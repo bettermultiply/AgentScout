@@ -16,7 +16,7 @@
 - 已倾向把此前的 `Speculative Policy` 提升为更一般的 `Policy`：speculation 只是其中一个 policy domain；Policy 也可覆盖 no-speculation/sequential baseline、candidate creation、resolver delegation、wait/resume、budget/resource handling、failure/fallback 和 Runtime Service selection 的 Harness 侧决策。
 - 已确认 Policy ownership 采用 Harness Core 全局默认 Policy + ASCoutAgent 可覆盖：Harness Core 持有 default policy，ASCoutAgent 创建配置可以绑定自身 policy；未绑定时使用 default policy。
 - `PolicyRef`/named policy handle 的意思不是把 trait object 直接塞进 `ASCoutAgent`，而是在 Harness Core 维护的 policy registry/config 中给 policy 一个稳定名字或 handle；ASCoutAgent 只保存可选 policy id，执行时由 Harness Core 解析为具体 policy。具体是否需要 registry 可等第一版实现时再定。
-- Runtime-bound `branch` plan 与 Runtime response mapping 暂缓到 Runtime phase；当前 Harness Core 只通过 Policy plan 执行 Harness-side BranchTree metadata，不调用 Runtime Boundary。
+- Runtime-bound `branch` plan 与 Runtime response mapping 暂缓到 Runtime phase；Harness Core 通过 Policy plan 执行 Harness-side BranchTree metadata，不直接调用 Runtime Boundary。
 - Policy 不能拥有 Runtime mutable state，不能绕过 Runtime capability/obligation validation，也不能改变 Branch lifecycle、single-winner、commit/discard/accept 或跨 tree 禁止等 ASCout 目标语义；它只能在这些语义约束内替 Harness Core 做选择。
 
 ### Local Controller 与 Entry API 边界
@@ -27,40 +27,35 @@
 - Entry API 不再自行解析 caller context，也不直接接触 Runtime；它接收 Local Controller 已解析的 typed request，只负责把请求交给 Harness Core。Harness Core 才拥有 ASCoutAgent/Branch metadata 和后续与 Runtime 的连接职责。
 - 当前阶段暂不展开 Harness Core 到 Runtime 的连接断点、Runtime client、Runtime Service discovery 和 Runtime-side endpoint 创建。
 - `ASCoutAgent` 当前只表示 Harness-side metadata BranchTree；Runtime execution state 不在该抽象内。
-- Local Controller 测试覆盖 Controller determines branch 与 Harness-side metadata lifecycle；HTTP malformed/unknown/error mapping 和 Runtime lifecycle 仍不在当前范围。
+- 测试覆盖 Controller determines branch 与 Harness-side metadata lifecycle；HTTP malformed/unknown/error mapping 和 Runtime lifecycle 不在当前范围。
 - Controller determines branch：同一个 CLI 请求分别打到 root Local Controller 和 child Local Controller，返回各自绑定 Branch 的 context，证明 Branch context 来自 Local Controller 绑定而不是 CLI 自报。
-- Metadata lifecycle path：通过临时 CLI 命令串联 `pbw branch`、`pbw children`、`pbw commit`、`pbw discard`、`pbw accept`、`pbw context`，验证 Harness-side ASCoutAgent/BranchTree metadata 的 parent/children/root/disposition/committed 变化。
-- 当前临时 CLI 命令使用直白形式：`pbw context`、`pbw children`、`pbw branch`、`pbw commit`、`pbw accept`、`pbw discard`；正式 UX 后续再收敛。
+- Metadata lifecycle path：通过 CLI 命令串联 `ascout branch`、`ascout children`、`ascout commit`、`ascout discard`、`ascout accept`、`ascout context`，验证 Harness-side ASCoutAgent/BranchTree metadata 的 parent/children/root/disposition/committed 变化。
+- CLI 命令暂用直白形式：`ascout context`、`ascout children`、`ascout branch`、`ascout commit`、`ascout accept`、`ascout discard`；正式 UX 后续再收敛。
 
 ### Harness-side Routine Operation Naming
 
 - Agent-facing 的分支创建操作统一命名为 `branch`。它表示从当前 Branch 建立一个或多个 direct child；在投机场景中这些 child 才按角色称为 candidate。
 - `create-child` 不是独立的 ASCout 目标操作，只是已移除的 skeleton metadata shortcut；低层 BranchTree 可以保留 child insertion primitive，但不再作为 CLI 或 Routine Agent intent 暴露。
-- 当前阶段 `branch` 只完成 Harness-side BranchTree metadata；Proposal、outcome slot、opaque handle 和 Runtime barrier 等行为留待 Runtime phase。
-- `start_pbw_agent` 当前完整边界是通过 Harness Entry API/Core 创建 ASCoutAgent、注册 root metadata 并返回 ASCoutAgentRef；不调用 Runtime。
+- 计划中 `branch` 先完成 Harness-side BranchTree metadata；Proposal、outcome slot、opaque handle 和 Runtime barrier 等行为留待 Runtime phase。
+- `start_ascout_agent` 的计划边界是通过 Harness Entry API/Core 创建 ASCoutAgent、注册 root metadata 并返回 ASCoutAgentRef；不调用 Runtime。
 - `wait event` 仍是 operation slot，event ordering、blocking 和 Runtime event source 尚未定义，因此当前不伪造成功行为。
 
-### pbw-cli 薄 CLI adapter 与 Runtime plugin 边界
+### ascout-cli 薄 CLI adapter 与 Runtime plugin 边界
 
-- 已确认 `pbw-cli` 是薄 CLI adapter，只负责参数解析、命令分派、输入输出和退出码；不拥有 ASCout lifecycle、speculation/evaluator policy 或 Runtime backend 逻辑。
-- 已确认具体 Runtime 实现应作为运行时插件使用，而不是作为 `pbw-cli` 编译期依赖。`pbw-runtime-api` 仍是 Harness 与 Runtime 之间的编译期语义 contract；具体 adapter/service 的发现、选择、加载或连接由 Harness 负责。
+- 已确认 `ascout-cli` 是薄 CLI adapter，只负责参数解析、命令分派、输入输出和退出码；不拥有 ASCout lifecycle、speculation/evaluator policy 或 Runtime backend 逻辑。
+- 已确认具体 Runtime 实现应作为运行时插件使用，而不是作为 CLI 的编译期依赖。Harness 与 Runtime 之间保持稳定的语义 contract；具体 adapter/service 的发现、选择、加载或连接由 Harness 负责。
 - 当前 CLI 不暴露 Runtime 名称或 backend 选项。未来如果允许用户通过 CLI 指定 Runtime，CLI 只传递一个中立的选择输入，不能自行解析、创建或连接 Runtime。
-- 已确认 `pbw-cli` 不得编译期依赖、构造或感知任何具体 Runtime。
+- 已确认 CLI 不得编译期依赖、构造或感知任何具体 Runtime。
 - Runtime plugin 是独立 service/process、动态库或其他装载形式尚未决定；该问题单独讨论，不能由 CLI 先行固化。
-- 已确认当前实现应直接去掉 `pbw-cli` 与 runtime 的关系；CLI 只保留薄 CLI adapter 职责。本轮不新增依赖方向脚本检查；后续如需要可在 CI 中用 `cargo metadata`、deny 规则或自定义脚本验证 CLI 未依赖 runtime 相关 crate。
 
-### 逐 crate 实现顺序
+### 逐 crate 实现顺序（crate 组织已废弃，决策语义保留）
 
-- 用户明确要求不从 `pbw-contract` 开始，而是先从 `pbw-harness` 开始实现，再随着 Harness 需要逐步完善 contract。
-- 具体实现方案必须先和用户商议；用户同意后才进行实现。
-- 测试必须先定稿并得到用户同意，再写对应业务逻辑。
-- 已确认 `pbw-harness` 不能继续把 Entry API、Harness Core、BranchTree/BranchView 和 Runtime Boundary 等概念挤在单个 `src/lib.rs` 中；本轮已先完成模块拆分，提高 ownership 可读性。
-- 已确认 Harness 与 in-process Runtime 不应绑定；本轮已移除外部入口上的 `Harness<R: Runtime>` 形态，改为通过 Harness-side `RuntimeBoundary` client 构造。
+- 已确认 Harness 与 in-process Runtime 不应绑定：Harness 通过 Harness-side Runtime Boundary client 构造，不携带具体 Runtime 类型。
 - 用户要求 Harness 只依赖稳定的 Runtime API，并由 Harness 决定选择和连接哪一个独立 Runtime Service；替换底层 Runtime 不应要求修改 Harness 的 semantic API。
 - 用户要求 Harness 同时支持外部传入 speculation plan、Proposal、resolver intent 等策略输入，并提供一个默认的 no-speculation/sequential policy，为不支持 speculation 的 Agent 提供服务，也用于测试与 baseline。
 - 用户澄清 Agent 接入 ASCout 有两种入口：内嵌时调用 ASCout 提供的函数/库接口；不内嵌时通过 ASCout CLI 以命令行形式操控。两者应进入同一套 Harness semantic API，不形成两套 lifecycle。
 - facade 只是对稳定统一入口的解释性称呼，不要求额外建立名为 facade 的组件；正式讨论优先使用 Agent-facing semantic API、library API 和 CLI integration 这些更具体的术语。
-- 用户否定此前“pbw-cli 作为 composition root 组装并选择 Runtime adapter”的方案：不得通过依赖注入组合 Harness 与 Runtime，CLI 也不负责选择、创建或连接 Runtime。
+- 用户否定“CLI 作为 composition root 组装并选择 Runtime adapter”的方案：不得通过依赖注入组合 Harness 与 Runtime，CLI 也不负责选择、创建或连接 Runtime。
 - 当前只确认 CLI 是 CLI integration 入口，Harness 拥有 Runtime Service 的选择与连接职责；具体 connection protocol、client/adapter 形态和 service discovery 仍未决定；此前 skeleton 的组合 wiring 不构成目标实现。
 - 已确认 Harness Entry API、CLI/library integration 与 Harness Core 的连接边界：Local Controller 负责上下文绑定，Entry API 不再做 context-bound resolution，也不直接接触 Runtime；Runtime Service client/adapter 及 `publish_outcome` 的 Runtime 侧连接暂不展开。
 - 已确认 Harness Core 应持有 `ASCoutAgentRegistry`；Entry/API 层应保持 stateless，不持有长期 Harness 数据结构。
@@ -69,7 +64,6 @@
 - 已确认如果 `root` 只是单独保存一个 `BranchId`，则没有必要作为 `ASCoutAgent` 的独立字段存在；root 应作为 `BranchTree` 自身的不变量或入口查询，而不是在 ASCoutAgent 上重复保存。
 - 已确认 `BranchNode` 本身必须维护直接 parent 与 direct children；parent 不一定是 root，grandchild 的 parent 应是直接 child。`BranchTree` 负责保存 root 与 node lookup，用于快速查找某个 node。
 - 已确认 routine control request 的上下文边界在 Local Controller：Local Controller 将自身绑定的 ASCoutAgent/Branch context 附加到 typed request 后交给 Entry API；Entry API 保持 stateless，只把已解析请求交给 Harness Core，再由 Harness Core 派发到对应 ASCoutAgent 的 Branch-level operation。
-- 当前 Branch-level operations 已先在 Harness-side BranchTree metadata 层落地：create candidate/create child、commit、accept、discard、context、children；wait/event 和 Runtime state propagation 仍待 Runtime boundary 设计。
 - 已确认 `commit` 必须存在；accept 以 candidate 已提交为前置条件，具体 obligation validation 后续再收敛。
 - 已确认 create child 不要求 parent 从未 discard 过 child，也不因当前 child 都失败或 parent 选择继续而禁止继续创建；只要当前 Branch 本身仍是可继续执行的 live Branch，它在后续状态/阶段仍可再次 create child。
 - 已确认 parent continue 不需要单独 operation；Parent 想继续时主动 discard 所有 direct child candidate subtrees，之后 parent 继续向下执行并可进入新的 `branch` 阶段。
@@ -83,7 +77,7 @@
 - central Harness 模型下，Branch 隔离环境内的 Local Controller 持有该 Branch 专属的本地控制入口；Local Controller 根据自身绑定的 Branch context 形成已解析请求，再交给 Harness Entry API，Harness Core 负责派发到 ASCoutAgent Branch-level operation。
 - 已确认 Agent-facing control path 采用 `CLI/library inside Branch -> Branch-local Local Controller -> Harness Entry API -> central Harness Core`。Local Controller 放在 Branch 隔离环境内，和 Agent/CLI 同侧；第一版使用约定端口的 HTTP Server。对 Local Controller 而言，入口自身代表当前 Branch，不需要让 CLI 自报 ASCoutAgent/Branch identity。
 - 已确认 Local Controller、Harness Entry API、Harness Core 和 Runtime Adapter 是不同概念：Local Controller 是 Branch 隔离环境内供 Agent-facing CLI/library 调用的 HTTP 控制入口；Entry API 是无 Runtime 访问的统一语义入口；Harness Core 拥有 ASCoutAgent metadata 并负责后续编排；Runtime Adapter 的连接断点暂不展开。
-- Local Controller 的实现边界必须能在 Branch 隔离环境内独立运行，不能与 central Harness Core 的长期 metadata owner 混在同一个部署假设中；第一版 HTTP Server 的具体 crate/binary 布局由实现阶段确定。
+- Local Controller 的实现边界必须能在 Branch 隔离环境内独立运行，不能与 central Harness Core 的长期 metadata owner 混在同一个部署假设中；第一版 HTTP Server 的具体模块/二进制布局由实现阶段确定。
 
 ### 投机执行底座与 Branch tree 语义
 
@@ -96,7 +90,7 @@
 ### 术语收敛（第一轮）
 
 - 已确认：投机执行底座就是当前系统（ASCout）本身的设计目标，不是另一套相邻系统的设计；`docs/design/decisions.md`（Branch tree 视角）与 `docs/design/speculation-decisions.md`（投机执行底座视角）是同一系统的两套设计记录，保持分离并建立术语映射表。
-- 已确认：系统名称已改为 **ASCout（Agent Scout）**，旧名不再使用。改名范围：仅文档（本仓库文档；crate/代码标识符/CLI 命令/仓库目录名暂不联动）。
+- 已确认：系统名称已改为 **ASCout（Agent Scout）**，旧名不再使用。改名范围：仅文档（本仓库文档；crate/代码标识符/CLI 命令/仓库目录名暂不联动）。**2026-08 更新（D-023-I）**：所有 pbw/ascout-* crate 名与 CLI 命令标识一并废弃，不再存在任何以 pbw 或 ascout-* 命名的实现标识；实现组织直接围绕目标组件模型重新决定。
 - 已确认：BranchTree 不是与底座分离的东西，它是底座的数据结构，重命名为 **Speculative Tree**。
 - 已确认：同时保留 **Branch** 与 **Instance** 两个名称；Branch 扩展为整个子树（不再区分 `subtree(A)`），Instance 为运行时执行单元。二者对应关系的精确表述待收敛。
 - 已确认（待最终定名）：Local Controller 与 Local Daemon 合并为一个驻 Branch 隔离环境的本地守护进程，暂名 **ASC-Daemon**；Interposer 保持分离（请求路径 vs 旁路）。
@@ -113,48 +107,18 @@
 
 - 用户希望把此前零散讨论形成的特性与约束放进一个全局视角，共同绘制整个项目的架构图。
 - 第一版草图记录于 `docs/architecture.md`，只综合已经接受的设计与开发决策，不新增 backend、协议或 lifecycle 语义。
-- 草图分为四个互补视角：系统上下文与 ownership、Runtime 机制与世界状态、一次投机执行的主时序、Rust crate 拓扑。这样避免把目标语义、运行时数据流和编译期依赖压进一张不可读的图。
+- 草图分为四个互补视角：系统上下文与 ownership、Runtime 机制与世界状态、一次投机执行的主时序、目标组件模型。这样避免把目标语义、运行时数据流和实现组织压进一张不可读的图。
 - 已确认以 Harness policy plane / Runtime mechanism plane 的边界，以及“由 Harness 编排、Runtime 强制管理”的 Agent execution 为整套架构图的主轴。
-- 已记录文档收口规则：正式实现或 skeleton 重新建立后，README、架构图、开发文档和使用文档中用于说明“当前从零开始/尚未实现”的过渡期状态表述必须移除或改写为普通实现状态；active documentation 不应长期保留过渡期 wording。
+- 已记录文档收口规则：实现重新建立后，README、架构图、开发文档和使用文档中用于说明“当前从零开始/尚未实现”的过渡期状态表述必须移除或改写为普通实现状态；active documentation 不应长期保留过渡期 wording。
 - 用户确认当前架构设计足以进入实现；更细节的设计等源码建立后再讨论，不在当前轮继续展开。
 
-### 空实现目标架构
+### 空实现目标架构（crate 拓扑部分已废弃，见 D-023-I）
 
-- 现有目标语义已经足够建立可编译的 Rust skeleton；Agent-facing operation detail、continuation backend、effect materialization、身份协议、输入边界和持久化恢复都可以先保留 adapter/placeholder，不阻塞架构搭建。
-- 已确认新架构继续使用 Rust，并采用 Cargo workspace。旧 `src/**`、manifests、tests、examples、headers、构建产物和实验文件已经按授权删除，未读取、迁移或复用其中的过时实现；新 workspace manifests 已建立。
-- 用户已授权旧实现与旧实现文档删除；2026-07-31 已授权创建新 workspace 并实现 D-021-I skeleton。
+- 已确认新实现继续使用 Rust。旧 `src/**`、manifests、tests、examples、headers、构建产物和实验文件已经按授权删除，未读取、迁移或复用其中的过时实现。
 - 已确认必须为 Execution、Workspace、Input、Effect、Outcome 和 Operation Integration 预留明确扩展点。
-- 已确认六类扩展点暂不各建空 crate：Execution/Workspace/Input/Effect/Outcome contract 放在 `pbw-runtime-api`，默认 placeholder implementation 放在 `pbw-runtime-default`；Operation Integration contract 归 Harness，基础实现放在 `pbw-integration-command`。只有出现独立实现、heavy dependency 或不同发布节奏时再提取 crate。
-- 已确认 Crate 边界按逻辑 ownership 划分，可替换性是重要考虑因素；独立实现、heavy/platform dependency、反向依赖防护、独立测试/版本节奏和权限/进程部署需求是评估独立 crate 的主要条件。
-- 已确认 crate 是编译期 ownership/dependency boundary，不等同于动态分派、IPC、OS process 或安全边界；扩展点不自动要求独立 crate，并避免“每个概念一个 crate”和单一大 crate 两个极端。
-- 已确认 shared semantic types 只包含跨 Harness/Runtime boundary 的最小中立 contract values，不包含 policy、mutable Runtime state、transport 或 backend detail，并由独立 `pbw-contract` 承载。
-- 已接受可复用但非强制的 `pbw-runtime-core`：它集中 backend-neutral Branch tree、capability、obligation、barrier 和原子 lifecycle correctness；默认 Runtime 复用它，其他 Runtime adapter 可以直接实现 `pbw-runtime-api`。
-- 已确认初始 Cargo workspace 拓扑：`pbw-contract`、`pbw-runtime-api`、`pbw-runtime-core`、`pbw-runtime-default`、`pbw-harness`、`pbw-integration-command`、`pbw-launch-codex` 和 `pbw-cli`；`pbw-cli` 是 CLI integration entry，不能作为 Harness/Runtime 的注入 composition root。后续新增 crate 必须对应明确 ownership、deployment 或 dependency boundary。
 - 用户只参与关系到可维护性、性能与功能的重要高层权衡；命名、文件布局、普通胶水、测试组织和不改变高层边界的实现细节由 Codex 决定。
-- 空实现的临时 API、错误形式、文件布局和测试组织已由用户委托 Codex 决定，不再作为设计议题；完成边界与验收标准记录于 D-021-I。
 
-#### 完成边界，已确定
-
-- 当前 workspace crates 都必须形成可构建 artifact；`pbw-cli` 形成 binary，其余 crate 形成各自 ownership boundary 对应的 library。
-- Shared contracts、Runtime API/Core/default adapter、Harness、Command integration、Codex launcher 和 CLI integration 必须存在最小 typed boundary；六类扩展点只需 contract 与 placeholder implementation。
-- 必须有一条经过 Harness Entry API、Harness Core 的显式 start path；当前不要求该路径展开 Runtime connection，也不为验证增加临时 Agent-facing 命令或伪产品功能。
-- 第一阶段只组合 `pbw codex` 入口；其他 launcher、Runtime 和 integration 只通过已有边界保持可扩展性，不建立额外空实现。
-- 旧 `src/**`、manifests、tests、examples、headers、构建产物和实验文件已经删除；新 workspace 不得引用或依赖 Git 历史中的旧实现。
-- D-021-I skeleton 已创建：初始 workspace、最小 typed boundary、composition construction/report wiring、placeholder unsupported 行为和 dependency direction check 均已落到当前树中。
-
-#### 物理边界与依赖的考虑点
-
-- Cargo workspace 已确定；package/crate 边界按逻辑 ownership 划分，并评估可替换性、编译、依赖、测试/版本节奏和权限部署需求。OS process boundary 与 crate boundary 保持概念独立。
-- Shared semantic types 由 `pbw-contract` 拥有，并严格限制为跨 Harness/Runtime boundary 的最小中立 contract，防止它变成包含 policy 或 backend detail 的公共杂物层。
-- 初始 workspace 采用从产品/composition 向 contract/mechanism 的单向依赖，不允许 contract/local-control/API/core 反向依赖 Harness、integration、launcher、CLI 或具体 adapter。
-- Harness 不依赖具体 Runtime 实现，transport、PID、namespace 和 privilege detail 留在 Runtime ownership boundary 内；Harness 负责选择并连接 Runtime Service，具体 transport/client/adapter 仍待收敛，不能由 `pbw-cli` 依赖注入。
-- Execution/Workspace/Input/Effect/Outcome placeholder 位于 Runtime API/default Runtime 两层，Operation Integration 位于 Harness/command integration 两层；未来补充 backend 不应修改无关层的公共接口。
-- Crate boundary 是编译期 ownership/dependency boundary，本身不等于 trait-object dynamic dispatch、serialization、IPC 或 OS process boundary；运行时成本取决于实际调用与数据传递机制。
-- 扩展点不自动要求独立 crate。只有当实现需要独立替换、携带 heavyweight/platform-specific dependency、形成权限/进程边界、需要阻止反向依赖，或具有独立版本与测试节奏时，才需要评估独立 crate；否则 module + trait 也可表达替换点。
-- 需要避免“每个概念一个 crate”造成 public API、转换胶水、feature matrix 和编译管理膨胀，也要避免单一 crate 让 Harness policy、Runtime mechanism、产品适配和 backend detail 互相可见。
-- Shared semantic types 指确实跨 Harness/Runtime typed boundary 的中立 contract values，例如 launch/context/candidate/Proposal/outcome/commit/disposition/event 的描述与 opaque handles。它们不应包含 Harness policy、Runtime mutable state、PID/socket/namespace、transport frame 或具体 backend handle。
-- Shared definitions 可以减少重复类型与转换漂移，但会耦合双方的发布和变化节奏；owner-private state 仍应留在各自 crate，只在边界转换为最小 contract value。
-- Execution/Workspace/Input/Effect 属于 Runtime mechanism 一侧的状态扩展点；Outcome 的 slot/routing/obligation 是 Runtime core 语义，而 outcome source/integration 可以替换；Operation Integration 属于 Harness/integration 一侧。预留扩展点时不能因为名称并列就赋予相同 ownership。
+> crate 拓扑、依赖方向、占位验收与 D-021-I skeleton 等条目已废弃删除，废弃记录见 `docs/development/decisions.md` D-023-I；本文不再保留相关 stub。
 
 #### 六类扩展点的含义
 
@@ -173,36 +137,13 @@
 - 端口不是单一类别：Branch-private socket/port namespace 属于 Execution resource；对宿主或其他 Branch 可见的共享端口、配额或 reservation 属于 Effect observation surface；持久或不支持多实例的后台进程可能是 shared service/session，需要由 Effect/Operation contract broker，而不是强行复制。
 - `Branch execution environment` 可以作为 Workspace、Execution、Input、Effect interaction 和 Outcome event 的聚合概念，但不需要成为另一个拥有状态与 lifecycle 的核心实体。
 
-#### 占位行为与验收，已确定
-
-- 对象构造与边界 wiring 可以成功；所有声称执行 ASCout 行为的 placeholder operation 必须在分配受管资源、创建 Branch 状态或产生 external effect 前显式返回内部 `Unsupported`/`NotImplemented`。
-- Placeholder 不模拟 lifecycle、隔离、Workspace、Execution、Input、Effect 或 Outcome 成功，也不能让默认 Runtime 看似已经提供 ASCout correctness 或 security guarantee。
-- 临时错误类型、trait method 和 payload 只服务于编译与依赖验证，不构成兼容性承诺；后续实现可以直接替换。
-- 最小验收包括 workspace format/build/test、依赖方向检查、composition construction/report wiring、显式失败路径及对旧实现零依赖；不要求真实启动 Agent、创建进程、操作 workspace 或连接外部服务。
-- 这些一次性 scaffold 细节由 Codex 自行确定，不再逐项请求用户确认。
-
-#### 当前 Cargo Workspace 拓扑，已接受
-
-- `pbw-contract`：只保存跨边界的最小 semantic value types、opaque handles 和 operation/event envelopes，不包含 mutable state、policy、transport 或 backend detail。
-- `pbw-local-control`：Branch-local Local Controller 的 request/binding values；只依赖 `pbw-contract`，可在 Branch 隔离环境侧独立编译；第一版实现可以使用隔离环境内约定端口 HTTP。
-- `pbw-runtime-api`：定义 Runtime typed API，以及 Execution/Workspace/Input/Effect/Outcome backend extension traits；只依赖 `pbw-contract`。
-- `pbw-runtime-core`：承载可供不同 Runtime adapter 复用的 backend-neutral Branch tree、capability、obligation、barrier 与原子 lifecycle mechanism；依赖 `pbw-runtime-api`，但具体 Runtime 也允许直接实现 API 而不复用该 core。
-- `pbw-runtime-default`：组合 `pbw-runtime-core` 与默认高效 backend placeholders，形成用户默认选择的 Runtime adapter；平台与特权细节只能从此侧向外扩展。
-- `pbw-harness`：拥有 managed launch orchestration、speculation/evaluator policy、预算与 Agent-facing semantic API；依赖 `pbw-local-control` 和 `pbw-runtime-api`，不依赖具体 Runtime。
-- `pbw-integration-command`：实现基础 Command + Skill profile 和 Operation Integration 扩展点，调用 Harness semantic API；未来 Hook 复用同一 API，不进入此 crate 的 lifecycle 分叉。
-- `pbw-launch-codex`：只处理 Codex argv、cwd、环境、TTY 与 Skill/Hook 准备，调用通用 managed-launch API，不依赖具体 Runtime。
-- `pbw-cli`：提供 `pbw` binary 和 CLI integration entry；不选择、创建或连接 Runtime，也不通过依赖注入组装 Harness 与 Runtime。业务 crate 不互相选择具体实现。
-- Execution/Workspace/Input/Effect/Outcome 计划只在 `pbw-runtime-api` 中保留 extension contract，在 `pbw-runtime-default` 中保留 placeholder implementation，不为这些扩展点预建独立空 crate。Operation Integration contract 由 Harness 侧拥有，基础实现位于 `pbw-integration-command`。
-- 依赖主干确认为 `pbw-cli -> {pbw-launch-codex, pbw-integration-command, pbw-harness}`，`pbw-launch-codex -> {pbw-harness, pbw-local-control}`，`pbw-harness -> {pbw-local-control, pbw-runtime-api}`，`pbw-local-control -> pbw-contract`，`pbw-runtime-api -> pbw-contract`，`pbw-runtime-default -> pbw-runtime-core -> pbw-runtime-api`；禁止从 contract/local-control/API/core 反向依赖产品、CLI、Harness 或具体 adapter。Harness 与 Runtime Service 的 transport、client 和 adapter 机制尚待收敛。
-- 已接受的高层权衡：独立 `pbw-runtime-core` 避免多个 Runtime 重复 lifecycle correctness；独立 `pbw-contract` 打断 request/event 双向依赖并保持中立 contract ownership；独立 `pbw-local-control` 反映 Branch-local endpoint 与 central Harness 的部署边界。
-
 ### 旧实现删除与文档切换
 
 - 用户已明确授权直接删除全部旧实现；`src/**`、Cargo manifests、tests、examples、header、`target/`、实验产物和样例数据已经删除。
 - 只描述旧实现的 lifecycle、proxy、runtime、control protocol、service、module 和旧测试矩阵文档已经删除，不建立 active legacy archive；Git history 是唯一历史来源。
 - README、使用文档、开发架构、开发决策、路线图和验收文档曾统一切换为“当时无实现”的过渡期状态；目标设计文档继续作为语义权威。
-- 本次授权不包含创建新 Cargo workspace 或实现 D-021-I skeleton。正式开发选择见 `docs/development/decisions.md` 的 D-017-I 与 D-022-I。
-- 该状态已被 2026-07-31 的 skeleton 实现授权与文档收口覆盖；当前 active documentation 应描述 skeleton 已创建但 lifecycle/backend 未实现。
+- 本次授权不包含创建新 Cargo workspace 或实现 skeleton。正式开发选择见 `docs/development/decisions.md` 的 D-017-I 与 D-022-I。
+- 该状态已被 2026-07-31 的 skeleton 实现授权与文档收口覆盖；2026-08 又按 D-023-I 废弃全部 skeleton 阶段 crate 拓扑与实现记录，当前 active documentation 只描述目标语义与开发决策，不描述任何实现。
 
 ### 安全与部署边界
 
@@ -248,7 +189,7 @@
 
 ### 首要验证 Workload
 
-- 第一阶段使用 `pbw codex` + Command/Skill 在真实仓库执行 delayed-choice coding benchmark，并与 sequential baseline 对照。
+- 第一阶段使用 `ascout codex` + Command/Skill 在真实仓库执行 delayed-choice coding benchmark，并与 sequential baseline 对照。
 - 确定性测试 Agent 只做 conformance；暂不深改 OpenCode，Command 路径证明收益后再增加 Hook，并以后用第二种 Agent 验证可移植性。
 - 首先使用有限 exact outcome 和可控延迟，测量正确性、wall-clock speedup、ASCout overhead、hit rate、有效提前工作及 loser 资源成本。
 - 正式开发策略与实验契约见 `docs/development/reference-workload.md`、开发决策 D-015-I 和路线图。
@@ -257,7 +198,7 @@
 
 - Harness 独占 Agent/product integration 与 workload policy；runtime 独占受管 execution、Branch/resource 状态和原子机制转换。
 - 两层从第一版通过 typed、粗粒度、可版本化的 command/event contract 解耦，不共享跨边界可变状态。
-- 第一版允许共处 `pbw codex` supervisor，不强制拆成两个进程；具体 transport 始终由所选 Runtime adapter 决定。
+- 第一版允许共处 `ascout codex` supervisor，不强制拆成两个进程；具体 transport 始终由所选 Runtime adapter 决定。
 - 正式结论见 `docs/design/overview.md` 与 `docs/design/decisions.md` 的 D-027；实现边界见开发架构和路线图。
 
 ### Hook 与 embedded adapter
@@ -288,23 +229,23 @@
 
 - ASCout 是管理完整 Agent execution 的 Outer Harness；Skill 或普通命令是通用接入方式，thin in-Agent adapter 是可选优化。
 - Runtime 是 Branch 状态的权威来源，并在受控 barrier 上分支请求者所属的完整 Agent 进程树。
-- Agent-facing identity 使用 `pbw context` 和 `pbw children`，不使用 `pbw status` 或裸 Branch ID。
+- Agent-facing identity 使用 `ascout context` 和 `ascout children`，不使用 `ascout status` 或裸 Branch ID。
 - 正式结论见 `docs/design/overview.md` 与 `docs/design/decisions.md` 的 D-018、D-019 和 D-021。
 
 ### Agent-facing Branch context
 
 - Runtime 内部保留稳定 Branch identity；Agent context 不要求暴露裸 Branch ID。
 - Agent 看到动态 depth、lifecycle state、Proposal 和 capabilities，不能依靠 depth 推导权限。
-- Branch context 在语义上包含 direct-child control view；默认只返回统计，详细 child metadata 通过 `pbw children` 按需查询。
+- Branch context 在语义上包含 direct-child control view；默认只返回统计，详细 child metadata 通过 `ascout children` 按需查询。
 - Child 操作使用 session-scoped opaque candidate handle；不暴露 siblings、transitive descendants 或 child local state。
 - 正式结论见 `docs/design/overview.md` 与 `docs/design/decisions.md` 的 D-021；新实现任务见 `docs/development/roadmap.md`。
 
 ### 受管创建与 Launcher frontend
 
 - 完整 ASCout execution 必须由 ASCout 建立受管边界后创建；事后 attach 不提供同等级的完整 Branch 语义。
-- `pbw codex` 是第一阶段 launch adapter，不是目标设计限定的唯一入口；第一版可以只是通用 managed-launch 接口的薄入口。
+- `ascout codex` 是第一阶段 launch adapter，不是目标设计限定的唯一入口；第一版可以只是通用 managed-launch 接口的薄入口。
 - 第一阶段不实现其他 launch adapter，但 Codex 特定参数、TTY、Skill/Hook 准备必须与 execution/runtime core 解耦。
-- 正式结论见 `docs/design/overview.md` 与 `docs/design/decisions.md` 的 D-020；未实现能力见 `docs/development/architecture.md` 与 `docs/development/roadmap.md`。
+- 正式结论见 `docs/design/overview.md` 与 `docs/design/decisions.md` 的 D-020；未实现能力见 `docs/development/roadmap.md`。
 
 ### Branch 作为唯一核心实体
 
@@ -347,7 +288,7 @@
 
 ### 目标设计与实现状态的文档分层
 
-- README 与使用文档必须明确说明当前只有 skeleton，不把目标语义表述为可用功能。
+- README 与使用文档必须明确说明当前没有实现，不把目标语义表述为可用功能。
 - 旧实现手册不留在 active documentation；开发文档只记录新实现架构、开发决策、路线图和当前验证证据。
 - 已删除原型中的 parent 立即阻塞、bottom-up、输入 barrier、winner 压平、单线程 fork 或 fake network 测试模式均不构成 ASCout 设计或实现路线。
 
@@ -382,33 +323,42 @@
 
 ### Harness 术语解释
 
-- 后续逐一解释并收敛 managed launch orchestration、policy context、obligation，以及真实进程、Workspace、Effect、lifecycle state machine 各自的实现范围。
-- 用户要求先理解这些术语，再决定 pbw-harness 的具体实现边界。
+- 后续逐一解释并收敛 policy context、obligation，以及真实进程、Workspace、Effect、lifecycle state machine 各自的实现范围。
+- 用户要求先理解这些术语，再决定具体实现边界。
 
-### pbw-harness 实现分层与讨论约束
+#### 第 1 项：target initialization（已收敛）
 
-- 用户明确要求 pbw-harness 分为三层：第一层对接 CLI，接收 CLI 调用并解析各项参数；第二层是 pbw-harness 的实现本身；第三层对接 Runtime。
+- 原“managed launch orchestration”名称废弃；该流程的实质是初始化单一 Agent 实例，定名 **target initialization**（与 scout 对应）。
+- 范围：只覆盖 root Authority 实例（task 准入到 root Instance 落地）的建立；后续每次 fork SpecTask 不属于 target initialization（那是 Scheduler + Runtime Adapter 的 fork 路径）。
+- 与 D-020 的关系：target initialization 就是“受管创建”边界（完整 ASCout execution 必须先建立受管边界再创建 root Agent；事后 attach 不具备完整 Branch 语义）的流程视角。
+- 职责拆分：API Entry 只做薄入口（接收提交、返回 task_id、状态查询），不建 task；建 task 与准入归 Scheduler（准入四道闸所在）；policy profile 表与绑定判定归 Policy Engine；起 Instance 0 作为 root Authority 归 Runtime Adapter。
+- 预算暂不考虑：从初始化流程中剥离，Scheduler 的预算职责整个挂起，需要时再单独讨论。
+- 已收敛：暂不实现“按任务特征自动绑定 profile”机制。policy 绑定方式：用户指定 policy；不指定时使用默认 policy。
+
+### ascout-harness 实现分层与讨论约束
+
+- 用户明确要求 ascout-harness 分为三层：第一层对接 CLI，接收 CLI 调用并解析各项参数；第二层是 ascout-harness 的实现本身；第三层对接 Runtime。
 - 用户希望详细讨论 Harness 与 Runtime 究竟以什么形式连接和交互。
 - 当前讨论不允许编写临时代码；除非是为尚未开始实现的代码提供空函数，否则目标是直接形成可用代码。
 - 当前讨论中由用户作判断，助手不得替用户作设计取舍结论。
 - 用户进一步提出：第三层应是恒定层，负责两件事：规定 Runtime API，即提供一组语义 API，任何实现该 API 的 runtime 都可以被当作 ASCout runtime 使用；以及负责对接并维护与 Runtime 的连接。
 - 用户指出该职责与此前预期中的 Runtime-Adapter 功能相似，当前需要继续澄清 Harness 第三层与 Runtime-Adapter 的关系，避免概念混淆。
 - 用户说明其最初对 Runtime Adapter 的定位是一个中介层，由两部分组成：一部分是直接和 Harness 连接的不变层，为 Harness 保持一致、恒定的语义与接口，不因下层 Runtime 改变；另一部分是和 Runtime 对接的可变层，需要根据 Runtime 提供的能力组合实现 Harness 需要的约定 API，也是适配某个 Runtime 必须遵守的内容。
-- 当前理解中，不变层接近用户刚提出的 pbw-harness 第三层；可变层接近 Runtime-side adapter / Runtime backend adapter，但具体命名与归属尚未最终收敛。
-- 用户确认采用拆分命名：不变层称为 Harness Runtime Boundary，属于 pbw-harness 第三层；Runtime Adapter 仅指面向具体 Runtime 的可变适配层。
+- 当前理解中，不变层接近用户刚提出的 ascout-harness 第三层；可变层接近 Runtime-side adapter / Runtime backend adapter，但具体命名与归属尚未最终收敛。
+- 用户确认采用拆分命名：不变层称为 Harness Runtime Boundary，属于 ascout-harness 第三层；Runtime Adapter 仅指面向具体 Runtime 的可变适配层。
 - 用户提出继续讨论原先所谓 CLI-facing Harness layer 的命名与归属：Agent 必须有低耦合 CLI 调用方式和高耦合函数/内嵌 built-in harness 调用方式；因此 harness-core 可能同时接收 CLI 与 function/system 两类调用，且 function 方式可能是 harness-core 提供的原生方式，CLI 通过调用 function 实现。
-- 当前待澄清问题：是否仍需要一个名为 CLI-facing Harness layer 的层；或者 CLI 实现本身就是 CLI-facing adapter，而 pbw-harness 内部只暴露非 CLI 专属的 Agent-facing/function semantic API。
-- 用户确认采用统一入口层方案：pbw-harness 内部保留 Harness Entry Layer / Agent-facing Harness API，CLI adapter 与内嵌 function/system 调用都先经 Local Controller 或对应 library adapter 进入该入口层，再进入 Harness Core；Entry API 本身不直接对接 Runtime。
+- 当前待澄清问题：是否仍需要一个名为 CLI-facing Harness layer 的层；或者 CLI 实现本身就是 CLI-facing adapter，而 ascout-harness 内部只暴露非 CLI 专属的 Agent-facing/function semantic API。
+- 用户确认采用统一入口层方案：ascout-harness 内部保留 Harness Entry Layer / Agent-facing Harness API，CLI adapter 与内嵌 function/system 调用都先经 Local Controller 或对应 library adapter 进入该入口层，再进入 Harness Core；Entry API 本身不直接对接 Runtime。
 - 该入口层不应被命名为 CLI-facing，也不应限制用户只能采用 ASCout 预设的原语形态；用户可以较自由地实现自己想要的 function call，只要最终进入同一套 Harness semantic lifecycle。
-- 用户倾向于让自定义 function call 在 pbw-harness 外部封装，以保持更好解耦；同时提出希望用户能够自定义 speculative policy，而不是只能使用 ASCout 规定的一种策略。
-- 当前待澄清问题：自定义 speculative policy 应作为外部 wrapper/policy 调用稳定 Harness Entry API，还是由 pbw-harness Entry Layer 提供 profile/extension 注册机制；用户倾向前者，但尚未最终定案。
-- 用户倾向于将最小默认 no-speculation/sequential policy 放在轻量 profile/helper crate，而不是放进 pbw-harness core。
+- 用户倾向于让自定义 function call 在 ascout-harness 外部封装，以保持更好解耦；同时提出希望用户能够自定义 speculative policy，而不是只能使用 ASCout 规定的一种策略。
+- 当前待澄清问题：自定义 speculative policy 应作为外部 wrapper/policy 调用稳定 Harness Entry API，还是由 ascout-harness Entry Layer 提供 profile/extension 注册机制；用户倾向前者，但尚未最终定案。
+- 用户倾向于将最小默认 no-speculation/sequential policy 放在轻量 profile/helper crate，而不是放进 ascout-harness core。
 - 用户提出希望提供 helper，方便用户低编码或少量编码地定制自己的 speculative policy，而不必直接编写复杂策略代码。
 - 用户询问为何最小默认 policy 候选是 no-speculation/sequential，以及这是否与 ASCout 的 speculative 场景相背离；用户同时认为该 baseline 可能有利于 ASCout 未来扩展新场景。
-- 用户确认将该 helper 设计为 policy builder crate，用于帮助用户以低编码方式定制 speculative policy；该 crate 位于 pbw-harness core 外部，通过稳定 Harness Entry API 组合 lifecycle primitives。
-- 用户认可 pbw-harness 可理解为 Agent-facing control plane / lifecycle orchestration layer：记录并组织 request/Agent 相关信息，附加 policy/correlation 等 Harness-owned metadata 后交给 Runtime；也记录并解释 Runtime response/event，剥离或附加信息后返回给 Agent/policy/CLI。
+- 用户确认将该 helper 设计为 policy builder crate，用于帮助用户以低编码方式定制 speculative policy；该 crate 位于 ascout-harness core 外部，通过稳定 Harness Entry API 组合 lifecycle primitives。
+- 用户认可 ascout-harness 可理解为 Agent-facing control plane / lifecycle orchestration layer：记录并组织 request/Agent 相关信息，附加 policy/correlation 等 Harness-owned metadata 后交给 Runtime；也记录并解释 Runtime response/event，剥离或附加信息后返回给 Agent/policy/CLI。
 - 用户指出此前列出的 harness-core 内部部件仍需商榷；当前方向是先挑出最必要部件实现一个可用原型，其它部件后续添加。
-- 用户认可 pbw-harness 原型的最小部件集合：Harness Entry API、执行/树级上下文、Operation Orchestrator、Harness Runtime Boundary、Minimal Event Handling。
+- 用户认可 ascout-harness 原型的最小部件集合：Harness Entry API、执行/树级上下文、Operation Orchestrator、Harness Runtime Boundary、Minimal Event Handling。
 - 用户确认 ASCoutAgent 只表示 Harness-side BranchTree。受管启动是否需要 Runtime-side execution handle，留待 Runtime 议题单独处理。
 - 用户确认首个可用场景为 start + branch + wait event；当前先完成 start 与 Harness-side branch metadata，wait event 等 Runtime/event model 收敛后实现。
 - 用户允许先定测试场景；按照仓库约定，测试场景需先定稿并得到用户同意后，才能编写测试与业务逻辑。
@@ -463,13 +413,13 @@
 
 ### Harness Core 架构层定位
 
-- 已确认 `pbw-harness` / `Harness Core` 在软件架构中属于 Runtime 之上的 Agent-facing control plane / lifecycle orchestration layer；按分层架构可类比为 application service / use-case orchestration 层。
+- 已确认 `ascout-harness` / `Harness Core` 在软件架构中属于 Runtime 之上的 Agent-facing control plane / lifecycle orchestration layer；按分层架构可类比为 application service / use-case orchestration 层。
 - `Harness Core` 维护 `ASCoutAgentRegistry`、Harness-side `BranchTree`、策略选择、request correlation 和计划执行；它拥有 ASCout lifecycle 的控制面语义，但不拥有 Runtime mutable state、OS privilege、具体 backend 或 CLI/product 入口。
 - `Harness Entry API` 是进入该 application/control plane 的稳定 semantic facade；`Harness Runtime Boundary` 是它调用 Runtime mechanism plane 的 outbound port；具体 Runtime adapter/service 位于该边界之下。
 
 ### ASCout Agent 与 Harness 目标定位
 
-- 已新增 `docs/development/pbw-agent-positioning.md` 作为 ASCout Agent、ASCout Harness 与 Runtime 定位的专门设计记录。
+- 已新增 `docs/development/ascout-agent-positioning.md` 作为 ASCout Agent、ASCout Harness 与 Runtime 定位的专门设计记录。
 - 已确认 ASCout Harness 可定义为 Agent 分支执行的通用控制底座；第一版实现仍以 Agent Speculative Execution 为主要目标，后续再扩展到更多 Agent 分支执行模式。
 - 已确认 ASCout Agent 的心智模型是一整棵分支执行树；对用户呈现为一个完整 Agent，是为了隐藏 BranchTree 和分支执行语义，不表示它是单个 Agent 进程或模型实例。
 - 已确认 Harness 成为更通用的底座并不改变其控制器本质；需要修正的是抽象边界、策略开放性、上层模式可承载性和 Runtime 工具化关系，而不是把 Harness 弱化为中立转发层。
@@ -510,5 +460,5 @@
 
 ### Harness 通用底座差异审查
 
-- 已确认“Ray-like 通用底座”的范围是支撑不同 Agent 分支执行策略的通用底座，不扩展为任意分布式计算平台；详细审查记录放在 `docs/development/harness-generalization-gap.md`。
+- 已确认“Ray-like 通用底座”的范围是支撑不同 Agent 分支执行策略的通用底座，不扩展为任意分布式计算平台；原详细审查记录 `docs/development/harness-generalization-gap.md` 基于已删除的 skeleton 实现，已随实现一并删除，审查结论并入 D-023-I 与 `docs/architecture.md` §4。
 - 审查记录必须区分当前尚未实现的能力、可能限制扩展的设计风险、命名/语义冲突和有意暂不纳入第一版的范围，不能把所有差距都写成当前实现错误。

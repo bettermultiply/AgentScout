@@ -60,4 +60,4 @@ Context、direct children、candidate 创建、commit、accept、discard 和 eve
 
 ## 当前有可运行实现吗？
 
-没有可用 ASCout lifecycle 实现。旧原型已经删除；当前仓库已有可构建 Rust workspace skeleton 和 `pbw` binary，但它们只验证 ownership、composition 和 placeholder 失败路径，不提供真实 Agent execution、Branch lifecycle、Runtime backend 或 sandbox。
+没有可用 ASCout lifecycle 实现。当前仓库只有设计文档，不提供真实 Agent execution、Branch lifecycle、Runtime backend 或 sandbox。

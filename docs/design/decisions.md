@@ -80,7 +80,7 @@
 
 ## D-020：受管创建与可替换 Launcher frontend
 
-**选择**：完整 ASCout execution 必须由 ASCout 先建立受管边界再创建 root Agent，从进程创建开始捕获完整进程树、I/O 和资源。目标设计只规定受管创建，不固定为某一种 launcher frontend；`pbw codex`、通用 CLI、IDE、daemon 或 Agent platform 可以提供等价入口。
+**选择**：完整 ASCout execution 必须由 ASCout 先建立受管边界再创建 root Agent，从进程创建开始捕获完整进程树、I/O 和资源。目标设计只规定受管创建，不固定为某一种 launcher frontend；`ascout codex`、通用 CLI、IDE、daemon 或 Agent platform 可以提供等价入口。
 
 **能力边界**：事后 attach 可以作为受限模式研究，但不能宣称具有与受管创建相同的完整 Branch 语义。
 

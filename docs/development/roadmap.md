@@ -1,23 +1,18 @@
 # 开发路线图
 
-本路线图只跟踪当前仓库和新实现。已删除原型的历史成果不构成当前完成证据，只保留在 Git history 中。
+本路线图只跟踪当前仓库和新实现。
 
 ## 仓库重置
 
 - [x] 删除旧源码、Cargo manifests、tests、examples、C header、构建产物、实验文件和实现专属文档。
 - [x] 只保留目标语义、已接受的新实现决策及面向未来的使用/开发文档。
-- [x] 按 D-020-I 创建初始 Cargo workspace，不复制或依赖旧实现材料。
-- [x] 通过 D-021-I skeleton gate：所有 crate 构建、依赖方向受检、CLI/Local Controller/Harness boundary wiring 连通、行为显式零副作用失败且不存在 legacy dependency。
 
 ## 核心架构
 
-- [x] 在 `pbw-contract` 中定义最小中立 values 与 opaque handles。
-- [x] 在 `pbw-runtime-api` 中定义 typed Runtime boundary，以及 Execution、Workspace、Input、Effect 和 Outcome contracts。
-- [x] 在 `pbw-runtime-core` 中建立可复用但非强制的 node-state、capability、obligation、barrier 与 transition helper placeholders。
-- [x] 在 `pbw-runtime-default` 中组合默认 trusted-workload Runtime 和 placeholders。
-- [x] 建立 Harness policy ownership，以及 context、children、创建、commit、accept、discard 和 event wait placeholders。
-- [x] 建立 Command + Skill Operation Integration、Codex launch adapter 和 `pbw-cli` CLI integration entry。
-- [x] 建立 Branch-local Local Controller 的独立 request/binding crate，并接入 central Harness Entry/Core dispatch。
+- [ ] 围绕目标组件模型（Control Plane：Policy Engine、Assumption Manager、Scheduler、Effect Coordinator、Ledger、Runtime Adapter；Instance 侧：Interposer、Agent、ASC-Daemon、Isolation Env）决定 crate/模块与依赖组织（D-023-I）。
+- [ ] 建立 Harness policy ownership，以及 context、children、创建、commit、accept、discard 和 event wait 操作。
+- [ ] 建立 Command + Skill Operation Integration、Codex launch adapter 和 CLI integration entry。
+- [ ] 建立 Branch-local Local Controller（ASC-Daemon 的控制入口部分），并接入 central Harness Entry/Core dispatch。
 
 ## Runtime 正确性
 
@@ -39,10 +34,10 @@
 
 ## Launch 与 Integration
 
-- [x] 定义并实现第一版 Branch-local Local Controller HTTP Server/client：隔离环境内约定端口、request/response envelope、错误到 CLI 退出码映射。
+- [ ] 定义并实现第一版 Branch-local Local Controller HTTP Server/client：隔离环境内约定端口、request/response envelope、错误到 CLI 退出码映射。
 - [ ] 定义 Harness Core 选择并连接独立 Runtime Service 的 client/adapter、service discovery、连接失败和重连边界。
-- [x] 通过 Harness Entry API 与 Harness Core 完成 Harness-side ASCoutAgent start path；Runtime-side start handshake 仍待实现。
-- [ ] 实现首个 `pbw codex` adapter，不让 Codex detail 进入 Runtime crates。
+- [ ] 通过 Harness Entry API 与 Harness Core 完成 ASCoutAgent start path；Runtime-side start handshake 仍待实现。
+- [ ] 实现首个 `ascout codex` adapter，不让 Codex detail 进入 Runtime 实现。
 - [ ] 先实现 Command + Skill，再评估 Hook automation。
 - [ ] 由 Operation Integration 自动发布真实 outcome，不增加独立 Agent publish/delegate commands。
 
@@ -56,6 +51,6 @@
 
 ## Research
 
-- [ ] 在 interface skeleton 建立后选择 continuation、Workspace isolation 和 recovery backends。
+- [ ] 在组件模型与接口定义建立后选择 continuation、Workspace isolation 和 recovery backends。
 - [ ] 定义首个 workload 之外的 irreversible-effect support。
 - [ ] 评估附加 Runtime security profiles，不把 adversarial containment 设为默认 Runtime 要求。

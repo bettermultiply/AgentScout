@@ -1,8 +1,8 @@
 # ASCout 全局架构图集
 
-本文把已经确认的 ASCout 目标语义与实现架构放到同一套视觉坐标中，帮助读者建立全局视角。它是导航与可视化入口，不取代语义权威文档：目标行为以 [状态与生命周期语义](design/overview.md) 和 [设计决策](design/decisions.md) 为准，实现边界以 [开发架构](development/architecture.md) 和 [开发决策](development/decisions.md) 为准。
+本文把已经确认的 ASCout 目标语义放到同一套视觉坐标中，帮助读者建立全局视角。它是导航与可视化入口，不取代语义权威文档：目标行为以 [状态与生命周期语义](design/overview.md) 和 [设计决策](design/decisions.md) 为准，投机执行底座组件模型见 [投机执行底座设计决策](design/speculation-decisions.md) 与 [抽象设计札记](development/spec-exec-abstraction.md)。
 
-仓库当前已有 D-021-I Rust workspace skeleton。图中的 Runtime backend 和行为路径仍是已接受的目标架构或计划边界，不表示 lifecycle、isolation 或 security 已经实现。
+仓库当前只有设计文档，没有实现。图中的 Runtime backend 和行为路径是已接受的目标架构或计划边界，不表示 lifecycle、isolation 或 security 已经实现。
 
 ## 一句话模型
 
@@ -17,7 +17,7 @@ flowchart TB
     USER["用户 / 部署配置"]
 
     subgraph PRODUCT["产品入口与策略平面"]
-        FRONTEND["Launcher frontend<br/>首个入口：pbw codex"]
+        FRONTEND["Launcher frontend<br/>首个入口：ascout codex"]
         HARNESS["Outer Harness<br/>ASCoutAgent · BranchTree view<br/>speculation/evaluator policy · 调度 · 预算"]
         INTEGRATION["Agent integration profile<br/>routine control + Operation Integration<br/>首个实现：Command + Skill"]
     end
@@ -218,56 +218,26 @@ sequenceDiagram
 
 这里没有 parent/candidate merge。Accept 是 Branch tree 的原子重定向：winner 保留自身 identity 和 live descendants，旧 parent 与不兼容 sibling subtrees 失效。
 
-## 4. Rust 组件拓扑
+## 4. 目标组件模型
 
-箭头表示编译期依赖或明确的 semantic API 调用方向；它们不等于 OS process、IPC 或安全边界。`pbw-cli` 是 CLI integration entry，不负责选择、创建或连接 Runtime；所有 crate 当前均已作为 skeleton 创建。
+实现围绕投机执行底座的目标组件模型展开（`docs/development/spec-exec-abstraction.md` §10.4）。控制面与实例侧的关键边界如下，不重复语义细节：
 
-```mermaid
-flowchart TB
-    CLI["pbw-cli<br/>binary · CLI integration entry"]
+- **Control Plane**：API Entry、Policy Engine（六类 policy 插件宿主）、Assumption Manager、Scheduler、Effect Coordinator、Ledger、Runtime Adapter。
+- **Instance 侧**：Interposer、Agent、ASC-Daemon、Isolation Env。
+- **边界**：Agent Boundary（Interposer，四接缝：LLM 调用、工具分发、轨迹写入、调度）与 Isolation Boundary（Runtime Adapter，docker / firecracker / gVisor / QEMU / 自研）必需；Engine Boundary 在范围外。
+- Runtime Adapter 通过契约协商把后端能力差异上报给 Policy Engine，同一个 policy 在不同后端上自动得到不同的激进度。
+- Ledger 是异步旁路，不在关键路径上；Assumption Manager 的 `resolve()` 坐在关键路径上。
 
-    subgraph PRODUCT["产品适配"]
-        LAUNCH["pbw-launch-codex<br/>argv · cwd · env · TTY · Skill/Hook 准备"]
-        INTEGRATION["pbw-integration-command<br/>Command + Skill · Operation Integration"]
-    end
-
-    LOCAL_CONTROL["pbw-local-control<br/>Local Controller request/binding<br/>first impl: HTTP agreed port"]
-    HARNESS["pbw-harness<br/>Entry API · Harness Core<br/>ASCoutAgent / BranchTree · Runtime Boundary"]
-
-    subgraph RUNTIME["Runtime 实现"]
-        DEFAULT["pbw-runtime-default<br/>默认高效 Runtime adapter<br/>五类 backend placeholders"]
-        CORE["pbw-runtime-core<br/>可复用但非强制的 lifecycle correctness"]
-        API["pbw-runtime-api<br/>typed API · 五类 extension contracts"]
-    end
-
-    CONTRACT["pbw-contract<br/>最小中立 values · opaque handles<br/>operation/event envelopes"]
-
-    CLI --> LAUNCH
-    CLI --> LOCAL_CONTROL
-    LOCAL_CONTROL --> INTEGRATION
-    LAUNCH --> HARNESS
-    INTEGRATION --> HARNESS
-    HARNESS --> LOCAL_CONTROL
-    HARNESS --> API
-    LOCAL_CONTROL --> CONTRACT
-    DEFAULT --> CORE
-    DEFAULT --> API
-    CORE --> API
-    API --> CONTRACT
-
-    ALT["未来 sandbox / VM / remote Runtime"] -. "可直接实现 API，绕过 core" .-> API
-```
-
-这四层的变化方向是单向的：产品与策略可以依赖中立 contract、Branch-local Local Controller request/binding 和 Runtime API，contract/local-control/API/core 不能反向依赖 Harness、具体 Runtime、integration、launcher 或 CLI。Routine `pbw` CLI 在 Branch 隔离环境内只调用 Local Controller，不负责 Runtime connection；具体 Runtime 可以复用 `pbw-runtime-core`，也可以直接实现 `pbw-runtime-api`。Harness Core 到 Runtime Service 的 transport、client 和 adapter 机制尚待收敛。
+未来实现的 crate/模块与依赖组织直接围绕上述组件模型重新决定（开发决策 D-023-I）。
 
 ## 当前实现状态
 
 ```text
-目标语义与边界：已形成并有设计文档
-当前 workspace skeleton：已创建并通过 D-021-I 本地验证
+目标语义与组件模型：已形成并有设计文档
+当前实现：无
 Runtime lifecycle / isolation：未实现
 Execution / Workspace / Input / Effect / Outcome backend：未选择或未实现
-Command + Skill / pbw codex：计划中的首个 integration profile
+Command + Skill / ascout codex：计划中的首个 integration profile
 ```
 
 因此，当前最重要的架构事实不是“某项 backend 已经可用”，而是 ownership、生命周期不变量、替换边界和验证顺序已经明确。实现进度以 [开发路线图](development/roadmap.md) 和 [验收状态](development/verification.md) 为准。
@@ -275,7 +245,7 @@ Command + Skill / pbw codex：计划中的首个 integration profile
 ```mermaid
 flowchart TB
 subgraph PRODUCT["产品与部署"]
-FRONTEND["Launcher frontend<br/>pbw codex / IDE / daemon"]
+FRONTEND["Launcher frontend<br/>ascout codex / IDE / daemon"]
 CONFIG["部署配置<br/>选择 Runtime Service"]
 end
 

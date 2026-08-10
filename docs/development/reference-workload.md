@@ -4,7 +4,7 @@
 
 ## Delayed-choice coding
 
-第一阶段使用 `pbw codex`、Command + Skill 和真实代码仓库执行 delayed-choice coding benchmark。Parent 等待一个延迟、有限且可验证的真实 outcome；多个 candidates 分别接收互斥 Proposal，并提前完成对应的后续代码修改、工具执行和测试。
+第一阶段使用 `ascout codex`、Command + Skill 和真实代码仓库执行 delayed-choice coding benchmark。Parent 等待一个延迟、有限且可验证的真实 outcome；多个 candidates 分别接收互斥 Proposal，并提前完成对应的后续代码修改、工具执行和测试。
 
 最小场景使用二选一 outcome，例如等待用户、配置服务或可控 oracle 在固定延迟后选择 `sqlite` 或 `postgres`：
 
