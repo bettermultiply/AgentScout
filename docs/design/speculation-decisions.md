@@ -2,7 +2,7 @@
 
 本文档从 [`../development/spec-exec-abstraction.md`](../development/spec-exec-abstraction.md) 中提取**最终成立的设计/架构决策**，每条整理为「问题 → 选择 → 原因」的问答条目，按原文档出现顺序编号。格式与 `docs/design/decisions.md` 一致。设计过程本身（方法论、优先级、修订轨迹）不收录。
 
-本文档与 `docs/design/decisions.md` 是**同一系统**的两套设计记录，各自独立编号（本文档 D-001..D-028；后者 D-001..D-038）：后者从 Branch tree 机制视角记录已收敛语义，本文档从投机执行底座视角记录已收敛语义。投机执行底座就是当前系统（ASCout）本身的设计目标，不是另一套相邻系统。两套记录之间的术语对应（如 Branch / SpecTask、commit+accept / Reconciliation+Disposition）与不一致处的收敛方式需要进一步确认，见仓库根目录 `Discussion.md`。
+本文档与 `docs/design/decisions.md` 是**同一系统**的两套设计记录，各自独立编号（本文档 D-001..D-028；后者 D-001..D-039）：后者从 Speculative Tree 机制视角记录已收敛语义，本文档从投机执行底座视角记录已收敛语义。投机执行底座就是当前系统（ASCout）本身的设计目标，不是另一套相邻系统。两套记录之间的术语对应与权威范围见 [`terminology.md`](terminology.md)；一级架构统一以 [`../architecture.md`](../architecture.md) 与 `decisions.md` D-039 为准。
 
 ---
 
@@ -214,11 +214,13 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 ---
 
-## D-017：架构图画什么结构？
+## D-017：Control Plane 与 Instance 的部署关系是什么？
 
-**问题**：架构图的部署结构是什么？
+**问题**：投机执行底座的控制面如何管理运行中的 Instance？
 
-**选择**：k8s / Ray 式 —— **一个 Control Plane 对应 N 个 Instance**，Instance 结构同构、数量不定、各自携带状态。Mechanism/Policy 分离是**论证结构**（文字和表格表达）；架构图画的是**部署结构**。
+**选择**：部署视角采用 k8s / Ray 式的 **一个 Control Plane 对应 N 个 Instance**；Instance 结构同构、数量不定、各自携带状态。这只是四侧一级架构之下的运行对象部署视角：Control Plane 属于控制面侧，Instance 是 Runtime Mechanism 管理的运行对象；Harness Runtime Boundary 与实际 Runtime Adapter 位于二者之间。Instance 不构成独立一级架构侧面。
+
+**架构权威**：完整一级架构统一为 `Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism`（`decisions.md` D-039）。Mechanism/Policy 分离仍是职责论证，Control Plane / N Instance 图只说明控制面与受管运行对象的数量关系，不能省略 Adapter 侧或替代一级架构图。
 
 **实例的状态维度**：**role** = `Authority` \| `Speculative(d)` —— 不是静态标签，是 `A == ∅` 的函数（promote 就是这个谓词翻转，实例结构必须同构的原因）；**grain** = `own-env` \| `shared-env`（shared-env 仅对 PURE 开放，**隔离粒度由 EffectClass 决定**）；**lifecycle** = Forked → Running → Resolving → {Reused, Promoted, Discarded, Preempted, Salvaged}。
 
@@ -256,7 +258,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 - **resolve 不独立成组件，住在 Assumption Manager 里** —— 它的"状态"（待决 site 表）就是图本身（pending 状态的 assumption 节点恰好是 `(site, proposal)` 对），是**对图的无状态逻辑**，未通过"一个盒子 = 一份独立状态 + 一份独立接口"检验。体系结构对应：`Assumption Manager + resolve ≈ ROB`（持有投机状态 + retire/squash）；`Scheduler ≈ issue/dispatch`。
 - **Scheduler 独立** —— 有自己的状态（优先队列、预算热计数器、压力读数）；延迟类别不同：`resolve` 在关键路径上（权威路径阻塞等待），调度决策晚 50ms 只是少赚，共享事件循环产生**队头阻塞**，把调度簿记压到权威路径上（Speculative Tool Calls 实测短工具场景下逐出/重入簿记盖过延迟隐藏收益 —— 关键路径簿记吃掉赢面是真实失败模式）。
-- **Effect Coordinator 独立** —— 其状态（staged effect、Catalog）属于**外部世界**而非投机结构；失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。安全闸必须能被单独审计。
+- **Effect Coordinator 独立** —— 它在控制面持有 Effect Catalog、效果分类与协调计划；真实 staged effect、obligation 和 materialization 状态属于 Runtime Mechanism。两类状态都不属于 Assumption DAG，且失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。安全闸必须能被单独审计。
 
 ---
 
@@ -332,7 +334,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 | database | STAGEABLE | 未提交事务 / savepoint |
 | email, payment | COMPENSABLE / IRREVERSIBLE | outbox 模式延迟投递 / 硬闸 |
 
-**这个矩阵就是 Effect Coordinator 的设计空间。**
+**这个矩阵定义 Effect Coordinator 的控制面协调空间，以及 Runtime Mechanism Effect backend 必须实现的机制空间。**
 
 ---
 

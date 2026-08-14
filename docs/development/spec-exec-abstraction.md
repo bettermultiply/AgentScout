@@ -39,11 +39,11 @@
 | **Reconciliation** | 权威到达时，判定 `î ≈ i` 并选择处置 | 各家的 match + commit |
 | **Disposition** | 处置结果的枚举 | PASTE 的四终态 + Skim 的 warm-start + SPORK 的 partial-accept |
 
-**命名约定**（三层不重叠，避免撞名）：
+**命名约定**（三层不重叠）：
 
-- **Proposal** —— orchestration 层的投机值。选它而非 `Hypothesis`，因为 `Hypothesis` 与 DAG 里的 `Assumption` 是近义词（`Assumption = (site_id, proposal_id)` 读作"proposal X 成立这一假设"）；且投机解码社区已用 proposer/proposal（SPORK 的组件就叫 `SporkProposer`）；且语义承诺更弱因而更通用 —— hypothesis 是"待证据检验的信念"，在 L0 贴切，在 L3（无真值、validator 只看结果）不贴切。
-- **Draft** —— engine 层的 token 级草稿。SPORK 的 partial-token accept 正是把被拒 probe 变成 draft。**不要**用它指 orchestration 层的值，cost-aware 论文里 "a draft" 是 staged effect 的例子，会撞名。
-- **Assumption** —— 依赖图上的边（第 3 节）。
+- **Proposal** —— orchestration 层的投机值。它的语义承诺较弱，在 L0 到 L3 都适用；投机解码社区也已使用 proposer/proposal（SPORK 的组件名为 `SporkProposer`）。
+- **Draft** —— engine 层的 token 级草稿。SPORK 的 partial-token accept 会把被拒 probe 变成 draft；该词不用于 orchestration 层的值。
+- **Assumption** —— 依赖图上的边（第 3 节），表示某个 Proposal 成立这一未验证前提。
 
 ---
 
@@ -609,52 +609,49 @@ PASTE 是活证据：
 
 ## 10. 系统架构：组件清单与边界
 
-### 10.1 架构图
+### 10.1 四侧中的组件与部署视图
 
-**画法取向**：k8s / Ray 式 —— **一个 Control Plane 对应 N 个 Instance**，Instance 结构同构、数量不定、各自携带状态。Mechanism/Policy 分离是**论证结构**，用文字和表格表达；架构图画的是**部署结构**。
+一级架构统一为 **Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism**，权威定义见 [`../architecture.md`](../architecture.md) 与 [`../design/decisions.md`](../design/decisions.md) D-039。本节只把研究推导出的内部组件和 `Control Plane -> N Instance` 数量关系放回四侧坐标中；它不直接规定 crate、进程或服务拓扑。
 
 ```
-┌────────────────────────── Control Plane ───────────────────────────┐
-│                                                                     │
-│   API Entry ──①──▶ Policy Engine ──②──▶ ┌── Policy Set (插件) ─┐ │
-│                          │                │ Proposer  Equivalence│ │
-│                          │③ 契约协商       │ Topology  CostGate   │ │
-│                          │                │ Salvage   Compensat. │ │
-│                          │                └──▲────▲────▲─────────┘ │
-│                          ▼                   │④   │④   │④          │
-│   ┌──────────────────────────────────────────┴────┴────┴────────┐  │
-│   │          ⑤ 权威值到达 ──▶ Assumption Manager                 │  │
-│   │          假设DAG + 实例树 ⊕ resolve（判 ≈ ，选 Disposition）  │  │
-│   │              │⑥                        │⑦                   │  │
-│   │              ▼                         ▼                    │  │
-│   │  Scheduler        ◀───⑧───▶  Effect Coordinator           │  │
-│   │  准入/宽度/深度/抢占            staging / barrier / catalog   │  │
-│   └────────┬───────────────────────────────┬────────────────────┘  │
-│            │                               │⑫ 事件流（异步旁路）    │
-│            │                    ┌──────────▼───────────┐           │
-│            │                    │ Ledger               │           │
-│            │                    │ 记录 · 回放 · 校验    │           │
-│            │                    └──────────────────────┘           │
-│            ▼⑨                                                      │
-│   Runtime Adapter          [Engine Boundary ⋯ 范围外，D-013]      │
-└────────────┬───────────────────────────────┼────────────────────────┘
-             │⑩ fork / kill / 隔离原语        │⑪ 拦截上报·效果暂存·确认下发
-   ┌─────────┴──────┬────────────────────────┴───┬──────────────┐
-   ▼                ▼                            ▼
-┌──────────────┐ ┌──────────────┐           ┌──────────────┐
-│ Instance 0   │ │ Instance 1   │    ...    │ Instance N   │
-│ Authority    │ │ Spec  d=1    │           │ Spec  d=2    │
-│ A = ∅        │ │ A = {a₁}     │           │ A = {a₁,a₃}  │
-│ own-env      │ │ own-env      │           │ shared(I-1)  │
-├──────────────┤ ├──────────────┤           ├──────────────┤
-│ Interposer   │ │ Interposer   │           │ Interposer   │
-│ Agent  原样  │ │ Agent  原样  │           │ Agent  原样  │
-│ Local Daemon │ │ Local Daemon │           │ Local Daemon │
-├──────────────┤ ├──────────────┤           ├──────────────┤
-│ Isolation Env│ │ Isolation Env│           │  ↑ 共享 I-1  │
-│ Runtime      │ │ Runtime      │           │    的 Env    │
-└──────────────┘ └──────────────┘           └──────────────┘
+┌──────────────────────────── Agent 接入侧 ────────────────────────────┐
+│ Agent / product + CLI / library / launcher                           │
+│ ASC-Daemon + Interposer + Operation Integration（部署在各 Instance） │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │① / ⑤ / ⑪
+                                ▼
+┌───────────────────────────── 控制面侧 ───────────────────────────────┐
+│ Entry API ─────▶ Harness Core / ASCoutAgent                           │
+│                     │                                                 │
+│ Policy Engine ◀──④──┼──▶ Assumption Manager ──⑥──▶ Scheduler        │
+│      │②             │             │⑦                  │⑧             │
+│ Policy plugins      │             ▼                   ▼              │
+│                     └──────▶ Effect Coordinator ◀──────┘              │
+│                                  │⑫                                   │
+│                                  ▼                                    │
+│                                Ledger                                 │
+└──────────────────────────────────┬────────────────────────────────────┘
+                                   │③ / ⑨
+                                   ▼
+┌──────────────────────── Runtime Adapter 侧 ──────────────────────────┐
+│ Harness Runtime Boundary ─────▶ 具体 Runtime Adapter                 │
+│ 稳定 operation/event contract      capability / transport mapping    │
+└──────────────────────────────────┬────────────────────────────────────┘
+                                   │⑩
+                                   ▼
+┌────────────────────────── Runtime Mechanism ─────────────────────────┐
+│ Runtime Mechanism Core + Execution / Workspace / Input / Effect / Outcome│
+│                         │ 管理                                       │
+│        ┌────────────────┼──────────────────────────┐                  │
+│        ▼                ▼                          ▼                  │
+│   Instance 0       Instance 1       ...       Instance N             │
+│   Authority        Spec d=1                   Spec d=2                │
+│   A = ∅            A = {a₁}                  A = {a₁,a₃}             │
+│   own-env          own-env                   shared(I-1)              │
+└───────────────────────────────────────────────────────────────────────┘
 ```
+
+Instance 是 Runtime Mechanism 管理的运行对象，不是第五侧。Agent、ASC-Daemon 与 Interposer 可以部署在 Instance 的隔离环境内，但逻辑职责仍属于 Agent 接入侧；Isolation Env、执行状态与资源归属属于 Runtime Mechanism。
 
 **实例的可能状态**（对应 Ray 声明 actor | task | worker 的那一层）：
 
@@ -668,18 +665,18 @@ PASTE 是活证据：
 
 | # | 流向 | 内容 |
 |---|---|---|
-| ① | API Entry → Policy Engine | 任务提交、policy 声明 |
-| ② | Policy Engine → Policy Set（插件） | 实例化插件、绑定轴配置 |
-| ③ | Policy Engine ↕ Effect Coordinator / Runtime Adapter | **跨层契约协商**：上层报预测置信度、验证条件、失败代价；下层报隔离能力、隔离代价、可用纪律集合。产出 fidelity 上界；不可行组合拒绝加载 |
-| ④ | Mechanism → Policy Engine | Assumption Manager 的 resolve 调 Equivalence / Salvage；Scheduler 调 Topology / CostGate；Effect Coordinator 调 Compensation。**箭头自下而上 —— mechanism 调用 policy，不感知其实现** |
-| ⑤ | 权威实例的 Interposer → Assumption Manager | 权威值到达，触发 `resolve()`：调 Equivalence 判 `î ≈ i`，选 Disposition，沿依赖闭包传播。**在关键路径上 —— 权威路径阻塞等待此结果** |
-| ⑥ | Assumption Manager → Scheduler | 前沿形状、各节点存活概率（嵌套下即 §9.5 要透传给 CostGate 的 `survival`） |
-| ⑦ | Assumption Manager → Effect Coordinator | confirm 后放行 staged effect；refute 后触发补偿或丢弃 |
-| ⑧ | Scheduler ↔ Effect Coordinator | 抢占前先确认无未提交效果 |
-| ⑨ | Scheduler → Runtime Adapter | fork / kill / 优先级 |
-| ⑩ | Runtime Adapter ↔ Runtime | 隔离原语下行；**资源压力上行**（这条容易漏画成单向） |
-| ⑪ | Control Plane ↔ Instance | 上行：拦截上报、效果暂存、心跳；下行：Proposal 下发、confirm/refute 级联取消与提升 |
-| ⑫ | 各 mechanism → Ledger | **异步旁路**事件流：成本归属分类（由 Reconciler 在 resolve 后判定）、轨迹、Disposition、契约比对结果。**不在关键路径上** |
+| ① | Entry API → Harness Core / Policy Engine | 任务提交、查询与显式 policy 选择输入 |
+| ② | Policy Engine → Policy plugins | 实例化插件、绑定轴配置 |
+| ③ | Policy Engine / Effect Coordinator ↔ Harness Runtime Boundary | **跨侧契约协商**：控制面报预测置信度、验证条件与失败代价；Runtime Adapter 侧返回具体 Runtime 的隔离能力、成本与可用纪律。产出 fidelity 上界；不可行组合拒绝加载 |
+| ④ | 控制面 mechanism components → Policy Engine | Assumption Manager 的 resolve 调 Equivalence / Salvage；Scheduler 调 Topology / CostGate；Effect Coordinator 调 Compensation。mechanism 调用 policy，不感知其实现 |
+| ⑤ | Interposer / ASC-Daemon → Entry API → Assumption Manager | 权威值到达，触发 `resolve()`：调 Equivalence 判 `î ≈ i`，选 Disposition，沿依赖闭包传播；该路径阻塞权威 continuation |
+| ⑥ | Assumption Manager → Scheduler | 可扩展结构、各节点存活概率（嵌套下即 §9.5 要透传给 CostGate 的 `survival`） |
+| ⑦ | Assumption Manager → Effect Coordinator | confirm/refute 后形成目标 effect transition；Coordinator 再经 Harness Runtime Boundary 请求 Runtime Mechanism 执行 |
+| ⑧ | Scheduler ↔ Effect Coordinator | 抢占前检查控制面效果计划；Runtime Mechanism 仍须对真实 obligation 作最终校验 |
+| ⑨ | Scheduler / Effect Coordinator → Harness Runtime Boundary | 发送 fork、kill、优先级与 effect transition 等稳定语义 operation |
+| ⑩ | Runtime Adapter ↔ Runtime Mechanism | Adapter 映射机制 operation；Runtime Mechanism 返回结果、事件、能力与资源压力 |
+| ⑪ | Agent 接入侧 ↔ 控制面侧 | 上行：拦截上报、心跳与 Agent intent；下行：Proposal、confirm/refute、受控结果与 lifecycle event |
+| ⑫ | 控制面内部组件 → Ledger | **异步旁路**事件流：成本归属、轨迹、Disposition 与契约比对结果；不在关键路径上 |
 
 ### 10.3 使用模型
 
@@ -722,13 +719,13 @@ grep("parse_config") → read_file("config.py") → edit_file(...) → run_tests
 
 ---
 
-#### API Entry
+#### Entry API
 
-**职责**：底座对外唯一入口。接收任务提交、状态查询、policy profile 的下发与热更；做任务准入与 **policy 绑定**。
+**职责**：控制面侧的薄入口。接收 Agent 接入侧形成的任务提交、状态查询和显式 policy 选择输入，返回 task id 或查询结果，并把请求交给 Harness Core；它不直接调用 Runtime Adapter，也不独立拥有准入或 policy 规则。
 
-**持有状态**：在飞任务表（`task_id` → 绑定的 profile、预算余额、Authority 实例 id）。
+**持有状态**：不持有长期控制状态。在飞任务、policy 绑定与预算等状态由控制面内相应 owner 管理。
 
-**例**：服务收到"修复 issue #42"。API Entry 建 task，按路由规则判定"代码类任务 → profile `swe-aggressive`"，扣一份预算，请求 Runtime Adapter 起 Instance 0 作为 Authority，返回 `task_id`。**端用户只看到自己提了个任务。**
+**例**：服务收到"修复 issue #42"。Entry API 把任务与用户显式指定的 policy（未指定则为空）交给 Harness Core；控制面应用默认或指定 policy、完成准入，再经 Harness Runtime Boundary 请求初始化 root Authority Instance，最后由 Entry API 返回 `task_id`。端用户只看到自己提交了任务。
 
 #### Policy Engine（六类 policy 插件的宿主 + 编译校验）
 
@@ -743,7 +740,7 @@ grep("parse_config") → read_file("config.py") → edit_file(...) → run_tests
   topology: {breadth: 3, depth: auto}, fidelity: trajectory-equivalent }
 ```
 
-Policy Engine 逐条检查：`depth>1` 要求 L0/L2 ✓；`trajectory-equivalent` 要求 `authority_launch=eager` ✓ 且 `effect ∈ {PURE, STAGEABLE, TRANSFORMABLE}` ✓。再向下问 Runtime Adapter“能提供 filesystem 的 STAGEABLE 吗” → overlayfs 可以 ✓；问 API 能力表“有 logprobs 吗” → **API 后端没有** → 把依赖 logprobs 的置信门降级为常数阈值，**并把降级原因写进 profile**。编译通过。
+Policy Engine 逐条检查：`depth>1` 要求 L0/L2 ✓；`trajectory-equivalent` 要求 `authority_launch=eager` ✓ 且 `effect ∈ {PURE, STAGEABLE, TRANSFORMABLE}` ✓。再通过 Harness Runtime Boundary 查询“当前具体 Runtime 能否提供 filesystem STAGEABLE” → Adapter 映射的能力报告显示 overlayfs 可以 ✓；问 API 能力表“有 logprobs 吗” → **API 后端没有** → 把依赖 logprobs 的置信门降级为常数阈值，**并把降级原因写进 profile**。编译通过。
 
 **例（拒绝加载）**：operator 写 `{equivalence: L1-semantic, fidelity: trajectory-equivalent}` → 拒绝，报“L1 语义匹配撑不起轨迹等价，最高只能声明 outcome-equivalent”。这正是 ISP 论文自己承认过的事（用了模糊匹配后就不再保证与普通规划结果相同），底座把它变成加载期的强制检查。
 
@@ -822,9 +819,9 @@ PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机
 > **但 Scheduler 仍不该并入**，理由与上面无关：
 >
 > - **它有自己的状态** —— 优先队列、预算热计数器、Runtime 压力读数，三样都不在图里
-> - **延迟类别不同** —— `resolve` 在关键路径上（权威路径阻塞等待比对结果）；"要不要再开一个投机"晚 50ms 只是少赚一点。共享一个事件循环会产生**队头阻塞**：一次调度决策（遍历候选、调 CostGate 算 EV、查压力）可能排在一次 resolve 之前，把延迟压到权威路径上 —— 而那正是本系统要削减的量。旁证：Speculative Tool Calls 实测**短工具场景下，逐出与重入引擎的簿记开销会盖过延迟隐藏的收益**，关键路径上的簿记吃掉赢面是这类系统的真实失败模式。此理由与 §10.4 中 Interposer / Local Daemon 的拆分同构
+> - **延迟类别不同** —— `resolve` 在关键路径上（权威路径阻塞等待比对结果）；"要不要再开一个投机"晚 50ms 只是少赚一点。共享一个事件循环会产生**队头阻塞**：一次调度决策（遍历候选、调 CostGate 算 EV、查压力）可能排在一次 resolve 之前，把延迟压到权威路径上 —— 而那正是本系统要削减的量。旁证：Speculative Tool Calls 实测**短工具场景下，逐出与重入引擎的簿记开销会盖过延迟隐藏的收益**，关键路径上的簿记吃掉赢面是这类系统的真实失败模式。此理由与 §10.4 中 Interposer / ASC-Daemon 的拆分同构
 >
-> **Effect Coordinator 也不该并入**：它的状态（staged effect、Catalog）属于**外部世界**，不是投机结构；并入等于把"哪个 overlayfs 上层归谁"塞进"谁依赖谁"。更硬的理由是**失败模式不同 —— 图错了损失性能，Effect 错了真的发出一封邮件**。§11 把安全性列为核心指标，那这道闸必须能被单独审计。
+> **Effect Coordinator 也不该并入**：它持有的 Effect Catalog、分类与协调计划不属于 Assumption DAG；真实 staged effect、obligation、overlay 归属和 materialization 状态则由 Runtime Mechanism 持有。更硬的理由是**失败模式不同 —— 图错了损失性能，Effect 错了真的发出一封邮件**。控制面的协调路径与 Runtime 的强制路径都必须能被单独审计。
 
 #### Scheduler
 
@@ -834,21 +831,21 @@ PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机
 
 > 预算计数器归这里而不归 Ledger：它是花钱的那个，且 CostGate 每次决策都要同步读。Ledger 负责的是**成本归属分类**（resolve 之后才能判定），走异步旁路。
 
-**例**：队列里有 5 个可扩展节点，key = `存活概率 × 预期省时 / 资源成本`。此刻 Runtime 报告 CPU 压力高 → 只弹出 2 个；同时发现 Instance 4 是 utility 最低的投机实例，**先问 Effect Coordinator 确认它没有未提交效果**（流⑧），然后抢占它给权威腾资源。
+**例**：队列里有 5 个可扩展节点，key = `存活概率 × 预期省时 / 资源成本`。此刻 Runtime 报告 CPU 压力高 → 只弹出 2 个；同时发现 Instance 4 是 utility 最低的投机实例。Scheduler 先根据 Effect Coordinator 的协调视图判断能否请求抢占（流⑧），再经 Harness Runtime Boundary 发出请求；Runtime Mechanism 对真实 obligation 作最终校验后才能执行抢占。
 
 **为什么它必须存在**（这是整个底座最强的必要性论据）：SPAgent 实测朴素投机在 >2 rps 时**比不投机慢 49.3%**；PASTE 的 Tool-Only 消融（只加速工具、不改 LLM 调度）**比 baseline 更差**（419s vs LLM-Only 342s vs 完整 270s），因为投机让 session 更频繁、更集中地涌回 GPU。**没有这一层，投机在高负载下是负收益 —— 而单个算法的作者做不了这件事，因为他们没有调度层。**
 
 #### Effect Coordinator
 
-**职责**：**所有对外效果的唯一出口**。持有 EffectClass × StateDomain 矩阵与 Site & Effect Catalog。
+**职责**：控制面中所有对外效果的统一协调路径。它根据 EffectClass × StateDomain 矩阵和 Site & Effect Catalog 形成允许、拒绝或 transition 计划，再经 Harness Runtime Boundary 请求 Runtime Mechanism 执行；它本身不是效果执行出口。
 
-**持有状态**：每个 SpecTask 的 staged effect 列表；Catalog（工具 → EffectClass；边 → enable bit）。
+**持有状态**：Catalog（工具 → EffectClass；边 → enable bit）和每个 SpecTask 的效果协调视图。真实 staged effect、obligation、overlay 归属、commit barrier 与 materialization 状态由 Runtime Mechanism 的 Effect backend 持有。
 
-**例（STAGEABLE）**：Instance 1 投机执行 `run_tests()`。Catalog 查得它是 `STAGEABLE / filesystem` → 分配一个 overlayfs 上层，测试产生的 artifact 全落在上层。`a₁` confirm 后 Reconciler 通知放行（流⑦）→ 上层合并下去；refute 则直接丢弃上层，**零残留**。
+**例（STAGEABLE）**：Instance 1 投机执行 `run_tests()`。Catalog 查得它是 `STAGEABLE / filesystem`，Effect Coordinator 经 Harness Runtime Boundary 请求 staging；Runtime Mechanism 的 Effect backend 分配 overlayfs 上层并登记 obligation，测试 artifact 全落在上层。`a₁` confirm 后 Coordinator 请求放行（流⑦），Runtime Mechanism 校验后 materialize；refute 时由 Runtime Mechanism 丢弃上层并完成 cleanup。
 
-**例（硬闸）**：Instance 2 想投机 `git_push()`。Catalog 标为 IRREVERSIBLE → **拒绝执行，该分支阻塞到 commit barrier**。哪怕 CostGate 算出收益巨大也不行 —— 这就是"再激进的 policy 也不许放宽"的含义。cost-aware 给的理由很硬：`(1−P)·C_spec` 给浪费的 token 定了价，**给不了一次错误的不可逆副作用定价**。
+**例（硬闸）**：Instance 2 想投机 `git_push()`。Catalog 标为 IRREVERSIBLE，控制面拒绝该投机请求；Runtime Mechanism 同时强制对应 obligation 和 commit barrier，不能因调用者绕过协调计划而执行。哪怕 CostGate 算出收益巨大也不行。cost-aware 给浪费的 token 定了价，**给不了一次错误的不可逆副作用定价**。
 
-**例（TRANSFORMABLE，比补偿更优）**：若某工具存在 dry-run 或 staging 变体，走它 —— 拿到的是**真实**结果，只是执行不变异，**且不需要事后补偿**。PASTE 用的就是这条，应作为首选路径。
+**例（TRANSFORMABLE，比补偿更优）**：若某工具存在 dry-run 或 staging 变体，Coordinator 请求 Runtime Mechanism 走该变体，拿到**真实**但不产生原始变异的结果，且不需要事后补偿。PASTE 用的就是这条，应作为首选路径。
 
 **关于虚拟执行**：直接伪造一个成功返回值是危险的 —— 伪造值会成为该分支后续行为的条件，即使 L0 全等匹配，该分支也已建立在编造的 observation 上，而**破坏点在验证机制看不见的地方**。救法是把伪造值本身建模成一个 Proposal（生产者是 Effect Coordinator 而非 Proposer），让它进入 AssumptionSet 走同一套 confirm/refute —— 风险从隐藏变成**可见、可计价、可被 Fidelity Monitor 拦截**。
 
@@ -893,40 +890,42 @@ PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机
 | 成本校准 | 真实的命中率 `p`、接受率 `α`、取消前生成比例 `ρ` 只能从影子流量测出来 |
 | 灰度 | offline replay → shadow → canary → online → 漂移熔断 |
 
-#### Runtime Adapter
+#### Runtime Adapter 侧
 
-**职责**：统一 fork / 销毁 / 隔离 / 压力上报接口，屏蔽后端差异。
+**Harness Runtime Boundary 职责**：向控制面提供稳定的 fork、销毁、隔离、effect transition、能力查询和压力事件等 typed semantic contract。控制面只依赖该 contract。
 
-**持有状态**：后端能力表（支持哪种 fork 保真度、哪些 StateDomain 可 stage）。
+**具体 Runtime Adapter 职责**：把稳定 operation 映射到当前 Runtime Mechanism 的原语、transport 和事件，并规范化能力与错误；它不拥有控制面 policy 或 Runtime mutable state。
 
-**例**：Scheduler 说“从 Instance 1 fork 一个”。Adapter 查当前后端 —— 自研 runtime 走进程级 COW fork，亚毫秒级；换成 docker 则**没有 fork 原语**，退化为起新容器 + 轨迹重放，慢两个数量级。**这个能力差异通过契约协商（流③）上报给 Policy Engine**，所以 docker 后端下 depth 会被自动压低：fork 太贵，前沿预算撑不起深树。**同一个 policy 在不同后端上自动得到不同的激进度，而 policy 本身一行不改。**
+**适配状态**：可以维护连接和具体 Runtime 的能力映射（支持哪种 fork 保真度、哪些 StateDomain 可 stage），但这些不是第二份 Runtime 权威状态。
+
+**例**：Scheduler 经 Harness Runtime Boundary 请求“从 Instance 1 fork 一个”。具体 Adapter 查询当前 Runtime：自研 Runtime 走进程级 COW fork，亚毫秒级；容器 Runtime 没有 fork 原语，只能起新容器并重放轨迹。这个能力差异通过稳定 contract 上报给 Policy Engine，因此高成本 Runtime 下的 depth 会被自动压低，同一个 policy 不需要感知具体 backend。
 
 ---
 
-#### Instance 侧（结构同构，数量不定）
+#### Instance 部署承载（结构同构，数量不定）
 
 **Interposer** —— 数据面，在线拦截四接缝：LLM 调用、工具分发、轨迹写入、调度。
 
-> **例**：agent 调 `client.chat.completions.create(...)`。Interposer 拦下，向控制面上报"Instance 1 要发 LLM 调用，前缀哈希 X"。若控制面回"已有投机结果且 Equivalence 判定命中"，Interposer **直接把结果返回给 agent** —— agent 完全不知道这次调用没有真的发生。若 agent 调 `run_tests()`，Interposer 把它路由到 Effect Coordinator 分配的 overlay 环境里执行。
+> **例**：agent 调 `client.chat.completions.create(...)`。Interposer 拦下，向控制面上报"Instance 1 要发 LLM 调用，前缀哈希 X"。若控制面回"已有投机结果且 Equivalence 判定命中"，Interposer **直接把结果返回给 agent** —— agent 完全不知道这次调用没有真的发生。若 agent 调 `run_tests()`，Effect Coordinator 形成 staging 请求，Runtime Mechanism 的 Effect backend 分配并管理 overlay 环境，Interposer 再把调用路由到该受管环境。
 >
-> **它必须与 Local Daemon 分开**：它在请求路径上，延迟敏感；Daemon 是旁路的。二者性能要求与失败语义都不同。
+> **它必须与 ASC-Daemon 分开**：它在请求路径上，延迟敏感；ASC-Daemon 是本地控制入口和消息旁路。二者性能要求与失败语义都不同。
 
 **Agent** —— 用户原样的 agent，**不改一行**。
 
-**Local Daemon** —— 控制面旁路：身份、AssumptionSet 同步、生命周期、向 Proposer 提供**上下文句柄**。
+**ASC-Daemon** —— Agent 接入侧的本地守护进程：承载身份与 AssumptionSet 绑定、生命周期消息和向 Proposer 提供的**上下文句柄**。
 
 > **例**：心跳上报"Instance 1 存活、当前在第 3 步"；接收控制面下发的 `confirm(a₁)`（"你现在是 Authority 了"）；Proposer 要预测 Instance 1 的下一步时，通过 Daemon 拿到轨迹摘要的句柄，**而不是把整个上下文搬到控制面**。
 >
 > **Proposer 本身不在实例内**：否则每个实例复制一份预测器；且 SPORK 那类自投机探针实际跑在推理侧，根本不在实例里。
 
-**Isolation Env / Runtime** —— 效果隔离的实际承载。`shared-env` 仅对 PURE 效果开放，其余强制 `own-env`。
+**Isolation Env / Runtime Mechanism** —— Runtime Mechanism 管理的效果隔离与执行承载。`shared-env` 仅对 PURE 效果开放，其余强制 `own-env`。
 
 ---
 
 **两条归属说明：**
 
-- **Site & Effect Catalog 折进 Effect Coordinator**（有状态但无独立对外接口，不单独画盒子）。但**分类上仍是 mechanism 而非 policy** —— 判据：**再激进的 policy 也不许放宽的，就是 mechanism**。
-- **Policy Engine（含其插件集合）收在 Control Plane 内**，不单列 plane（体量撑不起）。但图上画成被 mechanism **反向调用**的一排插件，“mechanism 不感知具体算法”仍然一眼可见。
+- **Site & Effect Catalog 折进 Effect Coordinator**（有状态但无独立对外接口，不单独画盒子）。在控制面内部，效果分类与协调规则属于 policy 不能放宽的固定规则；真正的 obligation、barrier 与 materialization 强制由 Runtime Mechanism 承担。
+- **Policy Engine（含其插件集合）位于控制面侧内部**，不构成独立一级侧面。控制面 mechanism components 反向调用 policy plugins，从而保持“机制不感知具体算法”。
 
 ### 10.5 关键设计决策：不是所有投机都需要独占隔离环境
 
@@ -978,7 +977,7 @@ PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机
 | 边界 | 地位 | 实现者 | 需要的能力 |
 |---|---|---|---|
 | **Agent Boundary** | 必需 | Interposer | 四接缝：LLM 调用（流式 / 中断）、工具分发、轨迹写入（truncate-and-rewrite）、调度 |
-| **Isolation Boundary** | 必需 | Runtime Adapter | docker / firecracker / gVisor / QEMU / 自研；按 fork 保真度选型（§10.4） |
+| **Isolation Boundary** | 必需 | Runtime Mechanism（由 Runtime Adapter 接入） | docker / firecracker / gVisor / QEMU / 自研；按 fork 保真度选型（§10.4） |
 | **Engine Boundary** | **范围外** | 推理引擎钩子（不做） | prefix cache 共享、logprobs、draft proposer、准入覆盖 FCFS、KV/队列压力可见 |
 
 **降级不是排除，而是契约协商（流③）的正常输出**：API 后端不提供 Engine 能力时，依赖它的 policy 配置被自动标为不可用或降级，并把降级原因报给用户。这恰是 §11.1(B) 双向协商存在的意义。

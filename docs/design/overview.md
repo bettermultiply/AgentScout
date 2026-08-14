@@ -6,21 +6,21 @@
 
 ## 概述
 
-ASCout 是一种基于 Branch tree 的计算世界管理机制。它允许一个正在运行的计算世界递归产生多个 candidate Branch，使它们在共享 ancestor 环境的同时隔离各自的 local state，并继续独立演化。
+ASCout 是一种基于 Speculative Tree 的计算世界管理机制。它允许一个正在运行的计算世界递归产生多个 candidate Branch，使它们在共享 ancestor 环境的同时隔离各自的 local state，并继续独立演化。
 
 ASCout 分支的对象是影响 Agent 计算行为的完整运行环境，而不是代码、单一文件或单个进程。它覆盖文件系统、完整 Agent 进程树、计算机本地的其他环境，以及全局服务交互状态。
 
 Branch 的创建与丢弃应当廉价，不应要求预先复制整个计算世界，也不应通过回滚 loser 的全部操作来完成销毁。ASCout 不提供多个候选世界的通用 merge；一次裁决选择一个完整 candidate subtree 成为 winner，其他 sibling subtrees 的内部状态被丢弃。
 
-ASCout 对外暴露的顶层抽象称为 ASCoutAgent。一个 ASCoutAgent 在 Harness 侧拥有一棵 BranchTree；Runtime 维护单个 Agent/节点的执行状态，并可实现必要的节点间状态传播，但不拥有整体 BranchTree 视图。受管启动描述的是 Runtime 机制需要满足的创建过程，不是 ASCoutAgent 之外的第二种对外对象。
+ASCout 对外暴露的顶层抽象称为 ASCoutAgent。一个 ASCoutAgent 在 Harness 侧拥有一棵 Speculative Tree；Runtime 维护单个 Agent/节点的执行状态，并可实现必要的节点间状态传播，但不拥有整体 Speculative Tree 视图。受管启动描述的是 Runtime 机制需要满足的创建过程，不是 ASCoutAgent 之外的第二种对外对象。
 
-## Branch 与 Branch tree
+## Branch 与 Speculative Tree
 
-Branch 是 Branch tree 中唯一的核心世界实体，也是可继续运行和继续分叉的计算延续。每个 Branch 直接拥有自己的 local state，并可包含零个或多个 child Branch。Branch tree 描述 Branch 之间的派生关系，并从一个 root Branch 开始；状态本身不是另一棵独立的树。
+Branch 是 Speculative Tree 中唯一的核心世界实体，也是可继续运行和继续分叉的计算延续。每个 Branch 直接拥有自己的 local state，并可包含零个或多个 child Branch。Speculative Tree 描述 Branch 之间的派生关系，并从一个 root Branch 开始；状态本身不是另一棵独立的树。
 
-一个 ASCoutAgent 恰好拥有一棵 Harness-side BranchTree。Branch identity、candidate handle、capability、commit/discard 和 resolution 都只在这棵 tree 内有意义；ASCout 不定义或允许跨 tree 引用、授权和 lifecycle operation。同一部署可以承载多个 ASCoutAgent，但它们在 ASCout 语义上彼此无关，部署复用不会形成更高层的 Branch 关系。
+一个 ASCoutAgent 恰好拥有一棵 Harness-side Speculative Tree。Branch identity、candidate handle、capability、commit/discard 和 resolution 都只在这棵 tree 内有意义；ASCout 不定义或允许跨 tree 引用、授权和 lifecycle operation。同一部署可以承载多个 ASCoutAgent，但它们在 ASCout 语义上彼此无关，部署复用不会形成更高层的 Branch 关系。
 
-Branch 在 Branch tree 中存在，与该 Branch 的 Agent execution 当前是否 running、waiting 或 suspended 是两套正交状态。一个 live Branch 可以暂时没有正在占用 CPU 的 Agent execution，但仍保留 parent/child relationship、状态所有权和 capabilities，并可在事件到达后恢复。ASCout 不为此引入 `lineage` 实体或专门术语。
+Branch 在 Speculative Tree 中存在，与该 Branch 的 Agent execution 当前是否 running、waiting 或 suspended 是两套正交状态。一个 live Branch 可以暂时没有正在占用 CPU 的 Agent execution，但仍保留 parent/child relationship、状态所有权和 capabilities，并可在事件到达后恢复。ASCout 不为此引入 `lineage` 实体或专门术语。
 
 文档使用两个明确的范围术语：
 
@@ -41,15 +41,15 @@ Branch 之间传递信息必须使用显式的受控通道。通过受控通道�
 
 ## 隔离保证与 Runtime 安全边界
 
-ASCout 的核心保证是高效的 sibling non-interference，不要求 Outer Harness 本身成为抵御恶意 Branch payload 的安全沙箱。Child Agent 是可信且知道自身 Branch role/context 的参与者；这一感知不要求暴露 runtime 内部裸 identity，也不赋予超出当前 capabilities 的权限。Agent 或工具发生普通错误时，Runtime 仍必须维持 Branch 语义，但 ASCout 不默认承诺阻止可信执行主动攻击宿主或底层隔离机制。
+ASCout 的核心保证是高效的 sibling non-interference，不要求控制面本身成为抵御恶意 Branch payload 的安全沙箱。Child Agent 是可信且知道自身 Branch role/context 的参与者；这一感知不要求暴露 runtime 内部裸 identity，也不赋予超出当前 capabilities 的权限。Agent 或工具发生普通错误时，Runtime 仍必须维持 Branch 语义，但 ASCout 不默认承诺阻止可信执行主动攻击宿主或底层隔离机制。
 
-Harness 负责 Agent integration、speculation policy、ASCoutAgent/BranchTree 视图与 orchestration，不承担 adversarial containment。Runtime 是节点级机制强制边界：所有 Runtime 都必须在 Harness Runtime Boundary 请求的节点操作上验证必要 identity 与 capability，维持 sibling isolation、完整进程与资源归属、loser cleanup，以及 service adapter observation surface 内的 external effect mediation。这些是 ASCout 正确性要求，不能退化为由 Agent 自愿遵守的调用约定。
+控制面负责 speculation policy、ASCoutAgent/Speculative Tree 视图与 orchestration，不承担 adversarial containment；Agent/product integration 属于 Agent 接入侧。Runtime Mechanism 是节点级机制强制边界：所有 Runtime 都必须对经 Runtime Adapter 侧到达的节点操作验证必要 identity 与 capability，维持 sibling isolation、完整进程与资源归属、loser cleanup，以及 service adapter observation surface 内的 external effect mediation。这些是 ASCout 正确性要求，不能退化为由 Agent 自愿遵守的调用约定。
 
-建立 ASCoutAgent 节点执行、资源所有权或隔离边界所需的 OS privilege 只属于 Runtime mechanism plane。Harness、Agent 和 integration adapter 不持有 mount、namespace、cgroup、VM 或等价机制所需的特权。Runtime 可以在内部使用 privileged helper、daemon 或其他分权组件，但这些组件仍属于所选 Runtime 的实现边界，不成为 Harness policy plane 的一部分。
+建立 ASCoutAgent 节点执行、资源所有权或隔离边界所需的 OS privilege 只属于 Runtime Mechanism。Agent 接入侧、控制面侧和 Runtime Adapter 侧不持有 mount、namespace、cgroup、VM 或等价机制所需的特权。Runtime Mechanism 可以在内部使用 privileged helper、daemon 或其他分权组件，但这些组件仍属于所选 Runtime 的机制边界，不成为控制面的一部分。
 
-Runtime Service 可以在相同 Branch 语义之上提供不同的附加安全保证，例如使用 sandbox、namespace、VM 或其他隔离设施抵御不可信 workload。是否提供这类保证属于具体 Runtime Service 的能力；Harness 根据自身 policy/config 选择并连接 Runtime Service，但不协商、匹配或认证其安全等级。ASCout 只提供统一的 Runtime API/connection boundary，不改变 Harness policy、Branch lifecycle、commit/discard 或 single-winner 语义。没有明确提供安全保证的 Runtime Service 不得被解释为安全边界。
+具体 Runtime 可以在相同 Branch 语义之上提供不同的附加安全保证，例如使用 sandbox、namespace、VM 或其他隔离设施抵御不可信 workload。是否提供这类保证属于具体 Runtime 的能力；控制面根据自身 policy/config 选择目标 Runtime，Runtime Adapter 侧负责连接和协议适配，但 ASCout 不协商或认证其安全等级。统一的 Harness Runtime Boundary 不改变控制面 policy、Branch lifecycle、commit/discard 或 single-winner 语义。没有明确提供安全保证的 Runtime 不得被解释为安全边界。
 
-Runtime 必须维护节点执行 lifecycle、obligation validation 和受控状态转换所需的权威机制状态，并通过 typed events 交付 Harness 必须观察的结果。整体 BranchTree 视图属于 Harness 侧 ASCoutAgent，而不是 Runtime 的全局视图。这一正确性状态不等于 security audit。ASCout core 不要求持久、tamper-evident 或面向合规取证的审计日志；具体 Runtime adapter 可以按其安全与部署需求额外提供 audit，且该能力不改变 Branch 语义。
+Runtime Mechanism 必须维护节点执行 lifecycle、obligation validation 和受控状态转换所需的权威机制状态，并经 Runtime Adapter 侧通过 typed events 交付控制面必须观察的结果。整体 Speculative Tree 视图属于控制面侧 ASCoutAgent，而不是 Runtime Mechanism 的全局视图。这一正确性状态不等于 security audit。ASCout core 不要求持久、tamper-evident 或面向合规取证的审计日志；具体 Runtime 可以按其安全与部署需求额外提供 audit，Runtime Adapter 只负责映射该能力，且 audit 不改变 Branch 语义。
 
 ## 世界状态分类
 
@@ -65,23 +65,23 @@ Token 费用、provider 内部 audit、telemetry、CPU 等 operational footprint
 
 ## Agent 最小感知模型
 
-ASCout 向 Agent 提供三类生命周期能力：创建 candidate Branch、提交一个 candidate subtree，以及裁决收到的 subtree。Candidate Agent 决定何时提交；direct children 的 resolver capability 默认由 parent Agent 持有，parent 可以将其显式委托给 Outer Harness。持有 resolver capability 的授权主体决定是否接受、等待或丢弃 candidate subtree；runtime 不替 Agent 或其 delegate 固化这些运行策略。
+ASCout 向 Agent 提供三类生命周期能力：创建 candidate Branch、提交一个 candidate subtree，以及裁决收到的 subtree。Candidate Agent 决定何时提交；direct children 的 resolver capability 默认由 parent Agent 持有，parent 可以将其显式委托给控制面。持有 resolver capability 的授权主体决定是否接受、等待或丢弃 candidate subtree；runtime 不替 Agent 或其 delegate 固化这些运行策略。
 
-Routine Agent-facing control surface 暂时只保留两类查询和五类 lifecycle/activity operation placeholders：查询自身 `context`、查询 direct `children`、`branch`、`commit`、`accept`、`discard` 和等待 event。`branch` 表示从当前 Branch 创建一个或多个 direct child；在投机场景中这些 child 才按角色称为 candidate。CLI 与 embedded function 调用先进入当前 Branch 隔离环境内的 Local Controller；Local Controller 隐藏并绑定当前 ASCoutAgent/Branch context，再把 resolved typed request 交给 Harness Entry API。Entry API 不从 caller context 重新解析，也不直接接触 Runtime，只把请求交给 Harness Core；Harness Core 再派发到对应 ASCoutAgent 的 Branch-level operation。完整 Runtime 语义中 `branch` 可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override，未指定 resolver 时使用 ASCoutAgent 配置中的默认 resolver。当前不定义这些 control-surface operation 的完整参数、返回值、阻塞方式、event model 或具体命令拼写；它们仍受已经确定的 Branch lifecycle 语义约束，不能被解释为运行时 no-op。Command 与 Hook 必须调用同一 semantic API。
+Routine Agent-facing control surface 暂时只保留两类查询和五类 lifecycle/activity operation placeholders：查询自身 `context`、查询 direct `children`、`branch`、`commit`、`accept`、`discard` 和等待 event。`branch` 表示从当前 Branch 创建一个或多个 direct child；在投机场景中这些 child 才按角色称为 candidate。CLI 与 embedded function 调用先进入当前 Branch 隔离环境内的 ASC-Daemon；ASC-Daemon 隐藏并绑定当前 ASCoutAgent/Branch context，再把 resolved typed request 交给 Harness Entry API。Entry API 不从 caller context 重新解析，也不直接接触 Runtime，只把请求交给 Harness Core；Harness Core 再派发到对应 ASCoutAgent 的 Branch-level operation。完整 Runtime 语义中 `branch` 可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override，未指定 resolver 时使用 ASCoutAgent 配置中的默认 resolver。当前不定义这些 control-surface operation 的完整参数、返回值、阻塞方式、event model 或具体命令拼写；它们仍受已经确定的 Branch lifecycle 语义约束，不能被解释为运行时 no-op。Command 与 Hook 必须调用同一 semantic API。
 
-`PublishOutcome` 是 Harness/Runtime boundary 上必需的 semantic operation，但不作为独立 Agent-facing command。Operation wrapper、Hook、effect broker 或 Harness integration 在真实 operation 完成后自动把结果发布到 OutcomeSlot。Resolver capability 默认由 Parent Agent 持有；需要 Harness 代为裁决时，delegation 通过 ASCoutAgent 创建或 Branch 创建配置表达，不作为日常 Agent command。
+`PublishOutcome` 是 Harness Runtime Boundary 上必需的 semantic operation，但不作为独立 Agent-facing command。Operation wrapper、Hook、effect broker 或 Operation Integration 在真实 operation 完成后自动把结果发布到 OutcomeSlot。Resolver capability 默认由 Parent Agent 持有；需要控制面代为裁决时，delegation 通过 ASCoutAgent 创建或 Branch 创建配置表达，不作为日常 Agent command。
 
 ASCout 作为 Agent 外部的 Harness 管理完整 Agent execution。Command + Skill 是必须支持的基础接入；Agent Hook 与 embedded in-Agent adapter 是可替代的可选增强，不是正确性前提。优先使用 Hook 提供 safe point、context/outcome 注入和 tool lifecycle 捕获；只有 Hook 无法同步阻塞、替换结果、覆盖 sub-agent 或提供必要内部 identity 等能力缺口得到证明后，才引入 embedded adapter。两者不要求同时存在。
 
-Harness policy plane 与 runtime mechanism plane 必须具有明确的状态所有权和 typed API 边界。Harness 拥有 Agent/product integration、speculation planning、Proposal 业务含义、调度、预算、evaluator policy、ASCoutAgent 和 BranchTree 视图；runtime 独占节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理。Harness 不能直接修改 runtime 内部状态，runtime 不理解 Agent prompt、模型格式或 candidate 质量。
+控制面侧与 Runtime Mechanism 必须具有明确的状态所有权，并通过 Runtime Adapter 侧交换 typed API 数据。控制面拥有 speculation planning、Proposal 业务含义、调度、预算、evaluator policy、ASCoutAgent 和 Speculative Tree 视图；Runtime Mechanism 独占节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理。控制面不能直接修改 Runtime 内部状态，Runtime Mechanism 不理解 Agent prompt、模型格式或 candidate 质量。
 
-该边界要求 Runtime 以独立 Runtime Service 运行，Harness 通过稳定的 Runtime API/connection boundary 作为 client 连接它。Harness 与 Runtime Service 只能通过粗粒度 command/event interface 交互，不共享跨边界的可变内部状态。ASCout 不规定统一 control transport 或 wire format；本地 daemon、独立进程、VM channel 或远程协议完全由 Runtime adapter 决定，并且不能改变 typed operation/event semantics。Harness 负责选择和连接 service，CLI 不参与。
+Runtime Adapter 侧包含稳定 Harness Runtime Boundary 与面向具体 Runtime 的实际 Adapter。控制面只依赖前者；后者把控制面选定的目标 Runtime 解析为具体 Adapter，并承接能力映射、连接和 transport。具体 Runtime 可以作为独立 Runtime Service 运行。各侧只能通过粗粒度 command/event contract 交互，不共享跨边界的可变内部状态。ASCout 不规定 Adapter 到 Runtime Mechanism 的统一 control transport 或 wire format；本地 daemon、独立进程、VM channel 或远程协议不能改变 typed operation/event semantics。CLI 不参与 Runtime 选择或连接。
 
 每个完整 ASCout execution 必须由 ASCout 建立受管边界后创建，从 root Agent 启动时即纳入进程树、I/O 和资源归属管理。目标语义不限定 launcher frontend；显式 CLI、IDE、daemon 或 Agent platform 可以提供不同入口，但都必须先请求 ASCout 创建受管 execution。事后 attach 不能宣称具有同等的完整 Branch 语义。
 
-Harness 是 BranchTree 视图与 Branch 关系的权威来源；Runtime 是节点执行状态和执行实体归属的机制来源。Agent 或其短命命令子进程只请求 branch；真正的 Branch 创建必须通过 Harness Runtime Boundary 触发 Runtime 的节点级机制操作，并作用于请求者所属的完整 Agent 进程树，不能退化为只复制发出请求的进程。
+控制面是 Speculative Tree 视图与 Branch 关系的权威来源；Runtime Mechanism 是节点执行状态和执行实体归属的机制来源。Agent 或其短命命令子进程只请求 branch；真正的 Branch 创建必须经 Runtime Adapter 侧触发 Runtime Mechanism 的节点级操作，并作用于请求者所属的完整 Agent 进程树，不能退化为只复制发出请求的进程。
 
-ASCout 不定义创建 children 后长期冻结 parent 的 Parent barrier。它定义两个短暂且原子的执行边界：`Branch barrier` 在真实 operation 开始前作用于完整 Agent execution，建立共同 execution base、OutcomeSlot、candidate handles 和 capabilities，并让 parent/candidates 从同一个控制操作返回点按不同 role 恢复；`Resolution barrier` 在 Accept 或 parent fallback 时暂停受影响 executions，原子验证 obligations、转换 Branch tree/状态所有权、清理 losers，再恢复 winner 或 parent。
+ASCout 不定义创建 children 后长期冻结 parent 的 Parent barrier。它定义两个短暂且原子的执行边界：`Branch barrier` 在真实 operation 开始前作用于完整 Agent execution，建立共同 execution base、OutcomeSlot、candidate handles 和 capabilities，并让 parent/candidates 从同一个控制操作返回点按不同 role 恢复；`Resolution barrier` 在 Accept 或 parent fallback 时暂停受影响 executions，原子验证 obligations、转换 Speculative Tree/状态所有权、清理 losers，再恢复 winner 或 parent。
 
 Branch barrier 建立期间，runtime 必须阻止新的进程、资源和未登记 external operation 越过边界，并确认 in-flight operation 已完成或已成为明确 obligation。建立失败不得留下半创建 Branch；若资源策略允许少于请求数量的 candidates，实际创建集合必须显式返回。Command 与 Hook 只是不同触发器，必须调用同一 barrier/lifecycle 语义。
 
@@ -101,7 +101,7 @@ Child 不通过 ancestor PID、identity 或 execution liveness 获取业务语�
 
 Candidate Branch 即使仍有活跃 descendants，也可以把自己的完整 subtree 向 parent 提交。接收方愿意接受时，`subtree(candidate)` 整体成为 winner 并保留内部结构；candidate 的 sibling subtrees 成为 losers 并失效。
 
-Direct children 的 evaluator/resolver capability 默认由 parent Branch 中的 Agent 持有；parent 可以把该 capability 显式委托给 Outer Harness。Evaluator 是角色，不是另一种世界实体，ASCout 不引入 Evaluator World。Runtime 只验证 resolver capability 并执行决定，不判断 candidate 质量。
+Direct children 的 evaluator/resolver capability 默认由 parent Branch 中的 Agent 持有；parent 可以把该 capability 显式委托给控制面。Evaluator 是角色，不是另一种世界实体，ASCout 不引入 Evaluator World。Runtime 只验证 resolver capability 并执行决定，不判断 candidate 质量。
 
 Parent execution 意外丢失时，children 不能自行提升为 winner。只有此前获得显式委托的 resolver 可以继续裁决；没有可恢复 parent 或 authorized resolver 时，runtime 必须 fail closed，阻止该 speculation group 继续产生外部效果。具体恢复宽限期与最终清理策略属于故障恢复设计。
 
@@ -109,7 +109,7 @@ Parent 可以在 live direct child 尚未 commit 时主动 discard 整个 child 
 
 Candidate 未被接受不表示其不可行。受控 metadata 应区分 Proposal invalidated、evaluated but rejected、policy/resource cancelled、execution failed 和 superseded 等 disposition。Child 的 commit summary/evidence 是显式受控通信，Harness 可以在 Proposal 验证前封存；读取后的信息不能通过 discard 撤销。
 
-Accept 后 candidate 保留自己的 Branch identity，并替换 parent 在 Branch tree 中的位置。若 parent 是 root，candidate 成为新的 root；否则 candidate 连接到原 parent 的 parent。旧 parent 和 candidate 的 sibling subtrees 失效，candidate 原有 descendants 及其内部关系保持不变。Candidate 按各状态类别规则已经可见的 parent state、已验证 outcome 和 materialized external effect 必须随 winner 延续；parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播，也不执行 parent/candidate state merge。
+Accept 后 candidate 保留自己的 Branch identity，并替换 parent 在 Speculative Tree 中的位置。若 parent 是 root，candidate 成为新的 root；否则 candidate 连接到原 parent 的 parent。旧 parent 和 candidate 的 sibling subtrees 失效，candidate 原有 descendants 及其内部关系保持不变。Candidate 按各状态类别规则已经可见的 parent state、已验证 outcome 和 materialized external effect 必须随 winner 延续；parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播，也不执行 parent/candidate state merge。
 
 世界状态操作使用原生 API、透明 proxy，还是 ASCout-aware 的高性能接口，不属于目标语义的一部分。无论采用哪种接口，都必须保持相同的 Branch、状态可见性与 commit 语义。
 
@@ -132,7 +132,7 @@ Sibling command reuse 是 D-017 下的显式受控通信。接收方可以得知
 - B 的 local state；
 - B 在 branch barrier 上获得的 execution base；
 - 按文件系统、输入、outcome event 等类别规则对 B 可见的 ancestor state；
-- root Branch 所在 Branch tree 之外的全局计算环境。
+- root Branch 所在 Speculative Tree 之外的全局计算环境。
 
 不同状态类别不共享一条笼统的 ancestor visibility 规则。完整 Agent 进程树的本地执行状态在 barrier 上形成 execution base，之后各 Branch 独立演化；文件系统可以动态解析 ancestor writes，输入可以继续 fan-out，真实步骤结果通过 outcome event 交付。Sibling local state 始终不可见。
 

@@ -24,9 +24,9 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 
 ## D-018-I：Cargo Workspace 与扩展点范围（已废弃）
 
-本条目与 D-019-I、D-020-I、D-021-I 描述已删除的 skeleton 阶段 crate 拓扑与占位验收标准，现已整体废弃：不再保留任何 `ascout-contract` / `ascout-runtime-*` / `ascout-local-control` 等 crate 组织、依赖方向或编译期约束决策。未来实现的 crate 与模块组织直接围绕目标组件模型（Control Plane：Policy Engine、Assumption Manager、Scheduler、Effect Coordinator、Ledger、Runtime Adapter；Instance 侧：Interposer、Agent、ASC-Daemon、Isolation Env）重新决定，详见 D-023-I。
+本条目与 D-019-I、D-020-I、D-021-I 描述已删除的 skeleton 阶段 crate 拓扑与占位验收标准，现已整体废弃：不再保留任何 `ascout-contract` / `ascout-runtime-*` / `ascout-local-control` 等 crate 组织、依赖方向或编译期约束决策。废弃后的内部组件整理见 D-023-I；当前实现组织以 D-024-I 的四侧一级架构为准。
 
-必须预留六类扩展点这一目标语义仍然有效：Execution、Workspace、Input、Effect 和 Outcome 属于 Runtime 侧，Operation Integration 属于 Harness/Integration 侧。六类扩展点的职责定义见 `docs/design/overview.md`、`docs/design/glossary.md` 与投机执行底座文档。
+必须预留六类扩展点这一目标语义仍然有效：Execution、Workspace、Input、Effect 和 Outcome 属于 Runtime Mechanism，Operation Integration 属于 Agent 接入侧。六类扩展点的职责定义见 `docs/design/overview.md`、`docs/design/glossary.md` 与投机执行底座文档。
 
 ## D-019-I：Runtime Core 可复用但非强制（已废弃）
 
@@ -44,8 +44,23 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 
 旧原型的 lifecycle、proxy、Runtime、control protocol、service、module 和 test-matrix 文档已经随实现删除。Active documentation 只描述目标语义、已接受的实现架构和未来验收 gates；Git history 是唯一 legacy archive。
 
-## D-023-I：废弃 skeleton crate 拓扑，围绕目标组件模型重新决定
+## D-023-I：废弃 skeleton crate 拓扑，保留必要内部组件
 
-2026-08 决定：不再保留任何 pbw/ascout-* crate 命名、初始 Cargo workspace 拓扑、依赖方向或编译期约束决策（D-018-I 至 D-021-I 废弃）。未来实现的 crate、模块与依赖组织直接围绕目标组件模型重新决定：Control Plane（Policy Engine、Assumption Manager、Scheduler、Effect Coordinator、Ledger、Runtime Adapter）与 Instance 侧（Interposer、Agent、ASC-Daemon、Isolation Env）见 `docs/design/speculation-decisions.md` 与 `docs/development/spec-exec-abstraction.md`。
+2026-08 决定：不再保留任何 pbw/ascout-* crate 命名、初始 Cargo workspace 拓扑、依赖方向或编译期约束决策（D-018-I 至 D-021-I 废弃）。Policy Engine、Assumption Manager、Scheduler、Effect Coordinator、Ledger、ASC-Daemon 与 Interposer 等必要职责继续作为内部组件候选保留，但旧 Control Plane / Instance 图不再直接决定 crate、模块或部署组织；当前一级架构和组件归属由 D-024-I 覆盖。
+
+废弃名称只在本条留档：系统旧名 Parallel Branch World、PbwAgent、BranchTree、Policy Compiler、Policy Set、Frontier Scheduler、Local Controller、Local Daemon、API Entry、hypothesis 和 commit proposal。现行名称依次使用 ASCout、ASCoutAgent、Speculative Tree、Policy Engine、Scheduler、ASC-Daemon、Entry API、Proposal / Assumption 和 commit request；正式设计与使用文档不再引用旧名。
 
 六类扩展点（Execution、Workspace、Input、Effect、Outcome、Operation Integration）的职责语义不变，只是不再绑定任何 crate 归属。
+
+## D-024-I：实现组织服从四侧一级架构
+
+D-023-I 确认保留的内部组件继续有效，但其旧 Control Plane / Instance 组件图不再直接充当 crate、进程或部署拓扑。实现组织首先服从四侧一级架构：
+
+1. Agent 接入侧；
+2. 控制面侧；
+3. Runtime Adapter 侧，其中分为稳定 Harness Runtime Boundary 与面向具体 Runtime 的实际 Adapter；
+4. Runtime Mechanism。
+
+Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 位于控制面内部；Agent/product、ASC-Daemon、Interposer、Operation Integration、CLI/library/launcher 位于 Agent 接入职责；Execution、Workspace、Input、Effect 与 Outcome backend 位于 Runtime Mechanism。Agent execution、Instance 和 Branch 隔离环境是 Runtime Mechanism 管理的运行对象，不是独立一级层。
+
+后续 crate、模块、进程和服务边界必须依据 ownership、依赖方向、权限、替换频率与部署需求在四侧内决定，不能由“一组件一 crate”或旧部署图直接推出。具体 Adapter transport、discovery、连接生命周期和 Runtime backend 仍待后续设计。

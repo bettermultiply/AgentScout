@@ -5,14 +5,14 @@ ASCout 当前没有任何实现，当前仓库只有设计文档。Agent-facing 
 ## 当前可用内容
 
 - `docs/design/` 中已经确认的目标语义；
-- `docs/development/` 中已经确认的开发决策与目标组件模型；
+- 已确认的四侧一级架构与 `docs/development/` 中的开发决策；
 - 计划使用 Command + Skill 和 `ascout codex` launch adapter 的首个 integration profile。
 
 当前没有可构建代码。临时命令、HTTP control protocol、稳定 Rust API、C API、Runtime lifecycle 和正式 Agent-facing 命令语法均不存在。
 
 ## 计划中的 Agent Surface
 
-Routine Agent-facing control 计划通过 Branch-local Local Controller 进入 Harness Entry API。Local Controller 隐藏当前 ASCoutAgent/Branch context；第一版实现计划使用隔离环境内约定端口的 HTTP Server。计划覆盖以下操作：
+Routine Agent-facing control 计划通过 Branch-local ASC-Daemon 进入 Harness Entry API。ASC-Daemon 隐藏当前 ASCoutAgent/Branch context；第一版实现计划使用隔离环境内约定端口的 HTTP Server。计划覆盖以下操作：
 
 - 查询当前 Branch context；
 - 查询 direct children；
@@ -24,7 +24,7 @@ Outcome 由 Operation Integration 自动发布，不作为独立 Agent command�
 
 ## 计划中的 Launch 与 Integration
 
-首个产品入口计划为 `ascout codex`。产品相关的 argv、环境、TTY、Skill 和未来 Hook 准备归 Codex launcher；routine CLI/control 计划先进入 Local Controller，再由 Harness Entry API 转交 Harness Core。Harness Core 到 Runtime 的连接断点后续单独定义。
+首个产品入口计划为 `ascout codex`。产品相关的 argv、环境、TTY、Skill 和未来 Hook 准备归 Agent 接入侧；routine CLI/control 计划先进入 ASC-Daemon，再由 Harness Entry API 转交控制面。控制面只依赖稳定 Harness Runtime Boundary；具体 Runtime Adapter、discovery、连接和 Runtime Mechanism handshake 后续单独定义。
 
 Command + Skill 是第一个必须支持的 integration profile。Hook 只有在同步能力得到验证后才增加；embedded Agent adapter 不是正确性前提。
 

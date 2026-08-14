@@ -8,7 +8,7 @@
 
 ## 创建 candidates 后 parent 还能运行吗？
 
-Branch tree relationship 与 Agent execution activity 相互独立。Speculation window 内，parent 可以按 Agent/Harness policy 执行真实 operation、等待、suspend 或 resume；ASCout 不强制 parent 长期阻塞。
+Speculative Tree 中的关系与 Agent execution activity 相互独立。Speculation window 内，parent 可以按 Agent/Harness policy 执行真实 operation、等待、suspend 或 resume；ASCout 不强制 parent 长期阻塞。
 
 ## Parent 的内存修改会自动进入 child 吗？
 
@@ -28,11 +28,11 @@ Branch tree relationship 与 Agent execution activity 相互独立。Speculation
 
 ## Commit 会 merge Branch state 吗？
 
-不会。Commit 提交 candidate subtree proposal；Accept 选择一个 winner 并重定向 Branch tree，同时丢弃不兼容 siblings。ASCout 不定义通用 sibling merge。
+不会。Commit 提交 candidate subtree proposal；Accept 选择一个 winner 并重定向 Speculative Tree，同时丢弃不兼容 siblings。ASCout 不定义通用 sibling merge。
 
 ## Child 可以自行成为 winner 吗？
 
-不能。默认由 direct parent Agent 持有 resolver capability，并可以显式委托给 Outer Harness。Runtime validation 和 Accept gate 始终是权威边界。
+不能。默认由 direct parent Agent 持有 resolver capability，并可以显式委托给控制面。Runtime Mechanism 的 validation 和 Accept gate 始终是机制强制边界。
 
 ## 计划提供哪些 Agent-facing operations？
 
