@@ -16,7 +16,7 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 
 默认 Runtime 面向可信 Child Agent 与工具，优先低开销 sibling isolation，不提供 adversarial containment。它仍必须强制维护 identity/capability validation、Branch isolation、资源归属、loser cleanup 和受管 external-effect paths。
 
-需要 adversarial containment 时，用户选择另行适配的 sandbox/hardened Runtime。ASCout 不协商 security guarantee，默认 backend 技术尚未选择。
+需要 adversarial containment 时，用户选择另行适配的 sandbox/hardened Runtime。AScout 不协商 security guarantee，默认 backend 技术尚未选择。
 
 ## D-017-I：新 Rust 实现不继承旧代码
 
@@ -48,7 +48,7 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 
 2026-08 决定：不再保留任何 pbw/ascout-* crate 命名、初始 Cargo workspace 拓扑、依赖方向或编译期约束决策（D-018-I 至 D-021-I 废弃）。Policy Engine、Assumption Manager、Scheduler、Effect Coordinator、Ledger、ASC-Daemon 与 Interposer 等必要职责继续作为内部组件候选保留，但旧 Control Plane / Instance 图不再直接决定 crate、模块或部署组织；当前一级架构和组件归属由 D-024-I 覆盖。
 
-废弃名称只在本条留档：系统旧名 Parallel Branch World、PbwAgent、BranchTree、Policy Compiler、Policy Set、Frontier Scheduler、Local Controller、Local Daemon、API Entry、hypothesis 和 commit proposal。现行名称依次使用 ASCout、ASCoutAgent、Speculative Tree、Policy Engine、Scheduler、ASC-Daemon、Entry API、Proposal / Assumption 和 commit request；正式设计与使用文档不再引用旧名。
+废弃名称只在本条留档：系统旧名 Parallel Branch World、PbwAgent、BranchTree、Policy Compiler、Policy Set、Frontier Scheduler、Local Controller、Local Daemon、API Entry、hypothesis 和 commit proposal。现行名称依次使用 AScout、AScoutAgent、Speculative Tree、Policy Engine、Scheduler、ASC-Daemon、Entry API、Proposal / Assumption 和 commit request；正式设计与使用文档不再引用旧名。
 
 六类扩展点（Execution、Workspace、Input、Effect、Outcome、Operation Integration）的职责语义不变，只是不再绑定任何 crate 归属。
 
@@ -64,3 +64,7 @@ D-023-I 确认保留的内部组件继续有效，但其旧 Control Plane / Inst
 Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 位于控制面内部；Agent/product、ASC-Daemon、Interposer、Operation Integration、CLI/library/launcher 位于 Agent 接入职责；Execution、Workspace、Input、Effect 与 Outcome backend 位于 Runtime Mechanism。Agent execution、Instance 和 Branch 隔离环境是 Runtime Mechanism 管理的运行对象，不是独立一级层。
 
 后续 crate、模块、进程和服务边界必须依据 ownership、依赖方向、权限、替换频率与部署需求在四侧内决定，不能由“一组件一 crate”或旧部署图直接推出。具体 Adapter transport、discovery、连接生命周期和 Runtime backend 仍待后续设计。
+
+## D-025-I：项目名称统一为 AScout
+
+2026-08 决定：项目现行名称统一为 **AScout**（Agent Scout），相关现行复合名称使用 `AScoutAgent`。正式设计、架构、使用和开发文档不再使用 `ASCout` 作为现行名称；本条仅保留旧拼写用于历史追溯。该名称变更不改变既有生命周期、Policy、Runtime 或接口语义。

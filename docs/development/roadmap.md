@@ -14,13 +14,13 @@
 - [ ] 建立 Branch-local ASC-Daemon 控制入口，并接入控制面 Entry API。
 - [ ] 实现首个 `ascout codex` launcher 与 Command + Skill integration，不让产品细节进入控制面或 Runtime。
 - [ ] 由 Operation Integration 识别 pending-result boundary，保证真实 operation once-only 并自动发布 outcome。
-- [ ] 定义第一版本地调用 transport、request/response envelope 和错误映射；该 transport 不进入 ASCout 目标语义。
+- [ ] 定义第一版本地调用 transport、request/response envelope 和错误映射；该 transport 不进入 AScout 目标语义。
 - [ ] Command + Skill 证明正确性和收益后，再评估 Hook automation。
 
 ## 控制面侧
 
-- [ ] 决定 Harness Core、Entry API、ASCoutAgent/Speculative Tree 与 policy 组件的模块和依赖边界。
-- [ ] 建立 ASCoutAgent 与 Speculative Tree 控制状态及同 tree identity/capability 校验。
+- [ ] 决定 Harness Core、Entry API、AScoutAgent/Speculative Tree 与 policy 组件的模块和依赖边界。
+- [ ] 建立 AScoutAgent 与 Speculative Tree 控制状态及同 tree identity/capability 校验。
 - [ ] 建立 context、children、branch、commit、accept、discard 和 event wait 的控制语义。
 - [ ] 明确 Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 的最小第一版职责；不因研究组件清单自动各建独立 crate。
 - [ ] 实现控制闭环：precheck、Runtime operation、已确认 event、控制状态 finalize、Agent-facing result。
@@ -56,9 +56,9 @@
 ## 首要 Workload
 
 - [ ] 建立 deterministic delayed-choice coding outcome producer 和真实仓库任务。
-- [ ] 用相同 Codex 配置比较 sequential 与 ASCout speculation。
+- [ ] 用相同 Codex 配置比较 sequential 与 AScout speculation。
 - [ ] 验证真实 operation once-only、sibling isolation、Proposal gate、loser cleanup、no-match fallback 和最终任务等价性。
-- [ ] 测量端到端 latency、ASCout overhead、hit rate、有效提前工作及 loser token/CPU/memory cost。
+- [ ] 测量端到端 latency、AScout overhead、hit rate、有效提前工作及 loser token/CPU/memory cost。
 
 ## Research
 

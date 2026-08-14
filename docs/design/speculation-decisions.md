@@ -2,7 +2,7 @@
 
 本文档从 [`../development/spec-exec-abstraction.md`](../development/spec-exec-abstraction.md) 中提取**最终成立的设计/架构决策**，每条整理为「问题 → 选择 → 原因」的问答条目，按原文档出现顺序编号。格式与 `docs/design/decisions.md` 一致。设计过程本身（方法论、优先级、修订轨迹）不收录。
 
-本文档与 `docs/design/decisions.md` 是**同一系统**的两套设计记录，各自独立编号（本文档 D-001..D-028；后者 D-001..D-039）：后者从 Speculative Tree 机制视角记录已收敛语义，本文档从投机执行底座视角记录已收敛语义。投机执行底座就是当前系统（ASCout）本身的设计目标，不是另一套相邻系统。两套记录之间的术语对应与权威范围见 [`terminology.md`](terminology.md)；一级架构统一以 [`../architecture.md`](../architecture.md) 与 `decisions.md` D-039 为准。
+本文档与 `docs/design/decisions.md` 是**同一系统**的两套设计记录，各自独立编号（本文档 D-001..D-028；后者 D-001..D-039）：后者从 Speculative Tree 机制视角记录已收敛语义，本文档从投机执行底座视角记录已收敛语义。投机执行底座就是当前系统（AScout）本身的设计目标，不是另一套相邻系统。两套记录之间的术语对应与权威范围见 [`terminology.md`](terminology.md)；一级架构统一以 [`../architecture.md`](../architecture.md) 与 `decisions.md` D-039 为准。
 
 ---
 

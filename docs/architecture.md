@@ -1,16 +1,16 @@
-# ASCout 架构
+# AScout 架构
 
-本文只定义 ASCout 的一级分层、各侧所有权与跨侧调用方向。Branch 生命周期、状态可见性和 single-winner 语义以 [状态与生命周期语义](design/overview.md) 与 [设计决策](design/decisions.md) 为准；内部组件的研究推导见 [投机执行底座设计决策](design/speculation-decisions.md) 与 [抽象设计札记](development/spec-exec-abstraction.md)。
+本文只定义 AScout 的一级分层、各侧所有权与跨侧调用方向。Branch 生命周期、状态可见性和 single-winner 语义以 [状态与生命周期语义](design/overview.md) 与 [设计决策](design/decisions.md) 为准；内部组件的研究推导见 [投机执行底座设计决策](design/speculation-decisions.md) 与 [抽象设计札记](development/spec-exec-abstraction.md)。
 
 ## 1. 一级分层
 
-ASCout 采用四个连续侧面：
+AScout 采用四个连续侧面：
 
 ```text
 Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism
 ```
 
-ASCout control 请求按这个方向下行，结果与事件沿相反方向返回。四侧是逻辑责任边界，不等同于四个 crate、四个进程或四种部署单元。
+AScout control 请求按这个方向下行，结果与事件沿相反方向返回。四侧是逻辑责任边界，不等同于四个 crate、四个进程或四种部署单元。
 
 ```mermaid
 flowchart LR
@@ -23,7 +23,7 @@ flowchart LR
     subgraph CONTROL["控制面侧"]
         ENTRY["Entry API"]
         CORE["Harness Core<br/>请求解释 · 合法性校验 · 编排"]
-        STATE["ASCoutAgent<br/>Speculative Tree · 控制状态"]
+        STATE["AScoutAgent<br/>Speculative Tree · 控制状态"]
         POLICY["Policy 与控制面内部组件"]
         ENTRY --> CORE
         CORE <--> STATE
@@ -58,18 +58,18 @@ Runtime Adapter 侧内部固定分为两部分：
 
 | 侧面 | 拥有 | 不拥有 |
 |---|---|---|
-| Agent 接入侧 | Agent/product 调用形式、当前 Branch 的本地上下文绑定、operation 接入和结果呈现；Agent/resolver 在授权范围内作 lifecycle 决定 | ASCout 全局控制状态、Runtime 机制状态 |
-| 控制面侧 | ASCoutAgent、Speculative Tree、控制状态、policy、请求校验、操作编排和 Runtime 事件解释 | Runtime mutable state、OS privilege、具体 Runtime transport 或 backend 原语 |
+| Agent 接入侧 | Agent/product 调用形式、当前 Branch 的本地上下文绑定、operation 接入和结果呈现；Agent/resolver 在授权范围内作 lifecycle 决定 | AScout 全局控制状态、Runtime 机制状态 |
+| 控制面侧 | AScoutAgent、Speculative Tree、控制状态、policy、请求校验、操作编排和 Runtime 事件解释 | Runtime mutable state、OS privilege、具体 Runtime transport 或 backend 原语 |
 | Runtime Adapter 侧 | 稳定 Runtime contract、具体 Runtime 能力映射和协议适配 | Agent/product 语义、policy 决策、Speculative Tree 权威状态、Runtime 内部机制状态 |
 | Runtime Mechanism | 节点执行状态、进程与资源归属、隔离、capability/obligation validation、barrier、原子状态转换和 cleanup | Agent prompt、candidate 质量、控制面 policy 或整体 Speculative Tree 视图 |
 
 关键约束：
 
-- Agent 接入侧不能绕过控制面发起 ASCout lifecycle/control operation；Agent execution 对 Workspace、Input 等运行资源的正常访问仍由 Runtime Mechanism 强制管理。
+- Agent 接入侧不能绕过控制面发起 AScout lifecycle/control operation；Agent execution 对 Workspace、Input 等运行资源的正常访问仍由 Runtime Mechanism 强制管理。
 - 控制面不能绕过 Harness Runtime Boundary 直接依赖某个 Runtime，也不能先修改控制状态再假定机制操作已经成功。
-- Runtime Adapter 只能适配和规范化，不能放宽 ASCout lifecycle、single-winner、capability、obligation 或 cleanup 规则。
+- Runtime Adapter 只能适配和规范化，不能放宽 AScout lifecycle、single-winner、capability、obligation 或 cleanup 规则。
 - Runtime Mechanism 强制机制正确性，但不替 Agent、resolver 或 policy 作运行策略选择。
-- ASCout control path 只通过显式 contract 跨侧交换数据，不共享跨侧可变内部状态。
+- AScout control path 只通过显式 contract 跨侧交换数据，不共享跨侧可变内部状态。
 
 ## 3. 控制闭环
 

@@ -621,7 +621,7 @@ PASTE 是活证据：
                                 │① / ⑤ / ⑪
                                 ▼
 ┌───────────────────────────── 控制面侧 ───────────────────────────────┐
-│ Entry API ─────▶ Harness Core / ASCoutAgent                           │
+│ Entry API ─────▶ Harness Core / AScoutAgent                           │
 │                     │                                                 │
 │ Policy Engine ◀──④──┼──▶ Assumption Manager ──⑥──▶ Scheduler        │
 │      │②             │             │⑦                  │⑧             │

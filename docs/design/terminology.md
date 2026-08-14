@@ -1,6 +1,6 @@
 # 术语映射表
 
-本表是 `docs/design/decisions.md`（Speculative Tree 机制视角，D-001..D-039）与 `docs/design/speculation-decisions.md`（投机执行底座视角，D-001..D-028）两套决策记录的桥梁。二者描述同一个 ASCout 系统，各自在声明的范围内具有权威性，并通过本表使用同一组现行术语。每个术语的一句话定义见 [`glossary.md`](glossary.md)。
+本表是 `docs/design/decisions.md`（Speculative Tree 机制视角，D-001..D-039）与 `docs/design/speculation-decisions.md`（投机执行底座视角，D-001..D-028）两套决策记录的桥梁。二者描述同一个 AScout 系统，各自在声明的范围内具有权威性，并通过本表使用同一组现行术语。每个术语的一句话定义见 [`glossary.md`](glossary.md)。
 
 **权威声明**：一级架构以 `decisions.md` D-039 和 [`../architecture.md`](../architecture.md) 为准；Branch 生命周期与状态语义以 `decisions.md` 和 [`overview.md`](overview.md) 为准；投机执行抽象以 `speculation-decisions.md` 为准。不同文档若发生冲突，必须显式收敛并同步修改，不能让隐式优先级维持矛盾。
 
@@ -8,9 +8,9 @@
 
 | 术语 | 说明 |
 |---|---|
-| **ASCout**（Agent Scout） | 面向 Agent 投机执行的控制与运行机制 |
-| **Speculative Tree** | ASCout 的核心控制结构：从 root 开始记录 Branch 之间的派生关系 |
-| **task** | 端用户提交的准入单元。一个 task 对应一棵 Speculative Tree（一个 ASCoutAgent 控制域），准入时绑定 policy profile 并建立 root Authority 实例 |
+| **AScout**（Agent Scout） | 面向 Agent 投机执行的控制与运行机制 |
+| **Speculative Tree** | AScout 的核心控制结构：从 root 开始记录 Branch 之间的派生关系 |
+| **task** | 端用户提交的准入单元。一个 task 对应一棵 Speculative Tree（一个 AScoutAgent 控制域），准入时绑定 policy profile 并建立 root Authority 实例 |
 
 ## 实体
 
@@ -45,7 +45,7 @@
 | 术语 | 定义 | 状态 |
 |---|---|---|
 | **Agent 接入侧** | Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon 与 Interposer 等接入职责；把 intent 送入控制面 | 已确认 |
-| **控制面侧** | Harness Core 及其内部组件；拥有 ASCoutAgent、Speculative Tree 控制状态、policy、校验、编排与事件解释 | 已确认 |
+| **控制面侧** | Harness Core 及其内部组件；拥有 AScoutAgent、Speculative Tree 控制状态、policy、校验、编排与事件解释 | 已确认 |
 | **Runtime Adapter 侧** | 位于控制面与 Runtime Mechanism 之间，内部同时包含稳定 Harness Runtime Boundary 与面向具体 Runtime 的实际 Adapter | 已确认 |
 | **Runtime Mechanism** | 拥有节点执行状态、资源、隔离、capability/obligation validation、barrier、原子转换与 cleanup | 已确认 |
 | **Harness Runtime Boundary** | Runtime Adapter 侧面向控制面的不变部分；定义稳定、typed、可版本化的 operation/event contract | 已确认 |

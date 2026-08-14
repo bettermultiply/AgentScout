@@ -4,6 +4,17 @@
 
 ## 当前讨论
 
+### Agent 感知与执行观察边界
+
+- 已确认：AScout 的投机决策主体是控制面；控制面根据所绑定的 `Policy` 寻找、评估并选择投机机会。Agent 本体通常不负责投机编排。
+- 已确认：AScout 以 best effort 为目标，默认和自定义 Policy 都应在正确性、隔离、资源和 Runtime 能力约束内尽可能改善整体执行表现；策略可以选择顺序执行，不承诺每个步骤都产生分支或必然加速。
+- 当前待确认：Agent 默认可以完全无感知，但是否提供可选的感知、查询、提示或协作接口；这些能力不能成为生命周期正确性的前提。
+- 当前待确认：通过检测 Agent 运行位置和拦截 Agent 命令是候选实现路径，不先固化为目标语义。需要先确定 AScout 需要观察和拦截的稳定语义接缝，以及命令未被适配或无法安全解释时的行为。
+
+## 暂停讨论
+
+本轮从项目定位重新梳理；以下此前讨论暂不展开，待定位与边界收敛后再回到队列。
+
 ### Harness Core 执行模型与 Policy
 
 - 当前构想倾向把 Harness Core 视为围绕 `ASCoutAgent` 运行的编排器：Entry API 只交付已解析的 Agent-facing typed request，Harness Core 将其翻译成一组 `ASCoutAgent` 逻辑操作和对应的 Runtime control operation。
@@ -20,6 +31,14 @@
 - Policy 不能拥有 Runtime mutable state，不能绕过 Runtime capability/obligation validation，也不能改变 Branch lifecycle、single-winner、commit/discard/accept 或跨 tree 禁止等 ASCout 目标语义；它只能在这些语义约束内替 Harness Core 做选择。
 
 ## 已解决
+
+### 项目定位与 Policy
+
+- 已确认项目正式名称为 **AScout**，不再使用 `ASCout` 作为现行名称；后续正式文档、术语和新实现标识需同步采用 AScout。
+- AScout 面向两类用户：普通用户显式启用后按原方式使用 Agent，由 AScout 在后台自动执行投机；Agent 开发者可以为自己的 Agent 编写或替换 `Policy`，有能力的普通用户也可以自定义 Policy。
+- AScout 是可复用的投机执行底座，不提供某一种固定算法；它屏蔽底层编排、控制和 Runtime 适配，使不同策略建立在共同机制上。
+- 现有问题是 Agent 投机算法零散、正交能力难以集成，且现有运行底座与投机策略脱节、缺少面向投机执行的通用优化。
+- 已确认普通用户未指定 Policy 时，AScout 绑定内置默认 Policy；默认和自定义 Policy 都由控制面执行，并在 AScout 固定语义约束内选择是否、何时以及如何投机。
 
 ### 控制面与 Agent 接入边界
 

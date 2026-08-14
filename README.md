@@ -1,12 +1,12 @@
-# ASCout
+# AScout
 
-ASCout（Agent Scout）是面向 Agent 投机执行的控制与运行机制。ASCout 对外抽象为一个 ASCoutAgent；每个 ASCoutAgent 在控制面拥有一棵 Speculative Tree。在 pending-result boundary，parent 可以继续真实 operation，candidate Branches 则基于不同 Proposal 提前执行。Candidate 提交 commit request，持有 resolver capability 的主体至多接受一个 winner；控制面通过 Runtime Adapter 侧触发 Runtime Mechanism 的节点级转换和 loser cleanup。
+AScout（Agent Scout）是面向 Agent 投机执行的控制与运行机制。AScout 对外抽象为一个 AScoutAgent；每个 AScoutAgent 在控制面拥有一棵 Speculative Tree。在 pending-result boundary，parent 可以继续真实 operation，candidate Branches 则基于不同 Proposal 提前执行。Candidate 提交 commit request，持有 resolver capability 的主体至多接受一个 winner；控制面通过 Runtime Adapter 侧触发 Runtime Mechanism 的节点级转换和 loser cleanup。
 
 ## 仓库状态
 
-仓库当前只有设计文档，没有实现。当前没有可用的 ASCout lifecycle、Agent-facing 命令、control protocol、真实 Runtime backend 或 security sandbox。
+仓库当前只有设计文档，没有实现。当前没有可用的 AScout lifecycle、Agent-facing 命令、control protocol、真实 Runtime backend 或 security sandbox。
 
-目标语义与一级架构已经形成。ASCout 按 `Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism` 组织。Runtime Adapter 侧内部包含稳定的 Harness Runtime Boundary 和面向具体 Runtime 的实际 Adapter。设计文档是语义权威；开发文档记录已接受的实现选择与剩余任务。
+目标语义与一级架构已经形成。AScout 按 `Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism` 组织。Runtime Adapter 侧内部包含稳定的 Harness Runtime Boundary 和面向具体 Runtime 的实际 Adapter。设计文档是语义权威；开发文档记录已接受的实现选择与剩余任务。
 
 ## 已确认的实现边界
 

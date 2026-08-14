@@ -1,11 +1,11 @@
 # 验收状态
 
-ASCout 当前只有设计文档，没有任何实现或验证证据。
+AScout 当前只有设计文档，没有任何实现或验证证据。
 
 ## 当前证据
 
 - 目标语义与已接受的决策仍有正式文档（`docs/design/` 与 `docs/development/`）；
-- 当前树中没有源码、测试或构建产物，没有任何 ASCout lifecycle、isolation、security 或真实 backend mechanism 被标记为已实现。
+- 当前树中没有源码、测试或构建产物，没有任何 AScout lifecycle、isolation、security 或真实 backend mechanism 被标记为已实现。
 
 ## 后续验收 Gates
 

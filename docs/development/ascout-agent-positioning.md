@@ -1,36 +1,36 @@
-# ASCout Agent 定位与设计思考
+# AScout Agent 定位与设计思考
 
-本文记录 ASCout Agent、ASCout Harness 与 Runtime 的定位。它不是接口规格，也不替代 `docs/design/` 中已经确认的目标语义；它用于保存当前对核心抽象的理解、阶段目标和后续演进方向。
+本文记录 AScout Agent、AScout Harness 与 Runtime 的定位。它不是接口规格，也不替代 `docs/design/` 中已经确认的目标语义；它用于保存当前对核心抽象的理解、阶段目标和后续演进方向。
 
 ## 核心定位
 
-ASCout Harness 可以定义为：Agent 分支执行的通用控制底座。
+AScout Harness 可以定义为：Agent 分支执行的通用控制底座。
 
 这里的“通用”不是说第一版就要支持所有 Agent 执行模式，而是说 Harness 的核心抽象不应只服务某一种固定流程。第一版实现仍以 Agent Speculative Execution 为主要目标；后续可以在同一组分支、控制、选择和清理语义之上扩展到更多 Agent 分支执行模式。
 
 第一版重点可以继续偏向投机执行，包括 candidate、Proposal、commit、accept、resolver 等术语。只要这些术语不把核心语义锁死在单一流程里，它们可以先保留。后续如果需要更通用的表达，应优先在文档和外部 API 层逐步收敛，而不是过早重命名造成实现和讨论混乱。
 
-## ASCout Agent 的心智模型
+## AScout Agent 的心智模型
 
-ASCout Agent 不是某一个具体 Agent 进程，也不是某个模型实例。
+AScout Agent 不是某一个具体 Agent 进程，也不是某个模型实例。
 
-ASCout Agent 表示一整棵分支执行树。它是 Harness 侧看到的完整 Agent 控制域：从 root Branch 开始，所有 child Branch、candidate、commit、accept、discard、resolver、policy 和 capability 都限定在这棵树内。
+AScout Agent 表示一整棵分支执行树。它是 Harness 侧看到的完整 Agent 控制域：从 root Branch 开始，所有 child Branch、candidate、commit、accept、discard、resolver、policy 和 capability 都限定在这棵树内。
 
-从用户视角看，ASCout Agent 可以呈现为“一个完整的 Agent”。这是为了隐藏分支执行树的复杂性，让用户不必理解背后的多个可能世界、分支选择和失败清理。也就是说：
+从用户视角看，AScout Agent 可以呈现为“一个完整的 Agent”。这是为了隐藏分支执行树的复杂性，让用户不必理解背后的多个可能世界、分支选择和失败清理。也就是说：
 
 - 对外呈现：一个完整 Agent。
 - Harness 内部：一棵 Speculative Tree。
 - Runtime Mechanism：多个受管执行节点和隔离状态。
 
-因此，ASCout Agent 的名字可以继续保留，但文档中必须明确：它不是 Agent process abstraction，而是 branch execution tree abstraction。
+因此，AScout Agent 的名字可以继续保留，但文档中必须明确：它不是 Agent process abstraction，而是 branch execution tree abstraction。
 
 ## 用户视图与 Root Agent
 
-ASCout Agent 对外应暴露为“像一个完整 Agent 一样可使用”的能力。用户主要看到和操控的是 Root Agent 视角，而不是内部任意 Branch 上的原始 Agent 进程。
+AScout Agent 对外应暴露为“像一个完整 Agent 一样可使用”的能力。用户主要看到和操控的是 Root Agent 视角，而不是内部任意 Branch 上的原始 Agent 进程。
 
 这里的 Root Agent 是用户面对的主线视图，不是内部树结构的深度限制。也就是说：
 
-- 普通用户默认控制 ASCout Agent / Root Agent 视图。
+- 普通用户默认控制 AScout Agent / Root Agent 视图。
 - Harness 内部仍然维护完整 Speculative Tree。
 - Speculative Tree 可以有任意深度，不限于 root 的 direct children。
 - Branch-local Agent 或 policy 仍可以在当前 Branch 下继续创建 child Branch。
@@ -42,7 +42,7 @@ ASCout Agent 对外应暴露为“像一个完整 Agent 一样可使用”的能
 
 当前需要记录一个重要忧虑：如果用户频繁操作和调整 Root Agent，而 Harness 把每次用户操作都当成全局失效事件，就可能导致大量提前执行的 Branch 被过早剪掉。
 
-这会削弱 ASCout 想实现的体验：系统虽然做了提前分支执行，但用户只要持续介入，已有 speculation 就不断失效，最终退化成普通顺序执行或只剩很浅的投机窗口。
+这会削弱 AScout 想实现的体验：系统虽然做了提前分支执行，但用户只要持续介入，已有 speculation 就不断失效，最终退化成普通顺序执行或只剩很浅的投机窗口。
 
 因此，后续设计需要避免把 Root Agent 视图实现成简单的“用户一改，全部剪枝”。用户操作应被视为权威约束，但是否导致某个 Branch 丢弃、保留、挂起或修复，应该由后续的兼容性判断和 policy 决定。
 
@@ -52,13 +52,13 @@ ASCout Agent 对外应暴露为“像一个完整 Agent 一样可使用”的能
 
 Harness 成为更通用的底座，并不意味着它不再是控制器。
 
-相反，Harness 的本质仍然是控制器：它负责解释 Agent 侧请求，维护 ASCout Agent / Speculative Tree 的控制状态，选择策略，组织生命周期步骤，并决定何时调用 Runtime。更通用的目标不是削弱这个控制器角色，而是避免控制器只服务一种固定的投机执行流程。
+相反，Harness 的本质仍然是控制器：它负责解释 Agent 侧请求，维护 AScout Agent / Speculative Tree 的控制状态，选择策略，组织生命周期步骤，并决定何时调用 Runtime。更通用的目标不是削弱这个控制器角色，而是避免控制器只服务一种固定的投机执行流程。
 
 要让 Harness 从“投机执行控制器”扩展为“Agent 分支执行控制底座”，关键不只是把名词改得更中立，还包括：
 
 - 核心语义只固定必要的不变量，例如树内身份、分支关系、单一 winner、capability、受控 effect 和 loser cleanup。
 - policy 可以覆盖不同执行方式，例如无投机顺序执行、投机继续、多候选探索、验证器引导搜索、人工确认前预执行等。
-- Agent-facing API 不暴露内部 ASCoutAgent/Branch 身份，让上层可以把整棵树当成一个 Agent 使用。
+- Agent-facing API 不暴露内部 AScoutAgent/Branch 身份，让上层可以把整棵树当成一个 Agent 使用。
 - Runtime 只承担具体机制，不把某一种执行策略反向固化进 Harness。
 - Harness 内部的计划、调度、预算和事件处理应逐步从投机执行特例中抽出来，成为可服务多种分支执行模式的控制能力。
 
@@ -66,24 +66,24 @@ Harness 成为更通用的底座，并不意味着它不再是控制器。
 
 Harness 同时服务两个入口层次：
 
-- 用户入口：用户像控制一个完整 Agent 一样控制 ASCout Agent / Root Agent 视图。
+- 用户入口：用户像控制一个完整 Agent 一样控制 AScout Agent / Root Agent 视图。
 - Agent / policy 入口：Agent 或 policy 可以在授权范围内控制当前 Branch 的生命周期。
 
-这两个入口不应变成两套 ASCout 语义。它们最终都应进入 Harness 维护的同一套控制语义，只是暴露的细节、权限和返回内容不同。
+这两个入口不应变成两套 AScout 语义。它们最终都应进入 Harness 维护的同一套控制语义，只是暴露的细节、权限和返回内容不同。
 
 Harness 后续可能需要拥有调度相关能力，例如何时启动 candidate、保留多少 Branch、哪些 Branch 暂停或优先执行、预算不足时如何降级等。但第一版暂不深入展开调度。即使未来加入调度权，具体调度选择也应由 policy 在 Harness 固定不变量允许的空间内规定，而不是由 Runtime 或产品入口私自决定。
 
-Policy 应该可替换、可扩展，但不能绕过 Harness 的核心规则。Harness 固定 ASCout 的基础不变量，例如树内身份、分支关系、single-winner、capability、受控 effect 和 loser cleanup；policy 只能在这些规则内选择不同执行策略。
+Policy 应该可替换、可扩展，但不能绕过 Harness 的核心规则。Harness 固定 AScout 的基础不变量，例如树内身份、分支关系、single-winner、capability、受控 effect 和 loser cleanup；policy 只能在这些规则内选择不同执行策略。
 
 Harness 应负责解释 Runtime 返回的 response 和 event。Runtime 返回的是底层机制结果；Harness 需要把它们组合成 Agent、policy 或用户更容易理解的内容，并在必要时剔除敏感信息或隐藏底层实现细节。这一职责也属于上下文管理的一部分。
 
-ASCout 需要提供连续体验：用户看到的是一个持续工作的 Agent，而不是多个 Branch 的内部竞争状态。当前还没有确定具体提供方式，先作为待考虑内容记录。
+AScout 需要提供连续体验：用户看到的是一个持续工作的 Agent，而不是多个 Branch 的内部竞争状态。当前还没有确定具体提供方式，先作为待考虑内容记录。
 
 控制面与 Runtime Mechanism 的权威边界应形成完整闭环：控制面决定语义动作，经 Runtime Adapter 侧交给 Runtime Mechanism 强制完成，再根据返回事件更新控制状态。控制面不能只更新 metadata 后假装 Runtime Mechanism 已经完成隔离、状态转换或 cleanup。
 
-当前阶段不考虑多 ASCout Agent 之间的协调。一个 ASCout Agent 仍是一棵独立的分支执行树；多 Agent 协作即使未来需要，也不进入第一版核心设计。
+当前阶段不考虑多 AScout Agent 之间的协调。一个 AScout Agent 仍是一棵独立的分支执行树；多 Agent 协作即使未来需要，也不进入第一版核心设计。
 
-第一版部署形态先按服务来理解：central Harness 作为 ASCout Agent / Speculative Tree 的控制 owner，Branch-local ASC-Daemon 和上层入口通过稳定 API 进入它。未来是否提供 library / embedded 形态，可在不改变核心语义的前提下另行讨论。
+第一版部署形态先按服务来理解：central Harness 作为 AScout Agent / Speculative Tree 的控制 owner，Branch-local ASC-Daemon 和上层入口通过稳定 API 进入它。未来是否提供 library / embedded 形态，可在不改变核心语义的前提下另行讨论。
 
 ## 第一版目标
 
@@ -91,7 +91,7 @@ ASCout 需要提供连续体验：用户看到的是一个持续工作的 Agent�
 
 第一版可以优先解决这些问题：
 
-- 一个 ASCout Agent 如何拥有一棵 Harness-side Speculative Tree。
+- 一个 AScout Agent 如何拥有一棵 Harness-side Speculative Tree。
 - Agent 如何在当前 Branch 下创建 candidate。
 - candidate 如何提交自己的结果或 continuation。
 - resolver 如何在直接 child 中选择一个 winner。
@@ -102,7 +102,7 @@ ASCout 需要提供连续体验：用户看到的是一个持续工作的 Agent�
 
 ## 长期目标
 
-长期目标是让 ASCout Harness 支撑任意上层 Agent 分支执行策略。
+长期目标是让 AScout Harness 支撑任意上层 Agent 分支执行策略。
 
 这些策略可以包括但不限于：
 
@@ -119,7 +119,7 @@ ASCout 需要提供连续体验：用户看到的是一个持续工作的 Agent�
 
 ## 四侧关系
 
-ASCout 的完整一级关系不是 Harness 与 Runtime 两段直连，而是：
+AScout 的完整一级关系不是 Harness 与 Runtime 两段直连，而是：
 
 ```text
 Agent 接入侧
@@ -138,7 +138,7 @@ Runtime Mechanism
 执行 / 隔离 / 资源 / 原子状态转换 / cleanup
 ```
 
-控制面拥有 ASCout 的控制语义和编排权：它决定 Agent-facing 请求是什么意思、当前状态下是否合法、要展开成哪些步骤、何时创建分支、何时接受 winner、何时丢弃 loser，以及如何解释结果。
+控制面拥有 AScout 的控制语义和编排权：它决定 Agent-facing 请求是什么意思、当前状态下是否合法、要展开成哪些步骤、何时创建分支、何时接受 winner、何时丢弃 loser，以及如何解释结果。
 
 Runtime Adapter 侧承接控制面与具体 Runtime 之间的变化。Harness Runtime Boundary 保持语义稳定；实际 Adapter 负责能力映射、transport、连接和事件规范化。Adapter 不决定 Agent 策略，也不拥有 Speculative Tree 或 Runtime mutable state。
 
@@ -159,16 +159,16 @@ Runtime Mechanism 把控制意图落实到进程、工作区、输入、外部�
 - 不为了追求通用化而过早改掉当前已经工作的投机执行术语。
 - 不让 policy 绕过 Harness 固定不变量。
 - 不让 Runtime response / event 直接泄漏为用户或 Agent 必须理解的底层细节。
-- 不在第一版引入多 ASCout Agent 协调语义。
+- 不在第一版引入多 AScout Agent 协调语义。
 
 ## 待继续澄清
 
 后续需要继续澄清：
 
-- ASCout Agent 的外部 API 应该暴露哪些能力，哪些只能留在 Harness 内部。
+- AScout Agent 的外部 API 应该暴露哪些能力，哪些只能留在 Harness 内部。
 - policy 应该如何表达无投机、投机、多候选搜索和人工介入等不同模式。
 - Root Agent 视图下，用户操作如何影响已有 Branch，以及如何避免频繁用户操作导致大量 Branch 过早剪枝。
-- ASCout 如何提供连续 Agent 体验，以及哪些输出、事件和状态应该对用户可见。
+- AScout 如何提供连续 Agent 体验，以及哪些输出、事件和状态应该对用户可见。
 - Harness 的计划和事件模型如何从第一版投机执行扩展到更通用的分支执行。
 - Harness Runtime Boundary 的请求与事件、具体 Adapter 的连接生命周期，以及 Runtime Mechanism 的失败恢复如何定义。
 - 调度权如何由 policy 表达，并如何受 Harness 固定不变量约束。

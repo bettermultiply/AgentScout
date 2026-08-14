@@ -1,14 +1,14 @@
-# ASCout FAQ
+# AScout FAQ
 
-本文解释已经确认的 ASCout 语义和当前仓库状态，不描述某个具体 Runtime backend。
+本文解释已经确认的 AScout 语义和当前仓库状态，不描述某个具体 Runtime backend。
 
 ## Branch 是 Snapshot 吗？
 
-不是。Branch 是活的计算延续。Backend 内部可以使用 checkpoint 或 VM snapshot，但 Snapshot 不是 ASCout semantic entity。
+不是。Branch 是活的计算延续。Backend 内部可以使用 checkpoint 或 VM snapshot，但 Snapshot 不是 AScout semantic entity。
 
 ## 创建 candidates 后 parent 还能运行吗？
 
-Speculative Tree 中的关系与 Agent execution activity 相互独立。Speculation window 内，parent 可以按 Agent/Harness policy 执行真实 operation、等待、suspend 或 resume；ASCout 不强制 parent 长期阻塞。
+Speculative Tree 中的关系与 Agent execution activity 相互独立。Speculation window 内，parent 可以按 Agent/Harness policy 执行真实 operation、等待、suspend 或 resume；AScout 不强制 parent 长期阻塞。
 
 ## Parent 的内存修改会自动进入 child 吗？
 
@@ -18,7 +18,7 @@ Speculative Tree 中的关系与 Agent execution activity 相互独立。Specula
 
 具有覆盖语义的状态在当前 Branch 与 ancestors 之间使用 latest-visible-write。Input 与全局服务 Effect 使用不同语义，不能强行套入该模型。
 
-## ASCout 必须理解每个 syscall 吗？
+## AScout 必须理解每个 syscall 吗？
 
 不需要。文件操作进入 Branch Workspace View；shell/tool invocation 是 operation、outcome 和受控 reuse 的主要语义粒度。Opaque command 可以在隔离 Branch 中运行，但不能盲目去重。
 
@@ -28,7 +28,7 @@ Speculative Tree 中的关系与 Agent execution activity 相互独立。Specula
 
 ## Commit 会 merge Branch state 吗？
 
-不会。Commit 提交 candidate subtree proposal；Accept 选择一个 winner 并重定向 Speculative Tree，同时丢弃不兼容 siblings。ASCout 不定义通用 sibling merge。
+不会。Commit 提交 candidate subtree proposal；Accept 选择一个 winner 并重定向 Speculative Tree，同时丢弃不兼容 siblings。AScout 不定义通用 sibling merge。
 
 ## Child 可以自行成为 winner 吗？
 
@@ -60,4 +60,4 @@ Context、direct children、candidate 创建、commit、accept、discard 和 eve
 
 ## 当前有可运行实现吗？
 
-没有可用 ASCout lifecycle 实现。当前仓库只有设计文档，不提供真实 Agent execution、Branch lifecycle、Runtime backend 或 sandbox。
+没有可用 AScout lifecycle 实现。当前仓库只有设计文档，不提供真实 Agent execution、Branch lifecycle、Runtime backend 或 sandbox。

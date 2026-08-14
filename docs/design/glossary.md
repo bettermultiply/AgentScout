@@ -1,15 +1,15 @@
 # 术语表
 
-本表给出 ASCout 每个术语的一句话定义与权威出处。完整语义以各设计文档为准：目标语义见 `docs/design/overview.md`、`docs/design/decisions.md` 与 `docs/design/speculation-decisions.md`；两套视角（Speculative Tree 机制表述与投机执行底座抽象）的对应关系见 [`terminology.md`](terminology.md)。
+本表给出 AScout 每个术语的一句话定义与权威出处。完整语义以各设计文档为准：目标语义见 `docs/design/overview.md`、`docs/design/decisions.md` 与 `docs/design/speculation-decisions.md`；两套视角（Speculative Tree 机制表述与投机执行底座抽象）的对应关系见 [`terminology.md`](terminology.md)。
 
 ## 系统级
 
-- **ASCout（Agent Scout）**：面向 Agent 投机执行的控制与运行机制。（`../architecture.md`；`overview.md`）
-- **Speculative Tree**：ASCout 的核心控制结构：从一个 root Branch 开始记录 Branch 之间的派生关系。（`overview.md` §Branch 与 Speculative Tree）
-- **task**：端用户提交的准入单元。一个 task 对应一棵 Speculative Tree（一个 ASCoutAgent 控制域）；准入时绑定 policy profile 并建立 root Authority 实例。（`spec-exec-abstraction.md` §10.4 Entry API）
-- **ASCoutAgent**：一棵 Speculative Tree 的控制域；Branch identity、capability、commit/discard 与 resolution 都只在这棵 tree 内有意义。task 是该控制域的用户视角名称。（`overview.md` §概述）
+- **AScout（Agent Scout）**：面向 Agent 投机执行的控制与运行机制。（`../architecture.md`；`overview.md`）
+- **Speculative Tree**：AScout 的核心控制结构：从一个 root Branch 开始记录 Branch 之间的派生关系。（`overview.md` §Branch 与 Speculative Tree）
+- **task**：端用户提交的准入单元。一个 task 对应一棵 Speculative Tree（一个 AScoutAgent 控制域）；准入时绑定 policy profile 并建立 root Authority 实例。（`spec-exec-abstraction.md` §10.4 Entry API）
+- **AScoutAgent**：一棵 Speculative Tree 的控制域；Branch identity、capability、commit/discard 与 resolution 都只在这棵 tree 内有意义。task 是该控制域的用户视角名称。（`overview.md` §概述）
 - **Agent 接入侧**：四侧一级架构的入口侧，包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon 与 Interposer 等接入职责。（`../architecture.md` §1）
-- **控制面侧**：四侧一级架构的控制侧；Harness Core 及其内部组件拥有 ASCoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。（`../architecture.md` §2）
+- **控制面侧**：四侧一级架构的控制侧；Harness Core 及其内部组件拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。（`../architecture.md` §2）
 - **Runtime Adapter 侧**：四侧一级架构的适配侧；内部包含稳定 Harness Runtime Boundary 与面向具体 Runtime 的实际 Runtime Adapter。（`../architecture.md` §1）
 - **Runtime Mechanism**：四侧一级架构的机制侧；拥有节点执行状态、资源、隔离、capability/obligation validation、barrier、原子转换与 cleanup。（`../architecture.md` §2）
 

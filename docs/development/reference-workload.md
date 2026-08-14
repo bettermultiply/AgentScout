@@ -1,6 +1,6 @@
 # 首要验证 Workload
 
-本文记录 ASCout 第一阶段的开发与验证 workload，不定义 ASCout 的全部目标语义，也不预先选择 continuation branching backend。
+本文记录 AScout 第一阶段的开发与验证 workload，不定义 AScout 的全部目标语义，也不预先选择 continuation branching backend。
 
 ## Delayed-choice coding
 
@@ -19,18 +19,18 @@ Parent: 等待真实 choice
 ## 验证路径
 
 1. 确定性测试 Agent 只用于 lifecycle、隔离和失败路径的 conformance tests。
-2. 现有 Codex 通过 Skill 主动调用 ASCout 命令，作为第一个真实 Agent workload。
+2. 现有 Codex 通过 Skill 主动调用 AScout 命令，作为第一个真实 Agent workload。
 3. 在 Command + Skill 路径证明收益后，再验证 Hook 自动捕获 safe point 和 outcome boundary。
 4. 暂不深度修改 OpenCode 或其他 Agent loop；以后用第二种 Agent 验证 launch adapter 和 integration profile 的可移植性。
 
-这种顺序把 runtime 机制、speculation policy 和 Agent integration 分开验证，避免同时修改 Agent 与 ASCout 后无法判断失败来源。
+这种顺序把 runtime 机制、speculation policy 和 Agent integration 分开验证，避免同时修改 Agent 与 AScout 后无法判断失败来源。
 
 ## 对照与指标
 
 同一 Agent、模型设置、代码任务、outcome 和资源预算至少运行两种模式：
 
 - Sequential baseline：等待真实 outcome 后再执行后续工作。
-- ASCout speculation：等待期间并行执行 hypotheses，真实 outcome 到达后只保留一个 winner 或回退 parent。
+- AScout speculation：等待期间并行执行 hypotheses，真实 outcome 到达后只保留一个 winner 或回退 parent。
 
 正确性指标：
 
@@ -53,10 +53,10 @@ Parent: 等待真实 choice
 
 ```text
 Sequential ~= outcome latency + downstream work
-ASCout        ~= max(outcome latency, downstream work) + ASCout overhead
+AScout        ~= max(outcome latency, downstream work) + AScout overhead
 ```
 
-只有正确性成立且测得的 latency reduction 能覆盖额外成本，才能说明该 workload 上的 ASCout 机制有效。
+只有正确性成立且测得的 latency reduction 能覆盖额外成本，才能说明该 workload 上的 AScout 机制有效。
 
 ## 后续扩展
 
