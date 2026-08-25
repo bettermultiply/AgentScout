@@ -1,10 +1,13 @@
 # AScout 文档导航
 
-AScout 文档按权威范围划分。设计文档定义已经确认的目标语义；开发文档描述已接受的实现架构、实现决策、路线图和验收状态；使用文档说明 Agent 接入者当前能够和不能使用什么。
+AScout 文档组织成树：两个根文档提供全局视角，其余文档作为语义权威与实现细节。尚未收敛的议题先进入仓库根目录的 [Discussion.md](../Discussion.md)，接受后再同步到正式文档。
 
-设计文档与开发文档分别定义目标语义与已接受的实现选择。尚未收敛的议题先进入仓库根目录的 [Discussion.md](../Discussion.md)，接受后再同步到正式文档。
+## 根文档
 
-需要先建立全局视角时，从 [AScout 一级架构](architecture.md) 开始；它定义 `Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism` 的四侧分层、所有权与调用方向，但不取代各语义权威文档。
+- [心智模型](mental-model.md)：**概念层**。先讲 AScout 要解决的问题（策略孤岛、隔离碎片化、上下层脱节），再讲它赖以工作的核心模型（投机边、轴体系、Assumption DAG、效果管理、资源调度、保真度、Speculation Contract）。
+- [架构](architecture.md)：**系统层**。定义 `Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism` 的四侧分层、各侧所有权与跨侧调用方向。
+
+两条根后续分别长出细节叶子：心智模型延伸每个核心模型的专门文档；架构延伸四侧每层的专门文档。当前这两个方向的叶子尚未建立。
 
 ## 设计文档
 

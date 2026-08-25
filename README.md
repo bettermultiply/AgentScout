@@ -17,10 +17,13 @@ AScout（Agent Scout）是面向 Agent 投机执行的控制与运行机制。AS
 
 ## 文档
 
-- [文档导航](docs/index.md)
+文档以两个根文档为入口，再延伸到各语义权威与实现细节（详见 [文档导航](docs/index.md)）。
+
+- [心智模型](docs/mental-model.md)
 - [一级架构](docs/architecture.md)
 - [目标语义](docs/design/overview.md)
 - [设计决策](docs/design/decisions.md)
+- [投机执行底座设计决策](docs/design/speculation-decisions.md)
 - [开发决策](docs/development/decisions.md)
 - [开发路线图](docs/development/roadmap.md)
 - [验收状态](docs/development/verification.md)

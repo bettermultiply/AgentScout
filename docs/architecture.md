@@ -1,5 +1,7 @@
 # AScout 架构
 
+本文是 AScout 的**系统结构文档**：它定义通用底座的实现组织方式。底座"要解决什么问题、靠什么核心模型工作"见 [心智模型](mental-model.md)；本文只回答"系统怎么组织、每侧拥有什么、怎么跨侧协作"。
+
 本文只定义 AScout 的一级分层、各侧所有权与跨侧调用方向。Branch 生命周期、状态可见性和 single-winner 语义以 [状态与生命周期语义](design/overview.md) 与 [设计决策](design/decisions.md) 为准；内部组件的研究推导见 [投机执行底座设计决策](design/speculation-decisions.md) 与 [抽象设计札记](development/spec-exec-abstraction.md)。
 
 ## 1. 一级分层
