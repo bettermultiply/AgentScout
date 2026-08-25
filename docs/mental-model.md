@@ -1,48 +1,31 @@
 # AScout 心智模型
 
-> 本文是理解 AScout 的起点：先说明 AScout 要解决的问题，再给出 AScout 赖以工作的核心模型。本文只记录已经确定的目标语义；逐条决策的权威出处见 [设计决策](design/speculation-decisions.md) 与 [状态与生命周期语义](design/overview.md)，系统结构见 [架构](architecture.md)。
+> 本文是理解 AScout 的起点：先给出 AScout 的定位（定义、问题、目标、边界），再给出赖以工作的核心模型。本文只记录已经确定的目标语义；问题与目标的完整论证见 [问题与目标](problems-and-goals.md)，设计原则见 [设计原则](design-principles.md)，逐条决策的权威出处见 [设计决策](design/speculation-decisions.md) 与 [状态与生命周期语义](design/overview.md)，系统结构见 [架构](architecture.md)。
 
-## 1. 一句话定位
+## 1. 定位
 
-AScout（Agent Scout）是面向 Agent 投机执行的**通用底座**。
+AScout（Agent Scout）是面向 Agent 投机执行的通用底座：将投机执行所需的多种能力抽象为统一机制，使开发者能够通过组合与替换这些能力，构建出不同的执行策略。
 
-它不是某一种投机算法，也不承诺每个任务都必然加速；它提供的是让"预测、验证、隔离、取消、复用、副作用提交"这些能力可以组合、可以替换、可以跨任务选择的一层机制。任何投机算法都可以作为一条 policy 挂上来，任何状态域的效果都被同一套机制管理，上下层之间通过显式契约协商。
+投机执行想要解决的问题是：Agent 在执行过程中经常需要等待一个慢结果——远程 API、用户决策、CI 测试——它会阻塞后续推理执行，甚至主导整个执行流程。投机执行允许在结果尚未到达时按预测提前推进后续步骤，从而加速整个执行过程；而它所依赖的预测、验证、隔离、取消、复用与副作用提交，正是 AScout 抽象为统一机制的那组能力。
 
-## 2. 问题陈述：现有工作缺什么
+现有投机执行工作大多针对特定执行对象（tool call、plan、workspace branch）或特定状态域设计，能力与任务绑定，方案之间无法组合，也无法让不同任务选择不同策略。这些问题集中表现为三个缺口——策略孤岛、隔离碎片化、上下层脱节，具体论证与 AScout 的目标在 [问题与目标](problems-and-goals.md) 中展开。
 
-### 2.1 策略孤岛：每种方案只服务一种对象
+AScout 的能力体现在三个层面。
+- 策略层：任意算法都可以作为一条 policy 接入，预测器、等价判定、拓扑、成本、补偿等特征可独立替换、组合，并按任务选择。
+- 状态域层：文件系统、进程、内存、GUI 以及 network、database、email、payment 等外部状态域，由同一套效果管理机制统一处理，不必为每种状态域另建隔离与副作用方案。
+- 契约层：上层算法与下层隔离机制通过 Speculation Contract 双向协商——上层声明预测置信度、验证条件与失败代价，下层声明隔离能力、隔离代价与可用纪律。
 
-现有 speculative execution 工作通常针对特定任务和执行对象设计：tool call、plan、function future、workspace branch 各是一套。缺少统一框架来管理预测、验证、隔离、取消和提交，导致方案之间无法组合，也无法让不同的任务选择不同的 policy。
+落在使用上：
+- 端用户提交任务、得到结果，无需感知背后的投机分支；
+- Agent 开发者接入后不必重写执行逻辑；
+- 部署方（Operator）按部署需要选择 policy 与隔离后端、设定预算；
+- Policy 作者只需专注于算法设计（如何预测、如何判定命中、如何选择拓扑与成本），无需关心底层隔离与能力如何实现——这些由底座统一提供。
 
-### 2.2 隔离碎片化：隔离范围各不一样
+AScout 不是某个固定算法，也不承诺每个任务必然加速；是否投机、如何投机由控制面根据所绑定的 Policy 决定，投机与否本身就是 Policy 的决策内容。
 
-不同方案覆盖的隔离范围不同：有的只能隔离结果或 future，有的能隔离 filesystem、process、memory 或 GUI。对于 network、database、email、payment 等外部副作用，通常只能禁止、延迟或依赖特定 sandbox。缺少一个能够跨任务、跨状态域、跨 speculative policy 统一管理执行与副作用的框架。
+## 2. 核心模型
 
-### 2.3 上下层脱节：算法与隔离机制之间没有契约
-
-已有工作大多沿两条相对割裂的路径展开：
-
-- 一类关注如何在 Agent 执行中预测并提前执行未来动作，通常通过限制可投机操作类型（read-only、idempotent、sandboxed）来规避副作用风险；
-- 另一类关注系统层如何提供状态隔离、分支执行、事务提交或回滚，但没有建模上层投机算法的预测置信度、验证条件和失败代价。
-
-换言之，现有研究缺少一种跨层的 **speculation contract**，把上层算法充分映射到下层执行中。
-
-## 3. 目标与设计原则
-
-### 目标
-
-构建一个面向 speculative execution 的通用底座：允许不同任务选择不同的 speculation policy，并统一负责 tentative execution 的**隔离、调度、验证、取消、复用和副作用提交**。
-
-### 设计原则
-
-1. **Mechanism / Policy 划线**：底座提供算法不可修改的机制，算法以插件形式填入（详见 §5）。
-2. **同一坐标系**：所有投机算法的差异都能落进一组正交轴上的取值，底座据此统一表达与强制。
-3. **跨层契约**：上层报预测置信度、验证条件与失败代价，下层报隔离能力、隔离代价与可用纪律集合。
-4. **Fidelity 可声明、可强制、可审计**：lossless 不是口头论证，而是加载期对撞 + 运行期 shadow 实测。
-
-## 4. 核心模型
-
-### 4.1 投机边：最小的统一单位
+### 2.1 投机边：最小的统一单位
 
 一条依赖边 `u → v`：`v` 消费 `u` 的输出 `i`。当 `i` 尚未由权威路径产出时，用预测值 `î` 替代 `i`，提前启动 `v`。
 
@@ -55,7 +38,7 @@ AScout（Agent Scout）是面向 Agent 投机执行的**通用底座**。
 
 tool call、plan step、workspace branch、乃至人类回复，全都落在同一条投机边上——它们的差异只是这条边的位置、两侧延迟与谁是权威。这是底座能统一不同方案的原因。
 
-### 4.2 轴体系：同一坐标系
+### 2.2 轴体系：同一坐标系
 
 轴体系是底座的统一坐标系（编号沿用决策记录；Fidelity 是导出不变量，不是独立轴）：
 
@@ -71,7 +54,7 @@ tool call、plan step、workspace branch、乃至人类回复，全都落在同�
 
 每一条轴独立取值，论文之间的差异全部落成轴上的取值，而不是各自发明机制。
 
-### 4.3 组合性：Assumption DAG
+### 2.3 组合性：Assumption DAG
 
 多个投机同时在飞、且互相依赖时，需要一套通用语义。
 
@@ -86,7 +69,7 @@ tool call、plan step、workspace branch、乃至人类回复，全都落在同�
 
 Assumption DAG 同时统一了级联取消、不一致子树剪枝、坏前缀重建等局部方案，并让**嵌套投机**（投机之上再投机）成为组合性的自然推论。
 
-### 4.4 效果管理：EffectClass × StateDomain
+### 2.4 效果管理：EffectClass × StateDomain
 
 投机的最大价值洼地在效果层：多数现有工作只能投机只读操作。底座提供真正的效果管理，把适用范围从只读扩展到可写。
 
@@ -114,7 +97,7 @@ Assumption DAG 同时统一了级联取消、不一致子树剪枝、坏前缀�
 
 二维交叉决定每一种具体隔离机制。效果缓冲到 **commit barrier**（照抄处理器的 commit/retire 语义）之后才释放。外部效果只在 service adapter 声明的 **observation surface** 与 **guarantee horizon** 内获得 sibling non-interference 与 winner materialization 保证。
 
-### 4.5 资源、准入与记账
+### 2.5 资源、准入与记账
 
 投机收益是负载相关的，高负载下可以为负。因此底座必须提供：
 
@@ -126,7 +109,7 @@ Assumption DAG 同时统一了级联取消、不一致子树剪枝、坏前缀�
 
 **规范化记账**三分：(a) 无论如何都要花的 / (b) 纯浪费 / (c) 被抢占取消时已消耗的部分成本。口径必须包含 token 之外的资源，否则无法横向比较、无法做全局预算、无法做熔断。
 
-### 4.6 保真度与验证
+### 2.6 保真度与验证
 
 lossless 不是布尔值，而是契约等级。底座把 Fidelity 变成可声明、可强制、可审计的属性：
 
@@ -136,7 +119,7 @@ lossless 不是布尔值，而是契约等级。底座把 Fidelity 变成可声�
 
 同一套 shadow / replay 基础设施同时服务：Fidelity 审计、predictor 数据管道、成本校准与上线灰度（offline replay → shadow → canary → online → drift kill-switch）。
 
-### 4.7 Speculation Contract：跨层双向协商
+### 2.7 Speculation Contract：跨层双向协商
 
 上层与下层之间不是单向声明，而是双向协商：
 
@@ -145,14 +128,14 @@ lossless 不是布尔值，而是契约等级。底座把 Fidelity 变成可声�
 
 后果：单向声明下底座只能拒绝不可行组合；双向协商下底座能回答"给定这个隔离后端，该算法最多能激进到什么程度"、"要支持该算法，隔离层至少要提供什么"。静态约束求解是它的下层形态。
 
-## 5. Mechanism 与 Policy 划线
+## 3. Mechanism 与 Policy 划线
 
 - **Mechanism（底座提供，算法不可改）**：Site 注册与 admissibility、隔离域、Reconciliation 状态机、Assumption DAG 与传播、Effect Gate / commit barrier、资源准入 / 优先级 / 抢占 / 背压、规范化记账、Fidelity 契约的强制与审计。
 - **Policy（插件，有默认实现）**：Predictor、Equivalence、Authority launch、Topology、Cost model & gate、Salvage、Compensation。
 
 判据：如果某个论文的机制被迫写进 Mechanism 层，说明抽象漏了一轴。
 
-## 6. 这些模型如何落到系统上
+## 4. 这些模型如何落到系统上
 
 本文是底座的抽象心智。落到具体系统时，它承载为：
 
@@ -163,8 +146,9 @@ lossless 不是布尔值，而是契约等级。底座把 Fidelity 变成可声�
 
 这些是同一系统的机制表达，不是另一套系统；术语对应见 [术语映射表](design/terminology.md)。
 
-## 7. 文档地图
+## 5. 文档地图
 
+- 问题与目标、设计原则：`problems-and-goals.md`、`design-principles.md`
 - 核心模型与逐条决策：`design/speculation-decisions.md`
 - 机制视角语义（状态与生命周期）：`design/overview.md`、`design/decisions.md`
 - 研究推导与论文调研：`development/spec-exec-abstraction.md`

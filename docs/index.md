@@ -4,10 +4,15 @@ AScout 文档组织成树：两个根文档提供全局视角，其余文档作�
 
 ## 根文档
 
-- [心智模型](mental-model.md)：**概念层**。先讲 AScout 要解决的问题（策略孤岛、隔离碎片化、上下层脱节），再讲它赖以工作的核心模型（投机边、轴体系、Assumption DAG、效果管理、资源调度、保真度、Speculation Contract）。
+- [心智模型](mental-model.md)：**概念层**。先给出 AScout 的定位（定义、问题、目标、边界），再讲它赖以工作的核心模型（投机边、轴体系、Assumption DAG、效果管理、资源调度、保真度、Speculation Contract）。
 - [架构](architecture.md)：**系统层**。定义 `Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism` 的四侧分层、各侧所有权与跨侧调用方向。
 
-两条根后续分别长出细节叶子：心智模型延伸每个核心模型的专门文档；架构延伸四侧每层的专门文档。当前这两个方向的叶子尚未建立。
+心智模型当前长出的叶子：
+
+- [问题与目标](problems-and-goals.md)：投机动机、三个缺口（策略孤岛、隔离碎片化、上下层脱节）与 AScout 目标。
+- [设计原则](design-principles.md)：贯穿设计的四条原则（Mechanism/Policy 划线、同一坐标系、跨层契约、Fidelity 可声明/可强制/可审计）。
+
+其余核心模型叶子（投机边、轴体系、Assumption DAG、效果管理、资源调度、保真度、Speculation Contract）与架构四侧的叶子尚未建立。
 
 ## 设计文档
 

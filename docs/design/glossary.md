@@ -4,7 +4,7 @@
 
 ## 系统级
 
-- **AScout（Agent Scout）**：面向 Agent 投机执行的控制与运行机制。（`../architecture.md`；`overview.md`）
+- **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，将投机执行所需的多种能力抽象为统一机制，使开发者能够组合与替换这些能力、构建不同的执行策略。（`../mental-model.md`；`../architecture.md`；`overview.md`）
 - **Speculative Tree**：AScout 的核心控制结构：从一个 root Branch 开始记录 Branch 之间的派生关系。（`overview.md` §Branch 与 Speculative Tree）
 - **task**：端用户提交的准入单元。一个 task 对应一棵 Speculative Tree（一个 AScoutAgent 控制域）；准入时绑定 policy profile 并建立 root Authority 实例。（`spec-exec-abstraction.md` §10.4 Entry API）
 - **AScoutAgent**：一棵 Speculative Tree 的控制域；Branch identity、capability、commit/discard 与 resolution 都只在这棵 tree 内有意义。task 是该控制域的用户视角名称。（`overview.md` §概述）

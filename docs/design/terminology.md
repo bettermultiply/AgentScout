@@ -8,7 +8,7 @@
 
 | 术语 | 说明 |
 |---|---|
-| **AScout**（Agent Scout） | 面向 Agent 投机执行的控制与运行机制 |
+| **AScout**（Agent Scout） | 面向 Agent 投机执行的通用底座，将投机执行所需的能力抽象为统一机制，使开发者能够组合与替换这些能力、构建不同的执行策略 |
 | **Speculative Tree** | AScout 的核心控制结构：从 root 开始记录 Branch 之间的派生关系 |
 | **task** | 端用户提交的准入单元。一个 task 对应一棵 Speculative Tree（一个 AScoutAgent 控制域），准入时绑定 policy profile 并建立 root Authority 实例 |
 

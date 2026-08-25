@@ -1,6 +1,6 @@
 # AScout
 
-AScout（Agent Scout）是面向 Agent 投机执行的控制与运行机制。AScout 对外抽象为一个 AScoutAgent；每个 AScoutAgent 在控制面拥有一棵 Speculative Tree。在 pending-result boundary，parent 可以继续真实 operation，candidate Branches 则基于不同 Proposal 提前执行。Candidate 提交 commit request，持有 resolver capability 的主体至多接受一个 winner；控制面通过 Runtime Adapter 侧触发 Runtime Mechanism 的节点级转换和 loser cleanup。
+AScout（Agent Scout）是面向 Agent 投机执行的通用底座：将投机执行所需的多种能力抽象为统一机制，使开发者能够通过组合与替换这些能力，构建出不同的执行策略。AScout 对外抽象为一个 AScoutAgent；每个 AScoutAgent 在控制面拥有一棵 Speculative Tree。在 pending-result boundary，parent 可以继续真实 operation，candidate Branches 则基于不同 Proposal 提前执行。Candidate 提交 commit request，持有 resolver capability 的主体至多接受一个 winner；控制面通过 Runtime Adapter 侧触发 Runtime Mechanism 的节点级转换和 loser cleanup。
 
 ## 仓库状态
 
@@ -20,6 +20,8 @@ AScout（Agent Scout）是面向 Agent 投机执行的控制与运行机制。AS
 文档以两个根文档为入口，再延伸到各语义权威与实现细节（详见 [文档导航](docs/index.md)）。
 
 - [心智模型](docs/mental-model.md)
+- [问题与目标](docs/problems-and-goals.md)
+- [设计原则](docs/design-principles.md)
 - [一级架构](docs/architecture.md)
 - [目标语义](docs/design/overview.md)
 - [设计决策](docs/design/decisions.md)
