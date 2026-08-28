@@ -4,7 +4,7 @@ AScout 文档组织成树：两个根文档提供全局视角，其余文档作�
 
 ## 根文档
 
-- [心智模型](mental-model.md)：**概念层**。先给出 AScout 的定位（定义、问题、目标、边界），再讲它赖以工作的核心模型（投机边、轴体系、Assumption DAG、效果管理、资源调度、保真度、Speculation Contract）。
+- [心智模型](mental-model.md)：**概念层**。先给出 AScout 的定位（定义、问题、目标、边界），再介绍工作模型（可组合的投机执行过程、投机边、Policy/Mechanism、Speculation Contract）及其支撑模型（轴体系、Assumption DAG、效果管理、资源调度、Fidelity 等）。
 - [架构](architecture.md)：**系统层**。定义 `Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism` 的四侧分层、各侧所有权与跨侧调用方向。
 
 心智模型当前长出的叶子：
@@ -12,7 +12,7 @@ AScout 文档组织成树：两个根文档提供全局视角，其余文档作�
 - [问题与目标](problems-and-goals.md)：投机动机、三个缺口（策略孤岛、隔离碎片化、上下层脱节）与 AScout 目标。
 - [设计原则](design-principles.md)：贯穿设计的四条原则（Mechanism/Policy 划线、同一坐标系、跨层契约、Fidelity 可声明/可强制/可审计）。
 
-其余核心模型叶子（投机边、轴体系、Assumption DAG、效果管理、资源调度、保真度、Speculation Contract）与架构四侧的叶子尚未建立。
+心智模型内部先区分工作模型和支撑模型：投机执行过程、Policy/Mechanism、Speculation Contract 与投机边构成工作模型；轴体系、投机结果与验证、Assumption DAG、效果管理、资源管理和 Fidelity 构成支撑模型。上述支撑模型的专门叶子文档与架构四侧的叶子尚未建立。
 
 ## 设计文档
 
