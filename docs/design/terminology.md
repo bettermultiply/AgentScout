@@ -69,7 +69,7 @@ Harness Runtime Boundary 与 Runtime Adapter 同属 Runtime Adapter 侧，但不
 
 ## 底座独有概念（Branch 视角无对应，直接吸收）
 
-- 轴体系（轴 1 权威启动 / 轴 2 拓扑 / 轴 3 预测器 / 轴 4 等价 / 轴 5 权威 / 轴 6 处置 / Fidelity 导出不变量）
+- Policy Decisions（权威启动、拓扑、预测器、等价、权威来源、处置等代表性策略决策；Fidelity 为导出属性）
 - EffectClass（PURE / IDEMPOTENT / STAGEABLE / TRANSFORMABLE / COMPENSABLE / OVERWRITABLE / IRREVERSIBLE）× StateDomain
 - Fidelity 契约（Trajectory-equivalent / Outcome-equivalent / Bounded-degradation / Best-effort；可声明、可强制、可审计）
 - Salvage（残值回收：`progress() / handoff()` 一等抽象）

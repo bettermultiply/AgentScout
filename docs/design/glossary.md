@@ -66,7 +66,7 @@
 
 ## 机制与概念
 
-- **轴体系**：七轴正交模型 —— 轴 1 权威启动（Eager / Lazy / Absent）、轴 2 拓扑（breadth × depth）、轴 3 预测器、轴 4 等价、轴 5 权威、轴 6 处置、Fidelity 为导出不变量（不是轴）。（`spec-exec-abstraction.md` §2；`speculation-decisions.md` D-001..D-008）
+- **Policy Decision**：Policy 根据任务、上下文、资源和 Runtime 能力作出的可替换策略决策；当前六项代表性决策及其阶段映射见 [`policy-decisions.md`](policy-decisions.md)。（`../mental-model.md` §3.1）
 - **commit barrier**：效果释放屏障；照抄处理器 commit/retire 语义（"write operations are buffered but not allowed to execute until the instruction is committed"）。（`spec-exec-abstraction.md` §4）
 - **规范化资源记账**：成本三分 —— (a) 无论如何都要花的（命中时投机 work 即权威 work）/ (b) 纯浪费 / (c) 部分成本（被抢占/取消时已消耗部分）。口径必须包含 token 之外的资源。（`spec-exec-abstraction.md` §5；`speculation-decisions.md` D-012）
 - **Shadow / Replay**：投机与串行同跑、只提交串行结果；同一套基础设施服务 fidelity 审计、predictor 数据管道、cost 校准与上线灰度（offline replay → shadow → canary → online → drift kill-switch）。（`spec-exec-abstraction.md` §7；`speculation-decisions.md` D-014）

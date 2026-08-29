@@ -82,57 +82,26 @@ Runtime（具体后端原语）
 
 ## 3. 支撑模型
 
-### 3.1 轴体系：同一坐标系
+### 3.1 Policy Decisions
 
-轴体系是底座的统一坐标系（编号沿用决策记录；Fidelity 是导出不变量，不是独立轴）：
+Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策。以下内容是当前投机执行中最重要的代表性阶段决策及导出属性，并非穷尽列表；更完整的 Policy 决策面见 [Policy Decisions 设计](design/policy-decisions.md)。
 
-| 轴 | 管什么 | 取值 |
-|---|---|---|
-| 轴 1 权威启动 | `A_u` 跑不跑、何时跑 | Eager / Lazy / Absent |
-| 轴 2 拓扑 | 投机树的宽度与深度 | breadth × depth |
-| 轴 3 预测器 | 怎么猜 `î` | 小模型 / 自投机 / pattern / 在线记忆 … |
-| 轴 4 等价 `≈` | 怎么算"猜中了" | L0 语法 / L1 语义 / L2 效果同余 / L3 结果可接受 |
-| 轴 5 权威 | 谁产出真值 `i` | 模型 / 环境 / 人 / validator … |
-| 轴 6 处置 | 真值到达后怎么处理投机结果 | Reuse / Promote / Discard / Preempt / Re-execute / Compensate / Overwrite / Salvage |
-| Fidelity（导出） | 系统层承诺的保真等级 | Trajectory / Outcome / Bounded-degradation / Best-effort |
-
-每一条轴独立取值，论文之间的差异全部落成轴上的取值，而不是各自发明机制。
-
-### 3.2 投机结果与验证
-
-投机过程中的核心对象包括 Proposal、Authority、Equivalence 和 Disposition。Proposal 是投机路径使用的预测值；Authority 是产生真实结果或权威判断的主体；Equivalence 描述预测与权威结果如何被判定为兼容；Disposition 描述验证后如何处置投机工作。
-
-这些对象共同描述“预测了什么、谁提供依据、怎样判断命中以及命中或失败后怎么办”。它们是投机边生命周期的具体组成部分，而不是独立于执行过程之外的另一套机制。
-
-### 3.3 状态与副作用管理：EffectClass × StateDomain
-
-投机的最大价值洼地在效果层：多数现有工作只能投机只读操作。底座提供真正的效果管理，把适用范围从只读扩展到可写。
-
-**EffectClass**（效果纪律）与 **StateDomain**（状态域）正交：
-
-| EffectClass | 含义 |
+| 阶段中的代表性决策 | 管什么 |
 |---|---|
-| PURE | 无外部效果，随便投机 |
-| IDEMPOTENT | 重放收敛到同一状态 |
-| STAGEABLE | 效果可缓冲，commit barrier 后释放 |
-| TRANSFORMABLE | 存在非变异的等价执行（dry-run / staging） |
-| COMPENSABLE | 可补偿（refund / replace） |
-| OVERWRITABLE | last-write-wins 收敛 |
-| IRREVERSIBLE | 不可投机，硬闸 |
+| 准入与权威启动 | `A_u` 跑不跑、何时跑 |
+| 拓扑展开与投机执行 | 投机树的宽度与深度 |
+| 预测生成 | 怎么猜 `î` |
+| 权威获取与验证 | 谁产出依据 `i`，以及如何判断兼容 |
+| 处置与提交 | 真值到达后怎么处理投机结果 |
+| Fidelity（导出属性） | 系统层承诺的保真等级 |
 
-| StateDomain | 典型可用纪律 | 隔离机制 |
-|---|---|---|
-| filesystem | STAGEABLE | overlayfs / union mount |
-| process, memory | STAGEABLE | namespace / COW fork / VM 快照 |
-| GUI | TRANSFORMABLE | 影子渲染 / 离屏合成 |
-| network (read) | PURE | 直通 |
-| network (write) | TRANSFORMABLE / STAGEABLE | 录制回放 / 代理拦截 |
-| database | STAGEABLE | 未提交事务 / savepoint |
-| email, payment | COMPENSABLE / IRREVERSIBLE | outbox 延迟投递 / 硬闸 |
+机会发现与 Site 注册是这些决策的前置接缝，不属于上述六项中的独立 Policy Decision。EffectClass、资源准入和 Speculation Contract 是决策可行性的约束与输入，不是固定数量的 Policy Decision。Policy 可以继续增加决策项，但不能违反 AScout 的固定语义和 Mechanism 约束。
 
-二维交叉决定每一种具体隔离机制。效果缓冲到 **commit barrier**（照抄处理器的 commit/retire 语义）之后才释放。外部效果只在 service adapter 声明的 **observation surface** 与 **guarantee horizon** 内获得 sibling non-interference 与 winner materialization 保证。
+### 3.2 状态与效果
 
-### 3.4 资源与准入
+投机执行可能同时影响多个状态域并产生外部效果。AScout 根据效果的可投机纪律和状态域的隔离能力约束这些影响；在验证、提交和必要的状态转换完成前，投机结果不能进入最终语义状态。无法安全隔离、延迟释放或补偿的效果必须拒绝投机或降级处理。具体分类、交叉规则和后端机制见 [效果管理设计](design/effect-management.md)。
+
+### 3.3 资源与准入
 
 投机收益是负载相关的，高负载下可以为负。因此底座必须提供：
 
@@ -144,7 +113,7 @@ Runtime（具体后端原语）
 
 **规范化记账**三分：(a) 无论如何都要花的 / (b) 纯浪费 / (c) 被抢占取消时已消耗的部分成本。口径必须包含 token 之外的资源，否则无法横向比较、无法做全局预算、无法做熔断。
 
-### 3.5 保真度与运行验证
+### 3.4 保真度与运行验证
 
 lossless 不是布尔值，而是契约等级。底座把 Fidelity 变成可声明、可强制、可审计的属性：
 
