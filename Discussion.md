@@ -12,6 +12,7 @@
 - 已确认：使用 `docs/design/policy-decisions.md` 作为专门设计文档，后续在其中扩展完整 Policy 决策面、阶段归属、依赖和与 Mechanism 的边界。
 - 已确认：`mental-model.md` 不展开 Proposal、Authority、Equivalence、Disposition 等对象级细节；这些内容移入 `docs/design/policy-decisions.md` 的“语义对象”小节。心智模型中的原 §3.2 移除，后续章节顺延。
 - 已确认：心智模型中的状态与效果章节改为高层的“状态与效果”，不展开 `EffectClass × StateDomain` 交叉表和后端机制；详细内容移入 `docs/design/effect-management.md`。
+- 已确认：资源与准入不作为心智模型支撑模型中的独立章节。准入、调度和资源选择属于 Policy Decisions；资源隔离、配额、抢占、取消与清理属于 Mechanism；规范化资源记账属于 Ledger。`mental-model.md` 删除原 §3.3，Fidelity 章节顺延为 §3.3；资源机制和记账的既有语义仍由 `speculation-decisions.md` D-011/D-012 等设计决策承载。
 
 ### Agent 感知与执行观察边界
 
