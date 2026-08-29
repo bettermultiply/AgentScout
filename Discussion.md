@@ -13,6 +13,7 @@
 - 已确认：`mental-model.md` 不展开 Proposal、Authority、Equivalence、Disposition 等对象级细节；这些内容移入 `docs/design/policy-decisions.md` 的“语义对象”小节。心智模型中的原 §3.2 移除，后续章节顺延。
 - 已确认：心智模型中的状态与效果章节改为高层的“状态与效果”，不展开 `EffectClass × StateDomain` 交叉表和后端机制；详细内容移入 `docs/design/effect-management.md`。
 - 已确认：资源与准入不作为心智模型支撑模型中的独立章节。准入、调度和资源选择属于 Policy Decisions；资源隔离、配额、抢占、取消与清理属于 Mechanism；规范化资源记账属于 Ledger。`mental-model.md` 删除原 §3.3，Fidelity 章节顺延为 §3.3；资源机制和记账的既有语义仍由 `speculation-decisions.md` D-011/D-012 等设计决策承载。
+- 已确认：Fidelity 与运行验证也不作为心智模型支撑模型中的独立章节。Fidelity 是由 Policy Decisions、效果管理、隔离能力和 Speculation Contract 共同约束的系统级导出不变量；shadow/replay 是 Mechanism/Ledger 使用的验证与校准基础设施。支撑模型仅保留 Policy Decisions 与状态和效果，Fidelity 的契约语义仍在前文 §2.3、设计原则和 `speculation-decisions.md` D-004 中说明。
 
 ### Agent 感知与执行观察边界
 
@@ -472,7 +473,7 @@
 - 已确认：心智模型不是重要概念的平铺目录，而是帮助读者逐步建立系统理解的认知框架。
 - 已确认：心智模型在定位之后，先介绍“投机执行过程与生命周期”，再介绍 AScout 的工作模型，最后介绍支撑工作模型的细节。
 - 已确认：`mental-model.md` 中不再把投机边、轴体系、效果管理、资源调度、Fidelity 和 Speculation Contract 并列称为"核心模型"。
-- 已确认：工作模型包括投机执行过程与生命周期、Policy/Mechanism、Speculation Contract 和投机边；支撑模型包括 Policy Decisions、状态与副作用管理、资源与准入、Fidelity 与运行验证。Policy 语义对象与决策细节不在心智模型中展开，见专门设计文档。
+- 已确认：工作模型包括投机执行过程与生命周期、Policy/Mechanism、Speculation Contract 和投机边；支撑模型包括 Policy Decisions、状态与副作用管理。资源与准入、Fidelity 与运行验证不再作为独立支撑模型，分别回到 Policy/Mechanism/Ledger 及跨层契约和验证基础设施。Policy 语义对象与决策细节不在心智模型中展开，见专门设计文档。
 - 已确认：不再以 "Assumption DAG" 作为心智模型中的独立模型；多投机之间的组合语义（嵌套、未验证前提并集、级联失效、信息流约束）折叠进投机边与执行图描述，控制面组件 Assumption Manager（D-019）作为实现决策保留。
 - 已确认：投机执行不是固定的线性流程，而是一组可组合的独立阶段。Policy 可以根据任务、执行对象、可用信息和 Runtime 能力选择、替换和组合阶段；被启用的阶段仍须遵守必要的数据依赖以及 AScout 固定的正确性、隔离、资源和副作用约束。
 - 已确认：当前阶段集合为机会发现、准入判断、预测生成、过程执行、验证、处置与提交。其中机会发现包含按 Policy 观察 Agent 或其他执行对象并识别投机机会；投机工作（过程执行）可以是模型推理、命令执行、工具调用、远程请求或其他计算；验证包含获取权威依据并按 Policy 判定 Proposal 兼容性（无权威依据时改用 validator 等可接受性判断）；处置与提交按验证结果处理投机工作并把合格结果纳入后续执行。
