@@ -12,28 +12,23 @@ AScout 分支的对象是影响 Agent 计算行为的完整运行环境，而不
 
 Branch 的创建与丢弃应当廉价，不应要求预先复制整个计算世界，也不应通过回滚 loser 的全部操作来完成销毁。AScout 不提供多个候选世界的通用 merge；一次裁决选择一个完整 candidate subtree 成为 winner，其他 sibling subtrees 的内部状态被丢弃。
 
-AScout 对外暴露的顶层抽象称为 AScoutAgent。一个 AScoutAgent 在 控制面 侧拥有一棵 Speculative Tree；Runtime 维护单个 Agent/节点的执行状态，并可实现必要的节点间状态传播，但不拥有整体 Speculative Tree 视图。受管启动描述的是 Runtime 机制需要满足的创建过程，不是 AScoutAgent 之外的第二种对外对象。
+AScout 对外暴露的顶层抽象称为 AScoutAgent。一个 task 对外呈现为一个 AScoutAgent；控制面为它维护一棵 Speculative Tree，Runtime 维护各 Branch Node 对应 Instance 的执行状态，并可实现必要的节点间状态传播，但不拥有整体 Speculative Tree 视图。受管启动描述的是 Runtime 需要满足的创建过程，不是 AScoutAgent 之外的第二种对外对象。
 
 ## Branch 与 Speculative Tree
 
-Branch 是 Speculative Tree 中唯一的核心世界实体，也是可继续运行和继续分叉的计算延续。每个 Branch 直接拥有自己的 local state，并可包含零个或多个 child Branch。Speculative Tree 描述 Branch 之间的派生关系，并从一个 root Branch 开始；状态本身不是另一棵独立的树。
+Branch 是 Speculative Tree 中的子树，也是可继续运行和继续分叉的计算延续。每个 Branch 的根节点称为 Branch Node；Branch Node 直接拥有自己的 local state，并可包含零个或多个 child Branch Node。Speculative Tree 描述 Branch Node 之间的派生关系，并从 root Authority Instance 对应的 root Branch Node 开始；状态本身不是另一棵独立的树。
 
-一个 AScoutAgent 恰好拥有一棵 控制面 Speculative Tree。Branch identity、candidate handle、capability、commit/discard 和 resolution 都只在这棵 tree 内有意义；AScout 不定义或允许跨 tree 引用、授权和 lifecycle operation。同一部署可以承载多个 AScoutAgent，但它们在 AScout 语义上彼此无关，部署复用不会形成更高层的 Branch 关系。
+一个 AScoutAgent 恰好拥有一棵控制面 Speculative Tree。Branch Node identity、candidate handle、capability、commit/discard 和 resolution 都只在这棵 tree 内有意义；AScout 不定义或允许跨 tree 引用、授权和 lifecycle operation。同一部署可以承载多个 AScoutAgent，但它们在 AScout 语义上彼此无关，部署复用不会形成更高层的 Branch 关系。
 
-Branch 在 Speculative Tree 中存在，与该 Branch 的 Agent execution 当前是否 running、waiting 或 suspended 是两套正交状态。一个 live Branch 可以暂时没有正在占用 CPU 的 Agent execution，但仍保留 parent/child relationship、状态所有权和 capabilities，并可在事件到达后恢复。AScout 不为此引入 `lineage` 实体或专门术语。
+Branch Node 在 Speculative Tree 中存在，与对应 Instance 当前是否 running、waiting 或 suspended 是两套正交状态。一个 live Branch Node 可以暂时没有正在占用 CPU 的 Agent execution，但仍保留 parent/child relationship、状态所有权和 capabilities，并可在事件到达后恢复。AScout 不为此引入 `lineage` 实体或专门术语。
 
-文档使用两个明确的范围术语：
+`local state of A` 只表示 Branch Node A 直接拥有的状态层，不包含 child Branch Node。`Branch A` 则表示以 A 为根的整个子树，包括 A 及其全部 descendants。Child 从 branch barrier 上的 parent execution base 开始继续运行；Branch 后的 ancestor 可见性按状态类别分别定义，siblings 互不可见。
 
-- `local state of A`：Branch A 直接拥有的状态层，不包含 child Branch；它不是另一棵 subtree。
-- `subtree(A)`：Branch A 以及 A 的全部 descendants。
-
-没有范围修饰时，`Branch A` 指 Branch 实体本身；涉及递归清理、可达性或所有后代时必须明确写成 `subtree(A)`。Child 从 branch barrier 上的 parent execution base 开始继续运行；Branch 后的 ancestor 可见性按状态类别分别定义，siblings 互不可见。
-
-一个 Branch 的可分支执行实体是完整的 Agent 进程树，包括 Agent 主进程及其 sub-agent。Branch 操作必须覆盖这棵进程树继续执行所依赖的计算状态，而不是只处理调用 branch 接口的单个线程或进程。
+一个 Branch Node 对应 Instance 的可分支执行实体是完整的 Agent 进程树，包括 Agent 主进程及其 sub-agent。Branch 操作必须覆盖这棵进程树继续执行所依赖的计算状态，而不是只处理调用 branch 接口的单个线程或进程。
 
 ## Branch 绑定、隔离与通信
 
-每个 Agent 执行实体绑定到一个 Branch。同一 Branch 内的进程共享该 Branch 的可见执行环境，并能观察这个环境中由同 Branch 进程产生的修改。
+每个 Agent 执行实体由一个 Instance 承载，并绑定到对应的 Branch Node。同一 Branch Node 对应 Instance 内的进程共享该 Node 的可见执行环境，并能观察这个环境中由同一执行实体产生的修改。
 
 除文件系统、输入、outcome event 等各自规则明确纳入的 ancestor state 外，一个 Branch 不能直接读取另一个 Branch 的 local state、进程内存或内部 Agent 上下文。Descendant 对某类 ancestor state 的可见性不代表 parent 可以反向观察 descendant local state；siblings 也不能观察彼此的 local state。
 
@@ -99,7 +94,7 @@ Child 不通过 ancestor PID、identity 或 execution liveness 获取业务语�
 
 默认 context 查询应保持紧凑，只返回 direct-child 统计；Agent 可以按需查询 direct children 的 handle、state、Proposal 和显式 commit summary。详细 child 查询不改变 Branch 隔离边界，返回的信息必须来自显式受控通道。
 
-Candidate Branch 即使仍有活跃 descendants，也可以把自己的完整 subtree 向 parent 提交。接收方愿意接受时，`subtree(candidate)` 整体成为 winner 并保留内部结构；candidate 的 sibling subtrees 成为 losers 并失效。
+Candidate Branch 即使仍有活跃 descendants，也可以把完整 Branch 向 parent 提交。接收方愿意接受时，该 Branch 整体成为 winner 并保留内部结构；candidate 的 sibling Branches 成为 losers 并失效。
 
 Direct children 的 evaluator/resolver capability 默认由 parent Branch 中的 Agent 持有；parent 可以把该 capability 显式委托给控制面。Evaluator 是角色，不是另一种世界实体，AScout 不引入 Evaluator World。Runtime 只验证 resolver capability 并执行决定，不判断 candidate 质量。
 

@@ -5,9 +5,9 @@
 ## 系统级
 
 - **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，将投机执行所需的多种能力抽象为统一机制，使开发者能够组合与替换这些能力、构建不同的执行策略。（`../mental-model.md`；`../architecture.md`；`overview.md`）
-- **Speculative Tree**：AScout 的核心控制结构：从一个 root Branch 开始记录 Branch 之间的派生关系。（`overview.md` §Branch 与 Speculative Tree）
-- **task**：端用户提交的准入单元。一个 task 对应一棵 Speculative Tree（一个 AScoutAgent 控制域）；准入时绑定 policy profile 并建立 root Authority 实例。（`spec-exec-abstraction.md` §10.4 Entry API）
-- **AScoutAgent**：一棵 Speculative Tree 的控制域；Branch identity、capability、commit/discard 与 resolution 都只在这棵 tree 内有意义。task 是该控制域的用户视角名称。（`overview.md` §概述）
+- **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Node 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
+- **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
+- **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；拥有 Speculative Tree 控制状态和 Branch 关系。（`../mental-model.md` §4.2）
 - **Agent 接入侧**：四侧一级架构的入口侧，包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon 与 Interposer 等接入职责。（`../architecture.md` §1）
 - **控制面**：四侧一级架构的控制侧；包含 Entry API、Policy Engine、Effect Coordinator、Assumption Manager、Scheduler 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。（`../architecture.md` §2）
 - **Runtime Adapter**：四侧一级架构的适配侧；对控制面提供稳定 typed operation/event contract，并负责目标 Runtime 的能力映射、transport 与事件规范化。（`../architecture.md` §1）
@@ -15,8 +15,9 @@
 
 ## 实体
 
-- **Branch**：Speculative Tree 中的结构实体（节点）。指称扩展为以该节点为根的**整个子树**，不再区分 `subtree(A)`；提交、丢弃、接受都以整个子树为单位。每个 Branch 节点在运行时由一个 Instance 承载（1:1）。（`overview.md` §Branch 与 Speculative Tree；术语收敛）
-- **Instance**：运行时执行单元，携带 AssumptionSet、role、grain 与 lifecycle；与 Branch 1:1。投机实例与权威实例二进制同构（透明嵌套的前提）。（`spec-exec-abstraction.md` §10.1、§9.5）
+- **Branch**：Speculative Tree 中的一个子树，是树中的计算延续和投机世界的结构实体。（`../mental-model.md` §4.2）
+- **Branch Node**：Branch 对应的根节点，表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
+- **Instance**：Runtime 中承载一个 Branch Node 的实际执行单元，代表实际运行的单一 Agent；Branch Node 与 Instance 1:1。（`../mental-model.md` §4.2）
 - **Proposal** `î`：一次投机预测值：`{value, confidence, provenance, source}`。候选 Branch 基于它提前执行后续步骤。（`spec-exec-abstraction.md` §1）
 - **Assumption**：`(site_id, proposal_id)`，读作"proposal X 成立这一假设"；compatibility 条件可以是 exact payload、predicate 或 virtual-value mapping。（`spec-exec-abstraction.md` §3；`decisions.md` D-025）
 - **AssumptionSet**：Instance/SpecTask 携带的依赖闭包（`frozenset[Assumption]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`spec-exec-abstraction.md` §3）

@@ -32,7 +32,7 @@
 
 ## D-008：允许提交包含活跃 descendants 的 subtree
 
-**选择**：Candidate Branch 即使仍有活跃 descendants，也可以向 parent 提交完整的 `subtree(candidate)`。接收方 Agent 决定是否接受。
+**选择**：Candidate Branch 即使仍有活跃 descendants，也可以向 parent 提交完整 Branch。接收方 Agent 决定是否接受。
 
 **原因**：是否等待 descendants 完成属于 Agent 的运行策略，不应成为底层机制的强制限制。接受后 winner subtree 整体保留，不要求先执行 bottom-up 压平。
 
@@ -44,13 +44,13 @@
 
 **原因**：接受的是完整 candidate subtree，而不是把 candidate 压平回 parent identity。保留 winner identity 和 descendants 可以让 Accept 成为树指向变换，并避免强制 bottom-up。
 
-## D-015：Speculative Tree 只保留 Branch 作为核心实体
+## D-015：Branch 与 Branch Node 如何区分？
 
-**选择**：不把 Domain 与 Branch 建模为两个状态实体。每棵 Speculative Tree 从一个 root Branch 开始；Branch 直接拥有 local state，并包含零个或多个 child Branch。
+**选择**：Branch 表示 Speculative Tree 中的一个子树，是计算延续和投机世界的结构实体；Branch Node 是该子树的根节点。每棵 Speculative Tree 从 root Authority Instance 对应的 root Branch Node 开始；Branch Node 直接拥有 local state，并包含零个或多个 child Branch Node。Runtime 中一个 Instance 承载一个 Branch Node，两者 1:1。
 
-**术语**：`local state of A` 只表示 A 直接拥有的状态层；`subtree(A)` 表示 A 及其全部 descendants。Local state 不是独立 subtree。
+**术语**：`local state of A` 只表示 Branch Node A 直接拥有的状态层；`Branch A` 表示 A 以及全部 descendants 构成的子树。不再使用 `subtree(A)` 作为现行术语。
 
-**原因**：范围差异不构成第二种实体。把 Branch 排除 children 后的范围另称为 Domain，会造成所有权、commit 和 discard 语义混淆。
+**原因**：Branch 操作以整个子树为范围，而控制面和 Runtime 仍需要指称其根节点及其对应执行单元。显式区分 Branch 与 Branch Node 可以避免把子树范围和单节点状态混为一谈。
 
 ## D-016：Ancestor 输入直接 fan-out 到 descendants
 

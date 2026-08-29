@@ -14,6 +14,7 @@
 - 已确认：心智模型中的状态与效果章节改为高层的“状态与效果”，不展开 `EffectClass × StateDomain` 交叉表和后端机制；详细内容移入 `docs/design/effect-management.md`。
 - 已确认：资源与准入不作为心智模型支撑模型中的独立章节。准入、调度和资源选择属于 Policy Decisions；资源隔离、配额、抢占、取消与清理属于 Mechanism；规范化资源记账属于 Ledger。`mental-model.md` 删除原 §3.3，Fidelity 章节顺延为 §3.3；资源机制和记账的既有语义仍由 `speculation-decisions.md` D-011/D-012 等设计决策承载。
 - 已确认：Fidelity 与运行验证也不作为心智模型支撑模型中的独立章节。Fidelity 是由 Policy Decisions、效果管理、隔离能力和 Speculation Contract 共同约束的系统级导出不变量；shadow/replay 是 Mechanism/Ledger 使用的验证与校准基础设施。支撑模型仅保留 Policy Decisions 与状态和效果，Fidelity 的契约语义仍在前文 §2.3、设计原则和 `speculation-decisions.md` D-004 中说明。
+- 已确认：支撑模型按 `problems-and-goals.md` 的三个问题组织：Policy Decisions 对应策略孤岛，状态与效果对应隔离碎片化，Speculation Contract 对应上下层脱节。`mental-model.md` 的 Policy Decisions 内容保持不变；状态与效果和 Contract 按对应问题组织。Speculation Contract 同时属于工作模型中的抽象分层和支撑模型中的跨层对齐支撑，不新增独立的第四类模型。
 
 ### Agent 感知与执行观察边界
 
@@ -97,8 +98,8 @@
 - 已确认：**Engine Plane 不在范围内**（D-013/D-011/D-024/D-028 已同步修订）：KV cache 层 commit、partial-token accept、引擎压力调度、sequence residency 等全部排除；跨层可见性降级为 API 可观测信号（延迟/限流/配额）；接缝 1 去掉 prefix cache 共享。札记中的双层分析保留为论文背景与未来自托管候选。
 - 已确认：**Proposal** 表示投机预测值，**Assumption** 表示 Proposal 成立这一未验证前提；提交操作称为 commit / commit request。
 - 已确认：**Site 与 pending-result boundary 是两种东西，并存**：pending-result boundary 是“真实 operation 结果未到”的执行边界（时机语义）；Site 是该边界上被标注可投机、实际启动投机的依赖边/节点（结构语义）。
-- 已确认：**task 与 ASCoutAgent 是一对一** —— 一个 task（端用户提交的准入单元）对应一棵 Speculative Tree（一个 ASCoutAgent 控制域），准入时绑定 policy profile 并建立 root Authority 实例。task 是准入/用户视角的名字，ASCoutAgent 是树控制域视角的名字。
-- 已确认：**Branch ↔ Instance 1:1** —— Speculative Tree 的每个节点是一个 Branch（结构实体），每个 Branch 节点在运行时由一个 Instance 承载；“Branch 扩展成整个子树”指 Branch 指称包含其全部 descendants，提交/丢弃/接受以整个子树为单位，不再区分 `subtree(A)`。
+- 已确认：**task 与 AScoutAgent 是一对一** —— task 是 session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree；AScoutAgent 是该 task 对外呈现的单一 Agent 视图，也是控制面中的控制域。
+- 已确认：**Branch Node ↔ Instance 1:1** —— Branch 表示 Speculative Tree 中的一个子树，是计算延续和投机世界的结构实体；Branch Node 是该子树的根节点；Runtime 中一个 Instance 承载一个 Branch Node，代表实际运行的单一 Agent。不再使用 `subtree(A)` 作为现行术语。
 - 已确认：**Interposer ↔ Hook / effect runner 映射为同一概念** —— 数据面、请求路径上拦截四接缝；与 ASC-Daemon 分离（延迟敏感 vs 旁路）。
 - **术语收敛完成**：本小节全部条目均已收敛，术语映射表已落盘为 `docs/design/terminology.md`；两套决策记录的分离关系与权威声明见该文档。
 
@@ -422,9 +423,10 @@
 - 已确认：心智模型不是重要概念的平铺目录，而是帮助读者逐步建立系统理解的认知框架。
 - 已确认：心智模型在定位之后，先介绍“投机执行过程与生命周期”，再介绍 AScout 的工作模型，最后介绍支撑工作模型的细节。
 - 已确认：`mental-model.md` 中不再把投机边、轴体系、效果管理、资源调度、Fidelity 和 Speculation Contract 并列称为"核心模型"。
-- 已确认：工作模型包括投机执行过程与生命周期、Policy/Mechanism、Speculation Contract 和投机边；支撑模型包括 Policy Decisions、状态与副作用管理。资源与准入、Fidelity 与运行验证不再作为独立支撑模型，分别回到 Policy/Mechanism/Ledger 及跨层契约和验证基础设施。Policy 语义对象与决策细节不在心智模型中展开，见专门设计文档。
-- 已确认：`mental-model.md` 采用六层结构：1. 定位（是什么、解决什么问题、不是什么）；2. 工作模型（投机执行过程、投机边、组合与嵌套、抽象分层）；3. 固定语义与不变量；4. 支撑模型（Policy Decisions、状态与效果、契约与运行反馈）；5. 系统落地（四侧架构、AScoutAgent/Branch/Instance、Agent 接入与 Runtime 闭环）；6. 文档地图。
-- 已确认：`mental-model.md` §5.2 按现行术语解释 `task -> AScoutAgent -> Speculative Tree -> Branch / Instance`；AScoutAgent 是任务在控制面中的控制域，对外代表整个 AScout Agent，不是独立运行实体。§5.3 将闭环细化到 ASC-Daemon、Entry API、控制面内部组件、Runtime Adapter 和 Runtime；Interposer 定位尚待确认，只作为可选数据面接入说明，不列入固定控制路径。详细 ownership 和机制语义仍由 `architecture.md` 与 `design/overview.md` 承载。
+- 已确认：工作模型包括投机执行过程与生命周期、Policy/Mechanism、Speculation Contract 和投机边；支撑模型包括 Policy Decisions、状态与效果、Speculation Contract。三类支撑模型分别对应策略孤岛、隔离碎片化和上下层脱节；Fidelity 与 shadow/replay 不单独成模，分别作为契约导出属性和验证基础设施。Policy 语义对象与决策细节不在心智模型中展开，见专门设计文档。
+- 已确认：`mental-model.md` 采用五层结构：1. 定位；2. 工作模型（投机执行过程、投机边、组合与嵌套、抽象分层）；3. 支撑模型（Policy Decisions、状态与效果、Speculation Contract）；4. 系统结构（四侧架构、核心对象与所有权）；5. 文档地图。
+- 已确认：`mental-model.md` §3.3 先说明 Policy 与 Runtime Adapter 的跨层能力协商，再说明三类固定语义底线：控制语义、世界状态与效果语义、执行边界与资源所有权。§3.2 与 §3.3 分别直接回应隔离碎片化和上下层脱节。
+- 已确认：`mental-model.md` §4.1 解释四侧架构并保留最简控制闭环；§4.2 解释 `task -> AScoutAgent -> Speculative Tree -> Branch -> Branch Node -> Instance` 及其所有权，不再设置独立的 Agent 接入与 Runtime 闭环小节，详细内容由 `architecture.md` 承载。
 - 已确认：AScout 是整个底座的名字，不是控制面的名字。四侧统一为 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime`；Mechanism 只用于 Policy/Mechanism/Runtime 抽象分层。
 - 已确认：不再以 "Assumption DAG" 作为心智模型中的独立模型；多投机之间的组合语义（嵌套、未验证前提并集、级联失效、信息流约束）折叠进投机边与执行图描述，控制面组件 Assumption Manager（D-019）作为实现决策保留。
 - 已确认：投机执行不是固定的线性流程，而是一组可组合的独立阶段。Policy 可以根据任务、执行对象、可用信息和 Runtime 能力选择、替换和组合阶段；被启用的阶段仍须遵守必要的数据依赖以及 AScout 固定的正确性、隔离、资源和副作用约束。

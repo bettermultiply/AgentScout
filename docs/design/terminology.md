@@ -9,15 +9,16 @@
 | 术语 | 说明 |
 |---|---|
 | **AScout**（Agent Scout） | 面向 Agent 投机执行的通用底座，将投机执行所需的能力抽象为统一机制，使开发者能够组合与替换这些能力、构建不同的执行策略 |
-| **Speculative Tree** | AScout 的核心控制结构：从 root 开始记录 Branch 之间的派生关系 |
-| **task** | 端用户提交的准入单元。一个 task 对应一棵 Speculative Tree（一个 AScoutAgent 控制域），准入时绑定 policy profile 并建立 root Authority 实例 |
+| **Speculative Tree** | 投机执行不断发生和结束时形成的树形控制结构，从 root Authority Instance 对应的 Branch Node 开始记录各 Branch Node 的派生关系 |
+| **task** | session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree |
 
 ## 实体
 
 | 底座术语 | Speculative Tree 视角 | 状态 |
 |---|---|---|
-| **Branch** | （结构视角，指称扩展为整个子树，不再区分 `subtree(A)`） | 已确认 |
-| **Instance** | （运行时视角：单个执行单元，携带 AssumptionSet / role = Authority \| Speculative(d) / grain = own-env \| shared-env） | 已确认 |
+| **Branch** | Speculative Tree 中的一个子树，是计算延续和投机世界的结构实体 | 已确认 |
+| **Branch Node** | Branch 对应的根节点，表示该 Branch 在 Speculative Tree 中的结构位置 | 已确认 |
+| **Instance** | Runtime 中承载一个 Branch Node 的实际执行单元，代表实际运行的单一 Agent；Branch Node ↔ Instance 1:1 | 已确认 |
 | **Proposal** `î` | 投机预测值（`{value, confidence, provenance, source}`） | 已确认 |
 | **Assumption** / AssumptionSet | Proposal 成立这一未验证前提及其依赖闭包，随 subtree 保留为 unresolved obligation | 已确认 |
 | **Site** | pending-result boundary 上被标注可投机、实际启动投机的依赖边/节点（结构语义）；pending-result boundary 是"结果未到"的执行边界（时机语义），两者并存 | 已确认 |
