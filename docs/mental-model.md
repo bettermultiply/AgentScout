@@ -147,8 +147,6 @@ Policy Action -> 控制面编排 -> Runtime Adapter 映射
 
 ### 4.2 核心对象与所有权
 
-`task` 是 session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。
-
 ```text
 task
   -> AScoutAgent
@@ -158,7 +156,7 @@ task
                   -> Instance
 ```
 
-task 准入时绑定 policy profile，并建立初始 Agent，称为 root Authority Instance。在运行过程中，随着投机执行的不断发生和结束，Authority Instance 不断变化，由此形成树形结构。树中的每个子树都称为 `Branch`。`Branch` 是树中的计算延续，也是投机世界的结构实体；Branch 对应的根节点称为 `Branch Node`。`Instance` 是 Runtime 中承载 Node 的实际执行单元，代表实际运行的单一 Agent。
+`task` 是 session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。task 准入时绑定 policy profile，并建立初始 Agent，称为 root Authority Instance。在运行过程中，随着投机执行的不断发生和结束，Authority Instance 不断变化，由此形成树形结构。树中的每个子树都称为 `Branch`。`Branch` 是树中的计算延续，也是投机世界的结构实体；Branch 对应的根节点称为 `Branch Node`。`Instance` 是 Runtime 中承载 Node 的实际执行单元，代表实际运行的单一 Agent。
 
 对外，为只呈现一个单一 Agent，这个统一视图称为 `AScoutAgent`。它拥有 Speculative Tree 的控制状态和 Branch 之间的关系。由此，一个 task 对应一个 AScoutAgent，一个 AScoutAgent 拥有一棵 Speculative Tree；控制面拥有 Tree、Branch 关系和控制状态，Runtime 拥有 Instance 的执行、资源和隔离状态。
 
