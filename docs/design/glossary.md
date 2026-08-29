@@ -9,9 +9,9 @@
 - **task**：端用户提交的准入单元。一个 task 对应一棵 Speculative Tree（一个 AScoutAgent 控制域）；准入时绑定 policy profile 并建立 root Authority 实例。（`spec-exec-abstraction.md` §10.4 Entry API）
 - **AScoutAgent**：一棵 Speculative Tree 的控制域；Branch identity、capability、commit/discard 与 resolution 都只在这棵 tree 内有意义。task 是该控制域的用户视角名称。（`overview.md` §概述）
 - **Agent 接入侧**：四侧一级架构的入口侧，包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon 与 Interposer 等接入职责。（`../architecture.md` §1）
-- **控制面侧**：四侧一级架构的控制侧；Harness Core 及其内部组件拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。（`../architecture.md` §2）
-- **Runtime Adapter 侧**：四侧一级架构的适配侧；内部包含稳定 Harness Runtime Boundary 与面向具体 Runtime 的实际 Runtime Adapter。（`../architecture.md` §1）
-- **Runtime Mechanism**：四侧一级架构的机制侧；拥有节点执行状态、资源、隔离、capability/obligation validation、barrier、原子转换与 cleanup。（`../architecture.md` §2）
+- **控制面**：四侧一级架构的控制侧；包含 Entry API、Policy Engine、Effect Coordinator、Assumption Manager、Scheduler 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。（`../architecture.md` §2）
+- **Runtime Adapter**：四侧一级架构的适配侧；对控制面提供稳定 typed operation/event contract，并负责目标 Runtime 的能力映射、transport 与事件规范化。（`../architecture.md` §1）
+- **Runtime**：四侧一级架构的运行侧；拥有节点执行状态、资源、隔离、capability/obligation validation、barrier、原子转换与 cleanup。（`../architecture.md` §2）
 
 ## 实体
 
@@ -48,13 +48,11 @@
 - **Policy Engine**：六类 policy 插件的宿主（Proposer / Equivalence / Topology / CostGate / Salvage / Compensation），负责加载期约束校验和运行期分发。（`spec-exec-abstraction.md` §10.4）
 - **Assumption Manager**：全系统唯一"谁依赖谁"真相源；假设 DAG 与实例树是同一状态的两个索引（by_assumption / by_instance）。执行 resolve()，强制信息流约束（非空 AssumptionSet 的数据不得流向空容器）。（`spec-exec-abstraction.md` §10.4；`speculation-decisions.md` D-019）
 - **Scheduler**：负责准入、预算、优先级、抢占、过期丢弃和反向调度；是全系统唯一看到全局资源压力的控制面组件。（`spec-exec-abstraction.md` §10.4；`speculation-decisions.md` D-011/D-020/D-021）
-- **Effect Coordinator**：控制面内部的效果协调者；持有 EffectClass × StateDomain 规则、Site & Effect Catalog 和协调计划，经 Harness Runtime Boundary 请求 Runtime Mechanism 执行 effect transition。它不持有真实 staged effect、obligation 或 materialization 状态。（`spec-exec-abstraction.md` §10.4）
+- **Effect Coordinator**：控制面内部的效果协调者；持有 EffectClass × StateDomain 规则、Site & Effect Catalog 和协调计划，经 Runtime Adapter 请求 Runtime 执行 effect transition。它不持有真实 staged effect、obligation 或 materialization 状态。（`spec-exec-abstraction.md` §10.4）
 - **Ledger**：记录（append-only 事件流）/ 回放（确定性重跑）/ 校验（契约对撞：声明值 vs 推导上界 vs shadow 实测）；成本归属三分分类。异步旁路，不在关键路径上。（`spec-exec-abstraction.md` §10.4；`speculation-decisions.md` D-021）
-- **Harness Runtime Boundary**：Runtime Adapter 侧面向控制面的不变部分，定义稳定、typed、可版本化的 Runtime operation/event contract；控制面只依赖此边界。（`../architecture.md` §1）
-- **Runtime Adapter**：Runtime Adapter 侧面向某个具体 Runtime 的可变部分，把稳定 contract 映射为该 Runtime 的能力、原语、transport 与事件；它与 Harness Runtime Boundary 不是同一个组件。（`../architecture.md` §1）
 - **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地守护进程，承载 Agent-facing 控制入口、上下文绑定、身份/AssumptionSet 同步与生命周期消息。（`spec-exec-abstraction.md` §10.4；术语收敛）
 - **Interposer**：数据面，请求路径上拦截四接缝（LLM 调用、工具分发、轨迹写入、调度）；= Hook / effect runner。与 ASC-Daemon 分离（请求路径延迟敏感 vs 旁路）。（`spec-exec-abstraction.md` §10.4；术语收敛）
-- **Entry API**：控制面侧的稳定入口；接收 Agent 接入侧形成的请求并交给 Harness Core，不构成独立一级侧面，也不直接接触 Runtime Mechanism。（`decisions.md` D-038；`../architecture.md` §1）
+- **Entry API**：控制面的稳定入口；接收 Agent 接入侧形成的请求并交给控制面中的相应组件，不构成独立一级侧面，也不直接接触 Runtime。（`decisions.md` D-038；`../architecture.md` §1）
 
 ## 状态与生命周期
 
@@ -62,7 +60,7 @@
 - **grain**：`own-env | shared-env`；shared-env 仅对 PURE 效果开放，隔离粒度由 EffectClass 决定。（`spec-exec-abstraction.md` §10.1）
 - **lifecycle**：`Forked → Running → Resolving → {Reused, Promoted, Discarded, Preempted, Salvaged}`。（`spec-exec-abstraction.md` §10.1）
 - **obligation**：未验证前提随 subtree 保留的义务；在验证前不能 Accept。Assumption 未确认即 obligation。（`overview.md`；`decisions.md` D-025）
-- **capability**：resolver / validator 等授权能力；direct children 的 resolver capability 默认由 parent 持有，可显式委托给 Harness。（`overview.md`；`decisions.md` D-022）
+- **capability**：resolver / validator 等授权能力；direct children 的 resolver capability 默认由 parent 持有，可显式委托给控制面。（`overview.md`；`decisions.md` D-022）
 
 ## 机制与概念
 

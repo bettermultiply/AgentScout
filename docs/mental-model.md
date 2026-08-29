@@ -58,9 +58,11 @@ AScout 不是某个固定算法，也不承诺每个任务必然加速；是否�
 
 N 个预测就是 N 条并行的边。因此投机边描述“哪个结果尚未确定”以及“哪个后续工作可以提前执行”，可以统一表示模型推理、命令执行、工具调用、远程请求和其他计算——它们的差异只是边的两端的行为对应什么、谁提供权威依据、投机工作是什么，以及各自需要什么隔离和效果处理能力；投机过程本身不需要为每一种对象重新定义一套基本流程。
 
+### 2.3 组合与嵌套
+
 嵌套投机就是边的串联：下游投机建立在若干上游未验证的投机边之上，因此它是否成立取决于这些上游边。每条投机边隐含一个未验证前提——"预测值 `î` 成立"；一条路径携带的前提，是它沿途所有未验证边的前提之并集。权威结果确定时，验证决定这些前提的去留：匹配则那条边成为现实，依赖它的下游边随之少一个前提，前提清空的那条就地转正为权威路径；不匹配则建立在错误前提上的整条后续链整体失效，进入回收或丢弃，不做逐个修补。由此得到一条信息流约束：未验证路径产生的数据不能进入权威路径，只能经验证这一步流入，避免投机产物污染权威上下文。
 
-### 2.3 抽象分层
+### 2.4 抽象分层
 
 Policy、Mechanism 与 Runtime 构成三层抽象，逐层向上提供更抽象的接口：
 
@@ -74,15 +76,27 @@ Runtime（具体后端原语）
 
 **Policy：作者只需面对抽象。** Policy 作者面对的是一组抽象的决策点——在哪些环节投机（推理、工具执行等）、预测什么、如何判定命中、用什么公式判断是否值得投机、如何展开与处置投机工作。作者只需要给出这些决策的实现或选择，不需要知道系统是怎么落实的：命令如何被拦截、隔离环境如何创建、资源如何管理、失败分支如何清理，都由 Mechanism 负责。分层把"作者可以灵活定制"的部分与"必须可靠执行"的部分分开：作者在算法层面自由选择，正确性、隔离与资源约束由 Mechanism 兜底。
 
-**Mechanism：把抽象落实为执行。** Mechanism 是抽象的实现层，横跨多个部分：在 Agent 接入侧通过 Interposer 拦截命令与推理调用等环节，在控制面组织执行、验证与调度，在 Runtime Mechanism 落实隔离、资源与效果管理。它不一定是组合 Runtime 原语——拦截、效果管理、调度等能力本身就是 Mechanism 的一部分；后端缺失所需原语时，降级或拒绝，不让策略悄悄跑偏。
+**Mechanism：把抽象落实为执行。** Mechanism 是抽象的实现层，横跨多个部分：在 Agent 接入侧通过 Interposer 拦截命令与推理调用等环节，在控制面组织执行、验证与调度，在 Runtime 落实隔离、资源与效果管理。它不一定是组合 Runtime 原语——拦截、效果管理、调度等能力本身就是 Mechanism 的一部分；后端缺失所需原语时，降级或拒绝，不让策略悄悄跑偏。
 
 **Runtime：只提供简单原语。** Runtime 是具体执行后端，只负责上报并执行一组简单原语，不实现组合逻辑。原语本身是稳定的抽象、各后端保持一致兼容，换后端只换原语的实现——不换原语、不换组合。Adapter 侧的工作因此很简单：翻译调用 + 上报原语清单。
 
 **Speculation Contract：静态与动态保证抽象分层匹配、约束满足。** 作者写算法时声明需求（预测置信度、验证条件、失败代价、需要的隔离与效果纪律），具体 Runtime 通过 Adapter 上报自己的能力。Speculation Contract 在加载期静态校验需求与能力是否匹配，不匹配就拒绝或降级；在运行期由 shadow 实测声明的保真度是否真的达成。它保证抽象分层两侧始终对齐，并确保正确性、保真度等固定约束被满足——作者只需声明需求，不必知道后端实现。
 
-## 3. 支撑模型
+## 3. 固定语义与不变量
 
-### 3.1 Policy Decisions
+Policy 可以选择是否投机、预测什么以及如何处置候选，但不能改变以下 AScout 固定语义：
+
+1. **生命周期与 single-winner**：Branch 通过 `branch`、`commit`、`accept` 和 `discard` 演化；一次裁决至多接受一个 candidate subtree，不做多个候选世界的通用 merge。
+2. **隔离与信息流**：Branch 的 local state、进程内存和 Agent context 不因分支自动互相可见；跨 Branch 信息必须经过显式受控通道，未验证假设产生的数据不能流入权威上下文。
+3. **权威与 obligation**：Proposal 在验证前只是未验证前提；未解决的 obligation 随 subtree 保留，未满足验证条件时不能 `accept`。
+4. **效果与提交**：投机效果在满足对应的隔离、延迟释放或补偿条件前不能进入最终语义状态；不可安全处理的效果必须拒绝投机或降级。
+5. **机制状态与资源归属**：Runtime 强制 identity/capability、资源归属、barrier、原子状态转换、抢占/取消和 loser cleanup；控制面不能假定这些操作已经成功。
+
+这些不变量是 Policy 和具体 Runtime 都必须服从的共同语义；详细生命周期、状态可见性和效果规则见 [状态与生命周期语义](design/overview.md) 与 [设计决策](design/decisions.md)。
+
+## 4. 支撑模型
+
+### 4.1 Policy Decisions
 
 Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策。以下内容是当前投机执行中最重要的代表性阶段决策及导出属性，并非穷尽列表；更完整的 Policy 决策面见 [Policy Decisions 设计](design/policy-decisions.md)。
 
@@ -97,22 +111,71 @@ Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime �
 
 机会发现与 Site 注册是这些决策的前置接缝，不属于上述六项中的独立 Policy Decision。EffectClass、资源准入和 Speculation Contract 是决策可行性的约束与输入，不是固定数量的 Policy Decision。Policy 可以继续增加决策项，但不能违反 AScout 的固定语义和 Mechanism 约束。
 
-### 3.2 状态与效果
+### 4.2 状态与效果
 
-投机执行可能同时影响多个状态域并产生外部效果。AScout 根据效果的可投机纪律和状态域的隔离能力约束这些影响；在验证、提交和必要的状态转换完成前，投机结果不能进入最终语义状态。无法安全隔离、延迟释放或补偿的效果必须拒绝投机或降级处理。具体分类、交叉规则和后端机制见 [效果管理设计](design/effect-management.md)。
+投机执行可能同时影响多个状态域并产生外部效果。Mechanism 根据效果的可投机纪律和状态域的隔离能力约束这些影响；在验证、提交和必要的状态转换完成前，投机结果不能进入最终语义状态。无法安全隔离、延迟释放或补偿的效果必须拒绝投机或降级处理。具体分类、交叉规则和后端机制见 [效果管理设计](design/effect-management.md)。
 
-## 4. 这些模型如何落到系统上
+控制面中的 Effect Coordinator 负责效果分类、计划与协调；Runtime 负责 staged effect、obligation、materialization、隔离和清理等机制状态。前者不直接修改后者，Policy 也不能绕过这条边界。
 
-本文是底座的抽象心智。落到具体系统时，它承载为：
+### 4.3 契约与运行反馈
 
-- 一棵 **Speculative Tree**（一个 AScoutAgent 控制域），**Branch** 是树上的计算延续，**Instance** 是运行时执行单元（Branch ↔ Instance 1:1）；
-- **branch / commit / accept / discard** 是生命周期操作，**Branch barrier / Resolution barrier** 是原子边界；
-- **pending-result boundary** 是"结果未到"的时机，**Site** 是它上面被标注可投机的依赖边；
-- delayed-choice coding 是第一个端到端验证 workload。
+Speculation Contract 连接 Policy 与 Runtime：Policy 声明预测、验证和失败代价，Runtime 通过 Adapter 声明隔离能力、代价和可用纪律。加载期校验两侧是否匹配；运行期通过权威结果、validator 和必要的 shadow/replay 反馈校准实际行为。Fidelity 是由这些决策和能力共同导出的系统级属性，不是另一个独立模型；shadow/replay 是验证与校准基础设施，也不改变生命周期语义。
 
-这些是同一系统的机制表达，不是另一套系统；术语对应见 [术语映射表](design/terminology.md)。
+## 5. 系统落地
 
-## 5. 文档地图
+### 5.1 四侧架构
+
+AScout 按以下四侧组织，控制请求向下流动，结果与事件向上返回：
+
+```text
+Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime
+```
+
+四侧是逻辑责任边界，不等同于四个进程或 crate。各侧的所有权和边界见 [架构](architecture.md)。
+
+### 5.2 Task、AScoutAgent、Speculative Tree、Branch 与 Instance
+
+这些对象从系统级、结构和运行时三个视角描述同一次执行：
+
+```text
+task
+  -> AScoutAgent
+      -> Speculative Tree
+          -> Branch（结构视角）
+          -> Instance（运行时视角）
+```
+
+- **task**：端用户提交的准入单元；准入时绑定 policy profile，并建立 root Authority Instance。
+- **AScoutAgent**：该任务在控制面中的控制域，对外代表整个 AScout Agent。
+- **Speculative Tree**：AScout 的核心控制结构，从 root 开始记录 Branch 之间的派生关系。
+- **Branch**：结构视角下的实体，指称该 Branch 及其 descendants，不再另用 `subtree(A)` 表示另一种实体。
+- **Instance**：运行时视角下的执行单元，由 Runtime 管理，携带 AssumptionSet、Authority 或 Speculative role，以及执行环境粒度。
+
+一个 task 对应一棵 Speculative Tree，也就是一个 AScoutAgent 控制域。AScoutAgent 在这里表示控制域，不是独立的运行实体；Branch 和 Instance 分别是同一投机工作的结构视角与运行时视角。控制面拥有 Speculative Tree 控制状态，Runtime 拥有 Instance 的执行、资源与机制状态。
+
+### 5.3 Agent 接入与 Runtime 闭环
+
+一次控制请求沿四侧及其内部组件向下传递，结果与事件沿相反方向返回：
+
+```text
+Agent / CLI / library
+  -> ASC-Daemon
+  -> Entry API
+  -> Policy Engine / Assumption Manager / Scheduler / Effect Coordinator
+  -> Runtime Adapter
+  -> Runtime
+  -> typed event/result
+  -> 控制面更新 AScoutAgent / Speculative Tree 控制状态
+  -> Agent / CLI / library
+```
+
+以在 Site 启动 SpecTask 为例，Agent、CLI 或 library 向当前 Branch 隔离环境内的 ASC-Daemon 发出意图。ASC-Daemon 绑定当前 AScoutAgent/Branch context，并把 resolved typed request 交给控制面的 Entry API。控制面依据 Policy、AScoutAgent 和当前 Speculative Tree，由 Policy Engine、Assumption Manager、Scheduler 与 Effect Coordinator 协同校验并编排 `branch` 操作。
+
+控制面通过 Runtime Adapter 的稳定 typed contract 发出 operation；Runtime Adapter 将其映射为目标 Runtime 的能力、原语和 transport，再交给 Runtime。Runtime 完成 identity/capability/obligation validation、barrier、资源归属和原子转换，并将结果或事件沿原路径返回。控制面只根据已确认的 typed event/result 更新 AScoutAgent 和 Speculative Tree 控制状态，Ledger 记录相应事件，最后把结果返回 Agent 接入侧。
+
+这条闭环保证 Agent 接入侧不绕过控制面，Entry API 不直接操作 Runtime，控制面不直接修改 Runtime 状态，Runtime Adapter 不承担 Policy 或 Speculative Tree 决策，控制面也不能在 Runtime 确认前假定操作成功。Interposer 可以作为 Agent 接入侧的请求路径数据面接入，但其定位尚待确认，因此不列入固定的控制请求路径。
+
+## 6. 文档地图
 
 - 问题与目标、设计原则：`problems-and-goals.md`、`design-principles.md`
 - 工作模型与支撑模型的逐条决策：`design/speculation-decisions.md`

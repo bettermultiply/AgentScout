@@ -45,27 +45,23 @@
 | 术语 | 定义 | 状态 |
 |---|---|---|
 | **Agent 接入侧** | Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon 与 Interposer 等接入职责；把 intent 送入控制面 | 已确认 |
-| **控制面侧** | Harness Core 及其内部组件；拥有 AScoutAgent、Speculative Tree 控制状态、policy、校验、编排与事件解释 | 已确认 |
-| **Runtime Adapter 侧** | 位于控制面与 Runtime Mechanism 之间，内部同时包含稳定 Harness Runtime Boundary 与面向具体 Runtime 的实际 Adapter | 已确认 |
-| **Runtime Mechanism** | 拥有节点执行状态、资源、隔离、capability/obligation validation、barrier、原子转换与 cleanup | 已确认 |
-| **Harness Runtime Boundary** | Runtime Adapter 侧面向控制面的不变部分；定义稳定、typed、可版本化的 operation/event contract | 已确认 |
-| **Runtime Adapter** | Runtime Adapter 侧面向某个具体 Runtime 的可变部分；把稳定 contract 映射为该 Runtime 的能力、原语、transport 与事件 | 已确认 |
-
-Harness Runtime Boundary 与 Runtime Adapter 同属 Runtime Adapter 侧，但不是同义词。
+| **控制面** | 包含 Entry API、Policy Engine、Effect Coordinator、Assumption Manager、Scheduler 与 Ledger；拥有 AScoutAgent、Speculative Tree 控制状态、policy、校验、编排与事件解释 | 已确认 |
+| **Runtime Adapter** | 位于控制面与 Runtime 之间；定义稳定 typed operation/event contract，并负责目标 Runtime 的能力映射、transport 与事件规范化 | 已确认 |
+| **Runtime** | 拥有节点执行状态、资源、隔离、capability/obligation validation、barrier、原子转换与 cleanup | 已确认 |
 
 ## 内部组件与运行对象
 
 | 术语 | 所属 | 状态 |
 |---|---|---|
 | **Policy Engine** | 控制面内部（六类插件宿主、编译校验与运行期分发） | 已确认 |
+| **Entry API** | 控制面入口；接收 Agent 接入侧形成的请求，不持有长期控制状态 | 已确认 |
 | **Assumption Manager** | 控制面内部（resolve、Assumption DAG 与信息流约束） | 已确认 |
 | **Scheduler** | 控制面内部（准入、预算、优先级、抢占与过期丢弃） | 已确认 |
 | **Effect Coordinator** | 控制面内部（效果分类、计划与 transition 协调；不持有 Runtime staged effect 状态） | 已确认 |
 | **Ledger** | 控制面内部（记录、回放、fidelity 审计与成本归属） | 已确认 |
 | **ASC-Daemon** | Agent 接入侧；驻 Branch 隔离环境的本地守护进程 | 已确认 |
 | **Interposer** | Agent 接入侧；请求路径的数据面接入 | 观察待确认 |
-| **Entry API** | 控制面入口，不构成独立一级侧面 | 已确认 |
-| **Instance** | Runtime Mechanism 管理的运行对象，不构成独立一级侧面 | 已确认 |
+| **Instance** | Runtime 管理的运行对象，不构成独立一级侧面 | 已确认 |
 
 ## 底座独有概念（Branch 视角无对应，直接吸收）
 

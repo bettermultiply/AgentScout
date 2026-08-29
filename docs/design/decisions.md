@@ -74,7 +74,7 @@
 
 ## D-019：Runtime 节点状态与外部 Branch 执行
 
-**选择**：控制面是 AScoutAgent、Speculative Tree 视图和 Branch 关系的权威来源；Runtime Mechanism 是节点执行状态和执行实体归属的机制来源。Agent 或 CLI 只发出 branch 请求；控制面经 Harness Runtime Boundary 和具体 Runtime Adapter，要求 Runtime Mechanism 在受控 barrier 上分支请求者所属的完整 Agent 进程树，并分别向产生的世界交付结果。
+**选择**：控制面是 AScoutAgent、Speculative Tree 视图和 Branch 关系的权威来源；Runtime 是节点执行状态和执行实体归属的权威来源。Agent 或 CLI 只发出 branch 请求；控制面经 Runtime Adapter 要求 Runtime 在受控 barrier 上分支请求者所属的完整 Agent 进程树，并分别向产生的世界交付结果。
 
 **原因**：Agent 调用的 CLI 通常只是短命子进程。让它在自身内部执行 fork 只会复制调用进程，不能满足 D-004 的完整 Agent 进程树语义。
 
@@ -104,7 +104,7 @@
 
 **选择**：Parent 可以在 live direct child 尚未 commit 时主动 discard 整个 child subtree。Accept 只允许作用于已经显式 commit 的 candidate；discard 不要求 candidate ready，也不自动把 partial state 或结果反馈给 parent。Runtime 必须线性化并发 commit 与 discard。
 
-**Disposition**：Not accepted 不等于 infeasible。受控 metadata 区分 invalidated、rejected、cancelled、failed 和 superseded 等原因。Commit summary/evidence 属于显式受控通信，Harness 可以在 Proposal 验证前封存；已经披露给 parent 的知识不能由 discard 回滚。
+**Disposition**：Not accepted 不等于 infeasible。受控 metadata 区分 invalidated、rejected、cancelled、failed 和 superseded 等原因。Commit summary/evidence 属于显式受控通信，控制面 可以在 Proposal 验证前封存；已经披露给 parent 的知识不能由 discard 回滚。
 
 **原因**：跨步骤投机中，parent 常在 child 完成前获得真实 ancestor 结果，并应立即取消不匹配或不再需要的 candidate。结果披露必须维持 D-017 的隔离边界。
 
@@ -134,21 +134,21 @@
 
 **原因**：Command 保持通用接入；Hook 能以较低侵入性提供多数语义时机；无条件同时维护 Hook 和 embedded adapter 会重复产品适配逻辑并扩大接口面。
 
-## D-027：控制面与 Runtime Mechanism 解耦
+## D-027：控制面、Runtime Adapter 与 Runtime 解耦
 
-**状态所有权**：控制面拥有 Agent/product integration 的控制语义、speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图。Runtime Mechanism 独占节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理。Runtime 可以实现节点间状态传播，但不拥有整体 Speculative Tree 视图。
+**状态所有权**：控制面拥有 Agent/product integration 的控制语义、speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图。Runtime 独占节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理。Runtime 可以实现节点间状态传播，但不拥有整体 Speculative Tree 视图。
 
-**接口**：两者经 Runtime Adapter 侧交换 typed、可版本化的粗粒度 command/event。控制面只依赖稳定的 Harness Runtime Boundary，不直接依赖某个 Runtime；具体 Runtime Adapter 再把稳定 contract 映射到目标 Runtime Mechanism。控制面不得直接修改 Runtime mutable state；Runtime Mechanism 不解释 Agent prompt、模型格式、candidate 质量或整体 Speculative Tree 视图。复杂 Proposal 验证可以由持有 validator capability 的控制面计算；obligation 与 Accept 相关的机制状态转换必须经 Runtime Adapter 侧交给 Runtime Mechanism 执行。
+**接口**：控制面与 Runtime 经 Runtime Adapter 交换 typed、可版本化的粗粒度 command/event。Runtime Adapter 定义稳定 contract，并把它映射到目标 Runtime 的能力、原语、transport 与事件。控制面不得直接修改 Runtime mutable state；Runtime 不解释 Agent prompt、模型格式、candidate 质量或整体 Speculative Tree 视图。复杂 Proposal 验证可以由持有 validator capability 的控制面计算；obligation 与 Accept 相关的状态转换必须经 Runtime Adapter 交给 Runtime 执行。
 
-**部署**：具体 Runtime 可以作为独立 Runtime Service 运行。控制面根据自身 policy/config 决定目标 Runtime；Runtime Adapter 侧负责把该选择解析为具体 Adapter，并维护连接与协议适配。CLI、Agent integration 和 launcher 不负责选择、创建或连接 Runtime。各侧不能共享跨边界可变内部状态。AScout 不选择统一 transport；具体通信方式由 Runtime Adapter 按本地 daemon、独立进程、故障隔离或远程部署需求决定。
+**部署**：具体 Runtime 可以作为独立 Runtime Service 运行。控制面根据自身 policy/config 决定目标 Runtime；Runtime Adapter 负责解析目标、连接和协议适配。CLI、Agent integration 和 launcher 不负责选择、创建或连接 Runtime。各侧不能共享跨边界可变内部状态。AScout 不选择统一 transport；具体通信方式由 Runtime Adapter 按本地 daemon、独立进程、故障隔离或远程部署需求决定。
 
-**原因**：控制面 policy 会随 Agent 和 workload 快速变化，Runtime Mechanism 则承担正确性与资源强制边界。独立的 Adapter 侧使稳定语义 contract 与具体 Runtime 变化分离；粗粒度原子接口避免半完成的 barrier、Branch、Accept 或 cleanup，连接协议的变化不能泄漏为控制面 policy 或改变 lifecycle 语义。
+**原因**：控制面 policy 会随 Agent 和 workload 快速变化，Runtime 则承担正确性与资源强制边界。独立的 Adapter 侧使稳定语义 contract 与具体 Runtime 变化分离；粗粒度原子接口避免半完成的 barrier、Branch、Accept 或 cleanup，连接协议的变化不能泄漏为控制面 policy 或改变 lifecycle 语义。
 
 ## D-028：Speculative Tree 关系与 Agent execution activity 正交
 
 **选择**：Branch 在 Speculative Tree 中存在，与其 Agent execution 当前 running、waiting 或 suspended 是正交状态。Live Branch 可以暂不占用 CPU，同时保留 parent/child relationship、状态所有权和 capabilities，并在 outcome、commit 或 control event 到达后恢复。不引入 `lineage` 实体或专门术语。
 
-**可见性**：Child 不感知 ancestor PID、identity 或 execution liveness，也不依赖 parent Agent 持续运行；outcome 与 lifecycle event 由 runtime 按 OutcomeSlot 和 capability 路由。具体 suspend/resume 调度属于 Agent/Harness policy。
+**可见性**：Child 不感知 ancestor PID、identity 或 execution liveness，也不依赖 parent Agent 持续运行；outcome 与 lifecycle event 由 runtime 按 OutcomeSlot 和 capability 路由。具体 suspend/resume 调度属于 Agent/控制面 Policy。
 
 **失败边界**：Parent execution 丢失时 child 不能自行成为 winner。只有已经显式委托的 resolver 可以继续裁决；没有可恢复 parent 或 authorized resolver 时 runtime fail closed，并阻止该 speculation group 继续产生外部效果。恢复宽限期和最终清理策略另行定义。
 
@@ -192,39 +192,39 @@
 
 **核心保证**：AScout 以高效的 sibling non-interference 为核心，不要求控制面自身提供抵御恶意 Branch payload 的安全沙箱。Child Agent 是可信参与者，并知道自己的 Branch role/context；Agent-facing identity awareness 与 runtime 内部裸 identity、跨 Branch authority 是不同概念。
 
-**强制边界**：Agent integration 属于 Agent 接入侧；policy 和 orchestration 属于控制面侧；Runtime Mechanism 必须强制验证 Branch identity/capability，并维持 sibling isolation、进程与资源归属、loser cleanup，以及 observation surface 内的 external effect mediation。这些属于 AScout 正确性，不依赖 Agent 自愿合作执行 lifecycle 或资源清理。
+**强制边界**：Agent integration 属于 Agent 接入侧；policy 和 orchestration 属于控制面；Runtime 必须强制验证 Branch identity/capability，并维持 sibling isolation、进程与资源归属、loser cleanup，以及 observation surface 内的 external effect mediation。这些属于 AScout 正确性，不依赖 Agent 自愿合作执行 lifecycle 或资源清理。
 
-**Runtime contract**：不同 Runtime 可以在相同 AScout 语义上提供不同的附加安全保证。默认 Runtime 可以面向可信 workload、优先效率而不提供有效的 adversarial security guarantee；需要抵御不可信 workload 时，控制面根据自身 policy/config 选择 hardened Runtime，Runtime Adapter 侧负责连接和协议适配。AScout 只定义统一 Harness Runtime Boundary，不设计 security guarantee negotiation，也不要求控制面认证 Runtime 的安全等级。安全能力不得改变 Branch lifecycle、commit/discard、single-winner 或状态可见性语义。
+**Runtime contract**：不同 Runtime 可以在相同 AScout 语义上提供不同的附加安全保证。默认 Runtime 可以面向可信 workload、优先效率而不提供有效的 adversarial security guarantee；需要抵御不可信 workload 时，控制面根据自身 policy/config 选择 hardened Runtime，Runtime Adapter 负责连接和协议适配。AScout 不设计 security guarantee negotiation，也不要求控制面认证 Runtime 的安全等级。安全能力不得改变 Branch lifecycle、commit/discard、single-winner 或状态可见性语义。
 
-**原因**：工具错误在 parent 与 child execution 中同样可能发生，不足以要求 Harness 默认承担通用恶意代码防护。把 adversarial containment 放在可替换 Runtime 中，既保留隔离正确性，也避免所有使用场景为非必需的安全边界支付固定成本。
+**原因**：工具错误在 parent 与 child execution 中同样可能发生，不足以要求 控制面 默认承担通用恶意代码防护。把 adversarial containment 放在可替换 Runtime 中，既保留隔离正确性，也避免所有使用场景为非必需的安全边界支付固定成本。
 
 ## D-033：禁止跨 Speculative Tree 操作
 
-**选择**：一个 AScoutAgent 恰好拥有一棵 Harness-side Speculative Tree。Branch identity、candidate handle、capability 和所有 lifecycle operation 都限定在该 tree 内；AScout 不定义或允许跨 tree 查询、授权、commit/discard、Accept 或其他 Branch control。
+**选择**：一个 AScoutAgent 恰好拥有一棵 控制面 Speculative Tree。Branch identity、candidate handle、capability 和所有 lifecycle operation 都限定在该 tree 内；AScout 不定义或允许跨 tree 查询、授权、commit/discard、Accept 或其他 Branch control。
 
 **部署边界**：同一主机、daemon 或 Runtime process 可以承载多个 AScoutAgent 的节点状态，但每个 AScoutAgent 仍拥有独立的 root、Speculative Tree 视图与控制域。共用底层进程或服务不产生跨 tree AScout 语义，也不能让一个 AScoutAgent 获得另一个 AScoutAgent 的 Branch handle。
 
 **原因**：跨 tree 控制不属于 speculative subtree selection，会引入额外的 identity、授权、故障恢复与状态组合语义。需要在多个 execution 之间协调的上层系统应使用 AScout 之外的接口，而不是扩展 Branch lifecycle。
 
-## D-034：OS privilege 由 Runtime Mechanism 持有
+## D-034：OS privilege 由 Runtime 持有
 
-**选择**：建立 AScoutAgent 节点执行、进程与资源所有权、隔离边界或外部效果执行边界所需的 OS privilege 只由 Runtime Mechanism 持有。Agent 接入侧、控制面侧与 Runtime Adapter 侧不持有这些特权，也不能代替 Runtime Mechanism 执行特权状态转换。
+**选择**：建立 AScoutAgent 节点执行、进程与资源所有权、隔离边界或外部效果执行边界所需的 OS privilege 只由 Runtime 持有。Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权，也不能代替 Runtime 执行特权状态转换。
 
-**内部拆分**：Runtime Mechanism 可以使用独立 privileged helper、daemon、sandbox monitor、hypervisor 或等价组件收敛特权。Runtime Adapter 可以连接这些组件，但不因负责协议适配而获得 OS privilege 或 Runtime mutable state 所有权。此类机制组件只执行 Runtime 定义的操作，不获得控制面的 speculation/evaluator policy 所有权。
+**内部拆分**：Runtime 可以使用独立 privileged helper、daemon、sandbox monitor、hypervisor 或等价组件收敛特权。Runtime Adapter 可以连接这些组件，但不因负责协议适配而获得 OS privilege 或 Runtime mutable state 所有权。此类机制组件只执行 Runtime 定义的操作，不获得控制面的 speculation/evaluator policy 所有权。
 
-**原因**：特权用于强制 Runtime 独占的 execution、resource、barrier、cleanup 和 effect ownership。把特权交给 Harness 或 Agent 会混合 policy 与 mechanism，并允许调用方绕过 Runtime 的原子状态转换。
+**原因**：特权用于强制 Runtime 独占的 execution、resource、barrier、cleanup 和 effect ownership。把特权交给控制面或 Agent 会混合 policy 与 mechanism，并允许调用方绕过 Runtime 的原子状态转换。
 
 ## D-035：Control transport 由 Runtime Adapter 决定
 
-**选择**：Harness Runtime Boundary 只规定控制面与 Runtime Adapter 侧之间 typed、粗粒度、可版本化的 operation/event contract，不规定实际 Adapter 到 Runtime Mechanism 的统一 transport、wire format 或 IPC 机制。进程内调用、Unix socket、daemon IPC、VM channel、ioctl、syscall 或 remote RPC 均由面向具体 Runtime 的 Adapter 决定。
+**选择**：Runtime Adapter 对控制面提供 typed、粗粒度、可版本化的 operation/event contract，并自行决定与 Runtime 之间的 transport、wire format 或 IPC 机制。进程内调用、Unix socket、daemon IPC、VM channel、ioctl、syscall 或 remote RPC 均可由对应 Adapter 实现选择。
 
-**约束**：Transport 不得改变 operation 的原子性、identity/capability validation、role-specific response、failure semantics 或 Runtime Mechanism 状态所有权。控制面和 Agent-facing API 不依赖 Adapter 私有的 frame、socket path、operation number 或 backend handle。
+**约束**：Transport 不得改变 operation 的原子性、identity/capability validation、role-specific response、failure semantics 或 Runtime 状态所有权。控制面和 Agent-facing API 不依赖 Adapter 私有的 frame、socket path、operation number 或 backend handle。
 
 **原因**：高效默认 Runtime、独立 sandbox daemon、VM Runtime 与 remote Runtime 的通信需求不同。统一 transport 不增加 Branch 语义，却会限制 Runtime 的部署和优化空间。
 
 ## D-036：Security audit 不是 AScout core requirement
 
-**正确性状态**：Runtime Mechanism 必须维护节点 lifecycle、capability、obligation 和受控状态转换所需的权威机制状态，并通过 Runtime Adapter 侧交付控制面必须观察的 typed events。整体 Speculative Tree 视图属于控制面侧 AScoutAgent；具体 Runtime 可以根据其故障恢复 contract 决定节点状态和机制状态的内存或持久化形式。
+**正确性状态**：Runtime 必须维护节点 lifecycle、capability、obligation 和受控状态转换所需的权威机制状态，并通过 Runtime Adapter交付控制面必须观察的 typed events。整体 Speculative Tree 视图属于控制面 AScoutAgent；具体 Runtime 可以根据其故障恢复 contract 决定节点状态和机制状态的内存或持久化形式。
 
 **审计边界**：AScout core 不要求持久、tamper-evident、面向合规或安全取证的 audit log。具体 Runtime 可以按自身安全保证与部署需求提供附加 audit，Runtime Adapter 只负责映射相关能力和事件；控制面不依赖该 audit 才能维持 Branch 正确性，audit 也不自动成为 Branch 世界状态。
 
@@ -234,7 +234,7 @@
 
 **Routine surface placeholders**：Agent-facing surface 暂时只保留查询自身 context、查询 direct children、`branch`、commit、accept、discard 和等待 lifecycle/outcome event 这些 operation slots。`branch` 表示从当前 Branch 创建一个或多个 direct child；投机场景中这些 child 才按角色称为 candidate。当前不决定参数 schema、返回值、阻塞方式、event model 或具体命令拼写；“空操作”表示 control-surface contract 尚未展开，不表示已经确定的 lifecycle operation 在运行时不产生效果。
 
-**Outcome publication**：`PublishOutcome` 保留为 Harness Runtime Boundary 上的 lifecycle operation，但不作为独立 Agent-facing command。Operation wrapper、Hook、effect broker 或 Operation Integration 必须在真实 operation 完成后自动把 outcome 发布到对应 OutcomeSlot。
+**Outcome publication**：`PublishOutcome` 保留为经 Runtime Adapter 传递的 lifecycle operation，但不作为独立 Agent-facing command。Operation wrapper、Hook、effect broker 或 Operation Integration 必须在真实 operation 完成后自动把 outcome 发布到对应 OutcomeSlot。
 
 **Resolver delegation**：Direct-child resolver capability 默认由 Parent Agent 持有。需要控制面代为裁决时，delegation 作为 AScoutAgent 创建或 Branch 创建配置表达，不提供日常 `delegate-resolver` 命令。
 
@@ -244,31 +244,31 @@
 
 ## D-038：ASC-Daemon 作为 Agent-facing context boundary
 
-**选择**：CLI/library 不直接向 Harness Entry API 发送请求，而是先调用当前 Branch 隔离环境内的 ASC-Daemon。ASC-Daemon 通过自身绑定的 AScoutAgent/Branch context 隐藏当前身份，并将 resolved typed request 转交给 Harness Entry API。
+**选择**：CLI/library 不直接向 Entry API 发送请求，而是先调用当前 Branch 隔离环境内的 ASC-Daemon。ASC-Daemon 通过自身绑定的 AScoutAgent/Branch context 隐藏当前身份，并将 resolved typed request 转交给 Entry API。
 
-**Entry API 边界**：Entry API 不从 caller context 重新解析 AScoutAgent、Branch 或 capability，也不直接接触 Runtime。它只接收 ASC-Daemon 已解析的请求并交给 Harness Core；Harness Core 拥有 AScoutAgent/Branch metadata，并负责后续的 lifecycle orchestration 与 Runtime 交互。
+**Entry API 边界**：Entry API 不从 caller context 重新解析 AScoutAgent、Branch 或 capability，也不直接接触 Runtime。它接收 ASC-Daemon 已解析的请求并交给控制面中的相应组件；控制面拥有 AScoutAgent/Branch metadata，并负责后续 lifecycle orchestration 与 Runtime 交互。
 
 **运输约束**：ASC-Daemon 的具体 transport 不属于 AScout 语义。第一版实现可以使用 Branch 隔离环境内约定端口的 HTTP Server；HTTP wire format、端口数值和 server/client 部署细节属于实现决策，不能改变 Agent-facing operation semantics。
 
-**范围**：当前 AScoutAgent 只表示 Harness-side Speculative Tree metadata；Runtime connection 与受管启动 handshake 留待后续机制议题。
+**范围**：当前 AScoutAgent 只表示控制面 Speculative Tree metadata；Runtime connection 与受管启动 handshake 留待后续议题。
 
 **原因**：把上下文隐藏和本地调用入口收敛到 ASC-Daemon，可以让 CLI/library 使用稳定的无身份请求，同时保持 Entry API 的统一、无状态和 Runtime 无关。
 
 ## D-039：四侧一级架构
 
-**选择**：AScout 的一级架构按 `Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism` 组织。AScout control 请求通常沿该方向下行，结果与事件沿相反方向返回。四侧是逻辑 ownership 与 API 边界，不直接等同于 crate、进程、服务或部署单元。
+**选择**：AScout 的一级架构按 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 组织。AScout control 请求通常沿该方向下行，结果与事件沿相反方向返回。四侧是逻辑 ownership 与 API 边界，不直接等同于 crate、进程、服务或部署单元。
 
 **Agent 接入侧**：包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon、Interposer 与 Operation Integration 等接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
 
-**控制面侧**：包含 Harness Core 及其内部组件，拥有 AScoutAgent、Harness-side Speculative Tree、控制状态、policy、请求校验、操作编排和 Runtime event 解释。Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 均属于控制面内部，不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或 materialization 状态。
+**控制面**：包含 Entry API、Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或 materialization 状态。
 
-**Runtime Adapter 侧**：内部包含两个不同部分。Harness Runtime Boundary 是面向控制面的不变部分，定义稳定、typed、可版本化的 operation/event contract；Runtime Adapter 是面向某个具体 Runtime 的可变部分，把该 contract 映射为目标 Runtime 的能力、机制原语、transport 和事件。二者同属 Adapter 侧，但不是同义词，也不建立第二份长期权威状态。
+**Runtime Adapter**：位于控制面与 Runtime 之间，对控制面提供稳定、typed、可版本化的 operation/event contract，并把该 contract 映射为目标 Runtime 的能力、原语、transport 和事件。Runtime Adapter 不建立第二份长期权威状态。它在现实部署中属于 AScout 底座，但因与具体 Runtime 的变化紧密相关，在逻辑架构中单独成侧。
 
-**Runtime Mechanism**：拥有节点执行状态、进程与资源归属、隔离、capability/obligation validation、barrier、原子状态转换和 cleanup。Execution、Workspace、Input、Effect 与 Outcome backend 位于这一侧。Agent execution、Branch 隔离环境与 Instance 是 Runtime Mechanism 管理的运行对象，不是第五个一级侧面。
+**Runtime**：拥有节点执行状态、进程与资源归属、隔离、capability/obligation validation、barrier、原子状态转换和 cleanup。Execution、Workspace、Input、Effect 与 Outcome backend 位于这一侧。Agent execution、Branch 隔离环境与 Instance 是 Runtime 管理的运行对象，不是第五个一级侧面。
 
-**约束**：Agent 接入侧不能绕过控制面发起 AScout lifecycle/control operation；Agent execution 对 Workspace、Input 等运行资源的正常访问仍由 Runtime Mechanism 强制管理。控制面不能绕过 Harness Runtime Boundary 依赖具体 Runtime；Runtime Adapter 只能适配和规范化，不能放宽 lifecycle、single-winner、capability、obligation 或 cleanup 规则；Runtime Mechanism 强制正确性，但不替 Agent、resolver 或 policy 作策略选择。跨侧只交换显式 contract data，不共享可变内部状态。
+**约束**：Agent 接入侧不能绕过控制面发起 AScout lifecycle/control operation；Agent execution 对 Workspace、Input 等运行资源的正常访问仍由 Runtime 强制管理。控制面不能绕过 Runtime Adapter 依赖具体 Runtime；Runtime Adapter 只能适配和规范化，不能放宽 lifecycle、single-winner、capability、obligation 或 cleanup 规则；Runtime 强制正确性，但不替 Agent、resolver 或 policy 作策略选择。跨侧只交换显式 contract data，不共享可变内部状态。
 
-**原因**：此前的 Control Plane / Instance 部署图、Harness / Runtime 所有权划分和 Runtime Adapter 组件图描述的是不同观察角度，却被当成同一层级使用。四侧模型把接入、控制、适配和机制分开，使稳定 Runtime contract 与具体 Runtime 变化各有明确位置，同时保留控制面决策、Runtime 强制执行的闭环。
+**原因**：此前的 控制面 / Instance 部署图、控制面 / Runtime 所有权划分和 Runtime Adapter 组件图描述的是不同观察角度，却被当成同一层级使用。四侧模型把接入、控制、适配和机制分开，使稳定 Runtime contract 与具体 Runtime 变化各有明确位置，同时保留控制面决策、Runtime 强制执行的闭环。
 
 ## D-040：Policy 控制的 best-effort 投机
 

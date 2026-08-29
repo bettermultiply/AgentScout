@@ -36,4 +36,4 @@ Policy Decision 集合不固定为上表六项。后续可以加入 resolver del
 
 - Policy 选择和组合决策，不拥有 Runtime mutable state，也不能伪造 Runtime 已完成的操作。
 - Mechanism 校验决策是否可执行，并强制正确性、隔离、资源、副作用和生命周期不变量。
-- Runtime 提供具体后端原语；后端能力不足时，Harness 必须拒绝、降级或选择其他合法决策，不能静默改变 Policy 语义。
+- Runtime 提供具体后端原语；后端能力不足时，控制面 必须拒绝、降级或选择其他合法决策，不能静默改变 Policy 语义。

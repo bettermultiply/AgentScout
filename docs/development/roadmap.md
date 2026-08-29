@@ -6,7 +6,7 @@
 
 - [x] 删除旧源码、Cargo manifests、tests、examples、C header、构建产物、实验文件和实现专属文档。
 - [x] 只保留目标语义、已接受的新实现决策及面向未来的使用/开发文档。
-- [x] 确认 `Agent 接入侧 -> 控制面侧 -> Runtime Adapter 侧 -> Runtime Mechanism` 四侧一级架构（D-039、D-024-I）。
+- [x] 确认 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 四侧一级架构（D-039、D-024-I）。
 
 ## Agent 接入侧
 
@@ -17,24 +17,24 @@
 - [ ] 定义第一版本地调用 transport、request/response envelope 和错误映射；该 transport 不进入 AScout 目标语义。
 - [ ] Command + Skill 证明正确性和收益后，再评估 Hook automation。
 
-## 控制面侧
+## 控制面
 
-- [ ] 决定 Harness Core、Entry API、AScoutAgent/Speculative Tree 与 policy 组件的模块和依赖边界。
+- [ ] 决定 Entry API、AScoutAgent/Speculative Tree、Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 的模块和依赖边界。
 - [ ] 建立 AScoutAgent 与 Speculative Tree 控制状态及同 tree identity/capability 校验。
 - [ ] 建立 context、children、branch、commit、accept、discard 和 event wait 的控制语义。
 - [ ] 明确 Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 的最小第一版职责；不因研究组件清单自动各建独立 crate。
 - [ ] 实现控制闭环：precheck、Runtime operation、已确认 event、控制状态 finalize、Agent-facing result。
 - [ ] 保证 policy 只能在固定 lifecycle、single-winner、capability、obligation 与 cleanup 不变量内作选择。
 
-## Runtime Adapter 侧
+## Runtime Adapter
 
-- [ ] 定义稳定、typed、可版本化的 Harness Runtime Boundary operation/event contract。
-- [ ] 分离 Boundary contract 与具体 Runtime Adapter，不让控制面依赖 Adapter 私有类型、transport 或 backend handle。
-- [ ] 定义具体 Adapter 的能力报告、contract 映射、错误规范化和 event 上行规则。
+- [ ] 定义稳定、typed、可版本化的 Runtime Adapter operation/event contract。
+- [ ] 不让控制面依赖 Adapter 私有类型、transport 或 backend handle。
+- [ ] 定义 Runtime Adapter 的能力报告、contract 映射、错误规范化和 event 上行规则。
 - [ ] 后续收敛 Runtime 选择、Adapter discovery、连接建立、失败、重连与关闭语义。
-- [ ] 验证替换具体 Runtime Adapter 不要求修改控制面 semantic API。
+- [ ] 验证替换 Runtime Adapter 实现不要求修改控制面 semantic API。
 
-## Runtime Mechanism
+## Runtime
 
 - [ ] 管理完整 Agent process tree 及其 sub-agents，并限制在一棵 Speculative Tree 内。
 - [ ] 强制 identity/capability、sibling isolation、资源归属、loser cleanup 和禁止跨 tree 操作。

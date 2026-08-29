@@ -34,4 +34,4 @@ StateDomain 描述效果所作用的状态范围。EffectClass 与 StateDomain �
 
 ## 提交与可见性
 
-可缓冲效果在 **commit barrier** 后才释放。外部效果只在 service adapter 声明的 **observation surface** 与 **guarantee horizon** 内获得 sibling non-interference 与 winner materialization 保证。真实 staged effect、obligation 和 materialization 状态属于 Runtime Mechanism；控制面 Effect Coordinator 只持有效果分类、计划和协调视图。
+可缓冲效果在 **commit barrier** 后才释放。外部效果只在 service adapter 声明的 **observation surface** 与 **guarantee horizon** 内获得 sibling non-interference 与 winner materialization 保证。真实 staged effect、obligation 和 materialization 状态属于 Runtime；控制面 Effect Coordinator 只持有效果分类、计划和协调视图。
