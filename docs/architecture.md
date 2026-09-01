@@ -1,6 +1,6 @@
 # AScout 架构
 
-本文只定义 AScout 的一级分层、各侧所有权与跨侧调用方向。Branch 生命周期、状态可见性和 single-winner 语义以 [状态与生命周期语义](design/overview.md) 与 [设计决策](design/decisions.md) 为准；内部组件的研究推导见 [投机执行底座设计决策](design/speculation-decisions.md) 与 [抽象设计札记](development/spec-exec-abstraction.md)。
+本文只定义 AScout 的一级分层、各侧所有权与跨侧调用方向。
 
 ## 1. 架构总览
 
@@ -55,3 +55,9 @@ sequenceDiagram
 | Runtime | 内部组件由具体 Runtime 自行决定 | 节点执行状态、进程与资源归属、隔离、staged effect、obligation 等的权威状态 |
 
 特别的，ASC-Daemon、Interposer 等 Agent 侧接入组件实际运行在 Runtime 创建的 Branch 隔离环境内。
+
+## 4. 相关文档
+
+- [设计决策](design/decisions.md)：核心 Speculative Tree 语义选择速查
+- [投机执行底座设计决策](design/speculation-decisions.md) 与 [抽象设计札记](development/spec-exec-abstraction.md)：内部组件的研究推导
+- [设计模型](design-model.md)：抽象概念层
