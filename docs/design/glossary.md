@@ -1,17 +1,39 @@
 # 术语表
 
-本表给出 AScout 每个术语的一句话定义与权威出处。完整语义以各设计文档为准：目标语义见 `docs/design/overview.md`、`docs/design/decisions.md` 与 `docs/design/speculation-decisions.md`；两套视角（Speculative Tree 机制表述与投机执行底座抽象）的对应关系见 [`terminology.md`](terminology.md)。
+本表给出 AScout 每个术语的一句话定义与权威出处，并收录两套设计视角之间的关键映射。完整语义以各设计文档为准：目标语义见 `docs/design/overview.md`、`docs/design/decisions.md` 与 `docs/design/speculation-decisions.md`。
+
+**权威范围**：一级架构以 `decisions.md` D-039 和 [`../architecture.md`](../architecture.md) 为准；Branch 生命周期与状态语义以 `decisions.md` 和 `overview.md` 为准；投机执行抽象以 `speculation-decisions.md` 为准。不同文档若发生冲突，必须显式收敛并同步修改。
+
+## 视角映射
+
+`decisions.md` 从 Speculative Tree 机制视角记录语义，`speculation-decisions.md` 从投机执行底座视角记录语义；二者描述同一个 AScout 系统。
+
+| 底座术语 | Speculative Tree 视角 | 关系 |
+|---|---|---|
+| 在 Edge 启动 SpecTask | `branch`（创建 candidate） | 同一操作的两种表述 |
+| `commit` / `commit request` | candidate 显式提交 subtree | 同一提交语义 |
+| Reuse / Promote | `accept`（winner 转正） | 层间映射 |
+| Discard / Preempt | `discard`（含 live-child discard） | 层间映射 |
+| `resolve()` | Resolution barrier 的验证部分 | 层间映射 |
+| Equivalence `≈` | Proposal compatibility 条件 | 层间映射 |
+| Branch | Speculative Tree 中的子树 | 同一结构实体 |
+| Branch Node | Branch 的根节点 | 同一结构实体 |
+| Instance | Runtime 中承载 Branch Node 的执行单元 | 1:1 对应 |
+| OutcomeSlot | 同名同义 | 共享语义 |
+| Predictor | 无直接对应 | 底座独有 |
+| Salvage | 无直接对应 | 底座独有 |
+
 
 ## 系统级
 
-- **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，将投机执行所需的多种能力抽象为统一机制，使开发者能够组合与替换这些能力、构建不同的执行策略。（`../mental-model.md`；`../architecture.md`；`overview.md`）
+- **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，位于投机策略与执行机制之间，分离策略决策与具体运行时实现，使 Agent 能无修改地接入并获得投机执行能力。（`../mental-model.md`；`../architecture.md`；`overview.md`）
 - **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Node 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
 - **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；拥有 Speculative Tree 控制状态和 Branch 关系。（`../mental-model.md` §4.2）
 - **Agent 接入侧**：四侧一级架构的入口侧，包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon 与 Interposer 等接入职责。（`../architecture.md` §1）
-- **控制面**：四侧一级架构的控制侧；包含 Entry API、Policy Engine、Effect Coordinator、Assumption Manager、Scheduler 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。（`../architecture.md` §2）
+- **控制面**：四侧一级架构的控制侧；包含 Entry API、Policy Engine、Effect Coordinator、Assumption Manager、Scheduler 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。（`../architecture.md` §1）
 - **Runtime Adapter**：四侧一级架构的适配侧；对控制面提供稳定 typed operation/event contract，并负责目标 Runtime 的能力映射、transport 与事件规范化。（`../architecture.md` §1）
-- **Runtime**：四侧一级架构的运行侧；拥有节点执行状态、资源、隔离、capability/obligation validation、barrier、原子转换与 cleanup。（`../architecture.md` §2）
+- **Runtime**：四侧一级架构的运行侧；拥有节点执行状态、资源、隔离、capability/obligation validation、barrier、原子转换与 cleanup。（`../architecture.md` §1）
 
 ## 实体
 
@@ -19,12 +41,13 @@
 - **Branch Node**：Branch 对应的根节点，表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
 - **Instance**：Runtime 中承载一个 Branch Node 的实际执行单元，代表实际运行的单一 Agent；Branch Node 与 Instance 1:1。（`../mental-model.md` §4.2）
 - **Proposal** `î`：一次投机预测值：`{value, confidence, provenance, source}`。候选 Branch 基于它提前执行后续步骤。（`spec-exec-abstraction.md` §1）
-- **Assumption**：`(site_id, proposal_id)`，读作"proposal X 成立这一假设"；compatibility 条件可以是 exact payload、predicate 或 virtual-value mapping。（`spec-exec-abstraction.md` §3；`decisions.md` D-025）
+- **Assumption**：`(edge_id, proposal_id)`，读作"proposal X 成立这一假设"；compatibility 条件可以是 exact payload、predicate 或 virtual-value mapping。（`spec-exec-abstraction.md` §3；`decisions.md` D-025）
 - **AssumptionSet**：Instance/SpecTask 携带的依赖闭包（`frozenset[Assumption]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`spec-exec-abstraction.md` §3）
-- **Site**：一条被标注"可投机"的依赖边 `u → v`，携带 admissibility 元数据；投机启动点（结构语义）。建立于 pending-result boundary 上。（`spec-exec-abstraction.md` §1）
+- **Edge**：执行图中被标注"可投机"的依赖边 `u → v`，携带 admissibility 元数据；它是投机启动点的结构表示，可在 pending-result boundary 上注册。（`spec-exec-abstraction.md` §1）
 - **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；runtime 在此从共同 execution base 实例化多个 Branch。（`overview.md`；`decisions.md` D-024；术语收敛）
 - **SpecTask**：基于 Proposal 启动的投机工作单元，运行在隔离域中，携带 AssumptionSet。对应 candidate Branch。（`spec-exec-abstraction.md` §1）
-- **Authority** `A_u`：产出真值 `i` 的权威主体（大模型 / 主生成流 / 真实环境 / 人 / validator）。对应 parent（producer lane）与真实 operation。（`spec-exec-abstraction.md` §1、§2 轴 5）
+- **Authority** `A_u`：提供真实输入、结果或外部权威判断的可选来源（主生成流、真实环境、用户/人或远程服务）；`Authority` 可以为空。它对应 parent（producer lane）与真实 operation，不等同于 validator。（`spec-exec-abstraction.md` §1、§2 轴 5）
+- **validator**：独立的验证器；在有 Authority 时可辅助判断 Proposal 是否兼容，在 Authority 为空时可依据结果或约束直接作可接受性判断。validator 不是 Authority 的一种。（`spec-exec-abstraction.md` §2 轴 4、轴 5）
 - **Predictor** `S_u`：`u` 的廉价实现，产出 Proposal；轴 3，纯插件。（`spec-exec-abstraction.md` §2 轴 3）
 - **Reconciliation**：权威值到达时判定 `î ≈ i` 并选择处置的过程；对应 Resolution barrier 的验证部分。（`spec-exec-abstraction.md` §1；术语收敛）
 - **OutcomeSlot**：真实 outcome / 权威值的投递槽位；两边同名同义。（`overview.md`；`spec-exec-abstraction.md`）
@@ -49,7 +72,7 @@
 - **Policy Engine**：六类 policy 插件的宿主（Proposer / Equivalence / Topology / CostGate / Salvage / Compensation），负责加载期约束校验和运行期分发。（`spec-exec-abstraction.md` §10.4）
 - **Assumption Manager**：全系统唯一"谁依赖谁"真相源；假设 DAG 与实例树是同一状态的两个索引（by_assumption / by_instance）。执行 resolve()，强制信息流约束（非空 AssumptionSet 的数据不得流向空容器）。（`spec-exec-abstraction.md` §10.4；`speculation-decisions.md` D-019）
 - **Scheduler**：负责准入、预算、优先级、抢占、过期丢弃和反向调度；是全系统唯一看到全局资源压力的控制面组件。（`spec-exec-abstraction.md` §10.4；`speculation-decisions.md` D-011/D-020/D-021）
-- **Effect Coordinator**：控制面内部的效果协调者；持有 EffectClass × StateDomain 规则、Site & Effect Catalog 和协调计划，经 Runtime Adapter 请求 Runtime 执行 effect transition。它不持有真实 staged effect、obligation 或 materialization 状态。（`spec-exec-abstraction.md` §10.4）
+- **Effect Coordinator**：控制面内部的效果协调者；持有 EffectClass × StateDomain 规则、Edge & Effect Catalog 和协调计划，经 Runtime Adapter 请求 Runtime 执行 effect transition。它不持有真实 staged effect、obligation 或 materialization 状态。（`spec-exec-abstraction.md` §10.4）
 - **Ledger**：记录（append-only 事件流）/ 回放（确定性重跑）/ 校验（契约对撞：声明值 vs 推导上界 vs shadow 实测）；成本归属三分分类。异步旁路，不在关键路径上。（`spec-exec-abstraction.md` §10.4；`speculation-decisions.md` D-021）
 - **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地守护进程，承载 Agent-facing 控制入口、上下文绑定、身份/AssumptionSet 同步与生命周期消息。（`spec-exec-abstraction.md` §10.4；术语收敛）
 - **Interposer**：数据面，请求路径上拦截四接缝（LLM 调用、工具分发、轨迹写入、调度）；= Hook / effect runner。与 ASC-Daemon 分离（请求路径延迟敏感 vs 旁路）。（`spec-exec-abstraction.md` §10.4；术语收敛）
@@ -57,7 +80,7 @@
 
 ## 状态与生命周期
 
-- **role**：`Authority | Speculative(d)`。不是静态标签，是 `AssumptionSet == ∅` 的函数；promote 就是这个谓词翻转。（`spec-exec-abstraction.md` §10.1）
+- **role**：`Authority | Speculative(d)`。这里的 Authority 是实例角色，不等同于可选的 Authority 输入来源；它不是静态标签，而是 `AssumptionSet == ∅` 的函数；promote 就是这个谓词翻转。（`spec-exec-abstraction.md` §10.1）
 - **grain**：`own-env | shared-env`；shared-env 仅对 PURE 效果开放，隔离粒度由 EffectClass 决定。（`spec-exec-abstraction.md` §10.1）
 - **lifecycle**：`Forked → Running → Resolving → {Reused, Promoted, Discarded, Preempted, Salvaged}`。（`spec-exec-abstraction.md` §10.1）
 - **obligation**：未验证前提随 subtree 保留的义务；在验证前不能 Accept。Assumption 未确认即 obligation。（`overview.md`；`decisions.md` D-025）
@@ -71,7 +94,7 @@
 - **Shadow / Replay**：投机与串行同跑、只提交串行结果；同一套基础设施服务 fidelity 审计、predictor 数据管道、cost 校准与上线灰度（offline replay → shadow → canary → online → drift kill-switch）。（`spec-exec-abstraction.md` §7；`speculation-decisions.md` D-014）
 - **透明嵌套**：投机实例与权威实例二进制同构，实例不知道自己是投机的；底座追踪 provenance、闸门设在效果层。（`spec-exec-abstraction.md` §9.5）
 - **反射 gating**：Cost / admission 策略必须知道自身存活概率：`should_speculate(..., survival)`；底座透传 `P(实例存活)`，防止 depth-2 实例按 depth-0 的账过度投机。（`spec-exec-abstraction.md` §9.5）
-- **Speculation Contract**：跨层双向协商 —— 上层报预测置信度、验证条件、失败代价；下层报隔离能力、隔离代价、可用纪律集合。静态约束求解是它的下层形态。（`spec-exec-abstraction.md` §11.1(B)；`speculation-decisions.md` D-027）
+- **Speculation Contract**：Policy 与 Runtime 之间的双向能力匹配机制；上层声明预测、验证和失败代价，下层声明隔离、效果和资源能力，控制面进行静态校验并在运行期审计。（`speculation-contract.md`；`speculation-decisions.md` D-027）
 
 ## 范围决策
 
