@@ -21,8 +21,9 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 - [心智模型](docs/mental-model.md)
 - [问题与目标](docs/problems-and-goals.md)
+- [设计模型](docs/design-model.md)
 - [一级架构](docs/architecture.md)
-- [目标语义](docs/design/overview.md)
+- [Branch 语义](docs/design/branch-semantics.md)
 - [设计决策](docs/design/decisions.md)
 - [投机执行底座设计决策](docs/design/speculation-decisions.md)
 - [开发决策](docs/development/decisions.md)

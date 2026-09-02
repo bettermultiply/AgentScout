@@ -2,7 +2,9 @@
 
 本文档从 [`../development/spec-exec-abstraction.md`](../development/spec-exec-abstraction.md) 中提取**最终成立的设计/架构决策**，每条整理为「问题 → 选择 → 原因」的问答条目，按原文档出现顺序编号。格式与 `docs/design/decisions.md` 一致。设计过程本身（方法论、优先级、修订轨迹）不收录。
 
-本文档与 `docs/design/decisions.md` 是**同一系统**的两套设计记录，各自独立编号（本文档 D-001..D-028；后者 D-001..D-039）：后者从 Speculative Tree 机制视角记录已收敛语义，本文档从投机执行底座视角记录已收敛语义。投机执行底座就是当前系统（AScout）本身的设计目标，不是另一套相邻系统。两套记录之间的术语对应与权威范围见 [`terminology.md`](terminology.md)；一级架构统一以 [`../architecture.md`](../architecture.md) 与 `decisions.md` D-039 为准。
+本文档与 `docs/design/decisions.md` 是**同一系统**的两套设计记录，各自独立编号（本文档 D-001..D-028；后者 D-001..D-039）：后者从 Speculative Tree 机制视角记录已收敛语义，本文档从投机执行底座视角记录已收敛语义。投机执行底座就是当前系统（AScout）本身的设计目标，不是另一套相邻系统。
+
+与 `decisions.md` 相同，本文是**速查手册与原始讨论记录**，不替代正式主题文档，也不充当语义权威。一级架构统一以 [`../architecture.md`](../architecture.md) 与 `decisions.md` D-039 为准。
 
 ---
 
@@ -73,7 +75,7 @@
 
 **轴 1 与轴 6 的关系**（约束，不是恒等）：轴 6 管谁产出 `i`，轴 1 管 `A_u` 跑不跑，耦合只有一处 —— 生产者是世界则 Eager 物理强制，轴 1 的可行域是轴 6 的函数。
 
-**设计承认的合法组合**：`Authority=人 × launch=Lazy` —— 先按对用户意图的猜测往下干、只在 validator 拒绝时打扰用户（ISP 是它的反向）。一个好抽象应该能生成没人做过的组合，这条通过。
+**设计承认的合法组合**：`Authority=用户输入 × launch=Lazy` —— 先按对用户意图的猜测往下干、只在 validator 拒绝时打扰用户（ISP 是它的反向）。一个好抽象应该能生成没人做过的组合，这条通过。
 
 ---
 
@@ -100,7 +102,7 @@ interface Salvageable<P> {
 
 **问题**：底座提供什么、算法填什么？
 
-**选择**：**Mechanism（底座提供，算法不可改）**：Site 注册与 admissibility；隔离域；权威到达事件 + Reconciliation 状态机；Assumption DAG 与传播；Effect Gate / commit barrier；资源准入、优先级、抢占、背压；规范化资源记账；Fidelity 契约的强制与审计。
+**选择**：**Mechanism（底座提供，算法不可改）**：Edge 注册与 admissibility；隔离域；权威到达事件 + Reconciliation 状态机；Assumption DAG 与传播；Effect Gate / commit barrier；资源准入、优先级、抢占、背压；规范化资源记账；Fidelity 契约的强制与审计。
 
 **Policy（插件，有默认实现）**：Predictor / `S_u`；Equivalence `≈`；Authority launch；Topology（breadth × depth）；Cost model & gate；Salvage；Compensation。
 
@@ -112,7 +114,7 @@ interface Salvageable<P> {
 
 **问题**：组合性问题 —— 投机 work 能不能依赖另一个未确认的投机 work？（11 篇没有一篇给出通用语义）
 
-**选择**：每个 SpecTask 携带 provenance（AssumptionSet）：`Assumption = (site_id, proposal_id)`；`AssumptionSet = frozenset[Assumption]`。
+**选择**：每个 SpecTask 携带 provenance（AssumptionSet）：`Assumption = (edge_id, proposal_id)`；`AssumptionSet = frozenset[Assumption]`。
 
 规则：`AssumptionSet == ∅` ⟺ 权威工作；某 assumption **confirm** → 从所有 task 的 set 移除，变空的可以 commit；**refute** → 依赖它的整个子图进入 Salvage → Discard；投机 task 之间可互相依赖，set 做并集。
 
@@ -364,3 +366,12 @@ IRREVERSIBLE                      // 不可投机，硬闸
 | 4 | **调度/准入边界** | 引擎压力可见、准入重排、优先级覆盖 FCFS |
 
 **实测的侵入量**（支持"无侵入可行"命题）：PASTE —— agent 侧 ~5k 行 TS + LLM 侧 ~2k 行 Python，挂在**未修改的 vLLM** 上，工具 API 完全不改；SPORK —— 标准 completion API 上的 thin controller，无重训练、无辅助模型；Skim —— 对底层 agent 只有一个硬性要求（能从任意 URL warm-start），不需要注入推理历史；Speculative Tool Calls —— 提议新端点 `POST /cache-tool-output/{response_id}`。
+
+## 相关文档
+
+- [设计模型](../design-model.md)：抽象概念层
+- [Branch 语义设计](branch-semantics.md)：Branch 与生命周期语义
+- [效果管理设计](effect-management.md)：效果与状态
+- [Policy Decisions 设计](policy-decisions.md)：Policy 决策面
+- [Speculation Contract 设计](speculation-contract.md)：契约语义
+- [术语表](glossary.md)：两套记录的术语对应

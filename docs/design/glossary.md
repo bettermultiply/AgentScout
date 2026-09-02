@@ -1,8 +1,8 @@
 # 术语表
 
-本表给出 AScout 每个术语的一句话定义与权威出处，并收录两套设计视角之间的关键映射。完整语义以各设计文档为准：目标语义见 `docs/design/overview.md`、`docs/design/decisions.md` 与 `docs/design/speculation-decisions.md`。
+本表给出 AScout 每个术语的一句话定义与权威出处，并收录两套设计视角之间的关键映射。完整语义以各设计文档为准：抽象概念见 [`../design-model.md`](../design-model.md)，目标语义见 `docs/design/branch-semantics.md`、`docs/design/effect-management.md` 与 `docs/design/speculation-contract.md`，决策速查见 `docs/design/decisions.md` 与 `docs/design/speculation-decisions.md`。
 
-**权威范围**：一级架构以 `decisions.md` D-039 和 [`../architecture.md`](../architecture.md) 为准；Branch 生命周期与状态语义以 `decisions.md` 和 `overview.md` 为准；投机执行抽象以 `speculation-decisions.md` 为准。不同文档若发生冲突，必须显式收敛并同步修改。
+**权威范围**：一级架构以 `decisions.md` D-039 和 [`../architecture.md`](../architecture.md) 为准；Branch 生命周期与状态语义以 [`branch-semantics.md`](branch-semantics.md) 和 `decisions.md` 为准；投机执行抽象以 `speculation-decisions.md` 为准。不同文档若发生冲突，必须显式收敛并同步修改。
 
 ## 视角映射
 
@@ -26,7 +26,7 @@
 
 ## 系统级
 
-- **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，位于投机策略与执行机制之间，分离策略决策与具体运行时实现，使 Agent 能无修改地接入并获得投机执行能力。（`../mental-model.md`；`../architecture.md`；`overview.md`）
+- **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，位于投机策略与执行机制之间，分离策略决策与具体运行时实现，使 Agent 能无修改地接入并获得投机执行能力。（`../mental-model.md`；`../architecture.md`；`../design-model.md`）
 - **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Node 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
 - **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；拥有 Speculative Tree 控制状态和 Branch 关系。（`../mental-model.md` §4.2）
@@ -41,16 +41,16 @@
 - **Branch Node**：Branch 对应的根节点，表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
 - **Instance**：Runtime 中承载一个 Branch Node 的实际执行单元，代表实际运行的单一 Agent；Branch Node 与 Instance 1:1。（`../mental-model.md` §4.2）
 - **Proposal** `î`：一次投机预测值：`{value, confidence, provenance, source}`。候选 Branch 基于它提前执行后续步骤。（`spec-exec-abstraction.md` §1）
-- **Assumption**：`(edge_id, proposal_id)`，读作"proposal X 成立这一假设"；compatibility 条件可以是 exact payload、predicate 或 virtual-value mapping。（`spec-exec-abstraction.md` §3；`decisions.md` D-025）
-- **AssumptionSet**：Instance/SpecTask 携带的依赖闭包（`frozenset[Assumption]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`spec-exec-abstraction.md` §3）
-- **Edge**：执行图中被标注"可投机"的依赖边 `u → v`，携带 admissibility 元数据；它是投机启动点的结构表示，可在 pending-result boundary 上注册。（`spec-exec-abstraction.md` §1）
-- **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；runtime 在此从共同 execution base 实例化多个 Branch。（`overview.md`；`decisions.md` D-024；术语收敛）
+- **Assumption**：`(edge_id, proposal_id)`，读作"proposal X 成立这一假设"；compatibility 条件可以是 exact payload、predicate 或 virtual-value mapping。（`../design-model.md` §3.1；`spec-exec-abstraction.md` §3；`decisions.md` D-025）
+- **AssumptionSet**：Instance/SpecTask 携带的依赖闭包（`frozenset[Assumption]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`../design-model.md` §3.1；`spec-exec-abstraction.md` §3）
+- **Edge**：一个投机机会，是投机执行的抽象模型与 Policy 的作用对象；同一条 Edge 上可以有多个 Proposal。可投机性由 `effect`、`admit` 及相应能力校验共同决定，不另设 admissibility 元数据。（`../design-model.md` §3.1；`policy-decisions.md`；`spec-exec-abstraction.md` §1）
+- **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；runtime 在此从共同 execution base 实例化多个 Branch。（`branch-semantics.md`；`decisions.md` D-024；术语收敛）
 - **SpecTask**：基于 Proposal 启动的投机工作单元，运行在隔离域中，携带 AssumptionSet。对应 candidate Branch。（`spec-exec-abstraction.md` §1）
 - **Authority** `A_u`：提供真实输入、结果或外部权威判断的可选来源（主生成流、真实环境、用户/人或远程服务）；`Authority` 可以为空。它对应 parent（producer lane）与真实 operation，不等同于 validator。（`spec-exec-abstraction.md` §1、§2 轴 5）
 - **validator**：独立的验证器；在有 Authority 时可辅助判断 Proposal 是否兼容，在 Authority 为空时可依据结果或约束直接作可接受性判断。validator 不是 Authority 的一种。（`spec-exec-abstraction.md` §2 轴 4、轴 5）
 - **Predictor** `S_u`：`u` 的廉价实现，产出 Proposal；轴 3，纯插件。（`spec-exec-abstraction.md` §2 轴 3）
 - **Reconciliation**：权威值到达时判定 `î ≈ i` 并选择处置的过程；对应 Resolution barrier 的验证部分。（`spec-exec-abstraction.md` §1；术语收敛）
-- **OutcomeSlot**：真实 outcome / 权威值的投递槽位；两边同名同义。（`overview.md`；`spec-exec-abstraction.md`）
+- **OutcomeSlot**：真实 outcome / 权威值的投递槽位；两边同名同义。（`branch-semantics.md`；`spec-exec-abstraction.md`）
 - **Disposition**：处置结果枚举：Reuse / Promote / Discard / Preempt / Re-execute / Compensate / Overwrite / Salvage。（`spec-exec-abstraction.md` §2 轴 6）
 - **Equivalence** `≈`：判定"猜中"的可插拔同余关系，四层：L0 语法相等 / L1 语义等价 / L2 效果同余 / L3 结果可接受（唯一不需要权威值、可支撑 Bypass 的层次）。（`spec-exec-abstraction.md` §2 轴 4）
 - **EffectClass**：效果的投机纪律分类：PURE / IDEMPOTENT / STAGEABLE / TRANSFORMABLE / COMPENSABLE / OVERWRITABLE / IRREVERSIBLE。（`spec-exec-abstraction.md` §4）
@@ -59,20 +59,20 @@
 
 ## 操作
 
-- **branch**：从当前 Branch 创建一个或多个 direct child；投机场景中这些 child 才按角色称为 candidate。完整语义可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override。（`overview.md` §Agent 最小感知模型；`decisions.md` D-037）
+- **branch**：从当前 Branch 创建一个或多个 direct child；投机场景中这些 child 才按角色称为 candidate。完整语义可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override。（`branch-semantics.md` §Agent 最小感知模型；`decisions.md` D-037）
 - **commit / commit request**：candidate 显式提交自己的子树。可 conditional commit：未验证前提随 subtree 保留为 obligation，验证前不能 Accept。（`decisions.md` D-025、D-037）
-- **accept**：接受一个 winner subtree（裁决 = Reuse / Promote）；候选被接受后保留自身 Branch identity 并替换 parent 在树中的位置。（`overview.md`；`decisions.md` D-009/D-023）
-- **discard**：丢弃整个 child subtree（= Disposition 的 Discard / Preempt）；不要求 candidate ready，不自动把 partial state 反馈给 parent。（`overview.md`；`decisions.md` D-023）
+- **accept**：接受一个 winner subtree（裁决 = Reuse / Promote）；候选被接受后保留自身 Branch identity 并替换 parent 在树中的位置。（`branch-semantics.md`；`decisions.md` D-009/D-023）
+- **discard**：丢弃整个 child subtree（= Disposition 的 Discard / Preempt）；不要求 candidate ready，不自动把 partial state 反馈给 parent。（`branch-semantics.md`；`decisions.md` D-023）
 - **resolve()**：权威值到达时判 `î ≈ i`、选 Disposition 并沿依赖闭包传播的关键路径操作，由 Assumption Manager 执行。（`spec-exec-abstraction.md` §10.4 Assumption Manager）
 - **Salvage**：失败后回收部分进展（`progress() / handoff()` 一等抽象）；warm-start、partial-token accept、promote 的共性。（`spec-exec-abstraction.md` §2 轴 6）
-- **PublishOutcome**：真实 operation 完成后把 outcome 发布到 OutcomeSlot 的机制操作；由 Operation wrapper / Hook / effect broker 自动执行，不作为独立 Agent-facing 命令。（`overview.md`；`decisions.md` D-037）
+- **PublishOutcome**：真实 operation 完成后把 outcome 发布到 OutcomeSlot 的机制操作；由 Operation wrapper / Hook / effect broker 自动执行，不作为独立 Agent-facing 命令。（`branch-semantics.md`；`decisions.md` D-037）
 
 ## 组件
 
 - **Policy Engine**：六类 policy 插件的宿主（Proposer / Equivalence / Topology / CostGate / Salvage / Compensation），负责加载期约束校验和运行期分发。（`spec-exec-abstraction.md` §10.4）
 - **Assumption Manager**：全系统唯一"谁依赖谁"真相源；假设 DAG 与实例树是同一状态的两个索引（by_assumption / by_instance）。执行 resolve()，强制信息流约束（非空 AssumptionSet 的数据不得流向空容器）。（`spec-exec-abstraction.md` §10.4；`speculation-decisions.md` D-019）
 - **Scheduler**：负责准入、预算、优先级、抢占、过期丢弃和反向调度；是全系统唯一看到全局资源压力的控制面组件。（`spec-exec-abstraction.md` §10.4；`speculation-decisions.md` D-011/D-020/D-021）
-- **Effect Coordinator**：控制面内部的效果协调者；持有 EffectClass × StateDomain 规则、Edge & Effect Catalog 和协调计划，经 Runtime Adapter 请求 Runtime 执行 effect transition。它不持有真实 staged effect、obligation 或 materialization 状态。（`spec-exec-abstraction.md` §10.4）
+- **Effect Coordinator**：控制面内部的效果协调者；持有 EffectClass × StateDomain 规则、Edge & Effect Catalog 和协调计划，经 Runtime Adapter 请求 Runtime 执行 effect transition。它不持有真实 staged effect、obligation 或效果提交生效状态。（`spec-exec-abstraction.md` §10.4）
 - **Ledger**：记录（append-only 事件流）/ 回放（确定性重跑）/ 校验（契约对撞：声明值 vs 推导上界 vs shadow 实测）；成本归属三分分类。异步旁路，不在关键路径上。（`spec-exec-abstraction.md` §10.4；`speculation-decisions.md` D-021）
 - **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地守护进程，承载 Agent-facing 控制入口、上下文绑定、身份/AssumptionSet 同步与生命周期消息。（`spec-exec-abstraction.md` §10.4；术语收敛）
 - **Interposer**：数据面，请求路径上拦截四接缝（LLM 调用、工具分发、轨迹写入、调度）；= Hook / effect runner。与 ASC-Daemon 分离（请求路径延迟敏感 vs 旁路）。（`spec-exec-abstraction.md` §10.4；术语收敛）
@@ -83,12 +83,12 @@
 - **role**：`Authority | Speculative(d)`。这里的 Authority 是实例角色，不等同于可选的 Authority 输入来源；它不是静态标签，而是 `AssumptionSet == ∅` 的函数；promote 就是这个谓词翻转。（`spec-exec-abstraction.md` §10.1）
 - **grain**：`own-env | shared-env`；shared-env 仅对 PURE 效果开放，隔离粒度由 EffectClass 决定。（`spec-exec-abstraction.md` §10.1）
 - **lifecycle**：`Forked → Running → Resolving → {Reused, Promoted, Discarded, Preempted, Salvaged}`。（`spec-exec-abstraction.md` §10.1）
-- **obligation**：未验证前提随 subtree 保留的义务；在验证前不能 Accept。Assumption 未确认即 obligation。（`overview.md`；`decisions.md` D-025）
-- **capability**：resolver / validator 等授权能力；direct children 的 resolver capability 默认由 parent 持有，可显式委托给控制面。（`overview.md`；`decisions.md` D-022）
+- **obligation**：未验证前提随 subtree 保留的义务；在验证前不能 Accept。Assumption 未确认即 obligation。（`branch-semantics.md`；`decisions.md` D-025）
+- **capability**：resolver / validator 等授权能力；direct children 的 resolver capability 默认由 parent 持有，可显式委托给控制面。（`branch-semantics.md`；`decisions.md` D-022）
 
 ## 机制与概念
 
-- **Policy Decision**：Policy 根据任务、上下文、资源和 Runtime 能力作出的可替换策略决策；当前六项代表性决策及其阶段映射见 [`policy-decisions.md`](policy-decisions.md)。（`../mental-model.md` §3.1）
+- **Policy Decision**：Policy 根据任务、上下文、资源和 Runtime 能力作出的可替换策略决策；当前八类 decision 及其阶段映射见 [`policy-decisions.md`](policy-decisions.md)。（`../design-model.md` §3.1）
 - **commit barrier**：效果释放屏障；照抄处理器 commit/retire 语义（"write operations are buffered but not allowed to execute until the instruction is committed"）。（`spec-exec-abstraction.md` §4）
 - **规范化资源记账**：成本三分 —— (a) 无论如何都要花的（命中时投机 work 即权威 work）/ (b) 纯浪费 / (c) 部分成本（被抢占/取消时已消耗部分）。口径必须包含 token 之外的资源。（`spec-exec-abstraction.md` §5；`speculation-decisions.md` D-012）
 - **Shadow / Replay**：投机与串行同跑、只提交串行结果；同一套基础设施服务 fidelity 审计、predictor 数据管道、cost 校准与上线灰度（offline replay → shadow → canary → online → drift kill-switch）。（`spec-exec-abstraction.md` §7；`speculation-decisions.md` D-014）

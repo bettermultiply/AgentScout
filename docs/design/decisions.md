@@ -1,5 +1,7 @@
 # 设计决策记录
 
+本文是 AScout 设计决策的**速查手册与原始讨论记录**，记录逐条决策当时的选择与理由，不替代正式主题文档，也不充当语义权威。
+
 本文只记录已经确定的 AScout 语义选择。具体 backend、原型折衷和实现重评条件记录在开发决策中。
 
 ## D-001：Agent 控制生命周期策略
@@ -156,9 +158,11 @@
 
 ## D-029：外部效果使用声明式 Observation surface
 
-**选择**：AScout 不对所有理论上可能的间接因果影响做无限闭包，而是在 service adapter 声明的 observation surface 和 guarantee horizon 内提供 sibling non-interference。Semantic effect footprint 包括当前窗口内可直接观察的响应、受管状态、服务契约定义的触发动作，以及直接改变后续请求结果的共享约束。
+**选择**：Effect Management 管理投机分支对分支外部、共享或最终执行状态产生的影响，以及这些影响在投机期间的暂存、限制、提交、取消和清理。它管理 Branch 运行中需要保护的状态变化，但以共享、可观察的业务变化为描述中心；Branch-local state 主要由 Runtime 自动完成隔离、清理和 winner 延续，Outcome 与 operational footprint 是否纳入额外效果管理由 Policy 决定。AScout 不对所有理论上可能的间接因果影响做无限闭包，而是在 service adapter 声明的 observation surface 和 guarantee horizon 内提供 sibling non-interference。
 
-**Operational footprint**：Token 费用、provider 内部 audit、telemetry、CPU 等默认归属并计量，但不自动成为 Branch 世界状态。只有它们通过已声明的预算控制、rate limit、告警或其他自动规则实际反馈进当前 execution 时，才升级进入 observation surface。
+Semantic effect footprint 包括当前窗口内可直接观察的响应、受管状态、服务契约定义的触发动作，以及直接改变后续请求结果的共享约束。
+
+**Operational footprint**：Token 费用、provider 内部 audit、telemetry、CPU，以及额度、限流和并发槽的使用等默认归属并计量，但不自动成为 Branch 世界状态。Policy 可以将其中指定的资源或额度声明为准入约束、预算约束或取消条件。只有某项变化实际改变保证范围内的可观察业务行为时，才进入 Effect 管理；这时必须通过相应的 EffectClass、StateDomain 和 Runtime 能力处理。
 
 **保证**：在声明边界内，sibling 私有效果不能改变其他 Branch 的观察或约束，loser semantic effects 不能进入最终状态；最终 semantic state 等价于 committed parent operations 与 winner continuation。AScout 不对 adapter contract 与 guarantee horizon 之外的 operational footprint 声称隔离保证。
 
@@ -278,4 +282,12 @@
 
 **Agent 边界**：Agent 通常不需要感知或参与投机编排，底座的 lifecycle 正确性不能依赖 Agent 的配合。未来可以提供可选的 Agent 感知或协作能力，但其具体接口与语义另行收敛。
 
-**原因**：把策略选择集中在控制面，可以让不同 Agent 复用同一套机制并替换策略；把 best-effort 与固定正确性约束分开，既保留优化空间，也避免把“启用”误解为无条件分支或性能保证。
+**原因**：把策略选择集中在控制面，可以让不同 Agent 复用同一套机制并替换策略；把 best-effort 与固定正确性约束分开，既保留优化空间，也避免把"启用"误解为无条件分支或性能保证。
+
+## 相关文档
+
+- [设计模型](../design-model.md)：抽象概念层
+- [Branch 语义设计](branch-semantics.md)：Branch 与生命周期语义
+- [效果管理设计](effect-management.md)：效果与状态
+- [Policy Decisions 设计](policy-decisions.md)：Policy 决策面
+- [Speculation Contract 设计](speculation-contract.md)：契约语义
