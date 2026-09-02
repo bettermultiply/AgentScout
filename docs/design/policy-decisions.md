@@ -1,265 +1,343 @@
 # Policy Decisions
 
-Policy Decision 是 Policy 根据任务、执行上下文、可用信息、资源条件和 Runtime 能力作出的可替换决策。Policy Decisions 定义策略选择空间；它们不是 Runtime 状态，也不是可以绕过 AScout 固定语义的自由执行脚本。
+Policy Decision 是 Policy 针对一个投机机会作出的可替换选择。对一条投机 Edge `E`，一次投机执行可以由以下七类 decision 的组合刻画：
 
-## 2. 正交轴与取值域
-
-这是文档的核心。每一轴独立，论文的差异全部落在轴上的取值。
-
-### 单次投机执行的决策面
-
-正交轴是从论文中归纳出的分析维度，不直接规定 Policy 的调用结构。对一条投机边 `E`，Policy 实际面对的是一次投机执行的决策面：
-
-```
-S(E) = ( admit, extent, predict, launch,
-         authority, effect, match, dispose )
+```text
+S(E) = (admit, extent, predict, launch, effect, match, dispose)
 ```
 
-这些 decision 不是一次必须按固定顺序执行的流程，而是作用于同一个 Edge 的可组合选择。它们的粗粒度含义如下：
+这七类 decision 属于同一个决策面，但不要求按固定顺序调用。一次执行仍可按“机会发现、准入判断、预测生成、过程执行、验证、处置与提交”理解；决策面表达的是 Policy 在这些阶段中可以选择什么，而不是另一条固定流程。
 
-| decision | 语义 | 主要作用阶段 |
+| Decision | Policy 决定什么 | 主要阶段 |
 |---|---|---|
-| `admit` | 决定是否开启一次投机执行；输入包括 Edge、当前执行上下文、资源/预算条件、预期收益和实例存活概率 | 准入判断 |
-| `extent` | 决定一个已经开启的投机执行在其内部继续推进的边界，以及何时主动停止并等待裁决 | 过程执行 |
-| `predict` | 决定预测对象、Proposal 的生成方式与数量；Proposal 数量就是 breadth | 预测生成 |
-| `launch` | 决定权威路径是否启动以及启动时机 | 准入与权威路径启动 |
-| `authority` | 决定验证依据的来源及其获取方式；来源可以是 `A_u`、用户/环境或 validator | 权威获取与验证 |
-| `effect` | 决定投机执行过程中各个 step 产生的外部效果如何纳入管理，以及采用暂存、代理、阻塞、补偿或其他合法纪律 | 过程执行及处置 |
-| `match` | 决定 Proposal 与验证依据之间的兼容或可接受关系 | 验证 |
-| `dispose` | 决定验证、取消、抢占或停止后的投机工作如何复用、提升、回收、重执行或清理 | 处置与提交 |
+| `admit` | 该操作是否值得作为投机入口，以及当前约束下是否开启投机（同一决策内的两级判断） | 准入判断 |
+| `extent` | 已开启的投机执行在内部推进到哪里，以及暂停等待裁决的时机 | 过程执行 |
+| `predict` | 预测对象与 Proposal 生成数量与方式 | 预测生成 |
+| `launch` | 是否取得这条 Edge 的权威值以及何时取得 | 准入判断、权威路径启动 |
+| `effect` | 投机过程中产生的外部效果采用的处理纪律 | 过程执行、处置与提交 |
+| `match` | Proposal 与验证依据被视为兼容或可接受的时机 | 验证 |
+| `dispose` | 命中、未命中、取消或停止后投机工作的处置 | 处置与提交 |
 
-其中 `admit` 与 `extent` 必须区分：`admit` 决定是否创建一个投机执行过程；`extent` 只约束已经创建的过程在内部向前推进多远。`extent` 对所有投机执行都适用，不只适用于 PURE 效果。它可以由 step 数、收益阈值、停止条件或即将到达的处理边界表达；到达边界后的正常结果是暂停并等待裁决，不是自动 discard。
+Policy 允许这些 decision 依赖任务、执行上下文、当前状态、资源条件、预期收益和 Runtime 能力。依赖关系应显式表达，不能通过隐含的 Runtime 行为改变 decision 的含义。
 
-`extent` 也不同于嵌套深度。嵌套深度表示投机实例在执行中是否再次遇到新的 Edge 并递归调用 `admit`；`extent` 表示当前这一个投机执行过程内部已经推进了多少。前者改变投机过程的层级，后者限制单个过程的前进范围。
+## 2. 七类 Decision
 
-`effect` 包含此前由 admissibility 表达的含义，不再另设 Edge 级 admissibility 元数据。一次投机执行可以包含多个 step，并在不同 step 产生不同 StateDomain 和 EffectClass 的效果；`effect` 决定哪些变化必须纳入管理、允许采用哪些处理纪律以及相应 fallback。Effect Management 和 Runtime 再检查该选择是否有能力落实，因此可投机性是整个效果计划及其能力校验的结果，不是投机启动前的单独 enable bit。效果处理能力不足时，可以在执行到无法提前处理的效果处阻塞当前过程，不必预先把整个投机执行判死。
-
-`admit` 是经济性和运行条件的 Policy 判断，不负责替代 `effect` 的安全管理；`effect` 也不替代 `admit`。一个过程即使已通过 `admit`，仍可能在后续 step 因效果阻塞或达到 `extent` 而暂停。
-
-### 轴 1：权威启动策略 (Authority Launch)
-
-**Shape 不是原语**：Overlap / Bypass / Elide / Overwrite 是"权威启动策略 × 效果释放策略"乘积上一块区域的名字。拆开后 Bypass 与 Elide 自动被边模型覆盖，且几条性质变成可推导的。
-
-`A_u` 是否启动、何时启动：
-
-| 取值 | 语义 | 接受判据只能用 | 论文 |
-|---|---|---|---|
-| **Eager 急切** | `A_u` 与 SpecTask 同时启动 | L0 / L1 / L2（有 `i` 可比） | 其余全部 9 篇 |
-| **Lazy 惰性** | `A_u` 仅在 validator 拒绝后补启 | **L3**（无 `i` 可比） | **Skim** |
-| **Absent 缺席** | `A_u` 永不启动 | ⊤ | **SPAgent Aggressive 阶段** |
-
-**两条被推导出来、而非碰巧成立的性质：**
-
-1. 不启动 `A_u` ⟹ 根本没有 `i` ⟹ 接受判据只能是一元谓词 `validate(result)` ⟹ **必须是 L3 等价**。这解释了为什么 Skim 是唯一用 validator 的 —— 不是设计偏好，是被迫。
-2. Lazy 下 validator 拒绝时才补启 `A_u` ⟹ 此刻是**串行追加**而非并行 ⟹ 必然要问"投机的部分进展能否给 `A_u` 打底" ⟹ **Salvage / warm-start 是 Lazy 的必需品，不是可选优化**。
-
-**`A_u` 可省性判据**（有预测力，可用来判断一个新场景能否做 Bypass）：
-
-> `A_u` 可省 ⟺ (`u` 是**计算**而非**世界**) ∧ (保真度契约**不以** `A_u` 的输出定义正确性)
-
-- **`u` 是世界 → Eager 被物理强制**：Speculate with Memory Type 2 的 `u` 是环境、Speculative Interaction Agents 的 `u` 是人。你不可能让人说得更快，最终仍必须拿到真实 observation。
-- **契约以 `A_u` 定义正确 → Eager 被契约强制**：SPORK / PASTE / DSP 声明 trajectory-equivalence，而 trajectory 的定义就是"主模型会做什么"。省掉主模型等于取消正确性的定义。
-- **两者都不成立**：Skim（`u` = agent 自己的导航轨迹，契约是 outcome-equivalent）、SPAgent Aggressive（`u` = 模型自己的 thought，契约是 bounded-degradation）。**这恰好是全部 11 篇里仅有的两篇非 Eager。判据自洽。**
-
-**天花板的归因：天花板是 `depth = 1` 的推论。** Eager + depth=1 下权威工作一点没少、且权威链仍然串行，端到端延迟下界就是权威链自身的串行时间。Speculative Actions 的 breadth 上限 **50%**（`p/(1+p)·α/(α+β) ≤ 1/2`）、Speculative Tool Calls 的 client-side 上限 **2×** 都是这个下界的具体化。
-- 但 Speculative Actions 的 depth 公式是 `((T−1)/T)·p·(1−b/a)`，**把上限从 1/2 抬到 1，且全程保持 trajectory-equivalent**。机制上的原因是：depth 模式下第 `t+1` 步的权威调用在第 `t` 步权威返回**之前**就发出（因为它的输入是投机的），于是**权威链本身从串行变成流水线**。
-
-> **突破天花板有两条独立的路：Bypass（改契约，轴 7/§2.7）与 Nesting（不改契约，轴 2/§9）。后者应当优先**——它不需要牺牲保真度。详见第 9 节。
-
-**该轴取值可以是状态依赖的函数，而非常量**：SPAgent 采样 k 个候选后用 `π_θ^e` 打 1–5 分，若全部低于阈值 β 则从 Absent 切到 Eager（调优显示 β>3 后准确率持平而延迟继续升，推荐 β=3 或 4）。这正是它属于策略轴、而非"形状"的证据。
-
-**Overwrite 不在这条轴上**：Speculative Actions 的 OS 变体权威是 Eager 的（actor 照跑），它的特殊之处在于**投机效果在验证前就释放到了外部世界**（每秒把参数写进活内核，actor 到达时 last-write-wins 覆盖）。那是 **Effect 轴上的 release-early 取值**（第 4 节），与权威启动无关。
-
-### 轴 2：投机拓扑 (Topology) —— breadth × depth
-
-以 Edge 为机会单元展开一棵**投机树**。这条轴描述不同取值导致的图/树形态，而不是新增一个独立的 Policy Decision。
-
-本轴中的 `breadth` 与 `depth` 是论文分析拓扑形态时使用的术语，不等同于决策面中的单一 decision：`breadth` 由 `predict` 决定 Proposal 数量；单次投机过程内部的前瞻范围由 `extent` 决定；嵌套时是否在新 Edge 上继续开启投机，由递归的 `admit` 决定。论文将单次过程内的链式前瞻和多个投机过程的嵌套都称为 `depth`，AScout 在决策面中将二者分开；这里保留 `depth` 是为了描述论文中的链式拓扑和全局形态。
-
-| 维度 | 取值与论文 |
-|---|---|
-| **breadth 固定** | Speculative Actions Alg.1（命中率 `p(k) = 1−(1−p)^k`，因 `p(k)` 对 `k` 凹，成本增长非线性）；SPAgent 默认 `k=3`（命中率增益变平处）；Speculate with Memory 的 best-of-k |
-| **breadth 动态** | Speculative Actions Thm.4：按置信度降序取前 `m`，`m* = argmax_m {q(m;p)·Δ − c·m}`，贪心加分支直到 `Δ*·δq(m;p) < c`，运行期 `O(k)`（排序+扫描），`Δ*` 离线估。实测在 chess 上用"只保留预测准确率 >50%"的常数阈值近似即可拿到最低额外 token 成本 |
-| **depth = 1** | 绝大多数 |
-| **depth > 1** | Speculative Actions depth-focused：分支只在投机或真实调用返回时才延伸、不一致子树立即剪枝，因此**系统最多领先 `a/b` 步，活跃分支数与视界 `T` 无关**（不会指数爆炸）；ISP/DSP 的 k 步前瞻（ISP 最大并发 `k+1`，实验 `k=4`，实测并发 4.5–5） |
-| **depth 在线学习** | DSP：DistilBERT 回归器在线预测 `k`，TD(λ) 框架下 `V(s)` ≈ 该状态的期望投机步数；`λ=γ=1` 时退化为普通监督回归。用 expectile 参数 `τ` 或推理期偏移 `k = max(1, k̂+β)` 暴露延迟/成本前沿 |
-
-**breadth 与 depth 的成本结构不同，不能混为一谈**：breadth 的收益 `p(k)` 对 `k` 凹而成本近似线性 ⟹ 存在明确最优点；depth 的收益是把 50% 天花板抬到 100%，成本项是 `(1−p)(a/2b − 1/2) + p`，刻画的是"真值返回前堆积了多少投机步"。
-
-**与轴 1 的关系**：两条轴都作用于最终拓扑，但正交 —— **轴 1 管投机子树与权威路径的串并关系**（Eager = 并联；Lazy 被拒后 = 串联追加），**轴 2 管投机子树内部的分叉与前瞻**。
-
-### 预测对象 (Prediction Target)：为什么不是一条轴
-
-**归约论证。** 所谓的七种"预测对象"全部可归约：
-
-- plan step (DSP/ISP) = action + 其执行产生的 observation
-- 子轨迹 (Skim) = 若干 (action, observation) 对的复合，不是新品类
-- 链式 (Speculate with Memory Type 3) = 二者的显式组合，论文自己就是这么定义的
-- **未来的用户输入 (Speculative Interaction Agents) = observation，其对应 action 是"请求输入"** —— 这一条有论文的直接背书：该系统的三个动作里就有 `<pause>`，字面意思就是"停下来等用户/环境"。pause 就是那个 action，用户说的话就是 observation
-
-再往前推一步，连 action/observation 这个二分本身也不是关于**值**的：一般 DAG 上游算子的输出（cost-aware）既不是对世界的动作、也不是来自世界的观测，但**同一个值从生产侧看是 action，从消费侧看是 observation**。这个区分只取决于**你站在边的哪一侧**，所以它是边模型的视角选择，不是一条轴。
-
-**唯一的操作性残留**：生产者是**世界**还是**计算**。而这正是轴 1 可省性判据的第一个合取项。所以它不是独立轴，只是**轴 1 的投影**。
-
-**内容归位，不丢东西**：Speculate with Memory 的三类型延迟节省公式仍然有用 —— Type 1 省 `min(ℓ_env, ℓ_LLM − ℓ_spec)`、Type 2 省 `min(ℓ_LLM, ℓ_env − ℓ_spec)`、Type 3 省 `ℓ_LLM + ℓ_env` —— 但它们可由"边的位置 + 两侧延迟"直接推出，应落进**成本模型**而非占据一条轴。
-
-### 轴 3：预测器 (Predictor) —— 纯 policy，底座只定接口
-
-| 取值 | 论文 |
-|---|---|
-| 小模型 / 弱 backbone | Speculative Actions、DSP、ISP、Speculate with Memory (GPT-4.1-mini/nano)、Speculative Tool Calls (xLAM 1B/3B/8B) |
-| **同一模型自投机** | **SPORK**（forced tool-call prefix + prefix-cache fork，探针成本从 1.6s 降到 0.35s）、SPAgent（`π_θ^s` 无 thought 采样） |
-| 离线挖掘的 pattern | **PASTE**（两遍挖掘：事件签名的控制流 + argument mapper 的隐式数据流；**晚绑定**——pattern 定"下一步是什么"，活会话供具体值） |
-| 站点结构剖析 | **Skim**（offline profiler，每站一次，<16s） |
-| **在线累积的记忆** | **Speculate with Memory**（contrastive transition table + episodic memory + confusion tracker；accuracy 随经验从 ~28% 涨到 >50%） |
-
-**给底座的启示**：predictor 是最不需要底座操心的部分（纯插件），但**底座必须提供 predictor 的数据供给**。PASTE 需要历史 trace 做 pattern mining，DSP 需要 `(state, k)` 对做在线 RL，Speculate with Memory 需要 miss episodes 和完成轨迹。这三家各自造了一套数据管道。**底座提供统一的 trace / shadow / replay，就等于免费给所有 predictor 供血** —— 这是极强的无侵入卖点，见第 7 节。
-
-### 轴 4：等价关系 (Equivalence `≈`) —— 被严重低估的一轴
-
-判定"猜中了"有**四个本质不同的层次**，它们的可用性和保真度完全不同：
-
-| 层次 | 判据 | 是否需要权威值 | 论文 |
-|---|---|---|---|
-| **L0 语法相等** | canonical form 全等 | 需要 | SPORK（name **和** serialized args 全等）；PASTE（canonicalized name+args）；Speculate with Memory（"full exact match，action type 和所有参数都必须一致"）；DSP/ISP-OpenAGI |
-| **L1 语义等价** | embedding cosine ≥ 0.95 / AST 模格式相等 / semantic_json_equal / Levenshtein < 0.3 | 需要 | Cost-aware tier2；**ISP-TravelPlanner** |
-| **L2 效果同余** | 对**后续**的影响相同 | 需要 | **Speculative Actions**：cache key 是 `(h, q)` call specifier，比对的**不是猜的 action 本身，而是它蕴含的下一次调用** |
-| **L3 结果可接受** | validator 判定输出对不对 | **不需要** | **Skim**：schema check（零成本，无 LLM）+ semantic judge（小模型，输入是压缩后的 state summary） |
-
-三个必须写进设计文档的结论：
-
-1. **L2 是被低估的设计。** Speculative Actions 的洞察是：等价不必定义在"值"上，可以定义在"值对下游的影响"上。猜错了 action 但推出的下一次调用一样 —— 仍然算命中。这天然更宽松，且**仍然 lossless**（因为真正被复用的是那次调用的结果）。底座应该把 `≈` 定义为可插拔的**同余关系**，而不是相等判定。
-
-2. **L3 是唯一能支撑 Bypass 的等价关系。** 因为它不等权威值，所以能真正短路掉权威路径。代价是它必然 lossy。Skim 明确把 verifier 调成"倾向拒绝"，让不确定性转化为 fallback 而非静默错误 —— 这个偏置方向应该是底座的默认值。
-
-3. **放宽 `≈` 会静默打破 lossless，论文自己也承认。** ISP 明确写道：用了模糊匹配后 "it is not guaranteed that the result from speculative planning remains the same as the result from normal agent planning"，所以他们**分开报告两种模式的任务性能**。SPORK 则明确拒绝 name-only 匹配，理由是"对副作用工具会静默改变行为"。**底座必须把 `≈` 的层次和 Fidelity 契约（轴 7）绑定校验**：声明 trajectory-equivalent 的算法不允许用 L1/L3。
-
-### 轴 5：权威 (Authority) —— 权威路径不一定跑
-
-| 取值 | 论文 |
-|---|---|
-| 更强的 target agent | DSP、ISP |
-| 主生成流自身 | SPORK、PASTE、SPAgent、Speculative Tool Calls |
-| 真实环境返回 | Speculative Actions、Speculate with Memory |
-| **人** | **ISP**：用户在 `a_i` 显示后、`t_i` 到达前的间隔里中断，注入的值被当作 oracle，"effectively a third agent"。系统只 kill 第 i 个 target process，其他并发进程照跑 |
-| validator（Authority 为空时） | Skim |
-
-**底座含义**：`resolve()` 接口必须能接受**外部注入的权威值**，不能假设权威值一定来自那条已经在跑的权威路径。ISP 的 oracle interrupt 本质上是**用人的答案替换掉了 target agent 的那一步**。这同时意味着底座要支持"取消特定 index 的权威任务"这种细粒度操作（ISP 用 `signal.SIGTSTP` + 绑定 target_task_id 实现）。
-
-**与轴 1 的耦合关系（是约束，不是恒等）**：轴 5 管**谁**产出 `i`，轴 1 管 `A_u` **跑不跑**。耦合点只有一处 —— 可省性判据的第一个合取项：生产者是**世界**（环境 / 人）则 Eager 被物理强制。所以**轴 1 的可行域是轴 5 的函数**。
-
-把二者当独立轴处理，会生成一个**论文里没有的设计点**，这正好是抽象质量的检验：
-
-> `Authority = 用户输入` × `launch = Lazy` —— **先按对用户意图的猜测往下干，只在 validator 拒绝时才打扰用户。**
->
-> ISP 是它的反向（用户主动中断、系统被动接受）。lazy-human 完全可实现，且在"打扰成本很高"的场景（长时间任务、异步协作、语音）价值明显。**一个好抽象应该能生成没人做过的组合，这条通过了测试。**
-
-### 轴 6：处置 (Disposition)
-
-初始枚举：复用、提升、提交、重执行、丢弃、补偿、合并。论文证据基本吻合，但缺了一类，而且"提升"值得单独强调：
-
-| Disposition | 语义 | 论文 |
-|---|---|---|
-| **Reuse 复用** | 投机 task 已完成，结果直接转正 | PASTE、SPORK、Speculative Tool Calls |
-| **Promote 提升** | 投机 task **在飞**，命中后转为权威身份、变 non-preemptible，只等剩余时间 | **PASTE 明确列为独立终态**；SPAgent 的 Action Buffer "attach to in-flight execution" |
-| **Discard 丢弃** | 无匹配，过期，静默销毁 | 所有 |
-| **Preempt 抢占** | 权威工作需要资源，投机 task 被回收 | PASTE（按 utility 从低到高回收）；SPAgent（等待超过 `t_w` 直接丢弃而非抢占，因为重叠价值已过期） |
-| **Re-execute 重执行** | 用真值重跑 | ISP（`o'_j = execution(t_j)`，被拒 action 的 observation 不继承）；cost-aware（rollback-by-re-execution） |
-| **Compensate 补偿** | 反向操作抵消已发生的副作用 | Speculative Actions 提及（refund/replace 的 roll-forward repair），**无人实现** |
-| **Overwrite 覆盖** | 后写压前写，无需补偿 | Speculative Actions OS 变体 |
-| **★ Salvage 残值回收** | **失败后回收部分进展** | 见下 |
-
-**Salvage 是缺的一项，而且它可能是最有系统味的一项。**
-
-三个独立的实例，在三个不同的层次：
-
-- **Skim 的 warm-start**：fast path 被拒后，**它最后到达的 URL 交给完整 agent**。"escalation never begins worse off than where the cheap attempt landed"。被拒的答案和推理链全部丢弃，**只有 URL 过界**。
-- **SPORK 的 partial-token accept**：被拒的 probe token 注入成 per-request draft，在同一个 decode step 里被验证 —— "no separate verification pass, no second prompt"。被拒的投机变成了 speculative decoding 的草稿。
-- **PASTE 的 promote**：严格说是命中路径，但机制是同一个 —— 复用在飞任务的部分进度。
-
-三者的共性：**投机工作往往有"公共前缀"结构**（导航前缀 / token 前缀 / 执行进度）。**底座应该把"部分进展的表示与移交"做成一等抽象**，而不是让每个算法自己发明。这可能是整个设计里最值得写论文的点：
+### 2.1 `admit` - 是否开启投机
 
 ```
-interface Salvageable<P> {
-    progress(): P                      // 提取当前部分进展
-    handoff(p: P, to: AuthorityPath)   // 移交给权威路径
+opportunity_pass(op) -> true | false              # 粗筛：该操作是否可能成为投机入口
+feasibility_pass(state, profile) -> true | false  # 精判：当前约束下是否值得开启
+admit(op, state, profile) = opportunity_pass AND feasibility_pass
+```
+
+`admit` 决定一次投机是否开启，其内部按判断成本拆成两级，先廉价后昂贵：先用操作的机会事实（`step`）判断该操作有没有可能成为投机入口，再结合当前约束与实例事实（`state`）以及 Speculation Contract 校验后的 `profile`，判断这个已识别出的机会当前是否值得开启。
+
+一个 `step` 是一个可被控制面观察到、具有明确前后状态的 Agent 继续单元。它可以是一次推理转移、一次用户输入请求、一次工具调用或远程请求，也可以是一次根据已有结果更新计划或生成输出的过程阶段。等待用户输入或工具结果本身不算持续推进；通常由一个 step 产生 pending-result boundary，过程随后暂停。
+
+粗筛判断机会是否可能存在，只读操作的可观察事实，不涉及任何预测：
+
+| 事实 | 含义 |
+|---|---|
+| 正在执行的是哪个操作 | 操作的结果被后续步骤阻塞，投机才有可隐藏的等待 |
+| 操作是否产生一个结果 | 该操作会产出需要稍后才能确定的结果，投机才有预测对象 |
+| 是否已有对该结果可用的预测手段 | 没有预测手段则投机无从谈起 |
+
+粗筛通常近静态，可以按操作类别在声明期确定，不必到运行时逐次估算。粗筛不过的操作按普通执行继续，不进入投机决策面，也不投入任何投机机制。
+
+精判判断机会当前是否值得，输入分为两类：
+
+- AScout 提供的约束与实例事实：预算与资源计数、并发压力、当前实例已携带的 `AssumptionSet` 及其成本；
+- Policy 自行建模的经济评估：预期命中与收益对失败成本的权衡、实例存活概率等。AScout 只提供评估依据，不代 Policy 下主观结论。
+
+
+### 2.2 `extent` - 单个过程推进幅度
+
+```
+extent(process_state) -> stop | continue
+```
+
+`extent` 由一组停止条件集合和根据过程事实(`process_state`)动态计算的函数组成。用来表达一个已经开启的投机执行过程希望在内部推进到哪个前沿。`process_state` 由 AScout 提供，不包含任何主观条件。
+
+- 过程进度：至少包括已完成的 step 数和过程当前所处的语义阶段；
+- 已实现目标：已经产生的输出、已完成的目标项、已消耗的明确预算或资源计数；
+- 过程语义：由任务或 Policy 定义的状态，例如必要信息是否齐全、当前阶段是否完成。
+
+当前层确定的规范字段如下。它们是 `process_state` 的语义字段，不等同于某种具体 API 格式：
+
+| 字段 | 是否必需 | 含义 |
+|---|---:|---|
+| `steps_completed` | 是 | 当前投机过程已经完成的 step 数，从 0 开始计数 |
+| `phase` | 是 | 当前过程所处的稳定语义阶段，例如 reasoning、input-wait、tool-call、result-processing |
+| `active_time` | 否 | 实际执行时间，不包含等待用户输入或外部结果的暂停时间 |
+| `resource_counters` | 否 | 已实际消耗的可计量资源，例如 token 数、工具调用次数、字节数；只记录事实，不计算成本 |
+| `result_facts` | 否 | 已产生的输出、观测结果和已完成工作项 |
+| `semantic_facts` | 否 | 由任务或 Policy 定义的语义状态，例如必要信息是否齐全、当前阶段是否完成 |
+
+除 `steps_completed` 和 `phase` 外，字段可以按领域扩展，但必须保持为可观察事实；具体事件格式由下层接口文档定义。
+
+`extent` 与嵌套深度不同，`extent` 仅约束当前 Edge 对应的单个投机过程已经推进多少，每个嵌套 Edge 的子过程拥有独立的 step 计数，子过程的 step 默认不计入父过程。
+
+`extent` 的停止条件收敛为三类 Policy 可动态评估的谓词：
+
+```text
+progress_stop(process_state) -> true | false  # 根据已观察的推进事实判断
+utility_stop(process_state) -> true | false  # 根据已实现且可观察的目标或效用事实判断
+semantic_stop(process_state) -> true | false  # 根据任务或过程语义判断
+```
+
+三类条件可以组合；任一已声明条件成立，即表示 Policy 期望当前 `extent` 已到达：
+`extent_reached = progress_stop OR utility_stop OR semantic_stop`
+
+`extent` 属于次级指标，当运行被 effect、Runtime、控制面等阻塞时则不再检查，即使停止条件均未到底。而达到 `extent` 边界通常意味着暂停并等待验证或其他裁决，不意味着自动 discard。过程是否继续、转为权威、清理或采用其他路径，由后续验证和 `dispose` 决定。
+
+### 2.3 `predict`：生成哪些 Proposal
+
+```text
+predict(predict_input) -> ProposalSet
+```
+
+`predict` 将当前 Edge 和执行上下文中的事实映射为一个或多个 Proposal。`predict_input` 当前层确定包括以下输入类别：
+
+| 输入 | 是否必需 | 含义 |
+|---|---:|---|
+| `edge_context` | 是 | 当前 Edge 的 pending-result boundary、被预测结果的类型/结构，以及后续依赖点的基本描述 |
+| `process_context` | 是 | 当前 Agent 过程可见的状态，包括上下文、当前阶段、已有输入和已完成结果 |
+| `assumption_set` | 是 | 当前 Branch 已携带的未决 Proposal ID 集合；预测不能假装这些 Proposal 已经被确认 |
+| `history` | 否 | 当前 Agent 或同类过程已经产生的历史轨迹、观测和结果 |
+| `policy_config` | 是 | Policy 自己的模型、规则、阈值、候选数量限制等配置 |
+| `capability_context` | 是 | Contract/Runtime 已声明的可用能力和约束，例如相关效果是否可处理、可用预算或最大候选数 |
+
+`edge_context` 确定要预测哪个边界结果；`process_context` 和 `history` 提供生成候选所需的事实；`assumption_set` 保持未验证前提的可见性；`capability_context` 说明候选是否具备安全执行和验证的条件。来源可以是模型、规则、历史轨迹、外部系统或其他 Policy 组件，但来源不改变 Proposal 的语义。
+
+`predict` 可以使用这些输入作出推断或规则判断，但不负责验证 Proposal 是否正确，也不负责决定 Proposal 最终能否提交。
+
+`ProposalSet` 统一表示输出：
+
+```text
+ProposalSet = {
+    proposals: [Proposal, ...],
+    generation: batch | incremental # 表示 Proposal 的生成是一次性的还是递增的
 }
 ```
 
-### 轴 7：保真度契约 (Fidelity) —— lossless 不是布尔值；且它不是轴，是导出不变量
+每个 `Proposal` 至少包含一个当前 Edge 边界的候选输入：
 
-**为什么不与 Equivalence 合并（二者可独立变化）**：
+```text
+Proposal = {
+    payload,
+    provenance?
+}
+```
 
-- 固定 L0 变 Fidelity：SPORK 是 L0 + trajectory-equivalent；Speculative Interaction Agents 也用精确的 ID 键匹配，却只有 bounded-degradation —— 它掉保真度的通道**根本不是匹配谓词**，而是"模型在不完整用户输入上已经动过手" + SFT 模型的退化行为。
-- 固定 trajectory-equivalent 变 Equivalence：SPORK 是 L0，Speculative Actions 是 L2。
+`payload` 可以是原子值或结构化值；`provenance` 可选，用于记录候选来自模型、规则、历史轨迹或外部系统等来源。结构化计划仍只是边界上的候选输入，实际展开由 candidate Branch 完成。输出可以是单候选、有限候选集、带 Policy 元数据的候选集，或增量生成的候选序列。
 
-**但为什么它也不是一条轴**：Equivalence 是**机制层旋钮**，Fidelity 是**系统层承诺**。保真度可以从至少四条互不相同的通道丢失 —— 放松匹配（ISP 软匹配）、提前释放效果（OS 变体**根本没有匹配谓词**却破坏了轨迹等价）、不启动权威（SPAgent Aggressive）、模型协议退化（Spec Interaction）。**Fidelity 是这些轴上的一个合取，不是与它们并列的一维。**
+同一个 Edge 可以有多个 Proposal，每个 Proposal 可以派生出一个候选 Branch。Policy 可以根据自己的配置和已观察事实选择固定或动态的数量，但候选 Branch 仍必须遵守隔离、AssumptionSet 和 single-winner 约束。候选数量决定了投机的宽度 breadth；breadth 是 `predict` 的取值结果。每个已发出的 Proposal 必须不可变；如果 Policy 无法生成有效候选，应回退到普通/权威路径或结束本次投机入口。
 
-**正确处理（这是 mechanism）**：
+预测对象不局限于某种 Agent 行为。它可以是 action、observation、工具调用、命令、远程请求、用户输入或它们组成的计划，只要后续工作可以暂时依赖该 Proposal，并且存在验证或接受它的依据。
 
-1. **静态**：由各轴设置**推出保真度上界**（不可能优于最弱的一轴所允许的）。
-2. **加载期**：把开发者的**声明**与推导出的上界对撞，不一致则拒绝加载。声明仍然需要 —— 因为存在底座看不见的通道（如模型退化）。
-3. **运行期**：由 shadow mode **实测验证**声明是否真的达成。静态只能证上界，证不了达成。
+### 2.4 `launch`：是否取得权威值
 
----
+```text
+launch: eager | lazy | absent
+```
 
-所有论文都在说 lossless，但说的**不是一件事**：
+`launch` 决定这条 Edge 的权威值如何取得、是否取得、何时取得。权威值是该 Edge 真实结果 `i` 的可靠来源——真实执行、主生成流、用户输入、环境反馈或远程服务——只有拿到它，`match` 才能与 Proposal 对照；拿不到时只能依赖 validator 或其他可接受性判断。
 
-| 契约等级 | 保证什么 | 论文 |
-|---|---|---|
-| **Trajectory-equivalent** | 最终轨迹逐步等同于串行执行 | Speculative Actions（明确指出**只对 trajectory 成立，cost 不成立**）；DSP（"final execution path always conforms to T's policy"）；Speculate with Memory（"actor sees identical context regardless of prediction outcomes"）；PASTE（"a wrong prediction can waste bounded work, but it cannot expose an unconfirmed result to the agent"） |
-| **Outcome-equivalent（统计）** | 端到端指标不劣化，单次可能不同 | Skim（三个 backbone 上 accuracy 持平甚至略升，但 verifier precision 只有 82%，约 1/5 被接受的 fast path 可能是错的；论文**没有把静默错误率和 cascade 率分开报**） |
-| **Bounded-degradation** | 明确接受有损，但有界 | SPAgent Aggressive 阶段（论据：早期 action 是 evidence gathering，猜错"often still task-relevant"）；Speculative Interaction Agents（"minor accuracy loss"，HotpotQA 71.6→71.0） |
-| **Best-effort** | 不保证 | Speculative Actions OS 变体（中间态被 workload 真实经历，trajectory 等价被真实打破）；ISP 的软匹配模式 |
+“权威值来自谁”不是 Policy 可以替换的选项，而是这条 Edge 的固有事实：`u` 是谁，真实结果就由谁产生。例如 `u` 是一条命令时真值来自真实执行，`u` 在等待用户输入时真值来自用户。Policy 能决定的只有“是否取得、何时取得”，即 `launch` 的取值：
 
-**这是底座最大的差异化机会。** 现状是：每个算法在自己论文里论证自己 lossless，读者无法验证，也无法在生产里持续验证。底座应该让 **Fidelity 成为可声明、可强制、可审计的属性**：
-
-- **可声明**：算法在注册时声明契约等级。
-- **可强制**：底座校验轴间约束（声明 trajectory-equivalent 却用 L1 等价 → 拒绝加载；使用 Runtime 无法落实的效果处理纪律 → 拒绝加载或明确降级）。`IRREVERSIBLE` 效果是否可以在效果边界阻塞、等待 Branch 裁决，不由 Fidelity 声明单独决定，而由 Effect Management 与 Runtime capability 共同校验。
-- **可审计**：shadow mode（投机与串行同跑，只提交串行结果）是**验证 losslessness 的唯一手段**，也顺带是 predictor 的数据管道。cost-aware 论文把它列进五阶段校准的第 2 阶段，但那是它的方法的一部分；**在底座里它应该是基础设施**。
-
----
-
-## 阶段映射
-
-一次投机执行可以按以下阶段理解。表中的决策是当前最重要的代表性内容，不是完整清单。
-
-| 阶段 | 代表性 Policy Decisions |
+| 取值 | 语义 |
 |---|---|
-| 机会发现 | 识别并规范化潜在的投机 Edge |
-| 准入判断 | `admit`：是否开启一次投机执行 |
-| 预测生成 | `predict`：预测对象、Proposal 生成方式与数量 |
-| 过程执行 | `extent`：单次过程内部的推进边界；`effect`：过程内效果处理纪律 |
-| 权威获取与验证 | `launch`、`authority`、`match`：权威路径、验证来源和兼容性判定 |
-| 处置与提交 | `dispose`：验证、停止、取消或抢占后的处理 |
+| **Eager** | 尽早取得权威值：权威路径可并行启动就与投机工作并行启动；权威来自外部（用户、环境）则照常等待其真实到达 |
+| **Lazy** | 先只靠 validator 或其他可接受性判断裁决；投机结果不可接受时才补取权威值，包括在此刻询问用户 |
+| **Absent** | 从不取得权威值，即使它天然存在（例如来自用户输入）也可以放弃，只靠 validator 或其他可接受性判断裁决 |
 
-机会发现是 Policy 与 Mechanism 的接缝：接入侧识别并规范化 operation 及其 pending-result boundary，Policy 再对潜在 Edge 作出决策。Edge 不构成独立的注册实体；真正的投机注册是创建携带 Proposal 的 candidate Branch。效果纪律、资源条件和 Speculation Contract 限制各项决策的可行范围。
+Absent 允许策略放弃本应到来的用户输入，只按可接受性判断放行；这通常降低 Fidelity，一般不可取，但属于 Policy 的合法选择，能否采用由 Fidelity 契约校验。
 
-## 语义对象
+权威路径能否被“启动”取决于其来源形态。来源是系统内的可发起路径（更强的 target、主生成流、可重跑的真实执行）时，Eager 意味着并行启动、Lazy 意味着稍后补启；来源是系统外的天然输入（用户、环境）时没有可“启动”的路径，Eager/Lazy 只表达“照常等待”还是“必要时才等待”。
 
-Policy Decisions 作用于一组核心语义对象：
+### 2.5 `effect`：管理投机效果
 
-- **Proposal**：投机路径使用的预测值。
-- **Authority**：提供真实输入、结果或外部权威判断的可选来源；Policy 可以选择或等待其来源，但实际执行可能由 Runtime 提供。Authority 为空时，Proposal 仍可由独立 validator 按可接受性条件验证。
-- **Equivalence**：判断 Proposal 与验证依据是否兼容或可接受的关系。
-- **Disposition**：验证后对投机工作采取的处置意图；实际清理和状态转换由 Mechanism 强制完成。
+`effect` 决定投机过程中每个 step 产生的外部效果如何纳入管理，以及允许采用哪些处理纪律。一次投机执行可能包含多个 step，并涉及不同的 `StateDomain` 与 `EffectClass`。
 
-这些对象属于 AScout 的执行语义，不等同于 Policy 组件，也不表示其状态全部由 Policy 持有。
+`effect` 对每个已识别的效果返回处理计划：
 
-## Policy 与 Mechanism 的边界
+```text
+effect(effect_descriptor, context) -> EffectPlan
+```
 
-Policy 可以组合和实现八类 decision，但不能拥有 Runtime mutable state，也不能把策略意图伪造成已经完成的 Runtime 操作。以下内容由 Mechanism 或 Runtime 强制：
+处理计划的模式包括：
+
+| 模式 | 含义 |
+|---|---|
+| `default` | 采用服务 Adapter/Contract 声明的默认方案；未声明默认方案时不能静默放行 |
+| `simulate` | 拦截真实请求，不访问真实服务，在 Branch 内生成标记为 synthetic 的模拟响应 |
+| `transform` | 将原操作转换为 dry-run、staging 或其他等价的非变异形式 |
+| `stage` | 暂存真实效果，满足提交条件后再释放 |
+| `mediate` | 通过受管代理或 broker 执行 |
+| `block` | 在效果边界暂停当前 Branch，等待后续裁决 |
+| `allow` | 在声明范围内直接执行真实请求 |
+| `deny` | 直接拒绝该效果或拒绝相关投机环节 |
+
+`simulate` 要求存在针对该服务的 Adapter，并由 Adapter 声明哪些请求可以模拟以及模拟响应如何生成。模拟响应不是真实 Authority，必须带有 synthetic 来源和未验证假设；后续仍需通过 Authority、validator 或其他明确规则验证。这即正式语义所称的**伪装执行**，其约束与保证见 [效果管理设计](effect-management.md)。`EffectClass` 描述效果可采用的处理纪律，`StateDomain` 描述效果作用的状态域，二者保持正交；Policy 选择的模式必须经过 Effect Management、Contract 和 Runtime capability 校验。
+
+Policy 可以选择暂存、代理、延迟释放、阻塞、补偿或其他合法处理方式，但不能把效果排除在 AScout 的最低纳管范围之外。Effect Management 和 Runtime 必须检查所选纪律是否有能力落实。
+
+如果某个效果暂时无法安全提前处理，系统可以在该效果边界阻塞当前 Branch，同时保留已经安全完成的前置进展；验证接受后继续，验证拒绝或过程取消后清理、补偿或回收。只有无法安全阻塞、无法在接受后继续、也无法在淘汰后清理时，才应拒绝相关投机环节或明确降级。
+
+### 2.6 `match`：判断兼容或可接受
+
+`match` 将 Proposal、验证依据和比较上下文交给 Policy 规定的匹配规则：
+
+```text
+match(proposal, evidence, match_context) -> MatchResult
+```
+
+`evidence` 可以是 `authority` 提供的真实结果，也可以是 validator 提供的可接受性判断。没有 Authority 时，`match` 判断的是 Proposal 是否满足明确的验收条件，而不是假设存在一个可比较的真实值。
+
+`MatchResult` 至少区分以下结果：
+
+```text
+MatchResult = {
+    verdict: compatible | incompatible | indeterminate | error,
+    score?: MatchScore
+}
+```
+
+`score` 是可选的。严格相等或确定性 predicate 可以直接产生 `verdict`，不需要分数；模糊匹配、相似度匹配或带容差的语义判断可以返回分数，再依据 Policy 声明的阈值得出 `verdict`。分数的含义、计算函数、范围、方向和阈值全部由用户/Policy 定义，AScout 只提供承载、记录和在同一 Edge 的相同匹配规则上下文内进行比较的机制。分数不是 AScout 推断的正确概率，也不在不同 matcher、版本或 scale 之间比较。
+
+匹配关系至少应明确以下内容：
+
+- 比较的是 Proposal 本身、其输出，还是对后续行为的影响；
+- 该关系需要权威值，还是只要 validator 的可接受性判断（权威值不可得或 launch=Absent 时）；
+- 判断失败、不确定或 validator 出错时如何处理；
+- 该关系允许的 Fidelity 上界。
+
+放宽匹配关系可能使结果不再与串行执行完全一致，不能对声明为严格 trajectory-equivalent 的策略静默采用。`indeterminate` 和 `error` 不能被静默当成 `compatible`；后续如何暂停、重试、降级、重新执行或丢弃，由 `dispose` 和运行控制处理。分数只能支持兼容判断或同一 Edge 内的候选排序，不能绕过 Fidelity、效果边界或 single-winner 约束。
+
+### 2.7 `dispose`：处置投机工作
+
+`dispose` 根据投机过程进入处置阶段的原因和当前上下文，返回一个可组合的处置计划：
+
+```text
+dispose(branch, resolution, context) -> DispositionPlan
+```
+
+`resolution` 表示为什么进入处置，而不是具体怎么处置：
+`resolution =[accepted, rejected, indeterminate, error, cancelled, preempted, extent_reached, failed]`
+
+`DispositionPlan` 可以包含一个或多个处置意图：
+
+- **Reuse**：已完成的候选结果通过验证后直接复用；
+- **Promote**：将仍在运行的候选 Branch 转为权威身份并继续执行；
+- **Salvage**：提取安全的部分进展，交给权威路径或后续过程；
+- **Re-execute**：使用权威结果重新执行必要工作；
+- **Discard**：丢弃候选工作及其未确认产物；
+- **Compensate**：对已发生且可补偿的效果执行反向处理；
+- **Overwrite**：在明确允许的状态语义下由后写覆盖先写。
+
+这些意图可以组合。例如，`Salvage + Discard` 表示先移交可保留的部分进展，再丢弃剩余候选工作；`Compensate + Discard` 表示先处理已发生效果，再清理分支。`Promote` 表示身份转换后继续执行，`Reuse` 表示采用候选结果并清理其他候选。`dispose` 不重新判断 `match`，也不决定过程是否还能继续推进；它只根据已有裁决选择后续处置。
+
+这些是 Policy 的处置意图，不是对 Runtime 生命周期的直接调用。实际的 Branch 转换、状态回收、效果清理、资源释放和 commit/discard 由 Mechanism 与 Runtime 强制执行。未命中的候选路径不能通过逐个修补绕过其携带的错误前提；依赖被否定时，相关子图应整体进入回收或丢弃流程。
+
+## 3. 阶段映射与决策依赖
+
+下表将决策面映射到典型投机执行阶段。它不是固定调用顺序，也不是完整的决策清单。
+
+| 阶段 | 代表性 Decision | 说明 |
+|---|---|---|
+| 机会发现 | `admit` | admit 判断该操作是否可能成为投机入口（粗筛），Mechanism 识别并规范化 operation 及其结果未到达的等待边界。 |
+| 准入判断 | `admit`、`launch` | admit 判断当前约束下是否开启投机执行（精判）；launch 决定权威值是否取得、何时取得 |
+| 预测生成 | `predict` | 生成一个或多个 Proposal |
+| 过程执行 | `extent`、`effect` | 限制过程推进，并管理每个 step 的状态与外部效果 |
+| 验证 | `match` | 获得验证依据并判断 Proposal 是否兼容或可接受；权威值是否可取由 launch 决定 |
+| 处置与提交 | `dispose` | 复用、继续、转正、重执行、清理、回收或补偿 |
+
+一个 decision 可以跨越多个阶段。例如，`effect` 的处理会影响过程执行和最终处置，`launch` 同时影响准入和验证依据的可用时间。阶段映射用于说明责任，不应被解释为把七类 decision 串成不可替换的固定流程。
+
+## 4. 组合与嵌套
+
+### 4.1 组合
+
+同一 Edge 上的多个 Proposal/Branch 是并行候选关系，主要由 `predict` 的候选数量、Branch 隔离和 single-winner 约束决定，不引入额外的组合语义：
+
+```text
+Edge E
+├── Proposal p1 -> Branch B1
+├── Proposal p2 -> Branch B2
+└── Proposal p3 -> Branch B3
+```
+
+组合候选共享同一个 pending-result boundary 和 execution base，但彼此默认不直接协作。候选数量是 breadth 的取值结果，最终至多一个 Branch 成为 winner。
+
+### 4.2 嵌套
+
+候选 Branch 被创建后会像普通执行一样继续运行，因此也可能遇到新的 pending-result boundary。嵌套是某个 Branch 在继续执行时遇到新的 Edge，并再次调用 `admit`：
+
+```text
+Edge E1
+└── Proposal p1 -> Branch B1
+    └── Edge E2
+        └── Proposal p2 -> Branch B2
+```
+
+```text
+AssumptionSet(B1) = {p1}
+AssumptionSet(B2) = {p1, p2}
+```
+
+新 Edge 仍按照当前 task 已绑定的同一个 Policy profile 执行既有 decision；当前不因嵌套深度切换到另一套 Policy。新 Edge 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Edge 的 `extent` 和 step 计数独立于父 Edge。未来按嵌套深度或其他上下文切换 Policy，属于独立扩展。
+
+每个候选 Branch 携带其路径上的未决 Proposal ID 集合：`AssumptionSet = frozenset[ProposalId]`
+
+`AssumptionSet == ∅` 表示工作单元是权威工作。Proposal 被确认时，从依赖它的工作单元中移除其 ID；集合变空的工作单元才具备提交条件。Proposal 被否定时，依赖它的后续子图失效；控制面向受影响的 Branch 直接发送取消命令，各 Branch 作为独立执行个体停止自身工作并完成本地及受管效果清理，不要求一个集中式机制统一遍历和回收整棵子树。非空 `AssumptionSet` 产生的数据只能流向同样携带未决 Proposal ID 的容器，不能直接进入权威上下文。
+
+组合与嵌套通过四类连接共同实现：树结构归属、假设依赖、用户输入传播和生命周期控制。
+
+用户输入包括普通输入和用户中断；二者都传播给当时仍在运行的全部 descendants。普通输入作为新的输入事实进入各 Branch；中断虽然同样来自用户输入，但会触发各 Branch 自己的停止/取消处理。输入和中断不通过 `AssumptionSet` 传播。
+
+## 5. Fidelity 是导出契约
+
+Fidelity 不是独立的 Policy Decision，而是由决策组合、Runtime 能力和 Policy 声明共同形成的契约。它至少受到以下因素影响：
+
+- `launch` 是否取得权威值（Absent 意味着放弃真实依据，只能走可接受性裁决）；
+- Edge 的权威来源本身是否定义正确性（固有事实，Policy 不能改变）；
+- `match` 采用的等价或可接受关系；
+- `effect` 是否在验证前释放外部效果；
+- `dispose` 是否允许重执行、补偿或其他有损处置；
+- predictor 或 Agent 本身是否存在声明之外的退化行为。
+
+控制面应先根据这些选择推导可达到的 Fidelity 上界，再将上界与开发者声明进行比较。声明超过上界时，必须拒绝加载或明确降级。运行期间还应通过 shadow 或其他审计手段检查声明是否实际达成；静态检查只能证明上界，不能证明运行结果。
+
+常用的契约等级包括：
+
+| 等级 | 含义 |
+|---|---|
+| **Trajectory-equivalent** | 最终执行轨迹与对应的权威执行保持规定的逐步等价 |
+| **Outcome-equivalent** | 端到端结果在规定范围内等价，但单次轨迹可能不同 |
+| **Bounded-degradation** | 明确允许有损，但退化受到声明的边界约束 |
+| **Best-effort** | 不提供严格的等价或退化保证 |
+
+具体的 Fidelity 字段、Contract 校验和运行期审计见 [Speculation Contract 设计](speculation-contract.md)。
+
+## 6. Policy 与 Mechanism 的边界
+
+Policy 可以实现或组合七类 decision，但不能拥有 Runtime mutable state，也不能把策略意图伪造成已经完成的 Runtime 操作。以下内容必须由 Mechanism 或 Runtime 强制：
 
 - candidate Branch 的创建、隔离、暂停、恢复、接受、丢弃和清理；
-- `AssumptionSet` 的传播、验证后的确认/否定和非空假设数据的信息流约束；
-- single-winner、共享验证依据、commit barrier 与效果阻塞；
+- `AssumptionSet` 的传播、确认/否定和非空假设数据的信息流约束；
+- single-winner、共享验证依据、commit barrier 和效果阻塞；
 - 资源所有权、预算执行、抢占、取消和运行期成本记账；
-- Policy 声明与 Runtime 能力之间的 Contract 校验，以及 Fidelity 的加载期检查和运行期审计。
+- Policy 声明与 Runtime 能力之间的 Speculation Contract 校验，以及 Fidelity 的加载期检查和运行期审计。
 
-Policy 的 `effect` decision 可以选择效果处理纪律，但不能排除 AScout 为正确性规定的最低纳管范围；Effect Management 和 Runtime 负责将该选择落实为暂存、转换、阻塞、提交、取消、清理或补偿。
+Policy 决定“希望采用哪种策略”，Mechanism 保证该策略在正确性、隔离、资源、副作用和清理约束内执行。能力不足不能静默改变语义，只能拒绝、明确降级或选择其他合法路径。
 
-## 可扩展性
+## 7. 扩展规则
 
-Policy Decision 集合不固定为八项。后续可以加入 resolver delegation、等待与恢复、失败 fallback、Runtime Service 选择或其他决策。新增决策必须说明所属阶段、输入输出和与既有决策的依赖，并遵守 AScout 的 Edge、Branch、single-winner、隔离、capability、obligation、commit/discard/accept 和 cleanup 语义。
+七类 decision 是当前完整的基础决策面。后续如需增加决策，必须说明：
 
-投机的收益取决于等待时长、预测命中率与提前工作量的相对大小，这决定了准入与调度必须是机制的一部分，而不是各算法各自处理。
+- 它解决的独立策略问题；
+- 所属阶段、输入和输出；
+- 与现有七类 decision 的依赖或区别；
+- 对 Edge、Proposal、Branch、未决 Proposal 依赖、single-winner、commit/discard/accept、obligation 和 cleanup 语义的影响。
+
+如果新增内容只是某一 decision 的取值、实现方式或运行时优化，不应新增为独立 decision。`breadth`、嵌套 `depth` 和 Fidelity 已属于这种情况。

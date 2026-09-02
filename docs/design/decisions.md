@@ -284,6 +284,14 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **原因**：把策略选择集中在控制面，可以让不同 Agent 复用同一套机制并替换策略；把 best-effort 与固定正确性约束分开，既保留优化空间，也避免把"启用"误解为无条件分支或性能保证。
 
+## D-041：authority 决策槽并入 launch
+
+**选择**：决策面由八槽改为七槽，`S(E) = (admit, extent, predict, launch, effect, match, dispose)`。撤销独立的 `authority` 决策槽。权威值来自谁是这条 Edge 的固有事实（`u` 是谁、真实结果就由谁产生），不是 Policy 可替换的决策；Policy 通过 `launch` 决定该权威值是否取得、何时取得（Eager / Lazy / Absent）。Absent 允许策略放弃天然存在的权威值（如用户输入）而只靠 validator 或可接受性判断，是否允许由 Fidelity 契约校验。validator 不是权威值来源，归属 `match` 的可接受性判断。
+
+**废弃的旧表述**：`authority` 作为独立决策槽的语义（“验证依据的真实来源选择”）、以及将 validator 列为 authority 来源之一的做法。语义权威见 `design-model.md` §3.1 与 `policy-decisions.md` §2.4。
+
+**原因**：launch 的取值已经完整决定权威值的取得方式（是否取、何时取）；来源本身由 Edge 决定，不构成独立策略选择，拆槽造成职责重叠与表述混淆。
+
 ## 相关文档
 
 - [设计模型](../design-model.md)：抽象概念层

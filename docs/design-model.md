@@ -63,48 +63,9 @@ Agent 默认无需感知背后的投机分支，仍可按原方式完成任务�
 
 Edge 是一个全局概念，从一个投机机会开始，到这个投机机会对应的投机执行过程结束为止。Edge 对应一次投机机会，同一个 Edge 上可以并行存在多个 Proposal `i^n`，每个 Proposal 各自派生出它的候选投机工作。Edge 表示在哪个未决依赖上进行投机，Proposal 表示对该依赖结果的一个预测，Branch 表示基于该预测实际展开的候选执行。所以实际上一个 Edge 由多个对应的 Proposal 和 Branch 对构成
 
-Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策，通过对不同 Policy Decision 的组合可以生成不同的执行策略。一次投机执行由八类 policy decision 的组合完全刻画，每个 decision 都是控制面运行时需要进行的一次决策，具体而言包含以下内容。对每个 decision 的详细描述见 [Policy Decisions 设计](design/policy-decisions.md)。
+Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策，通过对不同 Policy Decision 的组合可以生成不同的执行策略。一次投机执行由七类 policy decision 的组合完全刻画：`admit`、`extent`、`predict`、`launch`、`effect`、`match`、`dispose`。对每个 decision 的详细描述见 [Policy Decisions 设计](design/policy-decisions.md)。
 
-```
-S(E) = ( admit, extent, predict, launch, authority, effect, match, dispose )
-```
-
-| decision | 决策内容 | 对应阶段 |
-|---|---|---|
-| admit | 是否开启一次投机：预算、资源与预期收益准入 | 准入判断 |
-| extent | 本次投机执行内部推进多远的边界 | 过程执行 |
-| predict | 预测对象与 Proposal 数量（breadth 并入） | 预测生成 |
-| launch | 权威路径 `A_u` 是否启动及启动时机 | 准入判断 |
-| authority | 验证依据的真实来源选择 | 验证 |
-| effect | 投机各 step 外部效果的处理纪律 | 过程执行 |
-| match | 真值到达时 `î` 与 `i` 的等价判定 | 验证 |
-| dispose | 命中或未命中后的处置选择 | 处置与提交 |
-
-
-
-
-**组合与嵌套。** 嵌套投机就是投机机会的串联：下游投机建立在若干上游尚未验证的机会之上，因此它是否成立取决于这些上游机会。每条投机边的活跃投机都隐含一个未验证前提——"该 Proposal `î` 成立"；一条路径携带的前提，是它沿途所有未验证 Proposal 的前提之并集。验证依据确定时，验证决定这些前提的去留：兼容或可接受时，那个 Proposal 成为现实，依赖它的下游随之少一个前提，前提清空的那条就地转正为权威路径；不兼容或不可接受时，建立在错误前提上的整条后续链整体失效，进入回收或丢弃，不做逐个修补。由此得到一条信息流约束：未验证路径产生的数据不能进入权威路径，只能经验证这一步流入，避免投机产物污染权威上下文。
-**前提的形式化：Assumption DAG。** AScout 把每个前提建模为一个 Assumption：
-
-```
-Assumption     = (edge_id, proposal_id)
-AssumptionSet  = frozenset[Assumption]    # 工作单元携带的依赖闭包
-```
-
-规则：
-
-- `AssumptionSet == ∅` ⟺ 该工作单元是权威工作；
-- 某 assumption 被 **confirm** → 从所有工作单元的 set 中移除；set 变空的工作单元可以 commit；
-- 某 assumption 被 **refute** → 依赖它的整个子图进入 Salvage → Discard；
-- 投机工作单元之间**可以**互相依赖（推测链），set 做并集。
-
-由此得到一条可静态检查的**信息流约束**：非空 AssumptionSet 产生的数据只能流向同样非空的容器，唯一降级通道是验证。底座能强制它，单个算法做不到。
-
-**嵌套投机。** 实例视角下，一次投机会并行运行多个 Agent 实例；每个投机实例执行的步骤"就是正经执行"，因此它自己也可以继续投机——这就是嵌套。边视角与实例视角由 AssumptionSet 连接：边引入一个 Assumption，实例携带其路径上所有边引入的假设之并，`AssumptionSet == ∅` ⟺ 权威实例。
-
-**透明嵌套与反射 gating。** 投机实例与权威实例二进制同构，Agent 业务逻辑与 Predictor 都不知道自己是投机的（透明）；但 Cost/admission 策略必须知道，底座需要透传 `P(实例存活)`（反射），否则深度投机实例会按深度 0 的账过度投机。这是对 gating 的改动，不是对算法行为逻辑的改动。
-
-**嵌套拓扑的成本与形态。** 分支只在投机或真实调用返回时才延伸、不一致子树立即剪枝，因此活跃分支数与执行视界无关，成本是速率界而非组合界。depth 不是策略参数，而是在 frontier budget 下按优先级涌现的属性；浅层分叉、深层单链是划算的形态——每层存活率被浅层 breadth 推高后，深度才可行。
+组合与嵌套：同一 Edge 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的 Edge，由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定都会使依赖它的后续工作失效。AScout 以树形、single-winner 和受控信息流约束这些关系；当前 task 内的嵌套 Edge 使用同一个 Policy。Proposal 依赖、确认与否定、Branch 取消以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
 
 ### 3.2 状态与效果
 
