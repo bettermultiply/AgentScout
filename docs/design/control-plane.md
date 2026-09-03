@@ -6,9 +6,9 @@
 
 ## 1. 控制面在四侧中的位置
 
-一级架构为 Agent 接入侧 → 控制面 → Runtime Adapter → Runtime。控制面持有 AScoutAgent 与 Speculative Tree 的控制状态、Policy 绑定、请求校验、操作编排和 Runtime event 解释；Runtime 持有节点执行状态、资源归属、隔离、staged effect、obligation 与受管状态转换。控制面不直接触碰 Runtime 内部状态，只经 Runtime Adapter 交换 typed operation 与 event。各侧所有权与调用方向的权威定义见 [架构](../architecture.md) 与决策 D-039。
+完整调用路径为 Agent 接入侧 → 控制面 → Runtime Adapter → Runtime。控制面持有 AScoutAgent 与 Speculative Tree 的控制状态、Policy 绑定、请求校验、操作编排和 Runtime event 解释；节点执行、资源、隔离、staged effect、obligation 与状态转换实际发生在外部 Runtime。控制面不定义或直接触碰 Runtime 内部状态，只经 Runtime Adapter 交换 typed operation 与 event。各侧责任与调用方向的权威定义见 [架构](../architecture.md) 与决策 D-039。
 
-Instance 是 Runtime 管理的运行对象，不是控制面的一部分。控制面看到的是它自己维护的 Speculative Tree 与 Branch 关系；Instance 的真实进程、workspace 与效果状态归 Runtime 所有。二者通过 Runtime Adapter 的稳定接口对齐。
+Instance 是外部 Runtime 承载的运行对象，不是控制面的一部分。控制面看到的是它自己维护的 Speculative Tree 与 Branch 关系；Instance 的真实进程、workspace 与效果状态位于 Runtime 内部，但 AScout 不规定其组织方式。二者通过 Runtime Adapter 的稳定接入边界对齐。
 
 ## 2. 控制面要实现的语义
 
@@ -16,7 +16,7 @@ Instance 是 Runtime 管理的运行对象，不是控制面的一部分。控�
 
 Policy 返回的是策略层面意图：是否对该机会投机、预测哪些 Proposal、何时取得权威值、如何处理效果、如何判定命中、如何处置候选。这些意图不能直接对应一次后端调用。控制面先把它们编排成有明确语义的受管操作——创建候选、登记未决依赖、验证、接受、丢弃、清理等——每个操作都有前置条件、作用对象和后续状态。
 
-例如 Policy 的 `dispose` 返回"丢弃某候选"，控制面形成 `discard` 操作，它包含候选身份、当前控制状态、取消范围与清理要求，不是一个可由任意调用方直接写入的布尔字段。控制面只在收到 Runtime 对应结果或事件后，才把候选的控制状态推进到相应终态。
+例如 Policy 的 `dispose` 返回"丢弃某候选"，控制面形成 `discard` 操作，它包含候选身份、当前控制状态、取消范围与清理要求，不是一个可由任意调用方直接写入的布尔字段。控制面只在收到 Adapter 返回的对应结果或事件后，才把候选的控制状态推进到相应终态。
 
 ### 2.2 保持的固定语义
 
@@ -49,7 +49,7 @@ Scheduler 负责准入、预算、优先级、取消和资源协调。它决定�
 
 ### 3.4 Effect Coordinator
 
-Effect Coordinator 负责控制面内效果处理的协调。它根据效果分类与状态域，结合 Policy、Contract 与 Runtime 能力形成允许、暂存、转换、延迟、阻塞或补偿计划，并经 Runtime Adapter 请求 Runtime 执行。它不持有真实的暂存效果、obligation 或隔离状态——这些归 Runtime 的 Effect backend。效果阻塞发生在效果边界：投机执行遇到不能安全暂存或释放的效果时停在门口，保留此前的前置进展，等待裁决。
+Effect Coordinator 负责控制面内效果处理的协调。它根据效果分类与状态域，结合 Policy、Contract 与 Adapter 声明的后端能力形成允许、暂存、转换、延迟、阻塞或补偿计划，并经 Runtime Adapter 请求后端执行。它不持有真实的暂存效果、obligation 或隔离状态——这些状态位于外部 Runtime，但其内部组织不由 AScout 定义。效果阻塞发生在效果边界：投机执行遇到不能安全暂存或释放的效果时停在门口，保留此前的前置进展，等待裁决。
 
 ### 3.5 Ledger
 

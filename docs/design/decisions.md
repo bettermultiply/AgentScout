@@ -104,7 +104,7 @@
 
 ## D-023：Live-child discard 与受控结果披露
 
-**选择**：Parent 可以在 live direct child 尚未 commit 时主动 discard 整个 child subtree。Accept 只允许作用于已经显式 commit 的 candidate；discard 不要求 candidate ready，也不自动把 partial state 或结果反馈给 parent。Runtime 必须线性化并发 commit 与 discard。
+**选择**：Parent 可以在 live direct child 尚未 commit 时主动 discard 整个 child subtree。Accept 只允许作用于已经显式 commit 的 candidate；discard 不要求 candidate ready，也不自动把 partial state 或结果反馈给 parent。控制面只接受能够表明并发 commit 与 discard 已被后端线性化的 Adapter 结果。
 
 **Disposition**：Not accepted 不等于 infeasible。受控 metadata 区分 invalidated、rejected、cancelled、failed 和 superseded 等原因。Commit summary/evidence 属于显式受控通信，控制面 可以在 Proposal 验证前封存；已经披露给 parent 的知识不能由 discard 回滚。
 
@@ -138,7 +138,7 @@
 
 ## D-027：控制面、Runtime Adapter 与 Runtime 解耦
 
-**状态所有权**：控制面拥有 Agent/product integration 的控制语义、speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图。Runtime 独占节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理。Runtime 可以实现节点间状态传播，但不拥有整体 Speculative Tree 视图。
+**状态边界**：控制面拥有 Agent/product integration 的控制语义、speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图。节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理实际存在于外部 Runtime。AScout 不定义 Runtime 内部如何组织或传播这些状态；Runtime Adapter 只向控制面呈现所需能力、结果与事件，不能把后端状态冒充为整体 Speculative Tree 视图。
 
 **接口**：控制面与 Runtime 经 Runtime Adapter 交换 typed、可版本化的粗粒度 command/event。Runtime Adapter 定义稳定 contract，并把它映射到目标 Runtime 的能力、原语、transport 与事件。控制面不得直接修改 Runtime mutable state；Runtime 不解释 Agent prompt、模型格式、candidate 质量或整体 Speculative Tree 视图。复杂 Proposal 验证可以由持有 validator capability 的控制面计算；obligation 与 Accept 相关的状态转换必须经 Runtime Adapter 交给 Runtime 执行。
 
@@ -196,9 +196,9 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **核心保证**：AScout 以高效的 sibling non-interference 为核心，不要求控制面自身提供抵御恶意 Branch payload 的安全沙箱。Child Agent 是可信参与者，并知道自己的 Branch role/context；Agent-facing identity awareness 与 runtime 内部裸 identity、跨 Branch authority 是不同概念。
 
-**强制边界**：Agent integration 属于 Agent 接入侧；policy 和 orchestration 属于控制面；Runtime 必须强制验证 Branch identity/capability，并维持 sibling isolation、进程与资源归属、loser cleanup，以及 observation surface 内的 external effect mediation。这些属于 AScout 正确性，不依赖 Agent 自愿合作执行 lifecycle 或资源清理。
+**强制边界**：Agent integration 属于 Agent 接入侧；policy 和 orchestration 属于控制面。AScout 只接受能够通过 Adapter 证明后端已落实 Branch identity/capability validation、sibling isolation、进程与资源归属、loser cleanup 以及 observation surface 内 external effect mediation 的接入。这些属于 AScout 正确性，不能只依赖 Agent 自愿合作执行 lifecycle 或资源清理。
 
-**Runtime contract**：不同 Runtime 可以在相同 AScout 语义上提供不同的附加安全保证。默认 Runtime 可以面向可信 workload、优先效率而不提供有效的 adversarial security guarantee；需要抵御不可信 workload 时，控制面根据自身 policy/config 选择 hardened Runtime，Runtime Adapter 负责连接和协议适配。AScout 不设计 security guarantee negotiation，也不要求控制面认证 Runtime 的安全等级。安全能力不得改变 Branch lifecycle、commit/discard、single-winner 或状态可见性语义。
+**后端安全能力**：不同 Runtime 可以提供不同的附加安全保证。默认接入可以面向可信 workload、优先效率而不提供有效的 adversarial security guarantee；需要抵御不可信 workload 时，部署方选择相应的 hardened Runtime 与 Adapter。AScout 不定义 Runtime 的安全实现，也不设计 security guarantee negotiation；Adapter 报告的安全能力不得改变 Branch lifecycle、commit/discard、single-winner 或状态可见性语义。
 
 **原因**：工具错误在 parent 与 child execution 中同样可能发生，不足以要求 控制面 默认承担通用恶意代码防护。把 adversarial containment 放在可替换 Runtime 中，既保留隔离正确性，也避免所有使用场景为非必需的安全边界支付固定成本。
 
@@ -210,13 +210,13 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **原因**：跨 tree 控制不属于 speculative subtree selection，会引入额外的 identity、授权、故障恢复与状态组合语义。需要在多个 execution 之间协调的上层系统应使用 AScout 之外的接口，而不是扩展 Branch lifecycle。
 
-## D-034：OS privilege 由 Runtime 持有
+## D-034：OS privilege 留在外部执行后端一侧
 
-**选择**：建立 AScoutAgent 节点执行、进程与资源所有权、隔离边界或外部效果执行边界所需的 OS privilege 只由 Runtime 持有。Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权，也不能代替 Runtime 执行特权状态转换。
+**选择**：建立节点执行、进程与资源所有权、隔离边界或外部效果执行边界所需的 OS privilege 留在外部执行后端一侧。Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权，也不能用控制状态更新代替后端的特权操作。
 
-**内部拆分**：Runtime 可以使用独立 privileged helper、daemon、sandbox monitor、hypervisor 或等价组件收敛特权。Runtime Adapter 可以连接这些组件，但不因负责协议适配而获得 OS privilege 或 Runtime mutable state 所有权。此类机制组件只执行 Runtime 定义的操作，不获得控制面的 speculation/evaluator policy 所有权。
+**外部实现**：具体 Runtime 可以使用 privileged helper、daemon、sandbox monitor、hypervisor 或其他方式管理特权，但其内部拆分不由 AScout 定义。Runtime Adapter 可以连接相应接口，但不因负责协议适配而获得 OS privilege 或后端 mutable state 所有权。
 
-**原因**：特权用于强制 Runtime 独占的 execution、resource、barrier、cleanup 和 effect ownership。把特权交给控制面或 Agent 会混合 policy 与 mechanism，并允许调用方绕过 Runtime 的原子状态转换。
+**原因**：把特权交给控制面或 Agent 会混合 policy 与执行机制，并允许调用方绕过后端实际状态转换。AScout 只需规定 Adapter 必须返回足以确认操作结果的事件，不需要规定 Runtime 内部如何持有特权。
 
 ## D-035：Control transport 由 Runtime Adapter 决定
 
@@ -228,7 +228,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-036：Security audit 不是 AScout core requirement
 
-**正确性状态**：Runtime 必须维护节点 lifecycle、capability、obligation 和受控状态转换所需的权威机制状态，并通过 Runtime Adapter交付控制面必须观察的 typed events。整体 Speculative Tree 视图属于控制面 AScoutAgent；具体 Runtime 可以根据其故障恢复 contract 决定节点状态和机制状态的内存或持久化形式。
+**正确性状态**：控制面只接受能够通过 Runtime Adapter 交付充分 typed events、证明节点 lifecycle、capability、obligation 和受控状态转换已经由后端落实的接入。整体 Speculative Tree 视图属于控制面 AScoutAgent；具体 Runtime 如何保存节点状态和机制状态不由 AScout 规定。
 
 **审计边界**：AScout core 不要求持久、tamper-evident、面向合规或安全取证的 audit log。具体 Runtime 可以按自身安全保证与部署需求提供附加 audit，Runtime Adapter 只负责映射相关能力和事件；控制面不依赖该 audit 才能维持 Branch 正确性，audit 也不自动成为 Branch 世界状态。
 
@@ -260,19 +260,21 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-039：四侧一级架构
 
-**选择**：AScout 的一级架构按 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 组织。AScout control 请求通常沿该方向下行，结果与事件沿相反方向返回。四侧是逻辑 ownership 与 API 边界，不直接等同于 crate、进程、服务或部署单元。
+**选择**：AScout 的完整调用路径按 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 组织。AScout control 请求通常沿该方向下行，结果与事件沿相反方向返回。四侧是逻辑责任与 API 边界，不直接等同于四个由 AScout 拥有的子系统，也不直接等同于 crate、进程、服务或部署单元。
 
 **Agent 接入侧**：包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon、Interposer 与 Operation Integration 等接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
 
 **控制面**：包含 Entry API、Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或 materialization 状态。
 
-**Runtime Adapter**：位于控制面与 Runtime 之间，对控制面提供稳定、typed、可版本化的 operation/event contract，并把该 contract 映射为目标 Runtime 的能力、原语、transport 和事件。Runtime Adapter 不建立第二份长期权威状态。它在现实部署中属于 AScout 底座，但因与具体 Runtime 的变化紧密相关，在逻辑架构中单独成侧。
+**Runtime Adapter**：位于控制面与 Runtime 之间，按控制面定义的稳定、typed、可版本化 operation/event 接入边界声明并呈现能力、结果和事件。其作者自行决定如何映射目标 Runtime 的能力、原语与 transport；AScout 不控制其内部实现，只通过接入校验与运行期结果判断它是否兑现声明。Runtime Adapter 不向控制面呈现第二份长期权威状态。
 
-**Runtime**：拥有节点执行状态、进程与资源归属、隔离、capability/obligation validation、barrier、原子状态转换和 cleanup。Execution、Workspace、Input、Effect 与 Outcome backend 位于这一侧。Agent execution、Branch 隔离环境与 Instance 是 Runtime 管理的运行对象，不是第五个一级侧面。
+**Runtime**：AScout 依赖但不拥有的外部执行后端。实际节点执行、进程、资源、隔离和效果状态位于这一侧；其内部架构、组件和原生接口由具体 Runtime 自行决定。AScout 不直接约束或读取这些内部状态，只判断 Adapter 在控制面边界上呈现的能力、结果和事件。
 
-**约束**：Agent 接入侧不能绕过控制面发起 AScout lifecycle/control operation；Agent execution 对 Workspace、Input 等运行资源的正常访问仍由 Runtime 强制管理。控制面不能绕过 Runtime Adapter 依赖具体 Runtime；Runtime Adapter 只能适配和规范化，不能放宽 lifecycle、single-winner、capability、obligation 或 cleanup 规则；Runtime 强制正确性，但不替 Agent、resolver 或 policy 作策略选择。跨侧只交换显式 contract data，不共享可变内部状态。
+**约束**：Agent 接入侧不能绕过控制面发起 AScout lifecycle/control operation。控制面不能绕过 Runtime Adapter 依赖具体 Runtime，也不接受会放宽 lifecycle、single-winner、capability、obligation 或 cleanup 语义的 Adapter 声明或结果。跨侧只交换显式 contract data，不共享可变内部状态。
 
-**原因**：此前的 控制面 / Instance 部署图、控制面 / Runtime 所有权划分和 Runtime Adapter 组件图描述的是不同观察角度，却被当成同一层级使用。四侧模型把接入、控制、适配和机制分开，使稳定 Runtime contract 与具体 Runtime 变化各有明确位置，同时保留控制面决策、Runtime 强制执行的闭环。
+**文档展开**：四侧路径不推出一侧一份架构子文档。控制面可以有内部设计文档；Agent 接入侧可在目标语义收敛后展开；Adapter 的内部实现与 Runtime 接入方法属于开发/接入指南；Runtime 不建立由 AScout 定义的通用设计文档。
+
+**原因**：此前的 控制面 / Instance 部署图、控制面 / Runtime 状态位置和 Runtime Adapter 组件图描述的是不同观察角度，却被当成同一层级使用。四侧模型保留完整调用路径，同时避免把外部 Runtime 和第三方 Adapter 误写成 AScout 可以控制的内部实现。
 
 ## D-040：Policy 控制的 best-effort 投机
 
@@ -307,4 +309,5 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 - [效果管理设计](effect-management.md)：效果与状态
 - [Policy Decisions 设计](policy-decisions.md)：Policy 决策面
 - [Speculation Contract 设计](speculation-contract.md)：契约语义
+- [Agent 接入侧设计](agent-integration.md)：Agent 接入组件与受控路径
 - [控制面设计](control-plane.md)：控制面组件与实现

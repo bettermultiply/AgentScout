@@ -6,13 +6,13 @@
 
 ### Speculation Contract 的定位与实现
 
-已收敛：`Contract` 约束的对象是 Policy 与 Adapter/Runtime 两侧，目的是保证语义正确与对齐，而不是约束控制面。控制面是 AScout 自身实现的 Mechanism 主体，是 Contract 的实现方，不属于被约束对象。Contract 不是部署配置或独立 Manager，不能由单个任务或 Policy 修改。
+已收敛：`Contract` 直接约束 Policy 的表达，以及 Runtime Adapter 在控制面接入边界上声明和返回的可观察行为，目的是保证策略与后端接入语义正确且对齐，而不是约束控制面或定义 Runtime 内部实现。控制面是 AScout 自身实现的 Mechanism 主体，是 Contract 的实现方，不属于被约束对象。Contract 不是部署配置或独立 Manager，不能由单个任务或 Policy 修改。
 
 已收敛：`Mechanism` 只作为抽象责任词，是 Contract 的固定实现，不是插件或独立组件；它由 AScout 自身能实现、能强制的固定机制共同构成，由控制面组件协同完成检查与编排，不归属任何单一组件。
 
 已收敛：Runtime 是通用执行后端（例如 docker、虚拟机或进程管理能力），不要求提供 AScout 专用接口。Branch 隔离、效果、cleanup 等 AScout 语义由 Runtime Adapter 用后端原生能力组合表达；控制面只能通过 Adapter 访问后端，因此接入校验的对象是 Adapter，Adapter 通过即代表其背后的 Runtime 能承载相应语义。Adapter 不能静默放宽语义，后端确实表达不出某语义时应拒绝接入或明确降级。
 
-已收敛：Contract 的执行路径统一描述为 `Policy 决策 → Policy Engine 校验决策取值 → 控制面机制编排为受管操作 → Runtime Adapter 映射 → Runtime 执行并返回结果/事件 → 控制面更新状态`。Policy Decision 描述高层语义，取值合法性随 Runtime 能力变化，需结合 Adapter 报告能力校验；高层决策展开为受管操作序列，Adapter 按契约规定的操作集映射为后端行为。对 Adapter/Runtime，通过声明式选择隔离度 + 接入时基本语义测试 + 运行期校验兜底来保证语义对齐。
+已收敛：Contract 的执行路径统一描述为 `Policy 决策 → Policy Engine 校验决策取值 → 控制面机制编排为受管操作 → Runtime Adapter 映射 → Runtime 执行并返回结果/事件 → 控制面更新状态`。Policy Decision 描述高层语义，取值合法性随后端能力变化，需结合 Adapter 报告能力校验；高层决策展开为受管操作序列，Adapter 按控制面接入契约映射为后端行为。通过 Adapter 的能力声明、接入时基本语义测试与运行期校验来判断其是否兑现后端能力；不直接校验或约束 Runtime 内部实现。
 
 已收敛：失败语义。对尚未被接受的投机 Branch，失败收敛到"该 Branch 在 Speculative Tree 中从未被创建"，不重放该操作；被接受的 Branch 已完成使命，不适用。Contract 文档写共同承诺一句，撤销与清理机制归 control-plane。
 
@@ -27,8 +27,8 @@
 1. **Branch 执行状态与控制上下文**：明确 Branch 除树关系外需要保存的执行状态、假设、能力、提交证据、未决约束、等待/暂停/失败状态和 Runtime 对齐信息。当前 `committed: bool` 与 disposition 只能视为临时 skeleton，不能直接视为长期公共状态模型。
 2. **信息与约束传播**：明确用户或 parent 向 descendants 的传播、child 向 parent 的 proposal/outcome summary、同级 Branch 不直接协作的边界，以及新约束导致保留、修复、挂起或 discard 的基本语义。
 3. **Resolution 与 canonical continuation**：明确 `accept` 选择的是后续 canonical continuation，而不是简单宣称 candidate 是客观 ground truth；继续明确 winner、旧 parent 和必要前置条件的关系。
-4. **控制面操作与 Runtime 机制对齐**：明确语义动作、Runtime 强制执行、规范化事件和控制状态更新之间的闭环，特别是原子性、失败和状态对齐。
-5. **Policy 与用户自定义操作的组合边界**：明确 policy 可以选择什么、控制面固定什么、Runtime 强制什么，以及上层可使用的 Branch context、事件、outcome 和约束输入。
+4. **控制面操作与后端结果对齐**：明确语义动作、Adapter 可观察结果、规范化事件和控制状态更新之间的闭环，特别是原子性、失败和状态对齐；不定义 Runtime 内部机制。
+5. **Policy 与用户自定义操作的组合边界**：明确 policy 可以选择什么、控制面固定什么、Adapter 必须证明后端落实什么，以及上层可使用的 Branch context、事件、outcome 和约束输入。
 
 ### Mental model 的后续维护
 
@@ -71,7 +71,7 @@
 - 已确认：去掉通用 `position` 字段。`process_state` 当前层确定的规范字段为 `steps_completed`、`phase`、`active_time`、`resource_counters`、`result_facts` 和 `semantic_facts`；其中除前两项外可按领域扩展，但必须保持为可观察事实，不能变成预测分数或机制推断值。字段语义已在 `policy-decisions.md` 以表格列出。
 - 已确认：`predict` 的输入契约包括 `edge_context`、`process_context`、`assumption_set`、可选 `history`、`policy_config` 和 `capability_context`。输出统一为 `ProposalSet`，支持单候选、有限候选集、带 Policy 元数据的候选集和增量生成；每个 Proposal 至少有 `payload`，可带 `provenance`。Proposal 是 Edge 边界的候选输入，可为原子值或结构化值，不是 Branch 或已执行轨迹；`rank`/`score` 只供 Policy 排序调度，不能被 Mechanism 解释为正确性或 `match` 结果。Proposal 数量是 breadth 的取值结果，无法生成有效候选时不创建空候选 Branch。
 - 已确认：`match` 使用 `match(proposal, evidence, match_context) -> MatchResult`；`evidence` 可以来自 Authority 的真实结果，也可以来自 validator 的可接受性判断。`MatchResult` 至少区分 `compatible`、`incompatible`、`indeterminate`、`error`，并可带 `score`。分数由用户/Policy 规定函数计算并定义含义、范围、方向和阈值，AScout 只提供承载、记录和在同一 Edge 的相同匹配规则上下文内比较的机制；不把分数解释为正确概率，也不跨 matcher、版本或 scale 比较。确定性 predicate 可无分数，模糊或带容差关系可用分数；不确定或出错不得静默接受。
-- 已确认：`dispose` 根据 `resolution` 和上下文返回可组合的 `DispositionPlan`，而不是单一终态。`resolution` 至少区分 `accepted`、`rejected`、`indeterminate`、`error`、`cancelled`、`preempted`、`extent_reached` 和 `failed`；处置意图包括 `Reuse`、`Promote`、`Salvage`、`Re-execute`、`Discard`、`Compensate` 和 `Overwrite`，可组合为例如 `Salvage + Discard` 或 `Compensate + Discard`。Policy 只表达处置意图，不重新判断 `match`、不决定继续推进；Branch 转换、清理、资源释放和 commit/discard 由 Mechanism/Runtime 强制执行。
+- 已确认：`dispose` 根据 `resolution` 和上下文返回可组合的 `DispositionPlan`，而不是单一终态。`resolution` 至少区分 `accepted`、`rejected`、`indeterminate`、`error`、`cancelled`、`preempted`、`extent_reached` 和 `failed`；处置意图包括 `Reuse`、`Promote`、`Salvage`、`Re-execute`、`Discard`、`Compensate` 和 `Overwrite`，可组合为例如 `Salvage + Discard` 或 `Compensate + Discard`。Policy 只表达处置意图，不重新判断 `match`、不决定继续推进；Branch 转换、清理、资源释放和 commit/discard 由 Mechanism 编排，并由 Adapter 返回足以确认后端已落实的结果。
 - 已确认：`effect` 对每个 step 的已识别效果返回 `EffectPlan`，模式包括 `default`、`simulate`、`transform`、`stage`、`mediate`、`block`、`allow` 和 `deny`。`simulate` 是伪装执行：服务 Adapter 拦截请求，不访问真实服务，在 Branch 内返回标记为 synthetic 的模拟响应；该响应不是真实 Authority，必须带来源和未验证假设，并由后续 Authority、validator 或明确规则验证。`default` 使用 Adapter/Contract 声明的默认方案，未声明时不得静默放行。`StateDomain` 与 `EffectClass` 保持正交，处理模式需经 Effect Management、Contract 和 Runtime capability 校验。
 - 已确认：组合与嵌套当前只定义用户输入这一类跨 Edge 信息传播。用户中断也是用户输入的一种，和普通用户输入一样传播给当时仍在运行的全部 descendants；普通输入作为输入事实进入 Branch，中断触发各 Branch 独立停止/取消和清理。中断不通过 `AssumptionSet` 传播，也不引入集中式子树回收机制。
 - 已确认：组合与嵌套的完整边界已写入 `policy-decisions.md` §4：同一 Edge 上的 Proposal/Branch 只是并行候选，由 `predict` 的 breadth、隔离和 single-winner 约束决定，不另设组合语义；嵌套 Edge 继续使用当前 task 已绑定的同一 Policy profile。`AssumptionSet` 只表达未验证依赖，跨 Edge 还通过树结构归属、用户输入传播和生命周期控制连接。祖先假设被否定时，控制面向受影响 Branch 直接发送取消命令，各 Branch 独立停止和清理，不设置集中式整棵子树回收机制。
@@ -82,9 +82,12 @@
 
 ### 架构四侧与对称框架
 
-- 已确认：Runtime 是最终机制强制边界；其完整实现可以由环境级组件（执行环境、隔离、资源、状态转换、清理）与 Agent-facing integration 组件（Interposer、ASC-Daemon、Operation Integration）共同组成。
+- 已确认：四侧是完整调用路径中的逻辑位置，不表示四侧都由 AScout 实现或拥有。Agent 接入侧与控制面是 AScout 可以定义和实现的系统部分；Runtime 是 AScout 依赖但不能定义其内部架构的外部能力来源。执行、隔离、资源和效果最终由后端原生机制承载，但 AScout 只通过 Adapter 的可观察行为判断这些能力是否兑现。
+- 已确认：AScout 能定义的是控制面接受的 Runtime Adapter operation/event 边界、能力声明和接入条件；不能控制 Adapter 内部如何调用 Runtime、组织模块或选择 transport。Adapter 的强制内容来自控制面接入契约，内部实现只适合给出开发建议与接入指南。
+- 已确认：`architecture.md` 的直接子文档不按四侧机械地一侧一份。直接子文档包括 Agent 接入侧与控制面设计；Adapter 的具体实现与接入方式进入开发/接入指南；Runtime 不建立通用设计子文档。
+- 已执行：新建 `docs/design/agent-integration.md` 作为架构的直接子文档，新建 `docs/development/runtime-adapter.md` 作为开发/接入指南；`spec-exec-abstraction.md` §6、§10.1–§10.4 与 §10.7 中相应的现行职责已迁移或改为引用，论文证据与 backend 候选分析继续留在开发札记。
 - 已确认：Interposer / ASC-Daemon 的语义由控制面定义（决定它们做什么）；它们部署在 Runtime 创建的 Branch 隔离环境内，运行生命周期由 Runtime 管理（决定它们在哪里跑、何时启停）。该决定不推翻"ASC-Daemon 能在 Branch 隔离环境内独立运行、不与控制面长期 metadata owner 混同部署"的既有约束。
-- 已确认：保留四侧一级结构，采用对称框架。控制面居于中间，两端分别通过 Adapter 类稳定边界连接：一侧是 Agent 接入侧（其内部 ASC-Daemon / Interposer / Operation Integration 承担 Agent 侧接入适配，相当于 Agent 侧 adapter），另一侧是执行 Runtime（通过 Runtime Adapter 连接）。不把 Agent 接入侧改称为 Runtime，不新增 Runtime 的第三个含义。
+- 已确认：保留 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 四侧调用路径，但不再将其解释为对称的四个 AScout 子系统或四份实现拓扑。控制面居中，Agent 接入侧是 AScout 自有接入边界，另一端经 Runtime Adapter 使用外部 Runtime。
 
 ## 暂停讨论
 
@@ -108,10 +111,10 @@
 - 目标是让上层 Agent 使用不同 speculative 算法或分支执行方案，而不要求修改算法、方案或 Agent。
 - 该目标仍不扩展为任意分布式计算平台，后续必须继续遵守控制面、Runtime Adapter 与 Runtime 的 ownership 分离。
 
-### Runtime atomic transition contract
+### Adapter 可观察的原子转换语义
 
-- 需要明确 Runtime core 如何协调 Execution、Workspace、Input、Effect、Outcome participant 的 prepare/apply/abort、可见性、失败收敛和 cleanup obligation。
-- 当前倾向由 Runtime core 拥有 transition coordination，backend 只实现 participant contract；该倾向尚未成为决策。
+- 需要明确控制面要求 Adapter 对 Execution、Workspace、Input、Effect、Outcome 转换呈现怎样的原子性、可见性、失败收敛和 cleanup result。
+- Adapter 与目标 Runtime 内部如何协调这些转换不由 AScout 设计；实现建议留在开发/接入文档。
 
 ### Control session 与 Workspace identity
 

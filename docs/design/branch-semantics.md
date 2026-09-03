@@ -34,7 +34,7 @@ Routine Agent-facing control surface 暂时只保留两类查询和五类 lifecy
 
 AScout 作为 Agent 外部的控制面管理完整 Agent execution。Command + Skill 是必须支持的基础接入；Agent Hook 与 embedded in-Agent adapter 是可替代的可选增强，不是正确性前提。优先使用 Hook 提供 safe point、context/outcome 注入和 tool lifecycle 捕获；只有 Hook 无法同步阻塞、替换结果、覆盖 sub-agent 或提供必要内部 identity 等能力缺口得到证明后，才引入 embedded adapter。两者不要求同时存在。
 
-控制面与 Runtime 必须具有明确的状态所有权，并通过 Runtime Adapter 交换 typed API 数据。控制面拥有 speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图；Runtime 独占节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理。控制面不能直接修改 Runtime 内部状态，Runtime 不理解 Agent prompt、模型格式或 candidate 质量。
+控制面与外部 Runtime 之间必须具有明确的状态边界，并通过 Runtime Adapter 交换 typed API 数据。控制面拥有 speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图；节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理实际存在于外部 Runtime。AScout 不定义 Runtime 如何组织这些状态；控制面只能根据 Adapter 返回的结果和事件更新自身视图，也不向后端传递 Agent prompt、模型格式或 candidate 质量等控制面含义。
 
 Runtime Adapter 对控制面提供稳定、typed、可版本化的粗粒度 command/event contract，并负责把控制面选定的目标 Runtime 解析为相应连接、能力和协议映射。具体 Runtime 可以作为独立 Runtime Service 运行。各侧只能通过显式 contract 交互，不共享跨边界的可变内部状态。AScout 不规定 Runtime Adapter 到 Runtime 的统一 control transport 或 wire format；本地 daemon、独立进程、VM channel 或远程协议不能改变 typed operation/event semantics。CLI 不参与 Runtime 选择或连接。
 

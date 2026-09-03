@@ -28,6 +28,8 @@ Outcome 由 Operation Integration 自动发布，不作为独立 Agent command�
 
 Command + Skill 是第一个必须支持的 integration profile。Hook 只有在同步能力得到验证后才增加；embedded Agent adapter 不是正确性前提。
 
+不依赖具体产品的组件责任与控制路径见 [Agent 接入侧设计](../design/agent-integration.md)。
+
 ## 可用性规则
 
 不得从目标语义或 roadmap item 推断当前支持。只有当前实现及其验证证据存在后，使用文档才会加入对应构建、运行和 API 说明。

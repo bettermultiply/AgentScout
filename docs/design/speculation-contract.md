@@ -1,6 +1,6 @@
 # Speculation Contract 设计
 
-Speculation Contract 是 AScout 用于规范和约束用户自定义 Policy、控制面执行机制、以及 Runtime Adapter 实现和接入方式的契约。它通过主动的静态校验和运行期校验两种方式，保证在投机执行的过程中，Policy 和 Runtime 能够保持语义的一致性和连贯性，避免 Policy 的制订和 Adapter 的实现破坏 AScout 的抽象、超出其语义边界。
+Speculation Contract 是 AScout 用于规范用户自定义 Policy，并定义 Runtime Adapter 控制面接入边界的契约。它通过主动的静态校验和运行期校验，保证 Policy 意图与 Adapter 实际呈现的后端能力保持一致，避免 Policy 的制订或 Adapter 的接入结果破坏 AScout 的抽象。AScout 不通过这份 Contract 定义 Runtime 内部实现。
 
 ## 1. Contract 的定位
 
@@ -14,7 +14,7 @@ Policy 决策
 控制面机制
     ↓ 只能形成 Contract 规定的控制操作
 Runtime Adapter
-    ↓ 只能映射为 Contract 规定的 Runtime 操作和事件
+    ↓ 自行映射为目标 Runtime 的原生调用
 Runtime
     ↓ 承载并返回实际执行状态
 控制面状态更新
@@ -24,11 +24,11 @@ Contract 是上述约束的总称，实现这些约束的抽象责任称为 Mech
 
 Mechanism 的责任包括如何校验 Policy 和 Runtime 能力的匹配，以及如何将 Policy 翻译成按时序排列的 Adapter 必须实现并提供的接口组合。前者是校验 Policy 期望的隔离度能否被当前接入的 Runtime 所承载，也就是 Policy 的声明与 Adapter 报告的能力是否匹配，并在运行期根据真实结果确认声明是否达成。后者是把 Policy 的高层决策展开为按固定时序的受管操作，并维护这些操作之间的状态与不变量。Mechanism 先把它们编排成受管语义操作序列，再由 Adapter 按 Contract 规定的同一组操作，把每个语义操作映射为后端行为。
 
-Contract 约束的对象是 Policy 与 Adapter/Runtime 两侧，目的是保证它们在语义上正确且对齐。控制面是 Contract 的实现方，属于 Mechanism 的一部分，不是被 Contract 约束的对象；控制面如何组织校验与编排，见 [控制面设计](control-plane.md)。
+Contract 直接约束 Policy 的表达，以及 Runtime Adapter 在控制面边界上声明和返回的可观察行为。Runtime 是 Adapter 使用的外部能力来源，不是 Contract 能直接约束的实现对象。控制面是 Contract 的实现方，属于 Mechanism 的一部分，不是被 Contract 约束的对象；控制面如何组织校验与编排，见 [控制面设计](control-plane.md)。
 
 ## 2. Contract 约束什么
 
-Contract 本质上是各个部分能做什么和不能做什么的约束，并通过强制手段来保证这些约束被正确遵循，使双侧的约束能够对齐。Runtime 与 Policy 的接入也是在这一约束下进一步加强约束，以规范投机执行的具体行为。Contract 的固定语义包括以下相互联系的内容：
+Contract 本质上规定 Policy 能表达什么，以及控制面接受怎样的 Adapter 能力、结果和事件。它通过受限入口和校验使策略表达与后端接入对齐。Contract 的固定语义包括以下相互联系的内容：
 
 - Policy 已经通过 Policy Decision 约束其设计空间，但 Decision 取值的合法性仍需校验。同时随着 Runtime 的变化，其能提供的隔离能力也会有所不同，这就造成了可能出现语义不匹配，同样表现为 Decision 取值的合法性。
 - Runtime Adapter 由固定的接口约束其输入输出，但相同接口约束下能提供的隔离度也并不相同，真实的隔离度需要进行校验。
@@ -46,11 +46,11 @@ Policy 通过 Policy Decision 表达策略，其设计空间已经被约束，�
 
 检查通过后，Policy 的结果仍只是策略意图。实际 Branch、生命周期、效果与 Runtime 操作由控制面固定机制形成，Policy 不能通过返回一个特殊值绕过控制面状态转换。
 
-### 3.2 对 Adapter/Runtime：接入校验与运行期校验
+### 3.2 对 Runtime Adapter：接入校验与运行期校验
 
 Adapter 由固定接口约束其输入输出形态，但相同的接口约束下，后端实际能提供的隔离度并不相同。投机执行最终要改变真实执行环境——创建和停止进程、管理 workspace 与资源、隔离不同 Branch、处理影响 Branch 外部的效果——这些语义能否达成，取决于 Adapter 能用后端原生能力组合到什么程度。
 
-AScout 不要求后端是专为 AScout 设计的 Runtime。Runtime 可以是通用执行后端，例如容器、虚拟机或一组本地进程管理能力。因此，Adapter 需要先以声明式的方式选择其支持的隔离度：说明它承诺用后端的原生能力组合出 AScout 的基本操作语义后，能保证多大程度的隔离。
+AScout 不要求后端是专为 AScout 设计的 Runtime。Runtime 可以是通用执行后端，例如容器、虚拟机或一组本地进程管理能力。因此，Adapter 需要先声明它能在控制面边界上提供什么能力，以及它承诺用后端原生能力组合出 AScout 基本操作语义后能保证多大程度的隔离。Adapter 内部如何完成组合不由 Contract 规定。
 
 但往往 Adapter 开发者本身也无法完全保证声称的隔离度符合需求，所以会通过仅接入时进行一次的基本语义测试，来规范其是否正确实现了所声明的隔离状态。接入校验的对象是 Adapter 而不是 Runtime 本身：控制面无法越过 Adapter 直接触碰后端，因此只要 Adapter 能忠实表达基本操作语义，就代表它背后的 Runtime 具备接入资格；反过来，一个后端能力再强，如果 Adapter 表达不出这些语义，也不能接入。无法完成这些语义时，该 Adapter 没有完整接入路径；对于基本语义之上的附加能力，Adapter 报告支持范围和限制，供 Policy Engine 判断具体策略是否有可行执行路径。
 

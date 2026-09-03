@@ -30,20 +30,22 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 
 新实现继续使用 Rust。旧 `src/**`、Cargo manifests、tests、examples、C header、构建产物和实验文件已经删除，未读取、迁移或复用。新实现只能依据已接受的设计与开发决策建立。
 
-## D-024-I：实现组织服从四侧一级架构
+## D-024-I：实现组织服从 AScout 可控边界
 
-实现组织服从四侧一级架构：
+完整调用路径仍为：
 
 1. Agent 接入侧；
 2. 控制面；
 3. Runtime Adapter；
 4. Runtime。
 
-Entry API、Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 位于控制面内部；Agent/product、ASC-Daemon、Interposer、Operation Integration、CLI/library/launcher 位于 Agent 接入职责。Runtime Adapter 自身提供稳定 typed contract，并负责目标 Runtime 的能力映射、transport 与事件规范化。Execution、Workspace、Input、Effect 与 Outcome backend 位于 Runtime；Agent execution、Instance 和 Branch 隔离环境是 Runtime 管理的运行对象，不是独立一级层。
+这四侧不再直接作为 AScout 源码或子文档的一一对应拓扑。Entry API、Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 位于控制面内部；ASC-Daemon、Interposer、Operation Integration、CLI/library/launcher 位于 Agent 接入职责。控制面定义 Runtime Adapter 的接入边界，但 Adapter 作者自行负责目标 Runtime 的能力映射、transport 与事件规范化。Runtime 是外部后端，不属于 AScout 可定义的实现模块。
 
 Execution、Workspace、Input、Effect、Outcome 与 Operation Integration 六类扩展点的职责语义不绑定具体 crate、模块、进程或服务边界。
 
-后续 crate、模块、进程和服务边界必须依据 ownership、依赖方向、权限、替换频率与部署需求在四侧内决定，不能由“一组件一 crate”直接推出。具体 Adapter transport、discovery、连接生命周期和 Runtime backend 仍待后续设计。
+后续 crate、模块、进程和服务边界必须依据责任、依赖方向、权限、替换频率与部署需求决定，不能由“一侧一模块”或“一组件一 crate”直接推出。具体 Adapter transport、discovery、连接生命周期和 Runtime backend 属于 Adapter/部署实现选择。
+
+**废弃记录**：原决定要求“实现组织服从四侧一级架构”，并把 Runtime backend 视为 AScout 待设计的实现部分。该解释已废弃；四侧现在只表示完整调用路径中的逻辑位置。
 
 ## D-025-I：项目名称统一为 AScout
 

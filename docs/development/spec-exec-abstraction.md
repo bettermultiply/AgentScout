@@ -104,6 +104,8 @@ AssumptionSet、同一 Edge 上的并行候选、嵌套 Edge、single-winner、�
 | 3 | **轨迹/上下文写入边界** | truncate-and-rewrite（`S[:j] + new`）、prompt 变更、commit boundary 强制 | ISP、DSP、PASTE |
 | 4 | **调度/准入边界** | 引擎压力可见、准入重排、优先级覆盖 FCFS | PASTE、SPAgent |
 
+这四类接缝是论文调研得到的候选观察点，不是每个 Agent integration profile 都必须实现的固定接口。现行目标边界已迁移到 [Agent 接入侧设计](../design/agent-integration.md)。
+
 **实测的侵入量**（支持"无侵入可行"这个命题）：
 
 - **PASTE**：agent 侧 ~5k 行 TS（tool dispatch 中间件 + LLM client 轻量 wrapper），LLM 侧 ~2k 行 Python（**未修改的 vLLM** 上挂 startup hook）。gemini-cli / Qwen Deep Research / Virtual-Lab 三个 agent 只需要一个小的 dispatch wrapper，**工具 API 完全不改**。
@@ -277,101 +279,19 @@ PASTE 是活证据：
 
 ### 10.1 四侧中的组件与部署视图
 
-一级架构统一为 **Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime**，权威定义见 [`../architecture.md`](../architecture.md) 与 [`../design/decisions.md`](../design/decisions.md) D-039。本节只把研究推导出的内部组件和 `控制面 -> N Instance` 数量关系放回四侧坐标中；它不直接规定 crate、进程或服务拓扑。
+当前权威结构见 [架构](../architecture.md)：四侧表示完整调用路径中的逻辑位置，不表示四个由 AScout 拥有的子系统，也不直接规定 crate、进程或服务拓扑。
 
-```
-┌──────────────────────────── Agent 接入侧 ────────────────────────────┐
-│ Agent / product + CLI / library / launcher                           │
-│ ASC-Daemon + Interposer + Operation Integration（部署在各 Instance） │
-└───────────────────────────────┬──────────────────────────────────────┘
-                                │① / ⑤ / ⑪
-                                ▼
-┌───────────────────────────── 控制面 ───────────────────────────────┐
-│ Entry API ─────▶ AScoutAgent / Speculative Tree                      │
-│                     │                                                 │
-│ Policy Engine ◀──④──┼──▶ Assumption Manager ──⑥──▶ Scheduler        │
-│      │②             │             │⑦                  │⑧             │
-│ Policy plugins      │             ▼                   ▼              │
-│                     └──────▶ Effect Coordinator ◀──────┘              │
-│                                  │⑫                                   │
-│                                  ▼                                    │
-│                                Ledger                                 │
-└──────────────────────────────────┬────────────────────────────────────┘
-                                   │③ / ⑨
-                                   ▼
-┌──────────────────────── Runtime Adapter ─────────────────────────────┐
-│ 稳定 operation/event contract + capability / transport mapping       │
-└──────────────────────────────────┬────────────────────────────────────┘
-                                   │⑩
-                                   ▼
-┌────────────────────────── Runtime ─────────────────────────┐
-│ Runtime + Execution / Workspace / Input / Effect / Outcome│
-│                         │ 管理                                       │
-│        ┌────────────────┼──────────────────────────┐                  │
-│        ▼                ▼                          ▼                  │
-│   Instance 0       Instance 1       ...       Instance N             │
-│   Authority        Spec d=1                   Spec d=2                │
-│   A = ∅            A = {a₁}                  A = {a₁,a₃}             │
-│   own-env          own-env                   shared(I-1)              │
-└───────────────────────────────────────────────────────────────────────┘
-```
-
-Instance 是 Runtime 管理的运行对象，不是第五侧。Agent、ASC-Daemon 与 Interposer 可以部署在 Instance 的隔离环境内，但逻辑职责仍属于 Agent 接入侧；Isolation Env、执行状态与资源归属属于 Runtime。
-
-**实例的可能状态**（对应 Ray 声明 actor | task | worker 的那一层）：
-
-| 维度 | 取值 | 说明 |
-|---|---|---|
-| **role** | `Authority` \| `Speculative(d)` | **不是静态标签，是 `A == ∅` 的函数。** promote 就是这个谓词翻转 —— 这也是实例结构必须同构的原因（§10.5） |
-| **grain** | `own-env` \| `shared-env` | shared-env 仅对 PURE 效果开放，其余强制 own-env。**隔离粒度由 EffectClass 决定** |
-| **lifecycle** | `Forked → Running → Resolving → {Reused, Promoted, Discarded, Preempted, Salvaged}` | 即 Disposition 轴（§2 轴 6） |
+各部分的下一层说明分别见 [Agent 接入侧设计](../design/agent-integration.md)、[控制面设计](../design/control-plane.md) 与 [Runtime Adapter 接入指南](runtime-adapter.md)。Runtime 是外部能力来源，不由 AScout 建立通用内部设计。Instance、Branch、AssumptionSet 与 disposition 的现行语义见对应正式设计文档。
 
 ### 10.2 组件间数据流
 
-| # | 流向 | 内容 |
-|---|---|---|
-| ① | Entry API → Policy Engine / AScoutAgent | 任务提交、查询与显式 policy 选择输入 |
-| ② | Policy Engine → Policy plugins | 实例化插件、绑定轴配置 |
-| ③ | Policy Engine / Effect Coordinator ↔ Runtime Adapter | **跨侧契约协商**：控制面报预测置信度、验证条件与失败代价；Runtime Adapter 返回具体 Runtime 的隔离能力、成本与可用纪律。产出 fidelity 上界；不可行组合拒绝加载 |
-| ④ | 控制面 mechanism components → Policy Engine | Assumption Manager 的 resolve 调 Equivalence / Salvage；Scheduler 调 Topology / CostGate；Effect Coordinator 调 Compensation。mechanism 调用 policy，不感知其实现 |
-| ⑤ | Interposer / ASC-Daemon → Entry API → Assumption Manager | 权威值到达，触发 `resolve()`：调 Equivalence 判 `î ≈ i`，选 Disposition，沿依赖闭包传播；该路径阻塞权威 continuation |
-| ⑥ | Assumption Manager → Scheduler | 可扩展结构、各节点存活概率（嵌套下即 §9.5 要透传给 CostGate 的 `survival`） |
-| ⑦ | Assumption Manager → Effect Coordinator | confirm/refute 后形成目标 effect transition；Coordinator 再经 Runtime Adapter 请求 Runtime 执行 |
-| ⑧ | Scheduler ↔ Effect Coordinator | 抢占前检查控制面效果计划；Runtime 仍须对真实 obligation 作最终校验 |
-| ⑨ | Scheduler / Effect Coordinator → Runtime Adapter | 发送 fork、kill、优先级与 effect transition 等稳定语义 operation |
-| ⑩ | Runtime Adapter ↔ Runtime | Adapter 映射机制 operation；Runtime 返回结果、事件、能力与资源压力 |
-| ⑪ | Agent 接入侧 ↔ 控制面 | 上行：拦截上报、心跳与 Agent intent；下行：Proposal、confirm/refute、受控结果与 lifecycle event |
-| ⑫ | 控制面内部组件 → Ledger | **异步旁路**事件流：成本归属、轨迹、Disposition 与契约比对结果；不在关键路径上 |
+当前跨侧闭环统一为：Agent 接入侧形成请求，控制面校验并编排受管操作，Runtime Adapter 映射到外部 Runtime，结果与事件沿反方向返回。具体责任分别见上述三份下沉文档与 [Speculation Contract](../design/speculation-contract.md)。
 
 ### 10.3 使用模型
 
-**四类角色，只有一类写配置，端用户不在其中。**
+角色与接入责任已经下沉到 [Agent 接入侧设计](../design/agent-integration.md)。保留的研究结论是：端用户与 Agent 默认不必感知投机，但这不是禁止显式协作的不变量；用户或 Agent 可以通过受控入口提供输入或参与裁决。具体 effect 元数据从哪里取得仍是开发问题，不再在组件使用模型中预设为唯一人工接入成本。
 
-| 角色 | 感知投机吗 | 要做什么 |
-|---|---|---|
-| **端用户** | **完全不感知** | 什么都不做。提任务、拿结果，体验与不投机时一致，只是更快 |
-| **Agent 开发者** | 不感知 | **代码不改一行**。唯一可能的动作是提供工具的 effect manifest |
-| **Operator / 部署方** | 感知 | 声明 policy profile、选隔离后端、设预算与延迟-成本旋钮 |
-| **Policy 作者（研究者）** | 就是他在写 | 实现 1–6 个插件接口；多数只需实现 Proposer |
-
-**Policy Engine 接收的是 operator 在部署期写的 policy 声明**。实质后果：**policy 与任务的绑定发生在任务准入时，由路由规则或任务特征决定，不由端用户输入决定** —— §11 那条“不同任务选不同 policy”的指标应据此实现（底座自己选）。
-
-**一个必须留的口子**：**ISP 是 11 篇里唯一故意让端用户感知投机的**。其全部贡献就是 UI 协同设计 —— 用户看到 approximation agent 的步骤、看到它与 target agent 步骤之间的时间差（该间隔本身在展示哪一步是瓶颈），并可在间隔内中断、注入自己的值作为 oracle（论文称其"effectively a third agent"）。所以**"端用户不感知"是默认值而非不变量**，底座须支持把人作为 Authority（轴 5）的 opt-in 模式。
-
-```
-Agent 开发者：  把 agent 的 LLM base_url 与工具分发指向底座 → 完事
-               （可选）提供 effect manifest
-
-Operator：      声明 profile：proposer / 等价层次 / 预算 /
-               声明的 fidelity 契约 / 隔离后端 → 底座编译并校验
-
-端用户：        "修复 issue #42"  →  结果
-               （不知道背后开了 5 个实例，也不需要知道）
-```
-
-**effect manifest 是接入时唯一非零的人工成本，且不可避免** —— 无法从函数签名推断一个 API 是否幂等。处理副作用的每一篇都要求其等价物（SPORK 的 manifest、Spec Interaction 的手工 safe/unsafe 标注、cost-aware 的 per-edge 标签）。可做的是把它从"全手工"降到"自动引导 + 人工确认残余"：从 MCP 的 `readOnlyHint` / `destructiveHint` / `idempotentHint`、或 OpenAPI 的 HTTP 动词语义引导生成初稿。
-
-### 10.4 组件职责（贯穿示例）
+### 10.4 控制面组件职责（贯穿示例）
 
 **贯穿示例**：一个编码 agent 收到"修复 issue #42"，轨迹为
 
@@ -557,38 +477,11 @@ PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机
 
 #### Runtime Adapter
 
-**Runtime Adapter 职责**：向控制面提供稳定的 fork、销毁、隔离、effect transition、能力查询和压力事件等 typed semantic contract；把这些 operation 映射到当前 Runtime 的原语、transport 和事件，并规范化能力与错误。它不拥有控制面 policy 或 Runtime mutable state。
+Runtime Adapter 的接入责任、适配状态与实现建议见 [Runtime Adapter 接入指南](runtime-adapter.md)。具体后端是否提供 fork、COW 或状态重建能力，由相应 Adapter 声明。
 
-**适配状态**：可以维护连接和具体 Runtime 的能力映射（支持哪种 fork 保真度、哪些 StateDomain 可 stage），但这些不是第二份 Runtime 权威状态。
+#### Agent 接入组件
 
-**例**：Scheduler 经 Runtime Adapter 请求“从 Instance 1 fork 一个”。Adapter 查询当前 Runtime：自研 Runtime 走进程级 COW fork，亚毫秒级；容器 Runtime 没有 fork 原语，只能起新容器并重放轨迹。这个能力差异通过稳定 contract 上报给 Policy Engine，因此高成本 Runtime 下的 depth 会被自动压低，同一个 policy 不需要感知具体 backend。
-
----
-
-#### Instance 部署承载（结构同构，数量不定）
-
-**Interposer** —— 数据面，在线拦截四接缝：LLM 调用、工具分发、轨迹写入、调度。
-
-> **例**：agent 调 `client.chat.completions.create(...)`。Interposer 拦下，向控制面上报"Instance 1 要发 LLM 调用，前缀哈希 X"。若控制面回"已有投机结果且 Equivalence 判定命中"，Interposer **直接把结果返回给 agent** —— agent 完全不知道这次调用没有真的发生。若 agent 调 `run_tests()`，Effect Coordinator 形成 staging 请求，Runtime 的 Effect backend 分配并管理 overlay 环境，Interposer 再把调用路由到该受管环境。
->
-> **它必须与 ASC-Daemon 分开**：它在请求路径上，延迟敏感；ASC-Daemon 是本地控制入口和消息旁路。二者性能要求与失败语义都不同。
-
-**Agent** —— 用户原样的 agent，**不改一行**。
-
-**ASC-Daemon** —— Agent 接入侧的本地守护进程：承载身份与 AssumptionSet 绑定、生命周期消息和向 Proposer 提供的**上下文句柄**。
-
-> **例**：心跳上报"Instance 1 存活、当前在第 3 步"；接收控制面下发的 `confirm(a₁)`（"你现在是 Authority 了"）；Proposer 要预测 Instance 1 的下一步时，通过 Daemon 拿到轨迹摘要的句柄，**而不是把整个上下文搬到控制面**。
->
-> **Proposer 本身不在实例内**：否则每个实例复制一份预测器；且 SPORK 那类自投机探针实际跑在推理侧，根本不在实例里。
-
-**Isolation Env / Runtime** —— Runtime 管理的效果隔离与执行承载。`shared-env` 仅对 PURE 效果开放，其余强制 `own-env`。
-
----
-
-**两条归属说明：**
-
-- **Edge & Effect Catalog 折进 Effect Coordinator**（有状态但无独立对外接口，不单独画盒子）。在控制面内部，效果分类与协调规则属于 policy 不能放宽的固定规则；真正的 obligation、barrier 与 materialization 强制由 Runtime 承担。
-- **Policy Engine（含其插件集合）位于控制面内部**，不构成独立一级侧面。控制面 mechanism components 反向调用 policy plugins，从而保持“机制不感知具体算法”。
+Interposer、ASC-Daemon、Operation Integration 及 Agent/product integration 的现行职责已迁移到 [Agent 接入侧设计](../design/agent-integration.md)。论文调研得到的四类接缝仍保留在 §6 作为接入证据，但不再被解释为每个 integration profile 都必须实现的固定接口。
 
 ### 10.5 关键设计决策：不是所有投机都需要独占隔离环境
 
@@ -639,8 +532,8 @@ PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机
 
 | 边界 | 地位 | 实现者 | 需要的能力 |
 |---|---|---|---|
-| **Agent Boundary** | 必需 | Interposer | 四接缝：LLM 调用（流式 / 中断）、工具分发、轨迹写入（truncate-and-rewrite）、调度 |
-| **Isolation Boundary** | 必需 | Runtime（由 Runtime Adapter 接入） | docker / firecracker / gVisor / QEMU / 自研；按 fork 保真度选型（§10.4） |
+| **Agent Boundary** | 必需 | Agent 接入侧 | 由具体 integration profile 选择可观察接缝，统一进入 Agent-facing semantic API |
+| **Isolation Boundary** | 必需 | 外部 Runtime（由 Runtime Adapter 接入） | docker / firecracker / gVisor / QEMU / 自研等候选；能力由 Adapter 声明并验证 |
 | **Engine Boundary** | **范围外** | 推理引擎钩子（不做） | prefix cache 共享、logprobs、draft proposer、准入覆盖 FCFS、KV/队列压力可见 |
 
 **降级不是排除，而是契约协商（流③）的正常输出**：API 后端不提供 Engine 能力时，依赖它的 policy 配置被自动标为不可用或降级，并把降级原因报给用户。这恰是 §11.1(B) 双向协商存在的意义。
@@ -679,7 +572,7 @@ PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机
 
 ### 11.1 两处框架改进
 
-效果分类与状态域的正式语义见 [效果管理设计](../design/effect-management.md)，Policy 与 Adapter/Runtime 的语义对齐契约见 [Speculation Contract](../design/speculation-contract.md)。本节只保留研究结论：现有工作通常以只读白名单回避副作用，预测/调度与隔离/事务之间缺少统一契约；AScout 的机会在于把策略表达、后端能力与效果处理接成一条可校验的路径。
+效果分类与状态域的正式语义见 [效果管理设计](../design/effect-management.md)，Policy 表达与 Runtime Adapter 接入行为的语义对齐契约见 [Speculation Contract](../design/speculation-contract.md)。本节只保留研究结论：现有工作通常以只读白名单回避副作用，预测/调度与隔离/事务之间缺少统一契约；AScout 的机会在于把策略表达、后端能力与效果处理接成一条可校验的路径。
 
 ### 11.2 指标口径
 

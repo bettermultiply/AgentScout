@@ -30,11 +30,11 @@
 - **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Node 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
 - **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；拥有 Speculative Tree 控制状态和 Branch 关系。（`../mental-model.md` §4.2）
-- **Agent 接入侧**：四侧一级架构的入口侧，包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon 与 Interposer 等接入职责。（`../architecture.md` §1）
+- **Agent 接入侧**：四侧调用路径的入口侧，包含 Agent/product integration，以及 CLI、library、launcher、ASC-Daemon、Interposer 与 Operation Integration 等接入职责。（`../architecture.md` §1；`agent-integration.md`）
 - **控制面**：四侧一级架构的控制侧；包含 Entry API、Policy Engine、Effect Coordinator、Assumption Manager、Scheduler 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释；是 AScout 自身实现的 Mechanism 主体，组件与实现见 `control-plane.md`。（`../architecture.md` §1；`control-plane.md`）
 
-- **Runtime Adapter**：四侧一级架构的适配侧；对控制面提供稳定 typed operation/event contract，并负责目标 Runtime 的能力映射、transport 与事件规范化。（`../architecture.md` §1）
-- **Runtime**：四侧一级架构的运行侧；拥有节点执行状态、资源、隔离、capability/obligation validation、barrier、原子转换与 cleanup。（`../architecture.md` §1）
+- **Runtime Adapter**：四侧调用路径的适配侧；按控制面的接入约定声明并呈现能力、operation result 与 event，并自行负责目标 Runtime 的能力映射、transport 和内部实现。（`../architecture.md` §1；`../development/runtime-adapter.md`）
+- **Runtime**：四侧调用路径中的外部运行侧；提供实际执行、资源、隔离与效果能力，其内部架构不由 AScout 定义。（`../architecture.md` §1）
 
 ## 实体
 
@@ -69,13 +69,13 @@
 
 ## 组件
 
-- **Policy Engine**：可替换 Policy 进入控制面的固定入口，解释 Policy Decision 并检查其取值在当前 Contract 与 Runtime 能力下是否合法；加载期约束校验和运行期分发。（`control-plane.md` §3.1）
+- **Policy Engine**：可替换 Policy 进入控制面的固定入口，解释 Policy Decision 并检查其取值在当前 Contract 与 Adapter 声明的后端能力下是否合法；加载期约束校验和运行期分发。（`control-plane.md` §3.1）
 - **Assumption Manager**：控制面内 Proposal 依赖与确认/否定状态的 owner；维护"谁依赖谁"、跟踪 `AssumptionSet`，强制信息流约束（非空 AssumptionSet 的数据不得流向空容器）。（`control-plane.md` §3.2；`speculation-decisions.md` D-019）
 - **Scheduler**：控制面内负责准入、预算、优先级、取消与资源协调的组件；是全系统唯一看到全局资源压力的控制面组件。（`control-plane.md` §3.3；`speculation-decisions.md` D-011/D-020/D-021）
 - **Effect Coordinator**：控制面内效果处理的协调者；结合 Policy、Contract 与 Runtime 能力形成允许、暂存、转换、延迟、阻塞或补偿计划，经 Runtime Adapter 请求 Runtime 执行。它不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §3.4；`effect-management.md`）
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §3.5；`speculation-contract.md` §3）
-- **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地守护进程，承载 Agent-facing 控制入口、上下文绑定、身份/AssumptionSet 同步与生命周期消息。（`spec-exec-abstraction.md` §10.4；术语收敛）
-- **Interposer**：数据面，请求路径上拦截四接缝（LLM 调用、工具分发、轨迹写入、调度）；= Hook / effect runner。与 ASC-Daemon 分离（请求路径延迟敏感 vs 旁路）。（`spec-exec-abstraction.md` §10.4；术语收敛）
+- **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地控制入口，绑定 Branch context，转发 Agent-facing request 并承载 lifecycle event；不拥有全局控制状态。（`agent-integration.md` §2.2）
+- **Interposer**：Agent 接入侧位于请求路径上的捕获与结果路由组件；具体可观察接缝由 integration profile 决定，不固定为四个接口。（`agent-integration.md` §2.3）
 - **Entry API**：控制面的稳定入口；接收 Agent 接入侧形成的请求并交给控制面中的相应组件，不构成独立一级侧面，也不直接接触 Runtime。（`decisions.md` D-038；`../architecture.md` §1）
 
 ## 状态与生命周期
@@ -95,7 +95,7 @@
 - **Shadow / Replay**：投机与串行同跑、只提交串行结果；同一套基础设施服务 fidelity 审计、predictor 数据管道、cost 校准与上线灰度（offline replay → shadow → canary → online → drift kill-switch）。（`spec-exec-abstraction.md` §7；`speculation-decisions.md` D-014）
 - **透明嵌套**：投机实例与权威实例二进制同构，实例不知道自己是投机的；底座追踪 provenance、闸门设在效果层。（`spec-exec-abstraction.md` §9.5）
 - **反射 gating**：Cost / admission 策略必须知道自身存活概率：`should_speculate(..., survival)`；底座透传 `P(实例存活)`，防止 depth-2 实例按 depth-0 的账过度投机。（`spec-exec-abstraction.md` §9.5）
-- **Speculation Contract**：AScout 约束 Policy 与 Adapter/Runtime 两侧、保证语义正确与对齐的契约。它规定 Policy 如何表达与校验决策取值、Adapter/Runtime 如何声明并通过校验提供隔离能力，以及失败时如何收敛；控制面是它的实现方。（`speculation-contract.md`）
+- **Speculation Contract**：AScout 约束 Policy 表达和 Runtime Adapter 控制面接入行为、保证语义正确与对齐的契约。它规定 Policy 如何表达与校验决策取值、Adapter 如何声明并通过校验兑现后端能力，以及失败时如何收敛；控制面是它的实现方，Runtime 内部实现不在直接约束范围内。（`speculation-contract.md`）
 
 ## 范围决策
 

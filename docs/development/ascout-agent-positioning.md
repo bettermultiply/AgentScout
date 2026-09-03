@@ -79,7 +79,7 @@ Policy 应该可替换、可扩展，但不能绕过控制面的核心规则。�
 
 AScout 需要提供连续体验：用户看到的是一个持续工作的 Agent，而不是多个 Branch 的内部竞争状态。当前还没有确定具体提供方式，先作为待考虑内容记录。
 
-控制面与 Runtime 的权威边界应形成完整闭环：控制面决定语义动作，经 Runtime Adapter交给 Runtime 强制完成，再根据返回事件更新控制状态。控制面不能只更新 metadata 后假装 Runtime 已经完成隔离、状态转换或 cleanup。
+控制面与外部 Runtime 的状态边界应形成完整闭环：控制面决定语义动作，经 Runtime Adapter 交给后端执行，再根据 Adapter 返回的结果和事件更新控制状态。控制面不能只更新 metadata 后假装后端已经完成隔离、状态转换或 cleanup；AScout 也不规定后端内部如何完成这些操作。
 
 当前阶段不考虑多 AScout Agent 之间的协调。一个 AScout Agent 仍是一棵独立的分支执行树；多 Agent 协作即使未来需要，也不进入第一版核心设计。
 

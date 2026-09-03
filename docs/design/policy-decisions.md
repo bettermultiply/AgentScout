@@ -180,7 +180,7 @@ effect(effect_descriptor, context) -> EffectPlan
 
 `simulate` 要求存在针对该服务的 Adapter，并由 Adapter 声明哪些请求可以模拟以及模拟响应如何生成。模拟响应不是真实 Authority，必须带有 synthetic 来源和未验证假设；后续仍需通过 Authority、validator 或其他明确规则验证。这即正式语义所称的**伪装执行**，其约束与保证见 [效果管理设计](effect-management.md)。`EffectClass` 描述效果可采用的处理纪律，`StateDomain` 描述效果作用的状态域，二者保持正交；Policy 选择的模式必须经过 Effect Management、Contract 和 Runtime capability 校验。
 
-Policy 可以选择暂存、代理、延迟释放、阻塞、补偿或其他合法处理方式，但不能把效果排除在 AScout 的最低纳管范围之外。Effect Management 和 Runtime 必须检查所选纪律是否有能力落实。
+Policy 可以选择暂存、代理、延迟释放、阻塞、补偿或其他合法处理方式，但不能把效果排除在 AScout 的最低纳管范围之外。Effect Management 必须检查 Adapter 声明的后端能力是否足以落实所选纪律。
 
 如果某个效果暂时无法安全提前处理，系统可以在该效果边界阻塞当前 Branch，同时保留已经安全完成的前置进展；验证接受后继续，验证拒绝或过程取消后清理、补偿或回收。只有无法安全阻塞、无法在接受后继续、也无法在淘汰后清理时，才应拒绝相关投机环节或明确降级。
 
@@ -237,7 +237,7 @@ dispose(branch, resolution, context) -> DispositionPlan
 
 这些意图可以组合。例如，`Salvage + Discard` 表示先移交可保留的部分进展，再丢弃剩余候选工作；`Compensate + Discard` 表示先处理已发生效果，再清理分支。`Promote` 表示身份转换后继续执行，`Reuse` 表示采用候选结果并清理其他候选。`dispose` 不重新判断 `match`，也不决定过程是否还能继续推进；它只根据已有裁决选择后续处置。
 
-这些是 Policy 的处置意图，不是对 Runtime 生命周期的直接调用。实际的 Branch 转换、状态回收、效果清理、资源释放和 commit/discard 由 Mechanism 与 Runtime 强制执行。未命中的候选路径不能通过逐个修补绕过其携带的错误前提；依赖被否定时，相关子图应整体进入回收或丢弃流程。
+这些是 Policy 的处置意图，不是对 Runtime 生命周期的直接调用。实际的 Branch 转换、状态回收、效果清理、资源释放和 commit/discard 由 Mechanism 编排，并由 Adapter 所接后端的实际结果确认。未命中的候选路径不能通过逐个修补绕过其携带的错误前提；依赖被否定时，相关子图应整体进入回收或丢弃流程。
 
 ## 3. 阶段映射与决策依赖
 
@@ -321,13 +321,13 @@ Fidelity 不是独立的 Policy Decision，而是由决策组合、Runtime 能�
 
 ## 6. Policy 与 Mechanism 的边界
 
-Policy 可以实现或组合七类 decision，但不能拥有 Runtime mutable state，也不能把策略意图伪造成已经完成的 Runtime 操作。以下内容必须由 Mechanism 或 Runtime 强制：
+Policy 可以实现或组合七类 decision，但不能拥有后端 mutable state，也不能把策略意图伪造成已经完成的后端操作。以下内容必须由 Mechanism 或经 Adapter 验证的后端能力落实：
 
 - candidate Branch 的创建、隔离、暂停、恢复、接受、丢弃和清理；
 - `AssumptionSet` 的传播、确认/否定和非空假设数据的信息流约束；
 - single-winner、共享验证依据、commit barrier 和效果阻塞；
 - 资源所有权、预算执行、抢占、取消和运行期成本记账；
-- Policy 声明与 Adapter/Runtime 能力之间的 Speculation Contract 校验，以及 Fidelity 的加载期检查和运行期校验。
+- Policy 声明与 Adapter 所呈现后端能力之间的 Speculation Contract 校验，以及 Fidelity 的加载期检查和运行期校验。
 
 Policy 决定“希望采用哪种策略”，Mechanism 保证该策略在正确性、隔离、资源、副作用和清理约束内执行。能力不足不能静默改变语义，只能拒绝、明确降级或选择其他合法路径。
 

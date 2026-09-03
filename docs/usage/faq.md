@@ -48,7 +48,7 @@ Context、direct children、candidate 创建、commit、accept、discard 和 eve
 
 ## Loser 的进程和资源会怎样？
 
-所选 Runtime 必须拥有完整 Agent process tree 和 Branch-private resources。Accept 或 discard 必须清理 loser processes、resources、state 和受管 effect obligations；这不能只依赖 Agent 自愿合作。
+AScout 只接受能够通过 Adapter 证明其后端可管理完整 Agent process tree 和 Branch-private resources 的接入。Accept 或 discard 的结果必须表明 loser processes、resources、state 和受管 effect obligations 已被清理；这不能只依赖 Agent 自愿合作。
 
 ## External effects 会自动回滚吗？
 

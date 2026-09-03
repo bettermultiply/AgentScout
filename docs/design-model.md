@@ -20,11 +20,11 @@ Runtime（具体后端原语）
 
 **Policy：作者只需面对抽象。** Policy 作者面对的是一组抽象的决策点——在哪些环节投机（推理、工具执行等）、预测什么、如何判定命中、用什么公式判断是否值得投机、如何展开与处置投机工作。作者只需要给出这些决策的实现或选择，不需要知道系统是怎么落实的：命令如何被拦截、隔离环境如何创建、资源如何管理、失败分支如何清理，都由 Mechanism 负责。分层把"作者可以灵活定制"的部分与"必须可靠执行"的部分分开：作者在算法层面自由选择，正确性、隔离与资源约束由 Mechanism 兜底。
 
-**Mechanism：把抽象落实为执行。** Mechanism 是抽象的实现层，横跨多个部分：在 Agent 接入侧通过 Interposer 拦截命令与推理调用等环节，在控制面组织执行、验证与调度，在 Runtime 落实隔离、资源与效果管理。它不一定是组合 Runtime 原语——拦截、效果管理、调度等能力本身就是 Mechanism 的一部分；后端缺失所需原语时，降级或拒绝，不让策略悄悄跑偏。
+**Mechanism：把抽象落实为执行。** Mechanism 是抽象的实现责任：在 Agent 接入侧通过 Interposer 拦截命令与推理调用等环节，在控制面组织执行、验证与调度，并通过 Runtime Adapter 使用外部后端的隔离、资源与效果能力。它不一定只是组合 Runtime 原语——拦截、效果管理、调度等能力本身就是 Mechanism 的一部分；Adapter 无法证明后端具备所需能力时，降级或拒绝，不让策略悄悄跑偏。
 
-**Runtime：只提供简单原语。** Runtime 是具体执行后端，只负责上报并执行一组简单原语，不实现组合逻辑。原语本身是稳定的抽象、各后端保持一致兼容，换后端只换原语的实现——不换原语、不换组合。Adapter 侧的工作因此很简单：翻译调用 + 上报原语清单。
+**Runtime：外部能力来源。** Runtime 是具体执行后端，例如容器、虚拟机或进程管理能力。AScout 不定义其内部结构，也不要求不同 Runtime 原生提供同一组 AScout 原语。Runtime Adapter 负责判断并说明目标 Runtime 的原生能力能否组合出控制面所需语义。
 
-**Speculation Contract：策略表达与后端接入的语义对齐约束。** Contract 约束 Policy 与 Adapter/Runtime 两侧：Policy 如何表达与校验决策取值、Adapter 需要把后端能力组合成哪些基本运行语义并通过校验。控制面是这份约束的实现方（Mechanism）：它把 Policy 决策编排为受管操作、经 Adapter 映射到后端，并在运行期以结果和事件确认约束是否被兑现。作者只需声明需求，不必知道后端实现。
+**Speculation Contract：策略表达与后端接入的语义对齐约束。** Contract 约束 Policy 的表达以及 Runtime Adapter 在控制面边界上的可观察行为：Policy 如何表达与校验决策取值、Adapter 需要声明并兑现哪些基本运行语义。控制面是这份约束的实现方（Mechanism）：它把 Policy 决策编排为受管操作、经 Adapter 映射到后端，并在运行期以结果和事件确认约束是否被兑现。Contract 不直接规定 Runtime 内部实现。
 
 ## 2. 工作模型
 
@@ -71,24 +71,24 @@ Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根�
 
 不同隔离方案往往隔离粒度不同，且较为全面的方案未对投机执行进行专门的适配，投机执行算法提出的方案都较为简单。并且都没有提供统一的接入方式，适配工作量大，这正是隔离碎片化的问题。状态与效果模型把投机执行产生的文件、进程、输入、结果和外部服务交互放入统一的管理框架，提供统一的接入方式，并根据状态域和效果纪律选择相应的隔离、暂存、延迟释放、补偿或清理方式。
 
-投机产物在验证、提交和必要的状态转换完成前不能进入最终语义状态。效果处理能力不足时，Effect Management 可以让投机执行阻塞在相关效果边界并保留前置进展；只有无法安全阻塞、接受后继续或淘汰后清理时，才拒绝相关环节的投机或明确降级。具体的 `EffectClass × StateDomain` 分类、交叉规则和 Runtime 实现见 [效果管理设计](design/effect-management.md)。
+投机产物在验证、提交和必要的状态转换完成前不能进入最终语义状态。效果处理能力不足时，Effect Management 可以让投机执行阻塞在相关效果边界并保留前置进展；只有无法安全阻塞、接受后继续或淘汰后清理时，才拒绝相关环节的投机或明确降级。具体的 `EffectClass × StateDomain` 分类、交叉规则和后端能力要求见 [效果管理设计](design/effect-management.md)。
 
-控制面中的 Effect Coordinator 负责效果分类、计划与协调；Runtime 负责 staged effect、obligation、效果提交生效、隔离和清理等状态。前者形成控制计划，后者负责实际执行和强制，两者之间不能互相越权。
+控制面中的 Effect Coordinator 负责效果分类、计划与协调；外部 Runtime 承载 staged effect、obligation、效果提交生效、隔离和清理等实际状态，Runtime Adapter 负责向控制面呈现这些操作是否完成。前者形成控制计划，后端负责实际执行；AScout 不通过修改控制状态代替后端执行。
 
 ### 3.3 Speculation Contract
 
-Speculation Contract 约束 Policy 与 Adapter/Runtime 两侧，把策略表达、后端接入与实际运行之间必须保持的语义对齐固定为可检查、可执行的契约。它使 Policy 能在统一决策面内表达需求，也使 Runtime 以统一操作和事件接入，而不让策略语义隐藏在特定后端或算法实现中。控制面是这份契约的实现方，属于 Mechanism；它把 Policy 决策编排为受管操作、经 Runtime Adapter 落向后端并解释事件。
+Speculation Contract 约束 Policy 的表达以及 Runtime Adapter 在控制面边界上的可观察行为，把策略表达、后端接入与实际运行之间必须保持的语义对齐固定为可检查、可执行的契约。它使 Policy 能在统一决策面内表达需求，也使不同 Adapter 以统一操作和事件接入，而不让策略语义隐藏在特定后端或算法实现中。控制面是这份契约的实现方，属于 Mechanism；它把 Policy 决策编排为受管操作、经 Runtime Adapter 落向后端并解释事件。
 
 Policy Engine 在加载或任务准入时检查 Policy 的决策取值能否由当前接入的后端能力承载；无法满足时必须拒绝，或明确报告降级。运行期间，控制面通过 Authority、validator、效果处理和 Runtime 返回的实际结果检查声明是否被兑现。
 
-Contract 约束的对象是两侧，不拥有 Branch 或 Runtime 的运行状态。具体的契约语义、校验路径、降级结果和运行期证据见 [Speculation Contract 设计](design/speculation-contract.md)，控制面如何落实见 [控制面设计](design/control-plane.md)。
+Contract 不拥有 Branch 或 Runtime 的运行状态，也不直接约束 Runtime 内部实现。具体的契约语义、校验路径、降级结果和运行期证据见 [Speculation Contract 设计](design/speculation-contract.md)，控制面如何落实见 [控制面设计](design/control-plane.md)。
 
 ## 4. 跨领域设计约束
 
 以下约束适用于 Policy、Mechanism、Runtime 及其扩展的设计取舍：
 
 1. **策略选择不应被机制固化**：能够交给 Policy 选择的内容，不应由核心机制或 Runtime 固定。
-2. **正确性与资源所有权不能依赖策略自律**：必须由 AScout Mechanism 或 Runtime 强制的约束，不能只依赖 Policy 遵守。
+2. **正确性与资源所有权不能依赖策略自律**：必须由 AScout Mechanism 或经 Adapter 验证的后端机制落实的约束，不能只依赖 Policy 遵守。
 3. **跨层语义必须显式表达**：Policy 的要求、Runtime 的能力和运行结果不能依赖未声明的隐含假设。
 4. **能力不足不得静默改变语义**：只能拒绝、明确降级或选择其他合法路径。
 5. **扩展不能破坏既有固定语义**：新 Policy、Runtime、状态域或其他扩展不能绕过 Branch、single-winner、隔离、obligation 和 cleanup 等固定约束。
