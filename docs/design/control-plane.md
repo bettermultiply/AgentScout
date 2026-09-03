@@ -33,25 +33,29 @@ Policy 返回的是策略层面意图：是否对该机会投机、预测哪些 
 
 ## 3. 组件与状态
 
-控制面由若干固定组件构成，各自拥有并修改自己的一份状态，通过固定入口协作。组件划分沿用 [投机执行底座抽象札记](../development/spec-exec-abstraction.md) §10.4 的研究结论；本文只保留作为目标语义的部分，实现细节与论文依据不在此重复。
+控制面由若干固定组件构成，通过固定入口协作。各组件具有明确的状态边界；有状态组件只能修改自己拥有的状态，Entry API 等无状态组件不能代替状态 owner 作决定。这里仅定义目标职责与状态边界；实现细节与论文依据留在 [投机执行底座抽象札记](../development/spec-exec-abstraction.md) 的对应主题中。
 
-### 3.1 Policy Engine
+### 3.1 Entry API
+
+Entry API 是控制面的薄入口。它接收 Agent 接入侧已经绑定上下文的任务与 Branch 请求，完成请求形态和调用权限的入口检查，再交给相应的控制面组件。它不直接调用 Runtime Adapter，不独立决定准入或 Policy，也不持有在飞任务、Policy 绑定、预算或 Branch lifecycle 等长期状态。
+
+### 3.2 Policy Engine
 
 Policy Engine 是可替换 Policy 进入控制面的固定入口。它把 Policy 返回的内容解释为对应的 Policy Decision，检查这些决策与决策之间的组合在当前 Contract 下是否合法，再结合 Runtime Adapter 已报告的能力判断策略能否在当前接入的后端上执行。Policy 声明超出 AScout 固定语义，或当前后端无法提供所需能力时，控制面拒绝该决策或按既定语义报告降级。检查通过后，Policy 的结果仍只是策略意图，由控制面其他组件继续处理。
 
-### 3.2 Assumption Manager
+### 3.3 Assumption Manager
 
 Assumption Manager 是 Proposal 依赖与确认/否定状态的 owner。它维护谁依赖谁的真相，跟踪每个 Branch 的 `AssumptionSet` 与未决 Proposal。权威值到达时，它触发匹配与处置决策，确认沿依赖闭包生效；被否定的 Proposal 使依赖它的后续工作失效，控制面向受影响的 Branch 发送取消。它同时强制信息流约束：非空 `AssumptionSet` 产生的数据不得进入权威上下文。
 
-### 3.3 Scheduler
+### 3.4 Scheduler
 
 Scheduler 负责准入、预算、优先级、取消和资源协调。它决定是否在给定预算与当前后端能力下开启一个候选、为候选分配运行资源、在资源压力下暂停或取消低优先级投机。预算计数在这里而不是在 Ledger：调度决策需要同步读取预算余量。
 
-### 3.4 Effect Coordinator
+### 3.5 Effect Coordinator
 
 Effect Coordinator 负责控制面内效果处理的协调。它根据效果分类与状态域，结合 Policy、Contract 与 Adapter 声明的后端能力形成允许、暂存、转换、延迟、阻塞或补偿计划，并经 Runtime Adapter 请求后端执行。它不持有真实的暂存效果、obligation 或隔离状态——这些状态位于外部 Runtime，但其内部组织不由 AScout 定义。效果阻塞发生在效果边界：投机执行遇到不能安全暂存或释放的效果时停在门口，保留此前的前置进展，等待裁决。
 
-### 3.5 Ledger
+### 3.6 Ledger
 
 Ledger 以异步旁路记录控制面需要保留的运行事实，包括 Policy 决策、Branch 与 Proposal 状态变化、验证依据、效果与 obligation 处理结果、资源使用、取消与清理结果、Adapter 映射结果与 Runtime 失败。它用于状态对齐、问题定位、shadow/replay 和契约校验；它不从记录中重新决定生命周期，也不代替 Runtime 持有执行状态。
 

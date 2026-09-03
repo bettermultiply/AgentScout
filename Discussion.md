@@ -16,7 +16,9 @@
 
 已收敛：失败语义。对尚未被接受的投机 Branch，失败收敛到"该 Branch 在 Speculative Tree 中从未被创建"，不重放该操作；被接受的 Branch 已完成使命，不适用。Contract 文档写共同承诺一句，撤销与清理机制归 control-plane。
 
-已收敛：文档拆分。`docs/design/speculation-contract.md` 收窄为"定位 / 约束什么（单节）/ 如何约束 / 完整控制闭环"；控制面内部机制（组件分工、状态 owner、操作编排、失败清理）下沉到新建的 `docs/design/control-plane.md`（参考 spec-exec-abstraction §10）。同步更新 glossary、design-model、mental-model、index、effect-management、decisions 与 architecture 的相关引用。
+已收敛：文档拆分。`docs/design/speculation-contract.md` 收窄为"定位 / 约束什么（单节）/ 如何约束 / 完整控制闭环"；控制面内部机制（组件分工、状态 owner、操作编排、失败清理）下沉到 `docs/design/control-plane.md`。同步更新 glossary、design-model、mental-model、index、effect-management、decisions 与 architecture 的相关引用。
+
+已收敛：`spec-exec-abstraction.md` 不再保留独立的“控制面组件职责”章节。Entry API 的目标职责补入 `control-plane.md`；Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 的现行职责以该文档为准。论文相关表格和数据继续作为事实依据，分别留在札记的 Effect、资源与准入、Shadow/Replay 等研究主题中；旧六插件、`site`、旧状态模型和重复贯穿示例不迁移。
 
 ### ASCout Agent 分支执行底座
 
@@ -53,14 +55,14 @@
 - 已确认：**Edge 是一次投机机会**（`u` 的输出 pending、`v` 依赖该输出的可投机依赖点）；一个 Edge 上可有多个 Proposal / SpecTask / candidate Branch。它是**抽象模型**，不是注册实体。可投机性由效果纪律与决策点共同承载，不再使用独立的 admissibility 元数据。
 - 已确认：**投机注册动作 = 在 pending-result boundary 上创建携带 Proposal 的 candidate Branch**（即 branch-semantics 的 branch 调用），不引入 site / "Edge 注册"作为额外注册实体；Assumption Manager 的 `(site, proposal)` 状态改为 `(edge_id, proposal_id)`，site 并入 edge 术语。
 - 已确认：Edge 的职责定位 = ① 统一不同投机对象（LLM 调用、工具、命令、远程请求、人类回复）的抽象；② 作为设计 policy decision 与 contract 的作用对象；③ 局部视角（单次投机机会如何投机的决策点）。嵌套与组合是补充的全局视角（多次投机机会如何串联、共享前提与信息流）。
-- 已确认：policy decision 多数挂机会粒度：权威启动（N 个候选共享同一 `A_u` 与真值 `i`）、BestOfN(breadth)、single-winner 处置都在 round 层面；逐 Proposal 的是 Predictor 与 Equivalence。机制侧证据：Assumption Manager 状态按 site 分组、`resolve(site, 权威值)`、`Assumption=(edge_id,proposal_id)` 两维均非冗余、§2.1"一个或多个 Proposal"。
+- 已确认：policy decision 多数挂机会粒度：权威启动（N 个候选共享同一 `A_u` 与真值 `i`）、BestOfN(breadth)、single-winner 处置都在 round 层面；逐 Proposal 的是 Predictor 与 Equivalence。机制侧证据：同一 Edge 下的 Proposal 共享权威依据并统一进入裁决，`edge_id` 与全局唯一的 `proposal_id` 各自承担机会归组与候选引用，§2.1 允许“一个或多个 Proposal”。
 - 已确认：**设计模型决策面 = 组合视图，不与 §2.1 阶段流程逐段对应**。§2.1 阶段是流程视图（机会发现→…→处置），§3.1 决策面是组合视图（policy 真正被问的作用点）；决策面是 Policy 的落地接口。
 - 已确认：**单边决策面为七槽元组** `S(E) = (admit, extent, predict, launch, effect, match, dispose)`，每槽 = 控制面真实问 policy 的问题。相对旧抽象：admit（新加，闸 + 嵌套递归入口）、extent（新加，单次过程内部推进边界，非嵌套深度；nested depth 归 admit 递归）、predict 吸收 breadth、effect（新加，管投机过程中各 step 外部效果纪律）、launch 承担权威值取得。depth 不再是策略参数。
 - 已确认：**authority 不再独立成槽**（D-041）。权威值来自谁是 Edge 的固有事实，不是可替换决策；`launch`（Eager / Lazy / Absent）决定是否取得、何时取得；Absent 允许放弃天然存在的权威值（含用户输入），是否允许由 Fidelity 契约校验；validator 归属 `match`。原"轴 1 / 轴 5（authority）拆开"的旧表述废弃。
 - 已确认：**admissibility 并入 effect，不再作为独立概念**。原"Edge 注册与 admissibility"机制项、Edge 携带 admissibility 元数据、六实体表均已从 design-model 移除或改写；可投机性由效果纪律与 effect/准入决策承载。阻塞语义：投机执行遇到不可安全暂存/释放的外部效果时停在门口保留前置，accept 才释放、discard 即清理，而非事前整条拒绝。
 - 已确认：**固定约束不进槽**（Mechanism 强制）：效果纪律与阻塞、隔离与信息流（非空 AssumptionSet 不进权威路径）、single-winner 与共享验证依据、注册必经 candidate Branch。**Fidelity 是导出契约不是决策槽**：由槽位取值推导上界、加载期对撞、运行期 shadow 审计。
 - 已确认：原 §2.2 投机边与原 §2.3 组合/嵌套已并入支撑模型 §3.1；工作模型只保留 §2.1 投机执行过程。
-- 连带待改（本轮已处理 design-model、policy-decisions、effect-management 与 glossary 的相关正文）：speculation-decisions D-008 的"Edge 注册与 admissibility"机制项措辞；spec-exec-abstraction §10.4 中 site/`resolve(site,…)` 残留表述；其他历史决策记录中的旧术语暂不改，待后续统一清理。
+- 连带待改（本轮已处理 design-model、policy-decisions、effect-management、glossary 与 spec-exec-abstraction 的相关正文）：speculation-decisions D-008 的"Edge 注册与 admissibility"机制项措辞；其他历史决策记录中的旧术语暂不改，待后续统一清理。
 - 已知但本轮不展开的三条缝隙：流式/交互依赖（`u` 未产完 `i` 时 `v` 部分消费）、L3/Bypass 无真实 `i` 的措辞、sibling command reuse 与投机边的关系。
 - 已确认文档归属：`design-model.md` 只保留八类 decision 的上层定义与组合/嵌套抽象；`admit`、`extent`、`effect` 以及 Effect 包含原 admissibility 含义的完整语义下沉到 `docs/design/policy-decisions.md`；效果到达处理边界时的阻塞、接受后继续和淘汰后清理由 `docs/design/effect-management.md` 定义；Contract 对 Branch 执行要求与 Runtime 能力的匹配由 `docs/design/speculation-contract.md` 承载。
 - 已确认：Effect 不是 Edge 的一次静态可投机标记。一次投机执行可包含多个 step 与多种效果；Policy 选择处理纪律，Effect Management/Runtime 校验并落实。遇到不能提前释放或暂存的效果时，可以阻塞当前投机执行并保留前置进展；只有无法安全阻塞、接受后继续或淘汰后清理时，才拒绝相关环节的投机或明确降级。
@@ -85,7 +87,7 @@
 - 已确认：四侧是完整调用路径中的逻辑位置，不表示四侧都由 AScout 实现或拥有。Agent 接入侧与控制面是 AScout 可以定义和实现的系统部分；Runtime 是 AScout 依赖但不能定义其内部架构的外部能力来源。执行、隔离、资源和效果最终由后端原生机制承载，但 AScout 只通过 Adapter 的可观察行为判断这些能力是否兑现。
 - 已确认：AScout 能定义的是控制面接受的 Runtime Adapter operation/event 边界、能力声明和接入条件；不能控制 Adapter 内部如何调用 Runtime、组织模块或选择 transport。Adapter 的强制内容来自控制面接入契约，内部实现只适合给出开发建议与接入指南。
 - 已确认：`architecture.md` 的直接子文档不按四侧机械地一侧一份。直接子文档包括 Agent 接入侧与控制面设计；Adapter 的具体实现与接入方式进入开发/接入指南；Runtime 不建立通用设计子文档。
-- 已执行：新建 `docs/design/agent-integration.md` 作为架构的直接子文档，新建 `docs/development/runtime-adapter.md` 作为开发/接入指南；`spec-exec-abstraction.md` §6、§10.1–§10.4 与 §10.7 中相应的现行职责已迁移或改为引用，论文证据与 backend 候选分析继续留在开发札记。
+- 已执行：新建 `docs/design/agent-integration.md` 作为架构的直接子文档，新建 `docs/development/runtime-adapter.md` 作为开发/接入指南；`spec-exec-abstraction.md` 中相应的现行职责已迁移，论文证据与 backend 候选分析继续留在开发札记。
 - 已确认：Interposer / ASC-Daemon 的语义由控制面定义（决定它们做什么）；它们部署在 Runtime 创建的 Branch 隔离环境内，运行生命周期由 Runtime 管理（决定它们在哪里跑、何时启停）。该决定不推翻"ASC-Daemon 能在 Branch 隔离环境内独立运行、不与控制面长期 metadata owner 混同部署"的既有约束。
 - 已确认：保留 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 四侧调用路径，但不再将其解释为对称的四个 AScout 子系统或四份实现拓扑。控制面居中，Agent 接入侧是 AScout 自有接入边界，另一端经 Runtime Adapter 使用外部 Runtime。
 

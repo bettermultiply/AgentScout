@@ -2,7 +2,7 @@
 
 > 本文是投机执行底座的完整设计札记（论文调研、推导过程、候选方案与未来构想）。已收敛的最终设计/架构决策以 [`docs/design/speculation-decisions.md`](../design/speculation-decisions.md) 为准。
 >
-> **范围决策（2026-08，D-013 修订）**：engine plane（推理引擎钩子层）不在范围内。文档中的双层分析、engine plane 表格与 §10.7 的 Engine Boundary 均保留为论文调研背景与未来自托管时的候选。
+> **范围决策（2026-08，D-013 修订）**：engine plane（推理引擎钩子层）不在范围内。文档中的双层分析、engine plane 表格与 §10.6 的 Engine Boundary 均保留为论文调研背景与未来自托管时的候选。
 
 ## 1. 核心模型（已下沉）
 
@@ -115,7 +115,7 @@ AssumptionSet、同一 Edge 上的并行候选、嵌套 Edge、single-winner、�
 
 ### 关键发现：底座必须是**双层**的（范围决策：engine plane 不做）
 
-> **范围决策（2026-08，D-013 修订）**：engine plane 整体排除在范围外 —— 本系统以 API 方式使用大模型，下面 4 篇的机制全是自托管专属。本小节与 §10.7 的分析保留为论文调研背景与未来自托管时的候选。
+> **范围决策（2026-08，D-013 修订）**：engine plane 整体排除在范围外 —— 本系统以 API 方式使用大模型，下面 4 篇的机制全是自托管专属。本小节与 §10.6 的分析保留为论文调研背景与未来自托管时的候选。
 
 11 篇里有 **4 篇** 的核心机制在纯 API 层够不着：
 
@@ -144,6 +144,13 @@ AssumptionSet、同一 Edge 上的并行候选、嵌套 Edge、single-winner、�
 4. **上线安全** —— cost-aware 的五阶段（offline replay → shadow → canary 1%/5%/25%/100% → online calibration → drift kill-switch）本该是底座能力
 
 Speculate with Memory 顺带给了一个有用的方法学细节：他们把 actor 轨迹**采集一次然后 replay**，以消除 actor 方差、把 API 成本隔离到 speculator 上。这个"actor replay"应该是底座的一等能力 —— 它让 predictor 的评测变成确定性的。
+
+| 用途 | 论文事实与用途 |
+|---|---|
+| Predictor 数据供给 | PASTE 需要历史 trace 挖 pattern，DSP 需要 `(state, k)` 对做在线 RL，Speculate with Memory 需要完成轨迹与 miss episodes |
+| 确定性评测 | Speculate with Memory 采集一次 actor 轨迹后重放，以消除 actor 方差并把 API 成本隔离到 speculator |
+| 成本校准 | 真实命中率 `p`、接受率 `α` 和取消前生成比例 `ρ` 只能从 shadow/replay 数据中测得 |
+| 灰度路径 | cost-aware 给出 offline replay → shadow → canary → online calibration → drift kill-switch 的上线过程 |
 
 ---
 
@@ -275,15 +282,15 @@ PASTE 是活证据：
 
 ---
 
-## 10. 系统架构：组件清单与边界
+## 10. 系统边界与后端研究
 
-### 10.1 四侧中的组件与部署视图
+### 10.1 四侧调用路径
 
 当前权威结构见 [架构](../architecture.md)：四侧表示完整调用路径中的逻辑位置，不表示四个由 AScout 拥有的子系统，也不直接规定 crate、进程或服务拓扑。
 
 各部分的下一层说明分别见 [Agent 接入侧设计](../design/agent-integration.md)、[控制面设计](../design/control-plane.md) 与 [Runtime Adapter 接入指南](runtime-adapter.md)。Runtime 是外部能力来源，不由 AScout 建立通用内部设计。Instance、Branch、AssumptionSet 与 disposition 的现行语义见对应正式设计文档。
 
-### 10.2 组件间数据流
+### 10.2 跨侧数据流
 
 当前跨侧闭环统一为：Agent 接入侧形成请求，控制面校验并编排受管操作，Runtime Adapter 映射到外部 Runtime，结果与事件沿反方向返回。具体责任分别见上述三份下沉文档与 [Speculation Contract](../design/speculation-contract.md)。
 
@@ -291,199 +298,7 @@ PASTE 是活证据：
 
 角色与接入责任已经下沉到 [Agent 接入侧设计](../design/agent-integration.md)。保留的研究结论是：端用户与 Agent 默认不必感知投机，但这不是禁止显式协作的不变量；用户或 Agent 可以通过受控入口提供输入或参与裁决。具体 effect 元数据从哪里取得仍是开发问题，不再在组件使用模型中预设为唯一人工接入成本。
 
-### 10.4 控制面组件职责（贯穿示例）
-
-**贯穿示例**：一个编码 agent 收到"修复 issue #42"，轨迹为
-
-```
-grep("parse_config") → read_file("config.py") → edit_file(...) → run_tests() → git_push()
-       PURE                  PURE                 STAGEABLE       STAGEABLE    IRREVERSIBLE
-```
-
-下文所有例子都基于这条轨迹。
-
----
-
-#### Entry API
-
-**职责**：控制面的薄入口。接收 Agent 接入侧形成的任务提交、状态查询和显式 policy 选择输入，返回 task id 或查询结果，并把请求交给 控制面；它不直接调用 Runtime Adapter，也不独立拥有准入或 policy 规则。
-
-**持有状态**：不持有长期控制状态。在飞任务、policy 绑定与预算等状态由控制面内相应 owner 管理。
-
-**例**：服务收到"修复 issue #42"。Entry API 把任务与用户显式指定的 policy（未指定则为空）交给 控制面；控制面应用默认或指定 policy、完成准入，再经 Runtime Adapter 请求初始化 root Authority Instance，最后由 Entry API 返回 `task_id`。端用户只看到自己提交了任务。
-
-#### Policy Engine（六类 policy 插件的宿主 + 编译校验）
-
-**职责**：注册、实例化六类 policy 插件（Proposer / Equivalence / Topology / CostGate / Salvage / Compensation）；部署期把 operator 的 policy 声明编译成轴配置，做**轴间约束求解**与**跨层契约协商**，产出「已验证的 policy profile」；运行期被 mechanism 反向调用，分发到对应插件。
-
-**持有状态**：已注册的插件实例；profile 表 —— 每个 profile 的轴配置、推导出的 fidelity 上界、所依赖的下层能力。
-
-**例（编译通过）**：operator 写
-
-```
-{ proposer: paste-pattern, equivalence: L0-canonical,
-  topology: {breadth: 3, depth: auto}, fidelity: trajectory-equivalent }
-```
-
-Policy Engine 逐条检查：`depth>1` 要求 L0/L2 ✓；`trajectory-equivalent` 要求 `authority_launch=eager` ✓ 且 `effect ∈ {PURE, STAGEABLE, TRANSFORMABLE}` ✓。再通过 Runtime Adapter 查询“当前具体 Runtime 能否提供 filesystem STAGEABLE” → Adapter 映射的能力报告显示 overlayfs 可以 ✓；问 API 能力表“有 logprobs 吗” → **API 后端没有** → 把依赖 logprobs 的置信门降级为常数阈值，**并把降级原因写进 profile**。编译通过。
-
-**例（拒绝加载）**：operator 写 `{equivalence: L1-semantic, fidelity: trajectory-equivalent}` → 拒绝，报“L1 语义匹配撑不起轨迹等价，最高只能声明 outcome-equivalent”。这正是 ISP 论文自己承认过的事（用了模糊匹配后就不再保证与普通规划结果相同），底座把它变成加载期的强制检查。
-
-**六类插件**：
-
-| 插件 | 职责 | 贯穿示例 |
-|---|---|---|
-| **Proposer** | 给出 `î` | pattern 池匹配到事件签名 `[grep → ?]` 的历史规律，argument mapper 从 grep 输出首条匹配里抽出路径，产出 Proposal `read_file("config.py")`，置信度 0.9 |
-| **Equivalence** | 判 `î ≈ i`，被 `resolve()` 调用 | 权威流实际发出 `read_file("./config.py")`。L0 规范化后两者相等 → 命中。若用 name-only 匹配则会把 `read_file(任意路径)` 都算命中 —— SPORK 明确拒绝这么做，因为对副作用工具会静默改变行为 |
-| **Topology** | 决定宽度与深度 | 该 site 有 3 个候选；预算允许，选置信度最高的 2 个，并允许在最高置信那支上再下探一层 |
-| **CostGate** | 要不要投机 | `存活率 0.9 × 预期省 2.3s × λ − (1−0.9) × 成本 ≥ 阈值` → SPECULATE。**嵌套下"存活率"必须由底座透传**，否则 depth-2 实例会按 depth-0 的账算，存活率 0.25 时过度投机 4× |
-| **Salvage** | 未命中时回收残值 | 权威实际读的是 `settings.py`，投机白读了 `config.py` —— 但那次读的结果留在缓存里，若后续真的用到直接命中。Skim 式的版本是把已到达的 URL 交给权威路径继续 |
-| **Compensation** | 补偿已发生的效果 | 投机分支在 staging 目录里跑过测试、留下 artifact；refute 后删除该目录 |
-
-**关键**：mechanism 调用 policy，不感知其实现（图中箭头④自下而上）。换一个 Proposer 不需要动 Reconciler 一行。
-
-#### Assumption Manager
-
-> **命名**：Assumption Manager。曾名 `Speculation Graph`，但本组件**调 Equivalence 插件、强制一条信息流规则、坐在关键路径上执行决策过程**，`Graph` 一词未覆盖"主动"语义。选定理由：**(1) 形状同构的强先例** —— 数据库的 Transaction Manager / Lock Manager（拥有状态、强制不变量、在关键路径、被他人调用），且 `resolve()` 本质是一次 commit 决策；**(2) 让架构图去教抽象** —— 全文概念中心是 assumption（`AssumptionSet`、`A == ∅ ⟺ Authority`、依赖闭包传播），盒子叫这名字，读者看图即把抽象与组件对上；**(3) 对"两个索引"诚实** —— 主名是 assumption，instance 树是其另一索引视图，正是 §9.1 对偶的说法。
-
-**职责**：全系统唯一的"谁依赖谁"真相源。假设 DAG 与实例树是**同一份状态的两个索引**（`by_assumption` / `by_instance`）。
-
-**持有状态**：assumption 节点 `(site, proposal, 状态 ∈ {pending, confirmed, refuted})`；instance 节点 `(id, AssumptionSet, role, grain)`；依赖边。
-
-**例（命中，展示 promote 级联）**：
-
-```
-Instance 0  Authority     A = ∅
-Instance 1  fork 自 0，基于 a₁ = (grep后的下一次调用, read_file("config.py"))
-Instance 2  fork 自 1，基于 a₃ = (read_file后的下一次调用, edit_file(...))
-            → Instance 2 的 AssumptionSet = {a₁, a₃}
-```
-
-权威 Instance 0 真的发出 `read_file("config.py")` → `a₁` 被 confirm →
-
-- Instance 1 的 AssumptionSet 变空 → **它就地成为 Authority**（role 只是 `A == ∅` 的函数）
-- Instance 0 那次调用**直接复用** Instance 1 已拿到的结果
-- Instance 2 的 AssumptionSet 收缩为 `{a₃}`，从 depth-2 降为 depth-1
-
-**没有任何实例被重建。** 这就是"实例结构必须同构"的收益 —— promote 只是谓词翻转。
-
-**例（未命中）**：权威发出的是 `read_file("settings.py")` → `a₁` refute → Instance 1 与 Instance 2 **整个子图**进入 Salvage → Discard。这一条统一了 Spec Interaction 的 cascade-cancel、Speculative Actions 的子树剪枝、ISP 的 kill `target_k (k>j)` —— 三家各自发明过的局部方案。
-
-**附带作用**：它是可见性泄漏的静态防线 —— `AssumptionSet` 非空的数据只能流向同样非空的容器，唯一降级通道是 `resolve()`。这是一条可静态检查的信息流规则。
-
-**它是自身唯一的变更者，且 resolve 就是它的写路径。** 对外只暴露操作，不暴露内部结构：
-
-```
-resolve(site, 权威值)          ← 关键路径；调 Equivalence 判定，选 Disposition
-add_node(...) / preempt(i)     ← 旁路；由 Scheduler 调用
-
-内部强制的不变量：
-    A == ∅  ⟺  role == Authority
-    refute 沿依赖闭包级联
-    AssumptionSet 非空的数据不得流向空容器
-```
-
-不变量集中在一处强制执行，调用者无法违反 —— 即 etcd / Ray GCS 的模式：状态与不变量归一个组件，决策逻辑归别人。
-
-**`resolve()` 的两种命中必须分开**（前面 promote 级联的例子里，`a₁` confirm 后发生的是哪一种取决于投机任务的进度）：
-
-- **Reuse**：投机的 `read_file` 早已跑完 → 结果直接转正，权威路径这次调用耗时归零
-- **Promote**：投机的 `run_tests()` 还在飞（跑了 8s，还剩 4s）→ 该任务**转为权威身份并置为不可抢占**，权威路径只等剩余 4s，而非完整 12s
-
-PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机成果会被丢掉重跑。
-
-> **resolve 不独立成组件**。按"一个盒子 = 一份独立状态 + 一份独立接口"的规则，独立 Reconciler 给出的"状态"是"待决 site 表（site → 已开出的 proposal 列表）"—— **那就是图本身**，pending 状态的 assumption 节点恰好是 `(site, proposal)` 对。它是**对图的无状态逻辑**，未通过状态检验。
->
-> **体系结构对应**：**commit/retire 与 ROB 在一起**，不独立于它 —— ROB 既持有投机状态、又执行 retire 与 squash。正确对应是：
->
-> ```
-> Assumption Manager + resolve  ≈  ROB（持有投机状态 + retire / squash）
-> Scheduler                   ≈  issue / dispatch
-> ```
->
-> **但 Scheduler 仍不该并入**，理由与上面无关：
->
-> - **它有自己的状态** —— 优先队列、预算热计数器、Runtime 压力读数，三样都不在图里
-> - **延迟类别不同** —— `resolve` 在关键路径上（权威路径阻塞等待比对结果）；"要不要再开一个投机"晚 50ms 只是少赚一点。共享一个事件循环会产生**队头阻塞**：一次调度决策（遍历候选、调 CostGate 算 EV、查压力）可能排在一次 resolve 之前，把延迟压到权威路径上 —— 而那正是本系统要削减的量。旁证：Speculative Tool Calls 实测**短工具场景下，逐出与重入引擎的簿记开销会盖过延迟隐藏的收益**，关键路径上的簿记吃掉赢面是这类系统的真实失败模式。此理由与 §10.4 中 Interposer / ASC-Daemon 的拆分同构
->
-> **Effect Coordinator 也不该并入**：它持有的 Effect Catalog、分类与协调计划不属于 Assumption DAG；真实 staged effect、obligation、overlay 归属和 materialization 状态则由 Runtime 持有。更硬的理由是**失败模式不同 —— 图错了损失性能，Effect 错了真的发出一封邮件**。控制面的协调路径与 Runtime 的强制路径都必须能被单独审计。
-
-#### Scheduler
-
-**职责**：决定投机什么、多宽、多深、何时抢占。**全系统唯一能看到全局资源压力的地方。**
-
-**持有状态**：可扩展节点的优先队列、**预算余额（热计数器）**、各 Runtime 的压力读数。
-
-> 预算计数器归这里而不归 Ledger：它是花钱的那个，且 CostGate 每次决策都要同步读。Ledger 负责的是**成本归属分类**（resolve 之后才能判定），走异步旁路。
-
-**例**：队列里有 5 个可扩展节点，key = `存活概率 × 预期省时 / 资源成本`。此刻 Runtime 报告 CPU 压力高 → 只弹出 2 个；同时发现 Instance 4 是 utility 最低的投机实例。Scheduler 先根据 Effect Coordinator 的协调视图判断能否请求抢占（流⑧），再经 Runtime Adapter 发出请求；Runtime 对真实 obligation 作最终校验后才能执行抢占。
-
-**为什么它必须存在**（这是整个底座最强的必要性论据）：SPAgent 实测朴素投机在 >2 rps 时**比不投机慢 49.3%**；PASTE 的 Tool-Only 消融（只加速工具、不改 LLM 调度）**比 baseline 更差**（419s vs LLM-Only 342s vs 完整 270s），因为投机让 session 更频繁、更集中地涌回 GPU。**没有这一层，投机在高负载下是负收益 —— 而单个算法的作者做不了这件事，因为他们没有调度层。**
-
-#### Effect Coordinator
-
-**职责**：控制面中所有对外效果的统一协调路径。它根据 EffectClass × StateDomain 矩阵和 Edge & Effect Catalog 形成允许、拒绝或 transition 计划，再经 Runtime Adapter 请求 Runtime 执行；它本身不是效果执行出口。
-
-**持有状态**：Catalog（工具 → EffectClass；边 → enable bit）和每个 SpecTask 的效果协调视图。真实 staged effect、obligation、overlay 归属、commit barrier 与 materialization 状态由 Runtime 的 Effect backend 持有。
-
-**例（STAGEABLE）**：Instance 1 投机执行 `run_tests()`。Catalog 查得它是 `STAGEABLE / filesystem`，Effect Coordinator 经 Runtime Adapter 请求 staging；Runtime 的 Effect backend 分配 overlayfs 上层并登记 obligation，测试 artifact 全落在上层。`a₁` confirm 后 Coordinator 请求放行（流⑦），Runtime 校验后 materialize；refute 时由 Runtime 丢弃上层并完成 cleanup。
-
-**例（硬闸）**：Instance 2 想投机 `git_push()`。Catalog 标为 IRREVERSIBLE，控制面拒绝该投机请求；Runtime 同时强制对应 obligation 和 commit barrier，不能因调用者绕过协调计划而执行。哪怕 CostGate 算出收益巨大也不行。cost-aware 给浪费的 token 定了价，**给不了一次错误的不可逆副作用定价**。
-
-**例（TRANSFORMABLE，比补偿更优）**：若某工具存在 dry-run 或 staging 变体，Coordinator 请求 Runtime 走该变体，拿到**真实**但不产生原始变异的结果，且不需要事后补偿。PASTE 用的就是这条，应作为首选路径。
-
-**关于虚拟执行**：直接伪造一个成功返回值是危险的 —— 伪造值会成为该分支后续行为的条件，即使 L0 全等匹配，该分支也已建立在编造的 observation 上，而**破坏点在验证机制看不见的地方**。救法是把伪造值本身建模成一个 Proposal（生产者是 Effect Coordinator 而非 Proposer），让它进入 AssumptionSet 走同一套 confirm/refute —— 风险从隐藏变成**可见、可计价、可被 Fidelity Monitor 拦截**。
-
-#### Ledger（记录 · 回放 · 校验）
-
-> **一个盒子**：Ledger / Fidelity Monitor / Trace & Shadow Store 合并为 Ledger —— 三者本质都是**记录与校验数据**、都在异步旁路上。
->
-> **预算计数器归 Scheduler，成本归属分类归 Ledger**：CostGate 每次决策都要同步读预算余量，热计数器挂在 GB 级 trace 存储后面是错的。分类天然发生在 resolve 之后（只有那时才知道算“本来就要花”还是“纯浪费”），由 Reconciler 发出分类事件、Ledger 存档。
-
-**职责**：三件事 —— 记录（append-only 事件流）、回放（确定性重跑）、校验（契约对撞）。
-
-**持有状态**：事件日志；每 profile 的保真度三元组（声明值 / 从轴推导的上界 / shadow 实测值）；成本归属的三分累计。
-
-**画布小但承重。** 类比 k8s 的 etcd 或 Ray 的 GCS —— 一个小盒子，但离了它系统不工作。**不要在论文里把它写成附属设施**，它承三处重量：
-
-**(1) 成本归属的三分记账**
-
-| 事件 | 计入 |
-|---|---|
-| Instance 1 投机 `read_file` 命中 | **本来就要花** —— 权威也要读，投机没有增加净成本 |
-| Instance 2 投机 `edit_file` 未命中 | **纯浪费** |
-| Instance 3 生成到一半被抢占（1000 token 里生成了 300） | **部分成本** —— 只计 300 token，但成功率 posterior 仍记一次完整失败 |
-
-为什么口径必须由底座统一：论文之间本来就不兼容（Speculative Actions 无条件按 `k̃` 计费；cost-aware 只在失败时计 `(1−P)·C_spec`；SPORK 用 per-turn 接受率 α 算 break-even）。各自记账则**无法横向比较、无法做全局预算、无法做熔断**。
-
-**(2) 契约实测 —— 让 lossless 从"声明"变成"测得"**
-
-**例**：profile 声明 `trajectory-equivalent`。抽 1% 任务开 shadow：同一任务同时跑投机路径与纯串行路径，**只提交串行结果**，逐步比对两条轨迹。跑满 500 个任务后发现 3 个不一致，定位到某工具参数序列化不稳定导致 L0 规范化失败 → 告警并关掉该 site 的 enable bit。
-
-三条承重理由：
-
-- **它是 §11 "正确性"指标的唯一实现方式。** 要比"原始实现 vs 底座上的最终可见行为"，只能影子对拍。没有它这条指标不可测，只能像 11 篇一样*论证*。
-- **组合一旦成为主打赢面，契约校验就从可选变成必需。** 把 PASTE 的 proposer 与 DSP 的 depth 学习器组合起来 —— **没有任何论文验证过该组合是否 lossless**。静态约束求解只给保真度**上界**，给不出"实际达成"的证据。而组合恰恰是最容易出问题的地方：两个各自无损的 policy 组合起来可能破坏契约。
-- **没有一篇论文做过这件事。** 这既是能力也是可发表的结果 —— 底座有可能测出某些已发表的 lossless 声明在特定负载下并不成立。
-
-**(3) 回放 —— predictor 数据供给与确定性评测**
-
-| 用途 | 例 |
-|---|---|
-| **Predictor 数据供给** | PASTE 要历史 trace 挖 pattern、DSP 要 `(state, k)` 对做在线 RL、Speculate with Memory 要完成轨迹 + miss episodes。**三家各造过一次管道** —— 底座录了就都白拿，"接入新 predictor 的成本"从"自建数据管道"降到零，这是可量化的通用性证据 |
-| 确定性评测 | 换一个新 Proposer，先在录好的 1000 条轨迹上**离线回放**，直接算出命中率与预期省时，**一行生产流量都不用碰**。Speculate with Memory 正是这么做的 —— actor 轨迹采一次后重放，消除 actor 方差、把 API 成本隔离到 speculator 上 |
-| 成本校准 | 真实的命中率 `p`、接受率 `α`、取消前生成比例 `ρ` 只能从影子流量测出来 |
-| 灰度 | offline replay → shadow → canary → online → 漂移熔断 |
-
-#### Runtime Adapter
-
-Runtime Adapter 的接入责任、适配状态与实现建议见 [Runtime Adapter 接入指南](runtime-adapter.md)。具体后端是否提供 fork、COW 或状态重建能力，由相应 Adapter 声明。
-
-#### Agent 接入组件
-
-Interposer、ASC-Daemon、Operation Integration 及 Agent/product integration 的现行职责已迁移到 [Agent 接入侧设计](../design/agent-integration.md)。论文调研得到的四类接缝仍保留在 §6 作为接入证据，但不再被解释为每个 integration profile 都必须实现的固定接口。
-
-### 10.5 关键设计决策：不是所有投机都需要独占隔离环境
+### 10.4 投机形态与隔离成本
 
 **这是能省掉最多复杂度的一条。**
 
@@ -508,7 +323,7 @@ Interposer、ASC-Daemon、Operation Integration 及 Agent/product integration �
 
 这同时给了多隔离后端（docker / firecracker / gVisor / QEMU）一个**架构上的必要性理由**：不同 agent 需要不同的 fork 保真度。否则多后端只是"支持得多"，不构成架构论点。
 
-### 10.6 虚拟执行：伪造返回值有正确性问题，但有救法
+### 10.5 虚拟执行的论文路线
 
 **对不可逆或非幂等的 API 直接返回成功、构造一个返回结果 —— 这个危险，且 11 篇无一这么做。**
 
@@ -524,7 +339,7 @@ Interposer、ASC-Daemon、Operation Integration 及 Agent/product integration �
 
 **救法**：把伪造的返回值本身建模成一个 **Proposal**，只是其生产者是 Effect Coordinator 而非 Proposer。这样它进入 AssumptionSet，走同一套 confirm/refute —— 风险从隐藏变成**可见、可计价、可被 Fidelity Monitor 拦截**。
 
-### 10.7 边界：Agent 与 Isolation 是必需，Engine 在范围外
+### 10.6 边界：Agent 与 Isolation 是必需，Engine 在范围外
 
 **Agent Boundary 与 Isolation Boundary 是必需的；Engine Boundary 在范围外（D-013 修订）。**
 
@@ -543,7 +358,7 @@ Interposer、ASC-Daemon、Operation Integration 及 Agent/product integration �
 1. **成本问题变严重。** 自托管靠 continuous batching，投机的 LLM 调用在低负载下近乎免费（Speculative Actions 明确指出这一点）。走 API 则每次投机按全价计费。**因此 CostGate 与准入从"锦上添花"变成必需**，§11.2 的 token 记账口径也从边缘指标变成核心指标。
 2. **别把 prompt cache 一起扔掉。** 主流 API 都有 prompt caching。你控制不了它的粒度，但可以**塑造请求前缀去命中它** —— 是 *prefix-cache-aware* 而非 *prefix-cache-controlling*。这个区别在 API 场景下是少数还能拿到的引擎级收益。
 
-### 10.8 自研 Runtime 的定位
+### 10.7 自研 Runtime 的定位
 
 **它的存在理由不是"又一个后端"，而是"证明 Isolation Boundary 的接口设计对了"** —— 通用后端能接上，专用后端能把接口用满。
 

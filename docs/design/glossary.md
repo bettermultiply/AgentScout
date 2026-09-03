@@ -63,17 +63,17 @@
 - **commit / commit request**：candidate 显式提交自己的子树。可 conditional commit：未验证前提随 subtree 保留为 obligation，验证前不能 Accept。（`decisions.md` D-025、D-037）
 - **accept**：接受一个 winner subtree（裁决 = Reuse / Promote）；候选被接受后保留自身 Branch identity 并替换 parent 在树中的位置。（`branch-semantics.md`；`decisions.md` D-009/D-023）
 - **discard**：丢弃整个 child subtree（= Disposition 的 Discard / Preempt）；不要求 candidate ready，不自动把 partial state 反馈给 parent。（`branch-semantics.md`；`decisions.md` D-023）
-- **resolve()**：权威值到达时判 `î ≈ i`、选 Disposition 并沿依赖闭包传播的关键路径操作，由 Assumption Manager 执行。（`spec-exec-abstraction.md` §10.4 Assumption Manager）
+- **resolve()**：权威值到达时进行匹配、选择处置并沿 Proposal 依赖传播的关键路径操作，由 Assumption Manager 协调。（`control-plane.md` §3.3；`policy-decisions.md`）
 - **Salvage**：失败后回收部分进展（`progress() / handoff()` 一等抽象）；warm-start、partial-token accept、promote 的共性。（`spec-exec-abstraction.md` §2 轴 6）
 - **PublishOutcome**：真实 operation 完成后把 outcome 发布到 OutcomeSlot 的机制操作；由 Operation wrapper / Hook / effect broker 自动执行，不作为独立 Agent-facing 命令。（`branch-semantics.md`；`decisions.md` D-037）
 
 ## 组件
 
-- **Policy Engine**：可替换 Policy 进入控制面的固定入口，解释 Policy Decision 并检查其取值在当前 Contract 与 Adapter 声明的后端能力下是否合法；加载期约束校验和运行期分发。（`control-plane.md` §3.1）
-- **Assumption Manager**：控制面内 Proposal 依赖与确认/否定状态的 owner；维护"谁依赖谁"、跟踪 `AssumptionSet`，强制信息流约束（非空 AssumptionSet 的数据不得流向空容器）。（`control-plane.md` §3.2；`speculation-decisions.md` D-019）
-- **Scheduler**：控制面内负责准入、预算、优先级、取消与资源协调的组件；是全系统唯一看到全局资源压力的控制面组件。（`control-plane.md` §3.3；`speculation-decisions.md` D-011/D-020/D-021）
-- **Effect Coordinator**：控制面内效果处理的协调者；结合 Policy、Contract 与 Runtime 能力形成允许、暂存、转换、延迟、阻塞或补偿计划，经 Runtime Adapter 请求 Runtime 执行。它不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §3.4；`effect-management.md`）
-- **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §3.5；`speculation-contract.md` §3）
+- **Policy Engine**：可替换 Policy 进入控制面的固定入口，解释 Policy Decision 并检查其取值在当前 Contract 与 Adapter 声明的后端能力下是否合法；加载期约束校验和运行期分发。（`control-plane.md` §3.2）
+- **Assumption Manager**：控制面内 Proposal 依赖与确认/否定状态的 owner；维护"谁依赖谁"、跟踪 `AssumptionSet`，强制信息流约束（非空 AssumptionSet 的数据不得流向空容器）。（`control-plane.md` §3.3；`speculation-decisions.md` D-019）
+- **Scheduler**：控制面内负责准入、预算、优先级、取消与资源协调的组件；是全系统唯一看到全局资源压力的控制面组件。（`control-plane.md` §3.4；`speculation-decisions.md` D-011/D-020/D-021）
+- **Effect Coordinator**：控制面内效果处理的协调者；结合 Policy、Contract 与 Runtime 能力形成允许、暂存、转换、延迟、阻塞或补偿计划，经 Runtime Adapter 请求 Runtime 执行。它不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §3.5；`effect-management.md`）
+- **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §3.6；`speculation-contract.md` §3）
 - **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地控制入口，绑定 Branch context，转发 Agent-facing request 并承载 lifecycle event；不拥有全局控制状态。（`agent-integration.md` §2.2）
 - **Interposer**：Agent 接入侧位于请求路径上的捕获与结果路由组件；具体可观察接缝由 integration profile 决定，不固定为四个接口。（`agent-integration.md` §2.3）
 - **Entry API**：控制面的稳定入口；接收 Agent 接入侧形成的请求并交给控制面中的相应组件，不构成独立一级侧面，也不直接接触 Runtime。（`decisions.md` D-038；`../architecture.md` §1）
