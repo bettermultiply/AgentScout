@@ -4,46 +4,9 @@
 >
 > **范围决策（2026-08，D-013 修订）**：engine plane（推理引擎钩子层）不在范围内。文档中的双层分析、engine plane 表格与 §10.7 的 Engine Boundary 均保留为论文调研背景与未来自托管时的候选。
 
-## 1. 核心模型：一条投机边的生命周期
+## 1. 核心模型（已下沉）
 
-统一模型：**执行图上存在一条边 `u → v`，`v` 消费 `u` 的输出 `i`。在 `i` 尚未由权威路径产出时，用 `î` 替代 `i` 启动 `v`。**
-
-`u` 和 `v` 是什么完全不重要，这正是 Speculative Actions 把 LLM 调用、工具调用、MCP 请求、**乃至人类回复**统统建模成 "API call" 的动机（它明确指出人类回复的延迟常常比自动化工具更长）。
-
-**被加速的组件是谁也不重要**：Skim 猜的是整条子轨迹的终点（URL + 答案 schema），DSP/ISP 猜的是整个 agent 的一步，Speculative Interaction Agents 猜的是用户还没说完的话 —— 它们全都落在同一条投机边上。
-
-**关键补充：`u` 有两个实现。** `î` 从哪来？来自 Predictor。而 Predictor 本质上就是 `u` 的一个廉价实现 `S_u`。所以一条边上并存 **权威实现 `A_u`** 与 **投机实现 `S_u`**，而 `A_u` **是否启动、何时启动是一条策略轴**（轴 1），不是模型的固有属性。这一点是整个模型能覆盖 Bypass / Elide 的关键。
-
-```
-                          ┌── launch policy: eager | lazy | absent   ← 轴 1
-                          ▼
-                    ┌──────────── Authority Path (权威路径) ────────────┐
-                    │  A_u ─────────────── i (真值，延迟 ℓ_auth) ───────▶│
-   Edge (投机边)  ──┤                                                    ├── Reconcile ──▶ Disposition
-                    │  S_u ── î ──▶ SpecTask(v, î) @ Isolation ─────────▶│
-                    └──────────── Speculative Path (投机路径) ───────────┘
-                              │                     │
-                        (breadth × depth)      staged effects
-                          ← 轴 2                    │
-                                              Effect Gate ──▶ 外部世界
-```
-
-六个必须命名的实体：
-
-| 实体 | 定义 | 论文对应 |
-|---|---|---|
-| **Edge** | 图上一条被标注为"可投机"的依赖边，携带 admissibility 元数据 | cost-aware 的 per-edge enable bit；PASTE 的 pattern 匹配点 |
-| **Proposal** `î` | 一次猜测。`{value, confidence, provenance, source}` | SPORK 的 probe；PASTE 的 prediction record；DSP 的 approximation step |
-| **SpecTask** | 基于 `î` 启动的工作单元，运行在隔离域中，携带 AssumptionSet | PASTE 的 speculative job；ISP 的 target_i process |
-| **Authority** | 提供真实输入、结果或外部权威判断的可选来源，由 `A_u` 表示；可以为空 | 大模型 / 主生成流 / 真实环境 / **人**；validator 是独立验证器 |
-| **Reconciliation** | 权威到达时，判定 `î ≈ i` 并选择处置 | 各家的 match + commit |
-| **Disposition** | 处置结果的枚举 | PASTE 的四终态 + Skim 的 warm-start + SPORK 的 partial-accept |
-
-**命名约定**（三层不重叠）：
-
-- **Proposal** —— orchestration 层的投机值。它的语义承诺较弱，在 L0 到 L3 都适用；投机解码社区也已使用 proposer/proposal（SPORK 的组件名为 `SporkProposer`）。
-- **Draft** —— engine 层的 token 级草稿。SPORK 的 partial-token accept 会把被拒 probe 变成 draft；该词不用于 orchestration 层的值。
-- **Assumption** —— 依赖图上的边（第 3 节），表示某个 Proposal 成立这一未验证前提。
+本节原先的 Edge 生命周期、Proposal/Authority/SpecTask/Reconciliation/Disposition 定义，以及 `A_u` 的启动策略，已分别纳入 [设计模型](../design-model.md) §2.1、§3.1 和 [Policy Decisions](../design/policy-decisions.md) §2。这里不再维护第二份规范表述；本札记后文只保留论文调研、候选方案和实现分析。
 
 ---
 
@@ -51,35 +14,9 @@
 
 本节已迁移至 [Policy Decisions](../design/policy-decisions.md)，后续在正式文档中继续整理其决策分类与取值。
 
-## 3. 组合性：Assumption DAG
+## 3. 组合性（已下沉）
 
-**问题**：多个投机同时在飞、且互相有依赖时，语义是什么？
-
-论文现状 —— 三家各自发明了一套局部方案，**没有一家给出通用语义**：
-
-- **Speculative Interaction Agents**：tool DAG + cascade-cancel。工具调用可以引用尚未解析的操作数；某个调用被作废时，下游级联取消，用 `<cancel>` 标签通知模型不要等那个 ID。
-- **Speculative Actions（depth 模式）**：多步深度投机。看似会指数爆炸，实际不会 —— 分支只在投机或真实调用返回时才延伸，不一致子树立即剪枝，所以系统最多领先 `a/b` 步，活跃分支数**与视界 T 无关**。
-- **ISP**：mismatch at step j → kill 所有 approximation process 和所有 `target_k (k > j)`，因为它们全建在坏前缀上。
-
-**底座应该给的通用机制**：每个 SpecTask 携带 provenance —— 它依赖了哪些**尚未确认的假设**。
-
-```
-Assumption     = (edge_id, proposal_id)
-AssumptionSet  = frozenset[Assumption]     # SpecTask 的依赖闭包
-```
-
-规则：
-
-- `AssumptionSet == ∅` ⟺ 该 task 是权威工作。
-- 某 assumption 被 **confirm** → 从所有 task 的 set 中移除；set 变空的 task 可以 commit。
-- 某 assumption 被 **refute** → 依赖它的整个子图进入 Salvage → Discard。
-- 投机 task 之间**可以**互相依赖（推测链），set 做并集。
-
-这一个机制统一了上面三家的局部方案，并且顺带解决了一个**没人提但很致命**的问题：
-
-> **可见性泄漏**。投机产物绝不能进入权威 context。PASTE 用"commit boundary"、Speculate with Memory 用"actor sees identical context"各自表述了这条。但一旦允许推测链，就需要一条**信息流约束**：非空 AssumptionSet 的数据只能流向同样非空的容器，唯一的降级通道是 `resolve()`。
-
-这是一条可静态检查的类型规则。底座能强制它，单个算法做不到。
+AssumptionSet、同一 Edge 上的并行候选、嵌套 Edge、single-winner、确认/否定传播和非空假设数据的信息流约束，统一语义见 [Policy Decisions](../design/policy-decisions.md) §4；Edge 与 Proposal/Branch 的抽象关系见 [设计模型](../design-model.md) §3.1。本札记不再重复定义 Assumption DAG。
 
 ---
 
@@ -103,25 +40,7 @@ AssumptionSet  = frozenset[Assumption]     # SpecTask 的依赖闭包
 
 如果底座能提供真正的效果管理层，就能把所有这些算法的适用范围从只读扩展到可写 —— **这才是系统研究者的贡献，而不是再写一个 predictor**。
 
-建议的 EffectClass（综合 PASTE 三层 + cost-aware 三分 + Speculative Actions 的补偿设想）：
-
-```
-PURE                              // 无外部效果，随便投机
-IDEMPOTENT(natural_key)           // 重放收敛到同一状态（upsert on deterministic id）
-STAGEABLE(commit_barrier)         // 效果可缓冲，屏障后释放
-TRANSFORMABLE(variant)            // 存在非变异的等价执行：dry-run / staging target  ← PASTE
-COMPENSABLE(undo_fn)              // 可补偿（refund/replace）
-OVERWRITABLE(ordering)            // last-write-wins 收敛                        ← Speculative Actions OS
-IRREVERSIBLE                      // 不可投机，硬闸
-```
-
-三个必须做进 Mechanism 的细节：
-
-1. **commit barrier 的触发条件必须显式建模。** Speculative Interaction Agents 给了一个非平凡的例子：unsafe 调用缓冲，直到 (i) final query update 到达 **且** (ii) 模型发出比之前更大的 tool ID（表示编辑结束）或 pause（计划稳定）。他们类比 MIPS R10000 的写缓冲：**"write operations are buffered but not allowed to execute until the instruction is committed"** —— 这个类比是对的，底座应该照抄处理器的 commit/retire 语义。
-
-2. **PASTE 的 TRANSFORMABLE 被低估了。** "非变异的等价执行"（dry-run、打到 staging 资源）把一个不可投机的操作变成可投机的，而且**不需要补偿**。这比 COMPENSABLE 便宜得多，应该是首选路径。
-
-3. **审计必须是 mechanism。** PASTE 报告"跨所有 workload 标记了 602 个潜在副作用投机动作并阻止其提交，没有任何任务的最终结果偏离 baseline"。这种数字只有底座能产出。
+效果分类、状态域、处理模式（包括阻塞、暂存、转换、伪装执行、补偿）及其能力校验的规范语义，统一见 [效果管理设计](../design/effect-management.md) §1–§5；`effect` decision 的接口和模式见 [Policy Decisions](../design/policy-decisions.md) §2.5。本札记不再维护第二套 EffectClass 或 commit-barrier 规则，仅保留上面的论文证据和研究动机。
 
 ---
 
@@ -273,22 +192,7 @@ Speculate with Memory 顺带给了一个有用的方法学细节：他们把 act
 
 ### 9.1 双视角：边 vs 实例
 
-- **边视角**（第 1 节）：假设**在哪里被引入** —— 这是语义。
-- **实例视角**：假设**由谁携带** —— 这是运行时。
-
-实例视角下，投机 4 次 + 权威 = **5 个并发 agent 实例**。而对每个投机实例来说，它正在执行的步骤"就是正经执行"，因此它自己也可以继续投机 —— 这就是嵌套。
-
-两个视角由 AssumptionSet 连接：
-
-```
-边   引入一个 Assumption
-实例 携带一个 AssumptionSet（其路径上所有边引入的假设之并）
-     assumptions == ∅  ⟺  权威实例
-```
-
-论文佐证实例视角与实现一致：ISP 字面上 spawn `approximation_i` / `target_i` 进程；DSP 并发跑 A 与 T。
-
-> **关键结论：AssumptionSet 是为组合性设计的（第 3 节），而嵌套就是组合性本身。嵌套不撑破模型 —— 它是那个机制存在的理由。**
+正式的 Edge、Branch 和 `AssumptionSet` 语义见 [设计模型](../design-model.md) §3.1 与 [Policy Decisions](../design/policy-decisions.md) §4。本节只保留研究视角：嵌套把“假设在哪里引入”（Edge）与“假设由谁携带”（Branch 实例）连接起来；ISP、DSP 等论文已经展示了单链嵌套，尚未解决的是带 breadth 的深层树形扩展。
 
 ### 9.2 现状：有链无树
 
@@ -346,32 +250,11 @@ PASTE 是活证据：
 
 ### 9.5 透明嵌套 + 反射 gating
 
-"对投机实例而言，它执行的步骤就是正经执行"这一观察指向正确的设计：
-
-**透明嵌套** —— 投机实例与权威实例二进制同构，**它不知道自己是投机的**。这正是 AssumptionSet 的意义：实例不必知道，底座追踪 provenance 并把闸门设在效果层。**这是无侵入的前提。**
-
-**但有一个真实陷阱**：算法自己的成本/置信策略**假设了自己在权威路径上**。DSP 学的 `k`、cost-aware 的 EV 门，算的都是"在真实状态下投机划不划算"。一个 depth-2、存活率 0.25 的实例若不知情，会**过度投机 4×**。
-
-正确的切法：
-
-| 层 | 是否知道自己是投机的 |
-|---|---|
-| Agent 业务逻辑 | **否**（透明） |
-| Predictor `S_u` | 否 |
-| **Cost / admission 策略** | **是**（反射）—— 底座必须透传 `P(实例存活)` |
-| Effect gate | 是（由 AssumptionSet 直接驱动） |
-
-接口改动仅一处：`should_speculate(..., survival: float)`。
-
-> **这是对 gating 的改动，不是对算法行为逻辑的改动。** 正面回应"嵌套会改变投机算法本身行为逻辑"的担忧：不会 —— 只要把存活概率透传给成本层。
+“投机实例应与权威实例同构、业务逻辑保持透明”已是正式设计边界。开发调研中仍值得验证的是：嵌套下 Cost/Admission 是否需要读取实例存活概率或其他祖先依赖事实；`survival` 及其接口形态目前只是候选方案，不是固定契约。
 
 ### 9.6 错误率：L0/L2 不升，L1/L3 相乘
 
-每层都验证 ⟹ `p^d` 是**命中率**，不是**错误率**。trajectory-equivalence 下错误率**恒为 0**，嵌套只增加**浪费**，不增加错误。
-
-但软匹配和 validator 会**复合**：Skim 的 verifier precision 82%，嵌两层 → 0.67，三层 → 0.55。
-
-> **硬约束（应编码进 loader）**：`depth > 1 ⟹ equivalence.level ∈ {L0, L2}`
+一种待验证的成本/风险假设是：严格 trajectory-equivalence 下嵌套增加的主要是浪费，而软匹配或 validator 的误接受风险可能随层数复合。`depth > 1` 是否限制某些 Fidelity/match 组合，留作 Contract profile 或实验假设，不在本札记中定义为通用硬约束。
 
 ### 9.7 实现复杂度：真正新增的只有两项
 
@@ -382,17 +265,11 @@ PASTE 是活证据：
 | 级联取消 | 本就需要 | Spec Interaction 的 cascade-cancel；ISP 的 kill `target_k, k>j` |
 | 提升级联 | 本就需要 | PASTE 的 promote；是 `assumptions == ∅ ⟺ 权威` 的自然推论 |
 
-嵌套下"提升"变成**级联**：depth-1 的 proposal 被确认时，建立其上的 depth-2 实例**不会**变成权威，而是**降级为 depth-1 投机**。模型已经处理了这一点 —— 因为"权威"从来就不是静态标签，而是 `assumptions == ∅` 的函数。
+父 Proposal 确认后的后代重新挂载、身份保持和隔离状态复用已由正式 Branch 语义定义；本节只保留实现成本与后端能力的研究比较，不重复规定状态转换。
 
 ### 9.8 与其他轴的交互汇总
 
-| 轴 | 交互 |
-|---|---|
-| 轴 1 权威启动 | `absent` 下嵌套无意义 —— 没有验证，深度只是更长的降级链 |
-| 轴 2 拓扑 | 嵌套就是这条轴的 depth 维度被认真对待；且 depth 应由预算涌现而非参数指定 |
-| 轴 4 等价 | `depth > 1 ⟹ L0/L2`（见 9.6） |
-| 轴 6 处置 | Salvage 在嵌套下**更重要** —— 被剪掉的子树可能含大量部分进展 |
-| Effect | 嵌套下 AssumptionSet 非单元素，effect gate 必须等**全部**假设确认，而非单个 |
+嵌套与 `launch`、拓扑、`match`、`dispose` 和 `effect` 的交互仍是实验与 Contract 设计的研究问题。当前正式约束只有：后代保留全部未决依赖；祖先否定会使其失效；后代自身依赖清空前不能进入权威状态。关于 Absent、深层匹配风险、frontier 预算和嵌套 salvage 的更强结论均不在此处固化。
 
 ---
 
@@ -802,32 +679,7 @@ PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机
 
 ### 11.1 两处框架改进
 
-**(A) EffectClass × StateDomain 是二维的，第 4 节只有一维。**
-
-第 4 节的 EffectClass（PURE / IDEMPOTENT / STAGEABLE / TRANSFORMABLE / COMPENSABLE / OVERWRITABLE / IRREVERSIBLE）描述的是**纪律**；而 filesystem / process / memory / GUI vs network / database / email / payment 描述的是**状态域**。二者正交，交叉出的每个格子对应一种具体隔离机制：
-
-| StateDomain | 典型可用纪律 | 隔离机制 |
-|---|---|---|
-| filesystem | STAGEABLE | overlayfs / union mount |
-| process, memory | STAGEABLE | namespace / COW fork / VM 快照 |
-| GUI | TRANSFORMABLE | 影子渲染 / 离屏合成 |
-| network (read) | PURE | 直通 |
-| network (write) | TRANSFORMABLE / STAGEABLE | 录制回放 / 代理拦截 |
-| database | STAGEABLE | 未提交事务 / savepoint |
-| email, payment | COMPENSABLE / IRREVERSIBLE | outbox 模式延迟投递 / 硬闸 |
-
-**这个矩阵就是 Effect Coordinator（§10.5）的设计空间。**
-
-**(B) "Speculation Contract" 优于 "Fidelity Contract" —— 双向协商，而非单向声明。**
-
-- **单向声明形态**：算法声明保证什么，底座校验并推上界。
-- **正确的形态是跨层双向协商**：
-  - **上层 → 下层**：预测置信度、验证条件、失败代价
-  - **下层 → 上层**：隔离能力、隔离代价、可用纪律集合
-
-后果是实质性的：单向声明下底座只能**拒绝**不可行组合；双向协商下底座能回答两个更有用的问题 —— "给定这个隔离后端，该算法最多能激进到什么程度"、"要支持该算法，隔离层至少要提供什么"。**静态约束求解即协商器的下层形态。**
-
-这也正是现有工作的缺口所在：一类工作只管预测与提前执行，靠"限制为 read-only / idempotent / sandboxed"绕开副作用；另一类工作只管系统层的状态隔离、分支、事务与回滚，不建模上层的置信度、验证条件与失败代价。**两条路径之间没有契约。** 本文档第 4 节的统计（9/11 篇用只读白名单绕开）是这一判断的直接证据 —— 这不是各家的疏忽，是这条技术路线的系统性缺口。
+效果分类与状态域的正式矩阵见 [效果管理设计](../design/effect-management.md)，Policy 与 Runtime 能力的契约见 [Speculation Contract](../design/speculation-contract.md)。本节只保留研究结论：现有工作通常以只读白名单回避副作用，预测/调度与隔离/事务之间缺少统一契约；AScout 的机会在于用跨层能力协商和运行期审计把两条路径接起来。
 
 ### 11.2 指标口径
 

@@ -72,6 +72,8 @@ Candidate 未被接受不表示其不可行。受控 metadata 应区分 Proposal
 
 Accept 后 candidate 保留自己的 Branch identity，并替换 parent 在 Speculative Tree 中的位置。若 parent 是 root，candidate 成为新的 root；否则 candidate 连接到原 parent 的 parent。旧 parent 和 candidate 的 sibling subtrees 失效，candidate 原有 descendants 及其内部关系保持不变。Candidate 按各状态类别规则已经可见的 parent state、已提交生效的 external effect 和已验证 outcome 必须随 winner 延续；parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播，也不执行 parent/candidate state merge。
 
+当父 Proposal 被确认而后代 Branch 仍携带其他未决 Proposal 时，父 Branch 结束其投机身份，其执行延续成为权威路径；后代 Branch 保留原有 Branch identity、隔离环境和执行进展，仅更新 Speculative Tree 中的父级引用并重新挂到该权威执行延续之下。此过程不创建新的 Branch，也不迁移 Runtime 状态。后代 Branch 在自身未决依赖清空前，不能把结果或效果纳入权威路径；若父 Proposal 被否定，后代 Branch 不能重新挂载，依赖它们的 Branch 分别进入取消与清理流程。
+
 世界状态操作使用原生 API、透明 proxy，还是 AScout-aware 的高性能接口，不属于目标语义的一部分。无论采用哪种接口，都必须保持相同的 Branch、状态可见性与 commit 语义。
 
 ## 4. Workspace 与 Command 语义粒度

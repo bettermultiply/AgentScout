@@ -27,10 +27,10 @@ Policy 允许这些 decision 依赖任务、执行上下文、当前状态、资
 ```
 opportunity_pass(op) -> true | false              # 粗筛：该操作是否可能成为投机入口
 feasibility_pass(state, profile) -> true | false  # 精判：当前约束下是否值得开启
-admit(op, state, profile) = opportunity_pass AND feasibility_pass
+admit(op, state, contract_context) = opportunity_pass AND feasibility_pass
 ```
 
-`admit` 决定一次投机是否开启，其内部按判断成本拆成两级，先廉价后昂贵：先用操作的机会事实（`step`）判断该操作有没有可能成为投机入口，再结合当前约束与实例事实（`state`）以及 Speculation Contract 校验后的 `profile`，判断这个已识别出的机会当前是否值得开启。
+`admit` 决定一次投机是否开启，其内部按判断成本拆成两级，先廉价后昂贵：先用操作的机会事实（`step`）判断该操作有没有可能成为投机入口，再结合当前约束与实例事实（`state`）以及 Contract 校验产生的能力与限制事实（`contract_context`），判断这个已识别出的机会当前是否值得开启。
 
 一个 `step` 是一个可被控制面观察到、具有明确前后状态的 Agent 继续单元。它可以是一次推理转移、一次用户输入请求、一次工具调用或远程请求，也可以是一次根据已有结果更新计划或生成输出的过程阶段。等待用户输入或工具结果本身不算持续推进；通常由一个 step 产生 pending-result boundary，过程随后暂停。
 
@@ -90,7 +90,7 @@ semantic_stop(process_state) -> true | false  # 根据任务或过程语义判�
 
 `extent` 属于次级指标，当运行被 effect、Runtime、控制面等阻塞时则不再检查，即使停止条件均未到底。而达到 `extent` 边界通常意味着暂停并等待验证或其他裁决，不意味着自动 discard。过程是否继续、转为权威、清理或采用其他路径，由后续验证和 `dispose` 决定。
 
-### 2.3 `predict`：生成哪些 Proposal
+### 2.3 `predict` - 生成哪些 Proposal
 
 ```text
 predict(predict_input) -> ProposalSet
@@ -135,7 +135,7 @@ Proposal = {
 
 预测对象不局限于某种 Agent 行为。它可以是 action、observation、工具调用、命令、远程请求、用户输入或它们组成的计划，只要后续工作可以暂时依赖该 Proposal，并且存在验证或接受它的依据。
 
-### 2.4 `launch`：是否取得权威值
+### 2.4 `launch` - 是否取得权威值
 
 ```text
 launch: eager | lazy | absent
@@ -155,7 +155,7 @@ Absent 允许策略放弃本应到来的用户输入，只按可接受性判断�
 
 权威路径能否被“启动”取决于其来源形态。来源是系统内的可发起路径（更强的 target、主生成流、可重跑的真实执行）时，Eager 意味着并行启动、Lazy 意味着稍后补启；来源是系统外的天然输入（用户、环境）时没有可“启动”的路径，Eager/Lazy 只表达“照常等待”还是“必要时才等待”。
 
-### 2.5 `effect`：管理投机效果
+### 2.5 `effect` - 管理投机效果
 
 `effect` 决定投机过程中每个 step 产生的外部效果如何纳入管理，以及允许采用哪些处理纪律。一次投机执行可能包含多个 step，并涉及不同的 `StateDomain` 与 `EffectClass`。
 
@@ -184,7 +184,7 @@ Policy 可以选择暂存、代理、延迟释放、阻塞、补偿或其他合�
 
 如果某个效果暂时无法安全提前处理，系统可以在该效果边界阻塞当前 Branch，同时保留已经安全完成的前置进展；验证接受后继续，验证拒绝或过程取消后清理、补偿或回收。只有无法安全阻塞、无法在接受后继续、也无法在淘汰后清理时，才应拒绝相关投机环节或明确降级。
 
-### 2.6 `match`：判断兼容或可接受
+### 2.6 `match` - 判断兼容或可接受
 
 `match` 将 Proposal、验证依据和比较上下文交给 Policy 规定的匹配规则：
 
@@ -214,7 +214,7 @@ MatchResult = {
 
 放宽匹配关系可能使结果不再与串行执行完全一致，不能对声明为严格 trajectory-equivalent 的策略静默采用。`indeterminate` 和 `error` 不能被静默当成 `compatible`；后续如何暂停、重试、降级、重新执行或丢弃，由 `dispose` 和运行控制处理。分数只能支持兼容判断或同一 Edge 内的候选排序，不能绕过 Fidelity、效果边界或 single-winner 约束。
 
-### 2.7 `dispose`：处置投机工作
+### 2.7 `dispose` - 处置投机工作
 
 `dispose` 根据投机过程进入处置阶段的原因和当前上下文，返回一个可组合的处置计划：
 
@@ -289,7 +289,7 @@ AssumptionSet(B2) = {p1, p2}
 
 每个候选 Branch 携带其路径上的未决 Proposal ID 集合：`AssumptionSet = frozenset[ProposalId]`
 
-`AssumptionSet == ∅` 表示工作单元是权威工作。Proposal 被确认时，从依赖它的工作单元中移除其 ID；集合变空的工作单元才具备提交条件。Proposal 被否定时，依赖它的后续子图失效；控制面向受影响的 Branch 直接发送取消命令，各 Branch 作为独立执行个体停止自身工作并完成本地及受管效果清理，不要求一个集中式机制统一遍历和回收整棵子树。非空 `AssumptionSet` 产生的数据只能流向同样携带未决 Proposal ID 的容器，不能直接进入权威上下文。
+`AssumptionSet == ∅` 表示工作单元是权威工作。Proposal 被确认时，从依赖它的工作单元中移除其 ID；集合变空的工作单元才具备提交条件。若父 Proposal 被确认，原父 Branch 结束其投机身份，其执行延续成为权威路径；仍携带其他未决 Proposal 的后代 Branch 保留原有身份、隔离环境和执行进展，仅将结构上的父级改挂到该权威执行延续之下，不创建新的 Branch，也不迁移 Runtime 状态。后代 Branch 仍须等自身 `AssumptionSet` 清空后，才具备将结果和效果纳入权威状态的资格。Proposal 被否定时，依赖它的后续子图失效；控制面向受影响的 Branch 直接发送取消命令，各 Branch 作为独立执行个体停止自身工作并完成本地及受管效果清理，不要求一个集中式机制统一遍历和回收整棵子树。只有父 Branch 进入 `Salvage` 时，后代 Branch 的部分进展才可作为该父 Branch salvage 的输入，不能脱离父 Branch 独立 salvage。非空 `AssumptionSet` 产生的数据只能流向同样携带未决 Proposal ID 的容器，不能直接进入权威上下文。
 
 组合与嵌套通过四类连接共同实现：树结构归属、假设依赖、用户输入传播和生命周期控制。
 

@@ -22,7 +22,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 4. [术语表](design/glossary.md)：每个术语的一句话定义、权威出处，以及两套设计视角之间的术语映射。
 5. [Policy Decisions 设计](design/policy-decisions.md)：Policy 可作出的决策集合、阶段映射、扩展边界与 Mechanism 约束。
 6. [效果管理设计](design/effect-management.md)：世界状态分类、EffectClass、StateDomain、提交屏障与外部效果可见性。
-7. [Speculation Contract 设计](design/speculation-contract.md)：Policy 与 Runtime 的双向声明、能力匹配、校验、降级与运行期审计。
+7. [Speculation Contract 设计](design/speculation-contract.md)：Policy、控制面、Runtime Adapter 与 Runtime 的跨层语义约束，以及其校验、操作衔接、降级与运行期证据。
 
 ## 使用文档
 

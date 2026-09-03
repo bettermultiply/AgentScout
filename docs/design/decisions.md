@@ -292,6 +292,14 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **原因**：launch 的取值已经完整决定权威值的取得方式（是否取、何时取）；来源本身由 Edge 决定，不构成独立策略选择，拆槽造成职责重叠与表述混淆。
 
+## D-042：父 Proposal 确认后的后代 Branch 重新挂载
+
+**选择**：父 Proposal 被确认后，原父 Branch 结束其投机身份，其执行延续成为权威路径。仍携带其他未决 Proposal 的后代 Branch 不被取消、不被重新创建，也不迁移 Runtime 状态；它们保留原有 Branch 身份、隔离环境和执行进展，仅把结构上的父级改挂到该权威执行延续之下。后代 Branch 在自身 `AssumptionSet` 清空前不能把结果或效果纳入权威状态。
+
+**否定路径**：父 Proposal 被否定时，依赖它的后代 Branch 失效并分别取消、清理。后代的部分进展只有在父 Branch 进入 `Salvage` 时，才能作为父 Branch salvage 的输入，不能脱离父 Branch 独立 salvage。
+
+**原因**：嵌套 Branch 运行在自身隔离环境中，父 Branch 确认不需要搬迁或重放子 Branch 状态；只需更新控制面的树结构与未决依赖。该规则保留嵌套执行进展，同时维持 `AssumptionSet` 和权威信息流约束。
+
 ## 相关文档
 
 - [设计模型](../design-model.md)：抽象概念层

@@ -24,7 +24,7 @@ Runtime（具体后端原语）
 
 **Runtime：只提供简单原语。** Runtime 是具体执行后端，只负责上报并执行一组简单原语，不实现组合逻辑。原语本身是稳定的抽象、各后端保持一致兼容，换后端只换原语的实现——不换原语、不换组合。Adapter 侧的工作因此很简单：翻译调用 + 上报原语清单。
 
-**Speculation Contract：静态与动态保证抽象分层匹配、约束满足。** 作者写算法时声明需求（预测置信度、验证条件、失败代价、需要的隔离与效果纪律），具体 Runtime 通过 Adapter 上报自己的能力。Speculation Contract 在加载期静态校验需求与能力是否匹配，不匹配就拒绝或降级；在运行期由 shadow 实测声明的保真度是否真的达成。它保证抽象分层两侧始终对齐，并确保正确性、保真度等固定约束被满足——作者只需声明需求，不必知道后端实现。
+**Speculation Contract：固定跨层语义的实现约束。** Contract 规定 Policy 如何表达策略、控制面如何形成操作、Runtime Adapter 如何接入和映射操作，以及 Runtime 必须提供哪些基本运行语义。Mechanism 通过固定接口、状态所有权、操作路径和运行期结果落实这份 Contract。Policy 声明需求，Runtime Adapter 上报实际能力；控制面在加载和准入时检查当前策略是否有合法执行路径，并在运行期以结果和事件确认 Contract 是否被兑现。作者只需声明需求，不必知道后端实现。
 
 ## 2. 工作模型
 
@@ -65,7 +65,7 @@ Edge 是一个全局概念，从一个投机机会开始，到这个投机机会
 
 Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策，通过对不同 Policy Decision 的组合可以生成不同的执行策略。一次投机执行由七类 policy decision 的组合完全刻画：`admit`、`extent`、`predict`、`launch`、`effect`、`match`、`dispose`。对每个 decision 的详细描述见 [Policy Decisions 设计](design/policy-decisions.md)。
 
-组合与嵌套：同一 Edge 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的 Edge，由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定都会使依赖它的后续工作失效。AScout 以树形、single-winner 和受控信息流约束这些关系；当前 task 内的嵌套 Edge 使用同一个 Policy。Proposal 依赖、确认与否定、Branch 取消以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
+组合与嵌套：同一 Edge 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的 Edge，由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定都会使依赖它的后续工作失效。父 Proposal 被确认时，原父 Branch 的执行延续成为权威路径，仍有未决依赖的后代 Branch 保留原有隔离环境和执行进展并重新挂到该权威执行延续之下；后代 Branch 只有在自身依赖清空后才具备提交资格。AScout 以树形、single-winner 和受控信息流约束这些关系；当前 task 内的嵌套 Edge 使用同一个 Policy。Proposal 依赖、确认与否定、Branch 取消、父 Branch salvage 以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
 
 ### 3.2 状态与效果
 
@@ -77,11 +77,11 @@ Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根�
 
 ### 3.3 Speculation Contract
 
-Speculation Contract 的目的，是把一个投机策略成立所依赖的前提变成可检查的契约，避免策略在不具备必要能力的 Runtime 上被静默执行，也让降级原因对使用者可见。
+Speculation Contract 的目的，是把投机策略、控制面操作与 Runtime 运行能力之间必须保持的关系固定为可检查、可执行的契约。它使 Policy 能在统一决策面内表达需求，也使 Runtime 以统一操作和事件接入，而不让策略语义隐藏在特定后端或算法实现中。
 
-根据 Policy 注册时声明和 Runtime Adapter 声明，控制面在加载或任务准入时对两组声明进行约束检查，生成已验证的 policy profile；无法满足的组合必须拒绝，或明确标记为降级。运行期间记录 Authority、validator 和效果处理的实际结果，并用动态检查声明的要求是否达到。
+Policy Engine 在加载或任务准入时检查 Policy 的决策和声明能否由 Contract 规定的控制语义与当前 Runtime 能力承接；无法满足时必须拒绝，或明确报告降级。运行期间，控制面通过 Authority、validator、效果处理和 Runtime 返回的实际结果检查 Contract 是否被兑现。
 
-Contract 只描述并检查策略与执行能力之间的匹配关系，不重新定义 AScout 的目标语义。具体的契约字段、校验流程、降级结果和运行期审计见 [Speculation Contract 设计](design/speculation-contract.md)。
+Contract 规定跨层操作必须保持的固定语义，但不拥有 Branch 或 Runtime 的运行状态。具体的契约语义、校验路径、降级结果和运行期证据见 [Speculation Contract 设计](design/speculation-contract.md)。
 
 ## 4. 跨领域设计约束
 
@@ -98,5 +98,5 @@ Contract 只描述并检查策略与执行能力之间的匹配关系，不重�
 - [架构](architecture.md)：系统结构（四侧、所有权、调用方向）
 - [Policy Decisions 设计](design/policy-decisions.md)：Policy 决策面
 - [效果管理设计](design/effect-management.md)：状态与效果
-- [Speculation Contract 设计](design/speculation-contract.md)：策略与能力匹配契约
+- [Speculation Contract 设计](design/speculation-contract.md)：跨层语义契约
 - [Branch 语义设计](design/branch-semantics.md)：Branch 生命周期、状态可见性和 single-winner 语义

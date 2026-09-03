@@ -4,6 +4,16 @@
 
 ## 当前讨论
 
+### Speculation Contract 的定位与实现
+
+已收敛：`Contract` 是 AScout 固定的跨层语义约束，连接 Policy、控制面、Runtime Adapter 与 Runtime；它规定各侧必须提供的接口、基本操作、不变量、能力和失败语义。Contract 不是部署配置或独立 Manager，不能由单个任务或 Policy 修改。
+
+已收敛：`Mechanism` 只作为抽象责任词，是 Contract 的固定实现，不是插件或独立组件。Policy Engine、控制面固定组件、Runtime Adapter 与 Runtime 分别在自己的责任边界内落实 Contract。Runtime 必须实现 AScout 要求的基本操作和语义；具体 Runtime 能力由 Adapter 接入时报告，并作为控制面判断策略可执行性的事实输入。
+
+已收敛：Contract 的执行路径统一描述为 `Policy 决策 → Policy Engine 校验 → 控制面机制形成语义操作 → Runtime Adapter 映射 → Runtime 执行并返回结果/事件 → 控制面更新状态`。控制面机制不依赖另一个 Manager 监督，而通过固定接口、状态所有权、操作路径和运行期校验落实契约；固定 Mechanism 的语义正确性还需要实现审查和经同意后的 conformance 验证。
+
+已收敛：`docs/design/speculation-contract.md` 重写为统一 Contract 设计，围绕从 Policy 决策到 Runtime 结果的一条操作路径，说明策略表达、控制语义、Runtime 操作与能力、失败语义、Mechanism 落实、完整控制闭环和运行期证据。删除 `profile` 及可配置 Contract 的暗示，不单列版本演进或文档边界章节，也不再使用“Runtime 最终强制”作为独立概念。
+
 ### ASCout Agent 分支执行底座
 
 当前目标范围是树形、单一 winner、无通用 merge、同级分支默认不协作的 Agent 分支执行。后续若支持 merge、多个 winner、DAG 或同级协作，应作为新的执行模型扩展，不能反向破坏当前基础语义。
