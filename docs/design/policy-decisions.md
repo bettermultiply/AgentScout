@@ -1,36 +1,38 @@
 # Policy Decisions
 
-Policy Decision 是 Policy 针对一个投机机会作出的可替换选择。对一条投机 Edge `E`，一次投机执行可以由以下七类 decision 的组合刻画：
+Policy Decision 是 Policy 针对投机执行作出的可替换选择。单条 Edge 上的局部决策、跨 Edge 的启动选择与运行调整共同构成以下九类 decision：
 
 ```text
-S(E) = (admit, extent, predict, launch, effect, match, dispose)
+S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)
 ```
 
-这七类 decision 属于同一个决策面，但不要求按固定顺序调用。一次执行仍可按“机会发现、准入判断、预测生成、过程执行、验证、处置与提交”理解；决策面表达的是 Policy 在这些阶段中可以选择什么，而不是另一条固定流程。
+这九类 decision 属于同一个决策面，但不要求按固定顺序调用。其中 `select` 面向多个已经准入但尚未启动的 Edge，`rebalance` 面向已经运行或暂停的投机工作，其他 decision 主要作用于单条 Edge。一次执行仍可按“机会发现、待选准入、启动选择、预测生成、过程执行、验证、处置与提交”理解；决策面表达的是 Policy 在这些阶段中可以选择什么，而不是另一条固定流程。
 
 | Decision | Policy 决定什么 | 主要阶段 |
 |---|---|---|
-| `admit` | 该操作是否值得作为投机入口，以及当前约束下是否开启投机（同一决策内的两级判断） | 准入判断 |
+| `admit` | 该操作是否值得作为投机入口并进入待选集合（同一决策内的两级判断） | 待选准入 |
+| `select` | 在当前全部待选机会之间权衡，现在启动哪些机会 | 启动选择 |
+| `rebalance` | 在已经运行或暂停的投机工作之间决定暂停、恢复或抢占 | 过程执行 |
 | `extent` | 已开启的投机执行在内部推进到哪里，以及暂停等待裁决的时机 | 过程执行 |
 | `predict` | 预测对象与 Proposal 生成数量与方式 | 预测生成 |
-| `launch` | 是否取得这条 Edge 的权威值以及何时取得 | 准入判断、权威路径启动 |
+| `launch` | 是否取得这条 Edge 的权威值以及何时取得 | 启动选择、权威路径启动 |
 | `effect` | 投机过程中产生的外部效果采用的处理纪律 | 过程执行、处置与提交 |
 | `match` | Proposal 与验证依据被视为兼容或可接受的时机 | 验证 |
 | `dispose` | 命中、未命中、取消或停止后投机工作的处置 | 处置与提交 |
 
 Policy 允许这些 decision 依赖任务、执行上下文、当前状态、资源条件、预期收益和 Runtime 能力。依赖关系应显式表达，不能通过隐含的 Runtime 行为改变 decision 的含义。
 
-## 2. 七类 Decision
+## 2. 九类 Decision
 
-### 2.1 `admit` - 是否开启投机
+### 2.1 `admit` - 是否进入待选集合
 
 ```
 opportunity_pass(op) -> true | false              # 粗筛：该操作是否可能成为投机入口
-feasibility_pass(state, profile) -> true | false  # 精判：当前约束下是否值得开启
+feasibility_pass(state, profile) -> true | false  # 精判：是否值得登记并保留
 admit(op, state, contract_context) = opportunity_pass AND feasibility_pass
 ```
 
-`admit` 决定一次投机是否开启，其内部按判断成本拆成两级，先廉价后昂贵：先用操作的机会事实（`step`）判断该操作有没有可能成为投机入口，再结合当前约束与实例事实（`state`）以及 Contract 校验产生的能力与限制事实（`contract_context`），判断这个已识别出的机会当前是否值得开启。
+`admit` 决定一个机会是否进入 AScout 维护的待选集合，不决定它是否立即启动。其内部按判断成本拆成两级，先廉价后昂贵：先用操作的机会事实（`step`）判断该操作有没有可能成为投机入口，再结合实例事实（`state`）以及 Contract 校验产生的能力与限制事实（`contract_context`），判断这个已识别出的机会是否值得登记和暂存。
 
 一个 `step` 是一个可被控制面观察到、具有明确前后状态的 Agent 继续单元。它可以是一次推理转移、一次用户输入请求、一次工具调用或远程请求，也可以是一次根据已有结果更新计划或生成输出的过程阶段。等待用户输入或工具结果本身不算持续推进；通常由一个 step 产生 pending-result boundary，过程随后暂停。
 
@@ -44,10 +46,12 @@ admit(op, state, contract_context) = opportunity_pass AND feasibility_pass
 
 粗筛通常近静态，可以按操作类别在声明期确定，不必到运行时逐次估算。粗筛不过的操作按普通执行继续，不进入投机决策面，也不投入任何投机机制。
 
-精判判断机会当前是否值得，输入分为两类：
+精判判断机会是否值得占用待选集合的管理成本，输入分为两类：
 
-- AScout 提供的约束与实例事实：预算与资源计数、并发压力、当前实例已携带的 `AssumptionSet` 及其成本；
-- Policy 自行建模的经济评估：预期命中与收益对失败成本的权衡、实例存活概率等。AScout 只提供评估依据，不代 Policy 下主观结论。
+- AScout 提供的约束与实例事实：Contract 能力与限制、当前实例携带的 `AssumptionSet` 及其成本、机会的保留期限与管理成本；
+- Policy 自行建模的局部评估：该类机会是否具有基本投机价值。AScout 只提供评估依据，不代 Policy 下主观结论。
+
+瞬时资源压力、不同机会之间的相对价值以及“现在启动谁”不属于精判，而由 `select` 统一决定。机会通过精判后不必再次精判；等待期间由 AScout 维护其有效性，启动前只复核客观有效性和硬约束。
 
 
 ### 2.2 `extent` - 单个过程推进幅度
@@ -239,6 +243,33 @@ dispose(branch, resolution, context) -> DispositionPlan
 
 这些是 Policy 的处置意图，不是对 Runtime 生命周期的直接调用。实际的 Branch 转换、状态回收、效果清理、资源释放和 commit/discard 由 Mechanism 编排，并由 Adapter 所接后端的实际结果确认。未命中的候选路径不能通过逐个修补绕过其携带的错误前提；依赖被否定时，相关子图应整体进入回收或丢弃流程。
 
+### 2.8 `select` - 从待选集合中选择启动机会
+
+```text
+select(frontier_view, scheduling_context) -> ordered subset[EdgeId]
+```
+
+`frontier_view` 是 AScout 当前维护的、同一 task / AScoutAgent 中已经通过 `admit` 且仍然有效的全部待选机会快照。`scheduling_context` 提供可观察的预算、资源压力、机会等待时间、依赖与成本事实。该 task 绑定的 Policy 直接返回现在希望启动的有序机会子集；可以选择一个、多个或暂时一个都不选。排序公式、best-first、浅层优先、深层优先以及 breadth/depth 分配都属于具体 Policy，不是 AScout 的固定规则。
+
+未被选择的机会继续留在待选集合，之后可以随新的资源和执行事实再次参与选择。AScout 拥有并维护该集合，而 Policy 不拥有可变队列状态。等待期间，如果 pending result 已到达、所属任务结束、祖先依赖被否定或其他必要前提失效，AScout 将机会移出集合；启动前 Scheduler 还必须复核机会有效性、Contract 与资源硬约束。
+
+Scheduler 落实 Policy 的选择，但不另行使用固定价值公式改写机会顺序。硬约束暂时不允许启动时，Scheduler 可以延后所选机会；这表示执行条件尚未满足，不构成新的 Policy 精判。
+
+`select` 只选择尚未启动的机会，不决定已经运行工作的暂停、恢复或抢占。
+
+### 2.9 `rebalance` - 调整已经启动的投机工作
+
+```text
+rebalance(active_view, paused_view, scheduling_context)
+    -> ordered actions[(BranchId, pause | resume | preempt)]
+```
+
+`rebalance` 面向同一 task / AScoutAgent 中已经运行或暂停的投机 Branch。Policy 可以要求暂时停止某项工作并保留其执行状态（`pause`）、恢复此前暂停的工作（`resume`），或者终止不再值得继续占用资源的工作（`preempt`）。它不接收尚未启动的机会，也不代替 `select`。
+
+`rebalance` 与 `extent` 回答不同问题：`extent` 决定单个投机过程基于自身进展应推进到哪里并等待裁决；`rebalance` 在多个已经启动的工作之间，根据当前资源和相对价值重新分配运行机会。暂停和恢复必须在 Runtime Adapter 声明支持的安全边界上执行。
+
+`preempt` 只决定终止运行；它使目标 Branch 以 `resolution = preempted` 进入现有 `dispose`，由 `dispose` 决定丢弃、残值回收、补偿和清理。Policy 不能通过 `rebalance` 绕过 Branch 生命周期、single-winner、效果纪律或资源硬约束，Scheduler 负责复核并执行这些动作。
+
 ## 3. 阶段映射与决策依赖
 
 下表将决策面映射到典型投机执行阶段。它不是固定调用顺序，也不是完整的决策清单。
@@ -246,13 +277,14 @@ dispose(branch, resolution, context) -> DispositionPlan
 | 阶段 | 代表性 Decision | 说明 |
 |---|---|---|
 | 机会发现 | `admit` | admit 判断该操作是否可能成为投机入口（粗筛），Mechanism 识别并规范化 operation 及其结果未到达的等待边界。 |
-| 准入判断 | `admit`、`launch` | admit 判断当前约束下是否开启投机执行（精判）；launch 决定权威值是否取得、何时取得 |
+| 待选准入 | `admit` | admit 精判机会是否值得登记并保留；通过后进入 AScout 维护的待选集合 |
+| 启动选择 | `select`、`launch` | select 在全部待选机会间决定现在启动哪些；launch 决定相应 Edge 的权威值是否取得、何时取得 |
 | 预测生成 | `predict` | 生成一个或多个 Proposal |
-| 过程执行 | `extent`、`effect` | 限制过程推进，并管理每个 step 的状态与外部效果 |
+| 过程执行 | `extent`、`effect`、`rebalance` | 限制单个过程推进、管理每个 step 的外部效果，并在多个已启动工作之间暂停、恢复或抢占 |
 | 验证 | `match` | 获得验证依据并判断 Proposal 是否兼容或可接受；权威值是否可取由 launch 决定 |
 | 处置与提交 | `dispose` | 复用、继续、转正、重执行、清理、回收或补偿 |
 
-一个 decision 可以跨越多个阶段。例如，`effect` 的处理会影响过程执行和最终处置，`launch` 同时影响准入和验证依据的可用时间。阶段映射用于说明责任，不应被解释为把七类 decision 串成不可替换的固定流程。
+一个 decision 可以跨越多个阶段。例如，`effect` 的处理会影响过程执行和最终处置，`launch` 同时影响启动和验证依据的可用时间，`rebalance` 的抢占结果会进入 `dispose`。阶段映射用于说明责任，不应被解释为把九类 decision 串成不可替换的固定流程。
 
 ## 4. 组合与嵌套
 
@@ -271,7 +303,7 @@ Edge E
 
 ### 4.2 嵌套
 
-候选 Branch 被创建后会像普通执行一样继续运行，因此也可能遇到新的 pending-result boundary。嵌套是某个 Branch 在继续执行时遇到新的 Edge，并再次调用 `admit`：
+候选 Branch 被创建后会像普通执行一样继续运行，因此也可能遇到新的 pending-result boundary。嵌套是某个 Branch 在继续执行时遇到新的 Edge，并再次调用 `admit`；通过后，该 Edge 与其他已准入机会共同等待 `select`：
 
 ```text
 Edge E1
@@ -285,7 +317,7 @@ AssumptionSet(B1) = {p1}
 AssumptionSet(B2) = {p1, p2}
 ```
 
-新 Edge 仍按照当前 task 已绑定的同一个 Policy profile 执行既有 decision；当前不因嵌套深度切换到另一套 Policy。新 Edge 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Edge 的 `extent` 和 step 计数独立于父 Edge。未来按嵌套深度或其他上下文切换 Policy，属于独立扩展。
+新 Edge 仍按照当前 task 已绑定的同一 Policy 及其 task-level 配置执行既有 decision；当前不因嵌套深度切换到另一套 Policy。新 Edge 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Edge 的 `extent` 和 step 计数独立于父 Edge。未来按嵌套深度或其他上下文切换 Policy，属于独立扩展。
 
 每个候选 Branch 携带其路径上的未决 Proposal ID 集合：`AssumptionSet = frozenset[ProposalId]`
 
@@ -321,9 +353,10 @@ Fidelity 不是独立的 Policy Decision，而是由决策组合、Runtime 能�
 
 ## 6. Policy 与 Mechanism 的边界
 
-Policy 可以实现或组合七类 decision，但不能拥有后端 mutable state，也不能把策略意图伪造成已经完成的后端操作。以下内容必须由 Mechanism 或经 Adapter 验证的后端能力落实：
+Policy 可以实现或组合九类 decision，但不能拥有待选集合、运行队列或后端 mutable state，也不能把策略意图伪造成已经完成的后端操作。以下内容必须由 Mechanism 或经 Adapter 验证的后端能力落实：
 
 - candidate Branch 的创建、隔离、暂停、恢复、接受、丢弃和清理；
+- 待选机会的暂存、有效性维护，以及 `select`、`rebalance` 结果的硬约束复核与执行；
 - `AssumptionSet` 的传播、确认/否定和非空假设数据的信息流约束；
 - single-winner、共享验证依据、commit barrier 和效果阻塞；
 - 资源所有权、预算执行、抢占、取消和运行期成本记账；
@@ -333,11 +366,11 @@ Policy 决定“希望采用哪种策略”，Mechanism 保证该策略在正确
 
 ## 7. 扩展规则
 
-七类 decision 是当前完整的基础决策面。后续如需增加决策，必须说明：
+九类 decision 是当前完整的基础决策面。后续如需增加决策，必须说明：
 
 - 它解决的独立策略问题；
 - 所属阶段、输入和输出；
-- 与现有七类 decision 的依赖或区别；
+- 与现有九类 decision 的依赖或区别；
 - 对 Edge、Proposal、Branch、未决 Proposal 依赖、single-winner、commit/discard/accept、obligation 和 cleanup 语义的影响。
 
 如果新增内容只是某一 decision 的取值、实现方式或运行时优化，不应新增为独立 decision。`breadth`、嵌套 `depth` 和 Fidelity 已属于这种情况。

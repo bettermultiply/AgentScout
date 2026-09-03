@@ -71,7 +71,7 @@
 
 - **Policy Engine**：可替换 Policy 进入控制面的固定入口，解释 Policy Decision 并检查其取值在当前 Contract 与 Adapter 声明的后端能力下是否合法；加载期约束校验和运行期分发。（`control-plane.md` §3.2）
 - **Assumption Manager**：控制面内 Proposal 依赖与确认/否定状态的 owner；维护"谁依赖谁"、跟踪 `AssumptionSet`，强制信息流约束（非空 AssumptionSet 的数据不得流向空容器）。（`control-plane.md` §3.3；`speculation-decisions.md` D-019）
-- **Scheduler**：控制面内负责准入、预算、优先级、取消与资源协调的组件；是全系统唯一看到全局资源压力的控制面组件。（`control-plane.md` §3.4；`speculation-decisions.md` D-011/D-020/D-021）
+- **Scheduler**：控制面内待选机会与调度状态的 owner；负责暂存机会、维护有效性、向 Policy 提供 task 内的调度事实，并在硬约束内落实 `select` 的启动选择与 `rebalance` 的暂停、恢复和抢占意图。（`control-plane.md` §3.4；`policy-decisions.md` §2.8–§2.9）
 - **Effect Coordinator**：控制面内效果处理的协调者；结合 Policy、Contract 与 Runtime 能力形成允许、暂存、转换、延迟、阻塞或补偿计划，经 Runtime Adapter 请求 Runtime 执行。它不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §3.5；`effect-management.md`）
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §3.6；`speculation-contract.md` §3）
 - **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地控制入口，绑定 Branch context，转发 Agent-facing request 并承载 lifecycle event；不拥有全局控制状态。（`agent-integration.md` §2.2）
@@ -88,13 +88,13 @@
 
 ## 机制与概念
 
-- **Policy Decision**：Policy 根据任务、上下文、资源和 Runtime 能力作出的可替换策略决策；当前七类 decision 及其阶段映射见 [`policy-decisions.md`](policy-decisions.md)。（`../design-model.md` §3.1）
+- **Policy Decision**：Policy 根据任务、上下文、资源和 Runtime 能力作出的可替换策略决策；当前九类 decision 及其阶段映射见 [`policy-decisions.md`](policy-decisions.md)。（`../design-model.md` §3.1）
 - **commit barrier**：效果释放屏障；照抄处理器 commit/retire 语义（"write operations are buffered but not allowed to execute until the instruction is committed"）。（`spec-exec-abstraction.md` §4）
 - **伪装执行（`simulate`）**：对已接入专门 Adapter 的外部服务拦截请求、不转发给真实服务、在 Branch 内生成 synthetic 模拟响应的处理方式，用于避免不可逆外部影响；模拟响应必须带 synthetic provenance、作为未验证假设参与 AssumptionSet 确认/否定，仍需 Authority、validator 或其他规则验证后才能被 winner 依赖。（`effect-management.md`；`policy-decisions.md` §2.5）
 - **规范化资源记账**：成本三分 —— (a) 无论如何都要花的（命中时投机 work 即权威 work）/ (b) 纯浪费 / (c) 部分成本（被抢占/取消时已消耗部分）。口径必须包含 token 之外的资源。（`spec-exec-abstraction.md` §5；`speculation-decisions.md` D-012）
 - **Shadow / Replay**：投机与串行同跑、只提交串行结果；同一套基础设施服务 fidelity 审计、predictor 数据管道、cost 校准与上线灰度（offline replay → shadow → canary → online → drift kill-switch）。（`spec-exec-abstraction.md` §7；`speculation-decisions.md` D-014）
-- **透明嵌套**：投机实例与权威实例二进制同构，实例不知道自己是投机的；底座追踪 provenance、闸门设在效果层。（`spec-exec-abstraction.md` §9.5）
-- **反射 gating**：Cost / admission 策略必须知道自身存活概率：`should_speculate(..., survival)`；底座透传 `P(实例存活)`，防止 depth-2 实例按 depth-0 的账过度投机。（`spec-exec-abstraction.md` §9.5）
+- **透明嵌套**：投机实例与权威实例二进制同构，实例不知道自己是投机的；底座追踪 provenance、闸门设在效果层。（`spec-exec-abstraction.md` §9.3）
+- **反射 gating**：Policy 可以读取祖先依赖与成本等客观事实，自行估计实例存活概率并用于 `admit` 或 `select`；AScout 不固定 `survival` 字段，也不强制 Policy 使用该模型。（`spec-exec-abstraction.md` §9.3；`policy-decisions.md` §2.8）
 - **Speculation Contract**：AScout 约束 Policy 表达和 Runtime Adapter 控制面接入行为、保证语义正确与对齐的契约。它规定 Policy 如何表达与校验决策取值、Adapter 如何声明并通过校验兑现后端能力，以及失败时如何收敛；控制面是它的实现方，Runtime 内部实现不在直接约束范围内。（`speculation-contract.md`）
 
 ## 范围决策

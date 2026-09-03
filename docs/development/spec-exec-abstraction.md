@@ -62,13 +62,13 @@ AssumptionSet、同一 Edge 上的并行候选、嵌套 Edge、single-winner、�
 
 ### 结论
 
-**投机的收益是负载相关的，且在高负载下可以为负。** 因此底座必须提供：
+**投机的收益是负载相关的，且在高负载下可以为负。** 因此底座必须提供承载以下 Policy 的机制与事实，而不是固定采用论文中的策略：
 
 1. **准入控制**：PASTE 的四道闸（executable / policy-safe / 置信度与预期收益 / 预算内）
-2. **优先级与抢占**：投机 job 低优先级、可抑制、可抢占；命中转正后变 non-preemptible
-3. **过期丢弃**：SPAgent 的 `t_w` —— 等太久的投机请求直接丢，因为重叠价值已经过期（**不是抢占，是过期**，这两者语义不同）
+2. **task 内选择与运行调整**：控制面暂存尚未启动的机会，并向 Policy 提供同一 task 的待选、运行、暂停状态及资源事实；Policy 通过 `select` 决定启动顺序，通过 `rebalance` 决定暂停、恢复和抢占，Scheduler 在资源硬约束内执行
+3. **等待期限 Policy**：SPAgent 的 `t_w` —— 等太久的投机请求直接丢，因为重叠价值已经过期（**不是抢占，是过期**，这两者语义不同）
 4. **跨层可见性**：底座必须看得到推理引擎的压力。PASTE 的 `EnginePressure(B) = DecodeLoad(B) + γ·KVLoad(B)` 维持在 `[P_low, P_high]` 带内；SPAgent 需要引擎暴露 hybrid batch 的 profiled timing 和 running request 计数
-5. **反向调度**：SPAgent 的 Inter-Request Schedule 用 SJF 让投机请求**插队** —— 投机输出通常 <10 token，延迟是排队主导的，不插队就赶不上主路径；而因为它们极小，插队几乎不拖慢推理请求
+5. **反向调度 Policy**：SPAgent 的 Inter-Request Schedule 用 SJF 让投机请求**插队** —— 投机输出通常 <10 token，延迟是排队主导的，不插队就赶不上主路径；而因为它们极小，插队几乎不拖慢推理请求
 
 ### 规范化资源记账（这也是 mechanism）
 
@@ -199,13 +199,9 @@ Speculate with Memory 顺带给了一个有用的方法学细节：他们把 act
 
 ## 9. 嵌套投机执行 (Nested Speculation)
 
-### 9.1 双视角：边 vs 实例
+正式的 Edge、Branch、`AssumptionSet`、待选机会和运行调整语义见 [设计模型](../design-model.md) §3.1 与 [Policy Decisions](../design/policy-decisions.md) §2.1、§2.8–§2.9、§4。本节只保留论文事实、候选 Policy 与待验证假设。
 
-正式的 Edge、Branch 和 `AssumptionSet` 语义见 [设计模型](../design-model.md) §3.1 与 [Policy Decisions](../design/policy-decisions.md) §4。本节只保留研究视角：嵌套把“假设在哪里引入”（Edge）与“假设由谁携带”（Branch 实例）连接起来；ISP、DSP 等论文已经展示了单链嵌套，尚未解决的是带 breadth 的深层树形扩展。
-
-### 9.2 现状：有链无树
-
-纠正一个常见误解 —— 嵌套并非完全空白：
+### 9.1 论文覆盖：有链无树
 
 | 论文 | 嵌套形态 |
 |---|---|
@@ -214,38 +210,18 @@ Speculate with Memory 顺带给了一个有用的方法学细节：他们把 act
 | Speculative Actions（depth-focused） | 多步连续 spawn，最多领先 `a/b` 步，活跃分支数与 `T` 无关 |
 | **无人实现** | **深层还分叉**。Speculative Actions 自己列为未实现扩展："predict s steps ahead into a tree, attach confidences, and expand promising branches beam-search style" |
 
-**所以缺口是 breadth × depth 的乘积区域，不是 depth 本身。** 这个缺口比"完全没人做嵌套"窄，也因此更可信 —— 单链嵌套已被证明可行且有界，剩下的是把它推广到树。
+现有工作已经证明单链嵌套可行；尚未被实现验证的是 breadth × depth 的深层树形扩展。
 
-### 9.3 成本：速率界，不是组合界
+### 9.2 成本证据与候选 Policy
 
-朴素直觉是 `k^d` 爆炸。**错。**
+Speculative Actions 给出的不是简单的 `k^d` 组合上界：分支只在投机或真实调用返回时延伸，并立即剪掉不一致子树，因此系统最多领先 `a/b` 步，活跃分支数与视界 `T` 无关。该结论支持用 frontier budget 管理成本，但不要求 AScout 固定 depth 或树形。
 
-Speculative Actions 的界：分支只在投机或真实调用返回时才延伸、不一致子树立即剪枝 ⟹ **系统最多领先 `a/b` 步，活跃分支数与视界 `T` 无关**。这是**速率界** —— 真正的约束是"权威路径还剩多少 wall-clock ÷ 投机器延迟"。
-
-**设计推论 1：depth 不该是策略参数，而是 frontier budget 下涌现的属性。**
-
-DSP 花力气在线学 `k`，本质是在学"往前走多远划算"。但给定一个 frontier budget，需要学的东西变成"下一个该扩展哪个节点" —— 那是优先队列问题，而 PASTE 已经在做（按 expected utility per unit resource 贪心排序）。
-
-> **frontier budget + 优先级排序，吸收了 depth-as-parameter。**
-
-具体机制：**best-first frontier expansion** —— 优先队列的 key = `P(节点存活) × 期望延迟节省 / 资源成本`，pop 到预算耗尽。它同时吸收了 breadth-vs-depth 的分配决策；Speculative Actions Thm.4 的贪心（加分支直到 `Δ*·δq(m;p) < c`）是它在 `depth=1` 上的特例。
-
-**设计推论 2：浅层分叉、深层单链。**
-
-每层都分叉 → `k^d`。只在浅层分叉、之后沿最高置信度**单链**下探 → `k·d`。存活率相应从 `p^d` 变成 `p(k)·p^(d−1)`。
-
-而 `p(k) = 1−(1−p)^k` 对 `k` 饱和很快、成本对 `k` 线性 ⟹ **花 breadth 买 depth 是划算的**。
-
-PASTE 是活证据：
+best-first 是一种候选 Policy：以 `P(机会存活) × 期望延迟节省 / 资源成本` 排序，在预算内通过 `select` 启动机会，并通过 `rebalance` 调整已运行工作。浅层分叉后沿高置信度单链深入是另一种候选：成本由 `k^d` 降为 `k·d`，存活率从 `p^d` 变为 `p(k)·p^(d−1)`，其中 `p(k) = 1−(1−p)^k`。这些公式和拓扑都属于 Policy，不是 Mechanism 规则。
 
 | | top-1 命中 | 多候选整体命中 | depth 3 存活率 |
 |---|---|---|---|
 | PASTE 实测 | 27.8% | **93.8%** | `0.938³ ≈ 0.83` |
 | 若只用 top-1 | 27.8% | — | `0.278³ ≈ 0.02` |
-
-> **breadth 是 depth 的使能器。** 这直接回应"成本急剧攀升"的担忧：答案不是限制深度，而是在浅层花 breadth 把每层存活率推高，让深度变得可行。
-
-### 9.4 适用性判据：看单步命中率
 
 | 论文 | 单步命中率 | 嵌套前景 |
 |---|---|---|
@@ -255,30 +231,21 @@ PASTE 是活证据：
 | Speculative Actions | chess 54.7%、e-commerce 22–38%、HotpotQA ≤46% | 不配 breadth 的话 depth 2 就到头 |
 | Speculate with Memory | 17–40%（但随经验单调增长） | 需 breadth 支撑；记忆累积后转好 |
 
-> **可检验预测**：嵌套的收益应随单步命中率**超线性**增长。这是底座能做、单个算法做不了的实验 —— 因为需要在同一套调度层上横扫多个 predictor。
+这些数据支持“嵌套收益随单步命中率超线性增长”这一待验证假设，但不能证明某种 breadth/depth 组合应成为默认策略。
 
-### 9.5 透明嵌套 + 反射 gating
+### 9.3 正式边界、能力依据与研究问题
 
-“投机实例应与权威实例同构、业务逻辑保持透明”已是正式设计边界。开发调研中仍值得验证的是：嵌套下 Cost/Admission 是否需要读取实例存活概率或其他祖先依赖事实；`survival` 及其接口形态目前只是候选方案，不是固定契约。
+同一 task / AScoutAgent 内，嵌套 Edge 经 `admit` 进入待选集合，由 `select` 与其他待选 Edge 一起权衡；启动后的投机 Branch 由 `rebalance` 参与暂停、恢复和抢占。后代依赖、祖先否定、重新挂载和提交资格均以正式 Branch/Policy 文档为准，本节不重复定义。
 
-### 9.6 错误率：L0/L2 不升，L1/L3 相乘
-
-一种待验证的成本/风险假设是：严格 trajectory-equivalence 下嵌套增加的主要是浪费，而软匹配或 validator 的误接受风险可能随层数复合。`depth > 1` 是否限制某些 Fidelity/match 组合，留作 Contract profile 或实验假设，不在本札记中定义为通用硬约束。
-
-### 9.7 实现复杂度：真正新增的只有两项
-
-| 能力 | 是否新增 | precedent |
+| 能力 | 当前定位 | precedent |
 |---|---|---|
-| 上下文 COW fork | **新增** | SPORK 的 prefix-cache fork 证明 KV 层近乎免费：探针预填 1.6s → 0.35s，prefill 干扰 <1% |
-| frontier 预算调度器 | **新增** | PASTE 的 utility-per-resource 排序 + SPAgent 的两级调度 |
+| 上下文 COW fork | 可选 Runtime 能力 | SPORK 的 prefix-cache fork 证明 KV 层近乎免费：探针预填 1.6s → 0.35s，prefill 干扰 <1% |
+| 待选机会暂存与选择执行 | **新增** | PASTE 的 utility-per-resource 排序 + SPAgent 的两级调度；排序方法由 Policy 决定 |
+| 已启动工作调整 | **新增** | SPAgent 的抑制与抢占；具体暂停、恢复和抢占目标由 `rebalance` 决定 |
 | 级联取消 | 本就需要 | Spec Interaction 的 cascade-cancel；ISP 的 kill `target_k, k>j` |
 | 提升级联 | 本就需要 | PASTE 的 promote；是 `assumptions == ∅ ⟺ 权威` 的自然推论 |
 
-父 Proposal 确认后的后代重新挂载、身份保持和隔离状态复用已由正式 Branch 语义定义；本节只保留实现成本与后端能力的研究比较，不重复规定状态转换。
-
-### 9.8 与其他轴的交互汇总
-
-嵌套与 `launch`、拓扑、`match`、`dispose` 和 `effect` 的交互仍是实验与 Contract 设计的研究问题。当前正式约束只有：后代保留全部未决依赖；祖先否定会使其失效；后代自身依赖清空前不能进入权威状态。关于 Absent、深层匹配风险、frontier 预算和嵌套 salvage 的更强结论均不在此处固化。
+仍待研究的只有策略和实验问题：Policy 是否需要根据祖先依赖自行估计 `survival`；软匹配或 validator 的误接受风险是否随嵌套层数复合；不同 `launch`、`match`、`effect` 和 Fidelity 组合在深层嵌套下的成本与保证。`survival` 字段、深度限制、frontier 预算和嵌套 salvage 均不在此处固化。
 
 ---
 
@@ -406,7 +373,7 @@ PASTE 是活证据：
 | # | 赢面 | 论文证据 |
 |---|---|---|
 | 1 | **负载相关性** | SPAgent：朴素投机在 >2 rps 时比不投机**慢 49.3%**；PASTE：Tool-Only 消融（只加速工具不改 LLM 调度）**比 baseline 更差**（419s vs LLM-Only 342s vs 完整 270s）。原生实现没有调度层，做不了准入与背压。**"speedup vs. 负载"图上，原生实现在高负载区掉到 1 以下，底座不会。** |
-| 2 | **嵌套** | 原生实现不可能嵌套（无 AssumptionSet 即无组合语义）。§9.4 的可检验预测 —— 收益随单步命中率超线性增长 —— 只有底座能验证 |
+| 2 | **嵌套** | 原生实现不可能嵌套（无 AssumptionSet 即无组合语义）。§9.2 的可检验预测 —— 收益随单步命中率超线性增长 —— 只有底座能验证 |
 | 3 | **按任务切换 policy** | per-task 选 policy 能否打败任何单一固定 policy。底座独有 |
 
 ### 11.3 指标：四处补充

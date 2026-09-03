@@ -102,9 +102,9 @@ interface Salvageable<P> {
 
 **问题**：底座提供什么、算法填什么？
 
-**选择**：**Mechanism（底座提供，算法不可改）**：Edge 注册与 admissibility；隔离域；权威到达事件 + Reconciliation 状态机；Assumption DAG 与传播；Effect Gate / commit barrier；资源准入、优先级、抢占、背压；规范化资源记账；Fidelity 契约的强制与审计。
+**选择**：**Mechanism（底座提供，算法不可改）**：待选机会与运行状态的保存；隔离域；权威到达事件 + Reconciliation 状态机；Proposal 依赖与传播；Effect Gate / commit barrier；资源所有权、硬约束、背压与 Policy 调度意图的执行；规范化资源记账；Fidelity 契约的强制与审计。
 
-**Policy（插件，有默认实现）**：Predictor / `S_u`；Equivalence `≈`；Authority launch；Topology（breadth × depth）；Cost model & gate；Salvage；Compensation。
+**Policy（有默认实现）**：通过 `admit`、`select`、`rebalance`、`extent`、`predict`、`launch`、`effect`、`match` 和 `dispose` 决定机会准入、启动选择、运行调整、预测、权威取得、效果、匹配和处置。
 
 **判据**：如果某个论文的机制被迫写进 Mechanism 层，说明抽象漏了一轴。
 
@@ -152,13 +152,13 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **问题**：投机的收益是负载相关的（SPAgent 朴素投机 >2 rps 时比不投机慢 49.3%；PASTE Tool-Only 消融比 baseline 更差），单个算法能自己解决准入吗？
 
-**选择**：不能，底座必须提供五项：
+**选择**：不能，底座必须提供承载以下 Policy 所需的机制与事实：
 
 1. **准入控制** —— 四道闸：executable / policy-safe / 置信度与预期收益 / 预算内
-2. **优先级与抢占** —— 投机 job 低优先级、可抢占；命中转正后 non-preemptible
-3. **过期丢弃** —— `t_w`：等太久的投机请求直接丢（与抢占语义不同，重叠价值已过期）
+2. **启动选择与运行调整** —— Policy 通过 `select` 选择待选机会，通过 `rebalance` 暂停、恢复或抢占已启动投机工作；Scheduler 只在硬约束内执行
+3. **等待期限策略** —— `t_w`：等太久的投机请求直接丢（与抢占语义不同，重叠价值已过期）
 4. **跨层可见性** —— 推理引擎压力（PASTE 的 `EnginePressure(B) = DecodeLoad(B) + γ·KVLoad(B)` 维持在带内）。**范围决策（D-013 修订）**：engine plane 不做后引擎内部压力不可见，该项降级为 API 可观测信号（延迟、限流、配额余量）；引擎级压力感知留给未来自托管场景
-5. **反向调度** —— SJF 让投机请求插队（投机输出 <10 token，延迟排队主导，插队几乎不拖慢推理）
+5. **反向调度策略** —— SJF 让投机请求插队（投机输出 <10 token，延迟排队主导，插队几乎不拖慢推理）
 
 **原因**：负结果证明单个算法在自己的抽象里解决不了 —— 他们没有调度层。
 
@@ -201,8 +201,9 @@ IRREVERSIBLE                      // 不可投机，硬闸
 **选择**：
 
 1. **成本是速率界，不是组合界** —— 分支只在投机或真实调用返回时才延伸、不一致子树立即剪枝 ⟹ 系统最多领先 `a/b` 步，活跃分支数与视界 `T` 无关。真正的约束是"权威路径还剩多少 wall-clock ÷ 投机器延迟"。
-2. **depth 由 frontier budget 涌现，不是策略参数** —— **best-first frontier expansion**：优先队列 key = `P(节点存活) × 期望延迟节省 / 资源成本`，pop 到预算耗尽。它吸收了 breadth-vs-depth 分配；Speculative Actions Thm.4 的贪心是它在 `depth=1` 上的特例。
-3. **浅层分叉、深层单链** —— 每层分叉 → `k^d`；浅层分叉后沿最高置信度单链下探 → `k·d`，存活率 `p(k)·p^(d−1)`。`p(k) = 1−(1−p)^k` 对 k 饱和快、成本对 k 线性 ⟹ 花 breadth 买 depth 划算。PASTE 是活证据：top-1 命中 27.8% vs 多候选整体 93.8%，depth 3 存活率 `0.938³ ≈ 0.83` vs `0.278³ ≈ 0.02`。**breadth 是 depth 的使能器。**
+2. **机制提供 task 内待选集合** —— 嵌套 Edge 通过 `admit` 后可以暂存而不立即启动，由该 task / AScoutAgent 绑定的 Policy 通过 `select` 与 task 内其他待选 Edge 一起权衡。AScout 维护机会有效性并在硬约束内执行选择。
+3. **树形扩展方式属于 Policy** —— best-first、`P(存活) × 期望延迟节省 / 资源成本` 排序、浅层分叉后沿单链深入以及显式 depth 都是可选策略。AScout 必须能够承载这些策略，但不固定其中任何一种。
+4. **已启动工作的调整另行决策** —— `rebalance` 在同一 task 内决定投机 Branch 的暂停、恢复与抢占，不扩大 `select` 的职责；抢占后的处置继续由 `dispose` 决定。
 
 ---
 
@@ -210,9 +211,9 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **问题**：透明嵌套会不会改变投机算法本身的行为逻辑？
 
-**选择**：Agent 业务逻辑**不知道**（透明）—— 实例与权威二进制同构，底座追踪 provenance、闸门设在效果层，这是**无侵入的前提**。但 **Cost / admission 策略必须知道**（反射）：算法自己的成本/置信策略假设自己站在权威路径上（DSP 学的 k、cost-aware 的 EV 门），depth-2 存活率 0.25 的实例不知情会**过度投机 4×**。
+**选择**：Agent 业务逻辑**不知道**（透明）—— 实例与权威二进制同构，底座追踪 provenance、闸门设在效果层，这是**无侵入的前提**。Policy 可以读取祖先依赖和成本等可观察事实，并自行计算存活概率；需要这种反射信息的 Policy 可用它避免按权威路径的假设过度投机，但 AScout 不强制所有 Policy 使用存活概率。
 
-**接口设计**：`should_speculate(..., survival: float)` —— 嵌套下 `P(实例存活)` 必须由底座透传。**这是对 gating 的改动，不是对算法行为逻辑的改动。**
+**接口边界**：AScout 提供形成判断所需的客观依赖事实，不把 `survival` 固定为通用接口字段，也不替 Policy 推断概率。具体 Policy 可以在 `admit` 或 `select` 中使用自己的 survival 模型。
 
 ---
 
@@ -232,7 +233,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **问题**：系统的使用模型是什么？
 
-**选择**：四类角色，只有一类写配置：端用户完全不感知（提任务、拿结果，只是更快）；Agent 开发者代码不改一行（唯一动作：提供工具 effect manifest）；Operator 声明 policy profile、选隔离后端、设预算旋钮；Policy 作者（研究者）实现 1–6 个插件接口，多数只需实现 Proposer。
+**选择**：四类角色，只有一类写配置：端用户完全不感知（提任务、拿结果，只是更快）；Agent 开发者代码不改一行（唯一动作：提供工具 effect manifest）；Operator 选择 Policy、声明 task-level 配置、选隔离后端并设预算旋钮；Policy 作者（研究者）实现所需 Policy Decision。
 
 **关键设计**：policy 与任务的绑定发生在任务准入时，由路由规则或任务特征决定（底座自己选），不由端用户输入决定。**"端用户不感知"是默认值而非不变量** —— ISP 是唯一故意让端用户感知投机的（UI 协同设计、用户可在间隔内中断并注入自己的值作为 oracle），底座须支持把人作为 Authority 的 opt-in 模式。
 

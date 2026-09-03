@@ -20,7 +20,7 @@ AScout 不是某个固定算法，也不是替代所有 Runtime 的统一运行�
 
 ## 2. AScout 的工作模型
 
-投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 准入判断 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、转正或结束。
+投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 待选准入 -> 启动选择 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。AScout 可以暂存已经准入但尚未启动的机会；一个 task / AScoutAgent 绑定的 Policy 在该 task 内全部有效待选机会之间选择现在启动哪些，并可以调整已经运行或暂停的投机工作。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、转正或结束。
 
 Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Mechanism 把抽象落实为执行并兜底正确性、隔离与资源约束；Runtime 是提供原生执行能力的外部后端。Speculation Contract 约束 Policy 的表达以及 Runtime Adapter 在控制面接入边界上的可观察行为；控制面作为 Mechanism 的实现方，通过编排与校验把约束落实为可执行的投机路径。AScout 不直接约束或定义 Runtime 内部实现。
 
@@ -66,7 +66,7 @@ task
                   -> Instance
 ```
 
-`task` 是 session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。task 准入时绑定 policy profile，并建立初始 Agent，称为 root Authority Instance。在运行过程中，随着投机执行的不断发生和结束，Authority Instance 不断变化，由此形成树形结构。树中的每个子树都称为 `Branch`。`Branch` 是树中的计算延续，也是投机世界的结构实体；Branch 对应的根节点称为 `Branch Node`。`Instance` 是由外部 Runtime 承载 Node 的实际执行单元，代表实际运行的单一 Agent。
+`task` 是 session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。task 准入时绑定 Policy 及其 task-level 配置，并建立初始 Agent，称为 root Authority Instance。在运行过程中，随着投机执行的不断发生和结束，Authority Instance 不断变化，由此形成树形结构。树中的每个子树都称为 `Branch`。`Branch` 是树中的计算延续，也是投机世界的结构实体；Branch 对应的根节点称为 `Branch Node`。`Instance` 是由外部 Runtime 承载 Node 的实际执行单元，代表实际运行的单一 Agent。
 
 对外，为只呈现一个单一 Agent，这个统一视图称为 `AScoutAgent`。它拥有 Speculative Tree 的控制状态和 Branch 之间的关系。由此，一个 task 对应一个 AScoutAgent，一个 AScoutAgent 拥有一棵 Speculative Tree；控制面拥有 Tree、Branch 关系和控制状态，Instance 的实际执行、资源和隔离状态位于外部 Runtime，控制面只能通过 Adapter 观察所需结果。
 

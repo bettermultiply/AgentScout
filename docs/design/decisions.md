@@ -288,7 +288,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-041：authority 决策槽并入 launch
 
-**选择**：决策面由八槽改为七槽，`S(E) = (admit, extent, predict, launch, effect, match, dispose)`。撤销独立的 `authority` 决策槽。权威值来自谁是这条 Edge 的固有事实（`u` 是谁、真实结果就由谁产生），不是 Policy 可替换的决策；Policy 通过 `launch` 决定该权威值是否取得、何时取得（Eager / Lazy / Absent）。Absent 允许策略放弃天然存在的权威值（如用户输入）而只靠 validator 或可接受性判断，是否允许由 Fidelity 契约校验。validator 不是权威值来源，归属 `match` 的可接受性判断。
+**选择**：撤销独立的 `authority` 决策槽。当前决策面为 `S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)`；后来增加的 `select` 与 `rebalance` 均与 authority 无关。权威值来自谁是这条 Edge 的固有事实（`u` 是谁、真实结果就由谁产生），不是 Policy 可替换的决策；Policy 通过 `launch` 决定该权威值是否取得、何时取得（Eager / Lazy / Absent）。Absent 允许策略放弃天然存在的权威值（如用户输入）而只靠 validator 或可接受性判断，是否允许由 Fidelity 契约校验。validator 不是权威值来源，归属 `match` 的可接受性判断。
 
 **废弃的旧表述**：`authority` 作为独立决策槽的语义（“验证依据的真实来源选择”）、以及将 validator 列为 authority 来源之一的做法。语义权威见 `design-model.md` §3.1 与 `policy-decisions.md` §2.4。
 
@@ -301,6 +301,26 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 **否定路径**：父 Proposal 被否定时，依赖它的后代 Branch 失效并分别取消、清理。后代的部分进展只有在父 Branch 进入 `Salvage` 时，才能作为父 Branch salvage 的输入，不能脱离父 Branch 独立 salvage。
 
 **原因**：嵌套 Branch 运行在自身隔离环境中，父 Branch 确认不需要搬迁或重放子 Branch 状态；只需更新控制面的树结构与未决依赖。该规则保留嵌套执行进展，同时维持 `AssumptionSet` 和权威信息流约束。
+
+## D-043：待选机会由 AScout 暂存，Policy 直接选择启动项
+
+**选择**：`admit` 只决定投机机会是否进入待选集合，不决定立即启动。其粗判识别可能的投机入口，精判决定机会是否值得登记和保留；通过精判后不在 `select` 前重复精判。控制面 Scheduler 拥有待选集合并维护机会有效性。
+
+新增独立的 `select(frontier_view, scheduling_context)` Policy Decision。一个 task / AScoutAgent 绑定的 Policy 在该 task 内所有仍有效的待选 Edge 之间进行全局权衡，直接选择当前希望启动的有序子集，可以选择一个、多个或暂时不选。未被选择的机会继续保留，直到后来被选择或因 pending result 到达、任务结束、祖先依赖否定等客观原因失效；不需要额外的主动放弃接口。
+
+**机制边界**：Scheduler 向 Policy 提供集合快照和可观察调度事实，并在资源、Contract 与正确性硬约束内落实选择。启动前只做有效性与硬约束复核，不进行第二次 Policy 精判，也不使用固定价值公式替代 Policy 的跨 Edge 排序。best-first、具体排序公式、浅层分叉、深层单链和 breadth/depth 分配均为可选 Policy，不能成为 AScout 固定规则。`select` 只处理尚未启动的机会，不负责已经运行工作的状态调整。
+
+**原因**：单 Edge 的独立“现在是否启动”无法表达多个机会竞争同一资源时的整体取舍，也会永久丢弃暂时不能启动但稍后仍有价值的机会。把登记、全局选择与机制复核分开，可以保留机会并让策略控制调度，同时不把队列状态或资源所有权交给 Policy。
+
+## D-044：已启动投机工作由 rebalance 决定暂停、恢复和抢占
+
+**选择**：新增 `rebalance(active_view, paused_view, scheduling_context)` Policy Decision。它面向同一 task / AScoutAgent 中已经运行或暂停的投机 Branch，由 Policy 决定哪些工作暂停、恢复或抢占；尚未启动的机会仍只由 `select` 处理。
+
+**与其他决策的关系**：`extent` 根据单个过程自身进展决定推进边界，`rebalance` 根据多个已启动工作的相对价值与资源条件调整运行分配。`rebalance` 的 `preempt` 只触发 `resolution = preempted`，后续丢弃、Salvage、补偿和清理由 `dispose` 决定。
+
+**机制边界**：Scheduler 提供运行与暂停集合的事实快照，并在 Runtime Adapter 声明的安全暂停/恢复能力、资源所有权、Branch 生命周期和效果纪律约束内执行 Policy 意图。Policy 不拥有运行队列，也不能直接修改 Runtime 状态。
+
+**原因**：已经启动工作的价值会随权威进展、资源压力和其他机会变化。若暂停或抢占由 Scheduler 的固定排序规则决定，就会把运行策略固化进 Mechanism；将其作为独立 Policy Decision，既保留策略控制，也避免扩大 `select` 的职责。
 
 ## 相关文档
 
