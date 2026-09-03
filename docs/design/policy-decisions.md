@@ -317,7 +317,7 @@ Fidelity 不是独立的 Policy Decision，而是由决策组合、Runtime 能�
 | **Bounded-degradation** | 明确允许有损，但退化受到声明的边界约束 |
 | **Best-effort** | 不提供严格的等价或退化保证 |
 
-具体的 Fidelity 字段、Contract 校验和运行期审计见 [Speculation Contract 设计](speculation-contract.md)。
+具体的 Fidelity 字段、Contract 校验和运行期校验见 [Speculation Contract 设计](speculation-contract.md)。
 
 ## 6. Policy 与 Mechanism 的边界
 
@@ -327,7 +327,7 @@ Policy 可以实现或组合七类 decision，但不能拥有 Runtime mutable st
 - `AssumptionSet` 的传播、确认/否定和非空假设数据的信息流约束；
 - single-winner、共享验证依据、commit barrier 和效果阻塞；
 - 资源所有权、预算执行、抢占、取消和运行期成本记账；
-- Policy 声明与 Runtime 能力之间的 Speculation Contract 校验，以及 Fidelity 的加载期检查和运行期审计。
+- Policy 声明与 Adapter/Runtime 能力之间的 Speculation Contract 校验，以及 Fidelity 的加载期检查和运行期校验。
 
 Policy 决定“希望采用哪种策略”，Mechanism 保证该策略在正确性、隔离、资源、副作用和清理约束内执行。能力不足不能静默改变语义，只能拒绝、明确降级或选择其他合法路径。
 

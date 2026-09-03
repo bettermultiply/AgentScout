@@ -24,7 +24,7 @@ Runtime（具体后端原语）
 
 **Runtime：只提供简单原语。** Runtime 是具体执行后端，只负责上报并执行一组简单原语，不实现组合逻辑。原语本身是稳定的抽象、各后端保持一致兼容，换后端只换原语的实现——不换原语、不换组合。Adapter 侧的工作因此很简单：翻译调用 + 上报原语清单。
 
-**Speculation Contract：固定跨层语义的实现约束。** Contract 规定 Policy 如何表达策略、控制面如何形成操作、Runtime Adapter 如何接入和映射操作，以及 Runtime 必须提供哪些基本运行语义。Mechanism 通过固定接口、状态所有权、操作路径和运行期结果落实这份 Contract。Policy 声明需求，Runtime Adapter 上报实际能力；控制面在加载和准入时检查当前策略是否有合法执行路径，并在运行期以结果和事件确认 Contract 是否被兑现。作者只需声明需求，不必知道后端实现。
+**Speculation Contract：策略表达与后端接入的语义对齐约束。** Contract 约束 Policy 与 Adapter/Runtime 两侧：Policy 如何表达与校验决策取值、Adapter 需要把后端能力组合成哪些基本运行语义并通过校验。控制面是这份约束的实现方（Mechanism）：它把 Policy 决策编排为受管操作、经 Adapter 映射到后端，并在运行期以结果和事件确认约束是否被兑现。作者只需声明需求，不必知道后端实现。
 
 ## 2. 工作模型
 
@@ -77,11 +77,11 @@ Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根�
 
 ### 3.3 Speculation Contract
 
-Speculation Contract 的目的，是把投机策略、控制面操作与 Runtime 运行能力之间必须保持的关系固定为可检查、可执行的契约。它使 Policy 能在统一决策面内表达需求，也使 Runtime 以统一操作和事件接入，而不让策略语义隐藏在特定后端或算法实现中。
+Speculation Contract 约束 Policy 与 Adapter/Runtime 两侧，把策略表达、后端接入与实际运行之间必须保持的语义对齐固定为可检查、可执行的契约。它使 Policy 能在统一决策面内表达需求，也使 Runtime 以统一操作和事件接入，而不让策略语义隐藏在特定后端或算法实现中。控制面是这份契约的实现方，属于 Mechanism；它把 Policy 决策编排为受管操作、经 Runtime Adapter 落向后端并解释事件。
 
-Policy Engine 在加载或任务准入时检查 Policy 的决策和声明能否由 Contract 规定的控制语义与当前 Runtime 能力承接；无法满足时必须拒绝，或明确报告降级。运行期间，控制面通过 Authority、validator、效果处理和 Runtime 返回的实际结果检查 Contract 是否被兑现。
+Policy Engine 在加载或任务准入时检查 Policy 的决策取值能否由当前接入的后端能力承载；无法满足时必须拒绝，或明确报告降级。运行期间，控制面通过 Authority、validator、效果处理和 Runtime 返回的实际结果检查声明是否被兑现。
 
-Contract 规定跨层操作必须保持的固定语义，但不拥有 Branch 或 Runtime 的运行状态。具体的契约语义、校验路径、降级结果和运行期证据见 [Speculation Contract 设计](design/speculation-contract.md)。
+Contract 约束的对象是两侧，不拥有 Branch 或 Runtime 的运行状态。具体的契约语义、校验路径、降级结果和运行期证据见 [Speculation Contract 设计](design/speculation-contract.md)，控制面如何落实见 [控制面设计](design/control-plane.md)。
 
 ## 4. 跨领域设计约束
 
@@ -98,5 +98,6 @@ Contract 规定跨层操作必须保持的固定语义，但不拥有 Branch 或
 - [架构](architecture.md)：系统结构（四侧、所有权、调用方向）
 - [Policy Decisions 设计](design/policy-decisions.md)：Policy 决策面
 - [效果管理设计](design/effect-management.md)：状态与效果
-- [Speculation Contract 设计](design/speculation-contract.md)：跨层语义契约
+- [Speculation Contract 设计](design/speculation-contract.md)：策略与运行时的语义对齐契约
+- [控制面设计](design/control-plane.md)：控制面作为 Mechanism 的实现
 - [Branch 语义设计](design/branch-semantics.md)：Branch 生命周期、状态可见性和 single-winner 语义

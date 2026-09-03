@@ -679,7 +679,7 @@ PASTE 把 Promote 列为独立终态是对的 —— 少了它，在飞的投机
 
 ### 11.1 两处框架改进
 
-效果分类与状态域的正式矩阵见 [效果管理设计](../design/effect-management.md)，Policy 与 Runtime 能力的契约见 [Speculation Contract](../design/speculation-contract.md)。本节只保留研究结论：现有工作通常以只读白名单回避副作用，预测/调度与隔离/事务之间缺少统一契约；AScout 的机会在于用跨层能力协商和运行期审计把两条路径接起来。
+效果分类与状态域的正式语义见 [效果管理设计](../design/effect-management.md)，Policy 与 Adapter/Runtime 的语义对齐契约见 [Speculation Contract](../design/speculation-contract.md)。本节只保留研究结论：现有工作通常以只读白名单回避副作用，预测/调度与隔离/事务之间缺少统一契约；AScout 的机会在于把策略表达、后端能力与效果处理接成一条可校验的路径。
 
 ### 11.2 指标口径
 

@@ -106,4 +106,5 @@ AScout 不作以下保证：
 - [心智模型](../mental-model.md) §状态与效果：高层说明
 - [设计模型](../design-model.md)：抽象概念层与跨领域约束
 - [Branch 语义设计](branch-semantics.md)：Branch 语义与隔离通信
-- [Speculation Contract 设计](speculation-contract.md)：Policy 与 Runtime 能力匹配
+- [控制面设计](control-plane.md)：控制面组件与效果协调
+- [Speculation Contract 设计](speculation-contract.md)：Policy 与 Adapter/Runtime 的语义对齐契约

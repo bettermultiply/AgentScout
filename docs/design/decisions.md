@@ -307,3 +307,4 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 - [效果管理设计](effect-management.md)：效果与状态
 - [Policy Decisions 设计](policy-decisions.md)：Policy 决策面
 - [Speculation Contract 设计](speculation-contract.md)：契约语义
+- [控制面设计](control-plane.md)：控制面组件与实现

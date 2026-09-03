@@ -6,13 +6,17 @@
 
 ### Speculation Contract 的定位与实现
 
-已收敛：`Contract` 是 AScout 固定的跨层语义约束，连接 Policy、控制面、Runtime Adapter 与 Runtime；它规定各侧必须提供的接口、基本操作、不变量、能力和失败语义。Contract 不是部署配置或独立 Manager，不能由单个任务或 Policy 修改。
+已收敛：`Contract` 约束的对象是 Policy 与 Adapter/Runtime 两侧，目的是保证语义正确与对齐，而不是约束控制面。控制面是 AScout 自身实现的 Mechanism 主体，是 Contract 的实现方，不属于被约束对象。Contract 不是部署配置或独立 Manager，不能由单个任务或 Policy 修改。
 
-已收敛：`Mechanism` 只作为抽象责任词，是 Contract 的固定实现，不是插件或独立组件。Policy Engine、控制面固定组件、Runtime Adapter 与 Runtime 分别在自己的责任边界内落实 Contract。Runtime 必须实现 AScout 要求的基本操作和语义；具体 Runtime 能力由 Adapter 接入时报告，并作为控制面判断策略可执行性的事实输入。
+已收敛：`Mechanism` 只作为抽象责任词，是 Contract 的固定实现，不是插件或独立组件；它由 AScout 自身能实现、能强制的固定机制共同构成，由控制面组件协同完成检查与编排，不归属任何单一组件。
 
-已收敛：Contract 的执行路径统一描述为 `Policy 决策 → Policy Engine 校验 → 控制面机制形成语义操作 → Runtime Adapter 映射 → Runtime 执行并返回结果/事件 → 控制面更新状态`。控制面机制不依赖另一个 Manager 监督，而通过固定接口、状态所有权、操作路径和运行期校验落实契约；固定 Mechanism 的语义正确性还需要实现审查和经同意后的 conformance 验证。
+已收敛：Runtime 是通用执行后端（例如 docker、虚拟机或进程管理能力），不要求提供 AScout 专用接口。Branch 隔离、效果、cleanup 等 AScout 语义由 Runtime Adapter 用后端原生能力组合表达；控制面只能通过 Adapter 访问后端，因此接入校验的对象是 Adapter，Adapter 通过即代表其背后的 Runtime 能承载相应语义。Adapter 不能静默放宽语义，后端确实表达不出某语义时应拒绝接入或明确降级。
 
-已收敛：`docs/design/speculation-contract.md` 重写为统一 Contract 设计，围绕从 Policy 决策到 Runtime 结果的一条操作路径，说明策略表达、控制语义、Runtime 操作与能力、失败语义、Mechanism 落实、完整控制闭环和运行期证据。删除 `profile` 及可配置 Contract 的暗示，不单列版本演进或文档边界章节，也不再使用“Runtime 最终强制”作为独立概念。
+已收敛：Contract 的执行路径统一描述为 `Policy 决策 → Policy Engine 校验决策取值 → 控制面机制编排为受管操作 → Runtime Adapter 映射 → Runtime 执行并返回结果/事件 → 控制面更新状态`。Policy Decision 描述高层语义，取值合法性随 Runtime 能力变化，需结合 Adapter 报告能力校验；高层决策展开为受管操作序列，Adapter 按契约规定的操作集映射为后端行为。对 Adapter/Runtime，通过声明式选择隔离度 + 接入时基本语义测试 + 运行期校验兜底来保证语义对齐。
+
+已收敛：失败语义。对尚未被接受的投机 Branch，失败收敛到"该 Branch 在 Speculative Tree 中从未被创建"，不重放该操作；被接受的 Branch 已完成使命，不适用。Contract 文档写共同承诺一句，撤销与清理机制归 control-plane。
+
+已收敛：文档拆分。`docs/design/speculation-contract.md` 收窄为"定位 / 约束什么（单节）/ 如何约束 / 完整控制闭环"；控制面内部机制（组件分工、状态 owner、操作编排、失败清理）下沉到新建的 `docs/design/control-plane.md`（参考 spec-exec-abstraction §10）。同步更新 glossary、design-model、mental-model、index、effect-management、decisions 与 architecture 的相关引用。
 
 ### ASCout Agent 分支执行底座
 
