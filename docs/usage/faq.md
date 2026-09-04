@@ -12,7 +12,7 @@ Speculative Tree 中的关系与 Agent execution activity 相互独立。Specula
 
 ## Parent 的内存修改会自动进入 child 吗？
 
-不会。Child 从 Branch barrier 捕获的 execution base 开始。之后的 parent 进程内存、Agent context 和环境修改不会隐式传播；Outcome、Workspace、Input 和 Effect 各自遵循明确的可见性规则。
+不会。Child 先从 Branch barrier 登记为逻辑 Branch；只有在需要独立执行状态时，才从相应 execution base 建立独立环境。独立环境建立后的 parent 受保护进程内存、Agent context 和环境修改不会隐式传播；Outcome、Workspace、Input 和 Effect 各自遵循明确的可见性规则。
 
 ## Parent 和 child 的后续写入如何排序？
 
@@ -52,7 +52,7 @@ AScout 只接受能够通过 Adapter 证明其后端可管理完整 Agent proces
 
 ## External effects 会自动回滚吗？
 
-只有落入 adapter 声明的 observation surface 和 guarantee horizon 的 effects 才获得 sibling non-interference 与 winner materialization 保证。Contract 外的 operational footprint 可能只能归属和计量。
+只有落入 adapter 声明的 observation surface 和 guarantee horizon 的 effects 才获得 sibling non-interference 与 winner 状态延续保证。Contract 外的 operational footprint 可能只能归属和计量。
 
 ## 默认 Runtime 会 sandbox 恶意 Child 吗？
 

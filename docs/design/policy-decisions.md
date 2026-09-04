@@ -174,7 +174,7 @@ effect(effect_descriptor, context) -> EffectPlan
 | 模式 | 含义 |
 |---|---|
 | `default` | 采用服务 Adapter/Contract 声明的默认方案；未声明默认方案时不能静默放行 |
-| `simulate` | 拦截真实请求，不访问真实服务，在 Branch 内生成标记为 synthetic 的模拟响应 |
+| `simulate` | 拦截真实请求，不访问真实服务，在 Branch 内生成明确标记为模拟结果并记录来源的模拟响应 |
 | `transform` | 将原操作转换为 dry-run、staging 或其他等价的非变异形式 |
 | `stage` | 暂存真实效果，满足提交条件后再释放 |
 | `mediate` | 通过受管代理或 broker 执行 |
@@ -182,7 +182,7 @@ effect(effect_descriptor, context) -> EffectPlan
 | `allow` | 在声明范围内直接执行真实请求 |
 | `deny` | 直接拒绝该效果或拒绝相关投机环节 |
 
-`simulate` 要求存在针对该服务的 Adapter，并由 Adapter 声明哪些请求可以模拟以及模拟响应如何生成。模拟响应不是真实 Authority，必须带有 synthetic 来源和未验证假设；后续仍需通过 Authority、validator 或其他明确规则验证。这即正式语义所称的**伪装执行**，其约束与保证见 [效果管理设计](effect-management.md)。`EffectClass` 描述效果可采用的处理纪律，`StateDomain` 描述效果作用的状态域，二者保持正交；Policy 选择的模式必须经过 Effect Management、Contract 和 Runtime capability 校验。
+`simulate` 要求存在针对该服务的效果插件，并由插件声明哪些命令或 URL 可以模拟以及模拟响应如何生成。模拟响应不是真实 Authority，必须明确标记为模拟结果、记录生成来源并作为未验证假设处理；后续仍需通过 Authority、validator 或其他明确规则验证。这即正式语义所称的**伪装执行**，其约束与保证见 [效果管理设计](effect-management.md)。`EffectClass` 描述效果可采用的处理纪律，`StateDomain` 描述效果作用的状态域，二者保持正交；Policy 选择的模式必须经过 Effect Management、Contract 和 Runtime capability 校验。
 
 Policy 可以选择暂存、代理、延迟释放、阻塞、补偿或其他合法处理方式，但不能把效果排除在 AScout 的最低纳管范围之外。Effect Management 必须检查 Adapter 声明的后端能力是否足以落实所选纪律。
 

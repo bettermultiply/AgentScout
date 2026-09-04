@@ -10,7 +10,7 @@
 
 控制面的工作方式是一条贯穿 Policy、控制结构与外部 Runtime 的闭环，Policy 的表达与 Runtime Adapter 的接入都经由控制面获得一致的校验与编排。
 
-控制面先通过 Policy Engine 解释并执行组成 Policy 的多个 Decision，在运行期针对每个阶段作出实时的决策。得到合理决策后，再把决策编排为受管语义操作，经 Runtime Adapter 请求外部 Runtime 执行。收到返回的结果或事件后，控制面解析并校验该操作是否确实按语义完成，再据实更新 Speculative Tree 的控制面视图。控制面还记录运行事实，操作结果用于确认受管操作是否按语义完成，结果与事件记录用于状态对齐、问题定位和审计校验。控制面不定义或直接触碰 Runtime 内部状态，只经 Runtime Adapter 交换 typed operation 与 event。
+控制面先通过 Policy Engine 解释并执行组成 Policy 的多个 Decision，在运行期针对每个阶段作出实时的决策。得到合理决策后，再把决策编排为受管语义操作；需要 Runtime 参与的操作经 Runtime Adapter 请求外部 Runtime 执行，Effect Coordinator 插件可以在控制面内直接处理受管效果并经 Agent Control Gateway 返回结果。控制面收到 Runtime 返回的结果或事件后，解析并校验该操作是否确实按语义完成，再据实更新 Speculative Tree 的控制面视图。控制面还记录运行事实，操作结果用于确认受管操作是否按语义完成，结果与事件记录用于状态对齐、问题定位和审计校验。控制面不定义或直接触碰 Runtime 内部状态，只经 Runtime Adapter 交换需要后端参与的 typed operation 与 event。
 
 这些校验与编排都必须落在 Policy 无法绕过的固定语义边界之内。该边界的清单与说明见 [Policy Decisions](policy-decisions.md) §6；控制面负责在运行期使这些语义被一致地落实。
 
@@ -24,11 +24,11 @@
 
 ## 2. 组件与状态
 
-控制面由若干固定职责的组件构成，包括 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger。它们分别承担不同的职责，维护不同的控制状态，并通过协作整体完成控制面的工作。
+控制面由若干固定职责的组件构成，包括 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger。它们分别承担不同的职责，围绕 Speculative Tree 的控制面视图协作，并维护各自需要的控制状态。
 
 ### 2.1 Agent Control Gateway
 
-Agent Control Gateway（以下简称 ACGateway）是控制面面向 Agent 接入侧的受管通信边界，负责统一管理控制面与接入侧之间的通信。它接收某个 Task 的开始请求，并在控制面协调下与 Runtime 共同建立 Branch Node：Runtime 创建对应的 Branch 执行环境，ACGateway 再在该环境内创建并启动对应的 Agent 接入侧，二者共同形成完整的 Branch Node。
+Agent Control Gateway（以下简称 ACGateway）是控制面面向 Agent 接入侧的受管通信边界，负责统一管理控制面与接入侧之间的通信。它接收某个 Task 的开始请求，并在控制面协调下建立逻辑 Branch Node；当该 Branch 需要独立执行环境时，Runtime 创建对应的 Branch 执行环境，ACGateway 再在该环境内创建并启动对应的 Agent 接入侧，二者共同形成完整的物理执行节点。尚未建立独立环境的 Branch 可以先由受控接入侧在共享执行视图中推进。
 
 Task 运行期间，它维护与 Agent 接入侧之间的通信会话，双向传递控制面与接入侧所需的信息和命令，包括 Policy dialect、本地 Decision 结果、decision log、运行事件和受管控制请求，并进行入口级的上下文、权限和格式检查。除通信会话所需的暂时状态外，它不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态。
 
@@ -42,17 +42,19 @@ Policy Engine 是可替换 Policy 进入控制面的固定入口。它在 Policy
 
 ### 2.3 Speculation Coordinator
 
-Speculation Coordinator 是控制面的全局投机视图与控制循环的协调核心。它维护每个 Task 的 Speculative Tree 视图，以及 Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系。它接收 Agent 接入侧的事件，以及 Runtime 经 Runtime Adapter 规范化后返回的结果和事件，据此更新全局视图，识别受影响的 Edge/Branch，并判断当前被激活的 Policy Decision。
+Speculation Coordinator 是控制面的全局投机视图与控制循环的协调核心。它维护每个 Task 的 Speculative Tree 视图，以及 Edge、Branch、Proposal、`AssumptionSet`、待选机会、调度状态和逻辑视图与 Runtime 实际状态之间的对应关系。它接收 Agent 接入侧的事件，以及 Runtime 经 Runtime Adapter 规范化后返回的结果和事件，据此更新全局视图，识别受影响的 Edge/Branch，并判断当前被激活的 Policy Decision。
 
-Speculation Coordinator 通过 Policy Engine 执行需要全局视图的 Decision，并接收 Agent 接入侧已经完成的、不依赖或不改变全局状态的本地 Decision 结果；对已经满足本地范围条件的 Decision 不重复执行。它根据 Policy Decision 和当前全局视图协调各专业组件形成操作意图，将这些意图编排为 semantic operation，经统一的控制面操作出口交给 Runtime Adapter，并根据返回结果或事件继续更新全局视图。
+Speculation Coordinator 通过 Policy Engine 执行需要全局视图的 Decision，并接收 Agent 接入侧已经完成的、不依赖或不改变全局状态的本地 Decision 结果；对已经满足本地范围条件的 Decision 不重复执行。它根据 Policy Decision 和当前全局视图协调各专业组件形成操作意图，将这些意图编排为 semantic operation：需要 Runtime 参与的操作经统一的控制面操作出口交给 Runtime Adapter，Effect Coordinator 在控制面内直接处理的效果则通过 Agent Control Gateway 返回结果，并根据结果或事件继续更新全局视图。
 
-它同时负责维护通过 `admit` 但尚未启动的待选机会及其有效性，向 Policy 提供同一 task 内的待选、运行和暂停工作，以及预算、资源压力、等待时间、依赖和成本等事实；接收 `select` 对当前启动机会的选择和 `rebalance` 对已启动工作的暂停、恢复或抢占意图，并在 Contract、资源与正确性硬约束内执行。未被选择的有效机会继续保留；pending result 到达、任务结束、祖先依赖被否定或其他必要前提失效时，Coordinator 将其移出集合。预算计数也由 Coordinator 维护，因为选择与执行都需要同步读取预算余量。
+它同时负责维护通过 `admit` 但尚未启动的待选机会及其有效性，向 Policy 提供同一 task 内的待选、运行和暂停工作，以及预算、资源压力、等待时间、依赖和成本等事实；接收 `select` 对当前启动机会的选择和 `rebalance` 对已启动工作的暂停、恢复或抢占意图，并在 Contract、资源与正确性硬约束内执行。逻辑 Branch 可以先推进而不立即创建独立 Runtime 环境；当接入侧识别出即将发生需要独立 Branch-local 状态的变化时，Coordinator 协调 Runtime 建立独立环境，并在收到实际完成事件后把逻辑状态标记为已对齐。独立环境尚未建立完成时，Coordinator 不把预期状态当作 Runtime 已确认的事实。未被选择的有效机会继续保留；pending result 到达、任务结束、祖先依赖被否定或其他必要前提失效时，Coordinator 将其移出集合。预算计数也由 Coordinator 维护，因为选择与执行都需要同步读取预算余量。
 
 Coordinator 不使用固定价值公式替代 Policy 的跨 Edge 权衡，也不在 `select` 前重复 `admit` 精判。启动或调整运行状态前的有效性、后端能力与硬约束复核属于机制校验；条件暂时不满足时可以延后执行 Policy 的意图。`rebalance` 的抢占结果以 `preempted` 原因进入 `dispose`，而不是由 Coordinator 自行决定清理方式。
 
 ### 2.4 Effect Coordinator
 
-Effect Coordinator 负责控制面内效果处理的协调。它根据效果分类与状态域，结合 Policy、Contract 与 Adapter 声明的后端能力形成允许、暂存、转换、延迟、阻塞或补偿计划，并经 Runtime Adapter 请求后端执行。它不持有真实的暂存效果、obligation 或隔离状态——这些状态位于外部 Runtime，但其内部组织不由 AScout 定义。效果阻塞发生在效果边界：投机执行遇到不能安全暂存或释放的效果时停在门口，保留此前的前置进展，等待裁决。
+Effect Coordinator 负责控制面内共享、外部及 Policy 要求纳管的效果处理。Agent 接入侧在效果真正发生前识别受管的命令或 URL，将请求交给 Effect Coordinator；Effect Coordinator 根据已注册的服务效果插件、效果分类与状态域，结合 Policy、Contract 与 Adapter 声明的后端能力形成处理结果或计划。插件可以在控制面内直接生成明确标记并记录来源的模拟响应，也可以拒绝或阻塞请求；只有需要 Runtime 提供暂存、代理、转换、提交或清理机制时，才经 Runtime Adapter 请求后端执行。Effect Coordinator 不负责普通 Branch-local 操作，也不持有真实的暂存效果、obligation 或隔离状态——这些状态位于外部 Runtime，但其内部组织不由 AScout 定义。
+
+效果插件在控制面启动或 Policy 加载阶段注册，并在对应 Task 使用的 Policy 生效时确定，不在运行中的 Task 内热替换。插件可以根据 Task、Branch 和控制面效果状态执行去重、审计及跨 Branch 协调；其生成的模拟结果必须明确标记为模拟结果并记录生成来源，按既定的假设与验证语义处理。效果阻塞发生在效果边界：投机执行遇到不能安全暂存或释放的效果时停在门口，保留此前的前置进展，等待裁决。
 
 ### 2.5 Ledger
 

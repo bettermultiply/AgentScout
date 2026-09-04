@@ -24,7 +24,7 @@
 
 **原因**：Ancestor state 是 child 执行环境的一部分，因此 ancestor 后产生的修改应自然进入 descendants，同时维持 sibling 隔离。
 
-**范围**：该规则适用于明确具有覆盖语义的状态类别，例如目标文件系统语义；不适用于进程内存、Agent context、输入、outcome 和全局服务。进程内执行状态从 branch barrier 的 execution base 开始独立演化；输入使用独立读取位置；outcome 使用显式验证与交付；全局服务使用 effect obligation。
+**范围**：该规则适用于明确具有覆盖语义的状态类别，例如目标文件系统语义；不适用于进程内存、Agent context、输入、outcome 和全局服务。被 Policy 或 Contract 要求保护的进程内执行状态在建立独立环境后从相应 execution base 开始独立演化；未被要求保护且不影响保证范围的完全可逆变化可以共享或忽略。输入使用独立读取位置；outcome 使用显式验证与交付；全局服务使用 effect obligation。
 
 ## D-007：Single winner，不做 merge
 
@@ -42,13 +42,13 @@
 
 **选择**：Accept 后 candidate 保留 Branch identity，并替换 direct parent 在 Speculative Tree 中的位置。Parent 是 root 时 root 指向 candidate；否则 grandparent 的 child 边由 parent 改指 candidate。旧 parent 与 candidate siblings 失效，candidate descendants 保持原有结构。
 
-**状态连续性**：Candidate 按各状态类别规则已经可见的 parent state、已验证 outcome 和 materialized external effect 必须成为 winner 延续状态的一部分。Backend 可以通过重定向、层复用或等价机制保持该状态，但不能因旧 parent 节点失效而丢失。Parent 在 Branch 创建后的任意进程内存、Agent context 和评测 scratch 不要求传播，不执行 parent/candidate state merge。
+**状态连续性**：Candidate 按各状态类别规则已经可见的 parent state、已验证 outcome 和已经实际生效的 external effect 必须成为 winner 延续状态的一部分。Backend 可以通过重定向、层复用或等价机制保持该状态，但不能因旧 parent 节点失效而丢失。Parent 在 Branch 创建后的任意进程内存、Agent context 和评测 scratch 不要求传播，不执行 parent/candidate state merge。
 
 **原因**：接受的是完整 candidate subtree，而不是把 candidate 压平回 parent identity。保留 winner identity 和 descendants 可以让 Accept 成为树指向变换，并避免强制 bottom-up。
 
 ## D-015：Branch 与 Branch Node 如何区分？
 
-**选择**：Branch 表示 Speculative Tree 中的一个子树，是计算延续和投机世界的结构实体；Branch Node 是该子树的根节点。每棵 Speculative Tree 从 root Authority Instance 对应的 root Branch Node 开始；Branch Node 直接拥有 local state，并包含零个或多个 child Branch Node。Runtime 中一个 Instance 承载一个 Branch Node，两者 1:1。
+**选择**：Branch 表示 Speculative Tree 中的一个子树，是计算延续和投机世界的结构实体；Branch Node 是该子树的根节点。每棵 Speculative Tree 从 root Authority Instance 对应的 root Branch Node 开始；Branch Node 直接拥有 local state，并包含零个或多个 child Branch Node。逻辑 Branch 可以先存在并推进；需要独立执行状态时才由 Runtime 建立 Instance。
 
 **术语**：`local state of A` 只表示 Branch Node A 直接拥有的状态层；`Branch A` 表示 A 以及全部 descendants 构成的子树。不再使用 `subtree(A)` 作为现行术语。
 
@@ -114,7 +114,7 @@
 
 **术语**：Branch 是活的计算延续，不称为 Snapshot，目标模型不引入 Snapshot 实体。具体 backend 可以内部使用 checkpoint、VM snapshot 或其他 capture 技术，但不能把实现术语提升为 Branch 语义。
 
-**选择**：在 pending-result boundary，runtime 在受控 barrier 上从共同 execution base 实例化完整 Agent 进程树的多个 Branch。Parent 取得真实 operation outcome；candidates 接收不同 Proposal 并提前执行后续步骤。Branch 后各 execution 的进程内存、Agent context、线程、进程关系和环境变量独立演化，parent later writes 不透明传播；真实步骤结果通过显式 outcome event 交付，文件系统和输入使用各自的状态规则。
+**选择**：在 pending-result boundary，控制面在受控 barrier 上从共同 execution base 登记多个逻辑 Branch。Candidate 可以在 Contract 允许的共享执行视图中接收不同 Proposal 并提前执行后续步骤；当接入侧识别到需要独立状态的操作时，Runtime 再建立对应的完整 Agent 进程树。被要求保护的本地状态在独立环境建立后独立演化，parent later writes 不透明传播；真实步骤结果通过显式 outcome event 交付，文件系统和输入使用各自的状态规则。
 
 **Parent lane**：Speculation window 内 parent 只负责真实 operation、outcome 发布、受控 evaluation 和 candidate 裁决，不与 candidates 同时推进相同的后续业务。没有 candidate 被接受时 parent 从真实 outcome 继续；接受 candidate 时执行 single-winner replacement，不做 merge。
 
@@ -170,9 +170,9 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-030：Branch barrier 与 Resolution barrier
 
-**术语**：不定义创建 children 后长期冻结 parent 的 Parent barrier。`Branch barrier` 与 `Resolution barrier` 都是作用于完整 Agent execution 的短暂原子边界；speculation window 中 parent 进入 producer/evaluator lane，而不是被 barrier 永久阻塞。
+**术语**：不定义创建 children 后长期冻结 parent 的 Parent barrier。`Branch barrier` 与 `Resolution barrier` 都是控制 Branch 关系和状态转换的短暂原子边界；需要建立独立环境时，环境边界才作用于完整 Agent execution。speculation window 中 parent 进入 producer/evaluator lane，而不是被 barrier 永久阻塞。
 
-**Branch barrier**：必须在真实 operation 开始前建立共同 execution base，固定进程树与各状态类别的位置，登记或排空 in-flight operations，创建 OutcomeSlot、candidate handles 和 capabilities，并让 parent/candidates 从同一控制操作返回点按不同 role 恢复。失败不能留下半创建 Branch；少于请求数量的显式降级必须返回实际创建集合。
+**Branch barrier**：必须在真实 operation 开始前建立共同 execution base，登记或排空 in-flight operations，创建 OutcomeSlot、candidate handles 和 capabilities，并让 parent/candidates 从同一控制操作返回点按不同 role 恢复。Branch barrier 首先登记逻辑 Branch，不要求立即建立独立 Runtime 环境；接入侧识别到需要独立 Branch-local 状态的操作时，再建立作用于完整 Agent execution 的环境边界。失败不能留下半创建 Branch；少于请求数量的显式降级必须返回实际登记和环境建立集合。
 
 **Resolution barrier**：Accept 或 parent fallback 时暂停受影响 executions，原子验证 commit、Proposal 和 blocking obligations，更新 Speculative Tree 与状态所有权，失效并清理 losers，随后恢复 winner subtree 或 parent。
 
@@ -264,7 +264,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **Agent 接入侧**：包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon、Interposer 与 Operation Integration 等接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
 
-**控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或 materialization 状态。
+**控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或独立环境建立状态。
 
 **Runtime Adapter**：位于控制面与 Runtime 之间，按控制面定义的稳定、typed、可版本化 operation/event 接入边界声明并呈现能力、结果和事件。其作者自行决定如何映射目标 Runtime 的能力、原语与 transport；AScout 不控制其内部实现，只通过接入校验与运行期结果判断它是否兑现声明。Runtime Adapter 不向控制面呈现第二份长期权威状态。
 

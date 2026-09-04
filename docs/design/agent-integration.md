@@ -56,7 +56,7 @@ Agent-facing control surface 不等于端用户界面。端用户直接操作 AS
 
 ## 4. 部署与生命周期
 
-ASC-Daemon、Interposer 与 Operation Integration 逻辑上属于 Agent 接入侧，但可以运行在外部 Runtime 为对应 Instance 提供的 Branch 隔离环境内。它们随该环境启动、停止或失效，不因此成为 Runtime 的内部组件，也不能持有跨 Branch 的可变权威状态。
+ASC-Daemon、Interposer 与 Operation Integration 逻辑上属于 Agent 接入侧。在 Branch 尚未建立独立环境时，它们可以在受控的共享执行视图中工作；Branch 需要独立的 Branch-local 状态时，再随 Runtime 建立的环境启动或迁移到该环境中。它们不因此成为 Runtime 的内部组件，也不能持有跨 Branch 的可变权威状态。
 
 Task 绑定 Policy 并建立受管上下文时，Policy Engine 可以把已经解析和校验的 Policy 执行表示注入对应的 Agent 接入侧。接入侧在后续本地执行符合条件的 Decision，不需要为每次 Decision 重新获取或解析 Policy；执行结果和 decision log 仍通过 Agent Control Gateway 返回控制面。
 
@@ -71,6 +71,8 @@ Agent 默认可以不感知投机；可选的显式协作入口可以让 Agent �
 - Policy 由控制面统一加载、解析、校验和版本管理；不依赖或不改变全局状态的 Decision 可以通过已解析的执行表示注入接入侧执行，并记录本地 decision log；
 - 控制面不重复执行已满足本地范围条件的 Decision，但仍接收其结果和日志；
 - Agent 接入侧不拥有控制面或后端权威状态；
+- Agent 接入侧必须在可观察的 Branch-local 变化发生前识别该变化并请求 lazy 创建独立环境；无法确认操作是否会产生需要隔离的变化时，按需要建立独立环境处理；
+- Agent 接入侧在识别到共享、外部或 Policy 要求纳管的效果时，必须在效果发生前将请求交给控制面 Effect Coordinator；
 - 真实 operation 保持 once-only，outcome 自动归入对应受管路径；
 - Agent-facing 组件不能绕过控制面或直接控制 Runtime。
 

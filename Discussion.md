@@ -81,7 +81,7 @@
 - 已确认：`predict` 的输入契约包括 `edge_context`、`process_context`、`assumption_set`、可选 `history`、`policy_config` 和 `capability_context`。输出统一为 `ProposalSet`，支持单候选、有限候选集、带 Policy 元数据的候选集和增量生成；每个 Proposal 至少有 `payload`，可带 `provenance`。Proposal 是 Edge 边界的候选输入，可为原子值或结构化值，不是 Branch 或已执行轨迹；`rank`/`score` 只供 Policy 排序调度，不能被 Mechanism 解释为正确性或 `match` 结果。Proposal 数量是 breadth 的取值结果，无法生成有效候选时不创建空候选 Branch。
 - 已确认：`match` 使用 `match(proposal, evidence, match_context) -> MatchResult`；`evidence` 可以来自 Authority 的真实结果，也可以来自 validator 的可接受性判断。`MatchResult` 至少区分 `compatible`、`incompatible`、`indeterminate`、`error`，并可带 `score`。分数由用户/Policy 规定函数计算并定义含义、范围、方向和阈值，AScout 只提供承载、记录和在同一 Edge 的相同匹配规则上下文内比较的机制；不把分数解释为正确概率，也不跨 matcher、版本或 scale 比较。确定性 predicate 可无分数，模糊或带容差关系可用分数；不确定或出错不得静默接受。
 - 已确认：`dispose` 根据 `resolution` 和上下文返回可组合的 `DispositionPlan`，而不是单一终态。`resolution` 至少区分 `accepted`、`rejected`、`indeterminate`、`error`、`cancelled`、`preempted`、`extent_reached` 和 `failed`；处置意图包括 `Reuse`、`Promote`、`Salvage`、`Re-execute`、`Discard`、`Compensate` 和 `Overwrite`，可组合为例如 `Salvage + Discard` 或 `Compensate + Discard`。Policy 只表达处置意图，不重新判断 `match`、不决定继续推进；Branch 转换、清理、资源释放和 commit/discard 由 Mechanism 编排，并由 Adapter 返回足以确认后端已落实的结果。
-- 已确认：`effect` 对每个 step 的已识别效果返回 `EffectPlan`，模式包括 `default`、`simulate`、`transform`、`stage`、`mediate`、`block`、`allow` 和 `deny`。`simulate` 是伪装执行：服务 Adapter 拦截请求，不访问真实服务，在 Branch 内返回标记为 synthetic 的模拟响应；该响应不是真实 Authority，必须带来源和未验证假设，并由后续 Authority、validator 或明确规则验证。`default` 使用 Adapter/Contract 声明的默认方案，未声明时不得静默放行。`StateDomain` 与 `EffectClass` 保持正交，处理模式需经 Effect Management、Contract 和 Runtime capability 校验。
+- 已确认：`effect` 对每个 step 的已识别效果返回 `EffectPlan`，模式包括 `default`、`simulate`、`transform`、`stage`、`mediate`、`block`、`allow` 和 `deny`。`simulate` 是伪装执行：服务 Adapter 拦截请求，不访问真实服务，在 Branch 内返回明确标记为模拟结果的响应；该响应不是真实 Authority，必须记录生成来源和未验证假设，并由后续 Authority、validator 或明确规则验证。`default` 使用 Adapter/Contract 声明的默认方案，未声明时不得静默放行。`StateDomain` 与 `EffectClass` 保持正交，处理模式需经 Effect Management、Contract 和 Runtime capability 校验。
 - 已确认：组合与嵌套当前只定义用户输入这一类跨 Edge 信息传播。用户中断也是用户输入的一种，和普通用户输入一样传播给当时仍在运行的全部 descendants；普通输入作为输入事实进入 Branch，中断触发各 Branch 独立停止/取消和清理。中断不通过 `AssumptionSet` 传播，也不引入集中式子树回收机制。
 - 已确认：组合与嵌套的完整边界已写入 `policy-decisions.md` §4：同一 Edge 上的 Proposal/Branch 只是并行候选，由 `predict` 的 breadth、隔离和 single-winner 约束决定，不另设组合语义；嵌套 Edge 继续使用当前 task 已绑定的同一 Policy 及其 task-level 配置。`AssumptionSet` 只表达未验证依赖，跨 Edge 还通过树结构归属、用户输入传播和生命周期控制连接。祖先假设被否定时，控制面向受影响 Branch 直接发送取消命令，各 Branch 独立停止和清理，不设置集中式整棵子树回收机制。
 - 已确认：AScout 暂存通过 `admit` 但尚未启动的 Edge；粗判识别可能的投机入口，精判只决定是否登记和保留，不决定立即生效。Policy 的独立 `select` 在同一 task / AScoutAgent 内的全部有效待选机会间直接选择当前启动的有序子集，可选一个、多个或暂时不选；未选机会继续等待，直到后来被选中或客观前提失效，不要求额外的主动放弃接口。Speculation Coordinator 维护待选集合及其有效性，并在资源、Contract 与正确性硬约束内执行选择，启动前不重复 Policy 精判，也不使用固定价值公式替代 Policy。独立的 `rebalance` 面向已运行或暂停的投机 Branch，决定暂停、恢复或抢占；`preempt` 以 `resolution = preempted` 进入 `dispose`。best-first、跨 Edge 排序公式、浅层分叉/深层单链与 breadth/depth 分配均为可选 Policy。
@@ -111,10 +111,11 @@
 - 已收敛：以 Agent Control Gateway 替代 Entry API，作为 Agent 接入侧进入控制面的统一受管通信边界。Runtime 创建 Branch 执行环境后，Agent Control Gateway 在该环境内创建并启动 Agent 接入侧，二者共同形成完整的 Branch Node。Gateway 负责 Task 启动、Agent 接入侧会话，以及 Policy dialect、本地 Decision 结果、decision log、运行事件和受管控制请求的双向传递，并进行入口级上下文、权限和格式检查；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态，不直接操控 Runtime，也不独立决定 Policy Decision 或 Branch 生命周期转换。
 - 已收敛：Agent Control Gateway 不绑定网络接口。进程内调用、本地 IPC 或网络属于部署与开发选择；同进程部署不是强隔离 Runtime 下的架构要求。无论采用何种传输，Gateway 接受的 typed request/event 及其控制语义保持一致。
 - 已收敛：以 Speculation Coordinator 替代 Assumption Manager，并吸收原 Scheduler 的控制面职责。Speculation Coordinator 作为全局投机视图与控制循环的协调核心，根据 Agent 接入侧和 Runtime 经 Runtime Adapter 规范化后的事件，以及当前依赖和 Branch 状态，激活受影响 Edge 的 Policy Decision；各专业组件形成相应的操作意图，所有 semantic operation 经统一的控制面操作出口交给 Runtime Adapter 执行，并由返回结果或事件更新全局视图。它不直接触发固定 Runtime 操作，也不重复执行已经满足本地范围条件的 Decision。
-- 已确认：投机 Branch 的逻辑创建与独立 Runtime 环境的创建可以分离。采用 lazy 物化时，控制面先在 Speculative Tree 中登记和推进逻辑 Branch；只有在即将发生需要独立 Branch-local 状态的操作前，才请求 Runtime 建立独立环境。物理环境完成相应操作后，控制面再把逻辑视图标记为已与实际状态对应，并区分逻辑视图已推进但物理状态尚未对齐的阶段。
-- 已确认：Branch-local 状态不因属于内存、进程上下文或其他完全可逆状态就一律要求强隔离。默认只保证 Policy 或 Contract 要求保护的状态域；未被要求保护且不会影响保证范围的可逆变化可以共享或忽略。若后续操作需要该状态按 Branch 独立延续，仍必须在操作前物化，不能把已经共享的状态事后假定为可分支状态。
-- 已确认：Agent 接入侧负责在高频路径上识别即将发生的 Branch-local 变化，并在变化发生前请求 lazy 物化；未知或无法确认的操作按需要物化处理。Effect Coordinator 不负责普通 Branch-local 操作，而专门协调共享、外部及 Policy 要求纳管的效果，尤其通过可扩展的服务效果插件支持 `simulate`。插件只在控制面启动或 Policy 加载阶段注册；Task 使用的 Policy 生效后不热替换插件目录，具体注册接口和插件实现留在开发文档。
+- 已确认：投机 Branch 的逻辑创建与独立 Runtime 环境的创建可以分离。采用 lazy 创建时，控制面先在 Speculative Tree 中登记和推进逻辑 Branch；只有在即将发生需要独立 Branch-local 状态的操作前，才请求 Runtime 建立独立环境。实际环境完成相应操作后，控制面再把逻辑视图标记为已与实际状态对应，并区分逻辑视图已推进但实际环境尚未对齐的阶段。
+- 已确认：Branch-local 状态不因属于内存、进程上下文或其他完全可逆状态就一律要求强隔离。默认只保证 Policy 或 Contract 要求保护的状态域；未被要求保护且不会影响保证范围的可逆变化可以共享或忽略。若后续操作需要该状态按 Branch 独立延续，仍必须在操作前建立独立环境，不能把已经共享的状态事后假定为可分支状态。
+- 已确认：Agent 接入侧负责在高频路径上识别即将发生的 Branch-local 变化，并在变化发生前请求 lazy 创建；未知或无法确认的操作按需要建立独立环境处理。Effect Coordinator 不负责普通 Branch-local 操作，而专门协调共享、外部及 Policy 要求纳管的效果，尤其通过可扩展的服务效果插件支持 `simulate`。插件只在控制面启动或 Policy 加载阶段注册；Task 使用的 Policy 生效后不热替换插件目录，具体注册接口和插件实现留在开发文档。
 - 已确认：效果插件实际运行在控制面内，由 Effect Coordinator 统一注册、选择和调用。Agent 接入侧只在效果真正发生前识别命令或 URL，并将受管请求转交控制面；插件可以基于全局视图执行去重、统一审计及跨 Branch 的效果协调。`simulate` 等可在控制面完成的结果由插件生成后经 Agent Control Gateway 返回；只有需要 Runtime 提供暂存、代理、转换或其他执行机制时，才经 Runtime Adapter 请求 Runtime。
+- 已确认：Ledger 在当前目标语义中只负责异步旁路记录控制面决策、运行事实及逻辑视图与实际执行状态的对应变化，用于状态对齐、问题定位、审计校验、shadow/replay 和分析；它不参与实时决策，不从记录中重新决定生命周期，也不承担控制面重启后的状态恢复。WAL、检查点、事件重放顺序和从 Ledger 重建 Speculative Tree 等恢复协议留在开发文档。
 
 ## 暂停讨论
 
@@ -153,7 +154,7 @@
 ### Runtime 与状态细节
 
 - Continuation branching backend：比较逻辑状态重建、完整进程树 checkpoint/restore、microVM 和定制内核机制。
-- Effect adapter materialization：定义 deferred、virtualized、deduplicated、compensatable、irreversible effect 的记录、验证、materialize 与清理。
+- Effect adapter 的实际建立：定义 deferred、virtualized、deduplicated、compensatable、irreversible effect 的记录、验证、建立与清理。
 - 身份与控制协议：定义 logical Branch identity、PID 生命周期、generation/lease、pidfd、错误、取消、超时和 orphan cleanup。
 - 输入边界：定义流/消息边界、partial read、EOF、阻塞行为和真实 FD 所有权。
 - 持久化与故障恢复：定义 control/runtime 状态持久化、WAL、ASC-Daemon 恢复、连接排空和隔离环境内后台进程归属。
@@ -165,11 +166,11 @@
 - **外部效果与资源影响**：额度、限流、并发槽等资源使用默认不纳入 Branch 世界状态，只归属和计量；Policy 可以将其中指定的资源或额度声明为准入约束、预算约束或取消条件。只有它改变保证范围内的可观察业务行为时，才进入 Effect 管理。正式语义见 `docs/design/effect-management.md`，决策记录见 `docs/design/decisions.md` D-029。
 - **Effect Management 的范围**：已确认 Effect Management 管理投机分支对分支外部、共享或最终执行状态产生的影响，以及这些影响在投机期间的暂存、限制、提交、取消和清理。Branch-local state 也属于管理范围，但主要由 Runtime 自动完成隔离、清理和 winner 延续；描述中心放在共享、可观察的业务变化。Outcome 和 operational footprint 的管理方式与共享业务变化相似，但是否纳入额外的 Effect 管理由 Policy 决定。单个动作或工具调用只是投机执行过程中的一个环节，不称为一次投机执行。正式语义见 `docs/design/effect-management.md`。
 - **Effect Management 文档组织**：已确认按“目的与描述中心 -> 管理范围与保证边界 -> 效果管理过程 -> 效果处理纪律与状态域 -> 责任边界 -> 固定保证与明确边界”的逻辑组织。管理范围与保证边界合并为第 1 节，并保留 `1.1` 到 `1.5`；不设置独立的 Branch 生命周期章节，Branch 的 lifecycle 由 Branch 语义文档负责。`EffectClass` 与 `StateDomain` 在同一节中以完整连续内容说明，不拆成多个概念小节。正式文本见 `docs/design/effect-management.md`。
-- **伪装执行命名**：已确认“伪装执行”为正式中文名，对应 `effect` 决策中的 `simulate` 模式标识符，二者并存并建立术语映射。伪装执行是对已接入专门 Adapter 的服务拦截请求、不转发给真实服务、在 Branch 内生成 synthetic 模拟响应以避免不可逆外部影响的处理方式；模拟响应必须带 synthetic provenance、作为未验证假设参与 AssumptionSet 确认/否定，仍需 Authority、validator 或其他规则验证后才能被 winner 依赖。正式语义见 `docs/design/effect-management.md`，决策模式见 `docs/design/policy-decisions.md` §2.5。
+- **伪装执行命名**：已确认“伪装执行”为正式中文名，对应 `effect` 决策中的 `simulate` 模式标识符，二者并存并建立术语映射。伪装执行是对已接入专门 Adapter 的服务拦截请求、不转发给真实服务、在 Branch 内生成明确标记并记录来源的模拟响应，以避免不可逆外部影响的处理方式；模拟响应作为未验证假设参与 AssumptionSet 确认/否定，仍需 Authority、validator 或其他明确规则验证后才能被 winner 依赖。正式语义见 `docs/design/effect-management.md`，决策模式见 `docs/design/policy-decisions.md` §2.5。
 
 - 项目定位、名称、四侧架构和控制面/Runtime ownership：见 `docs/mental-model.md`、`docs/architecture.md`、`docs/design-model.md`。
 - Policy Decisions、Proposal、Authority、Equivalence 和 Disposition：见 `docs/design/policy-decisions.md`。
-- 状态、效果、obligation 和 materialization：见 `docs/design/effect-management.md`。
+- 状态、效果、obligation 和独立执行环境的建立：见 `docs/design/effect-management.md`。
 - Speculation Contract：见 `docs/design/speculation-contract.md`。
 - Branch、Accept、Discard、Commit、single-winner、输入传播和生命周期：见 `docs/design/branch-semantics.md`、`docs/design/decisions.md` 与 `docs/design/speculation-decisions.md`。
 - Branch barrier、Resolution barrier、外部效果 observation surface 和 Agent execution activity：见 `docs/design/branch-semantics.md` 及对应设计决策。

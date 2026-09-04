@@ -14,11 +14,11 @@ Branch Node 在 Speculative Tree 中存在，与对应 Instance 当前是否 run
 
 `local state of A` 只表示 Branch Node A 直接拥有的状态层，不包含 child Branch Node。`Branch A` 则表示以 A 为根的整个子树，包括 A 及其全部 descendants。Child 从 branch barrier 上的 parent execution base 开始继续运行；Branch 后的 ancestor 可见性按状态类别分别定义，siblings 互不可见。
 
-一个 Branch Node 对应 Instance 的可分支执行实体是完整的 Agent 进程树，包括 Agent 主进程及其 sub-agent。Branch 操作必须覆盖这棵进程树继续执行所依赖的计算状态，而不是只处理调用 branch 接口的单个线程或进程。
+当 Branch Node 需要建立 Instance 时，其可分支执行实体是完整的 Agent 进程树，包括 Agent 主进程及其 sub-agent。建立操作必须覆盖这棵进程树继续执行所依赖的计算状态，而不是只处理调用 branch 接口的单个线程或进程。尚未建立独立环境的逻辑 Branch 可以由受控接入侧继续推进，不要求立即拥有独立进程树。
 
 ## 2. Branch 绑定、隔离与通信
 
-每个 Agent 执行实体由一个 Instance 承载，并绑定到对应的 Branch Node。同一 Branch Node 对应 Instance 内的进程共享该 Node 的可见执行环境，并能观察这个环境中由同一执行实体产生的修改。
+每个已建立的 Agent 执行实体由一个 Instance 承载，并绑定到对应的 Branch Node。同一 Branch Node 对应 Instance 内的进程共享该 Node 的可见执行环境，并能观察这个环境中由同一执行实体产生的修改。逻辑 Branch 在建立独立环境前可以使用受控的共享执行视图；该视图不能允许它产生未登记的共享或外部效果。
 
 除文件系统、输入、outcome event 等各自规则明确纳入的 ancestor state 外，一个 Branch 不能直接读取另一个 Branch 的 local state、进程内存或内部 Agent 上下文。Descendant 对某类 ancestor state 的可见性不代表 parent 可以反向观察 descendant local state；siblings 也不能观察彼此的 local state。
 
@@ -42,15 +42,15 @@ Runtime Adapter 对控制面提供稳定、typed、可版本化的粗粒度 comm
 
 每个完整 AScout execution 必须由 AScout 建立受管边界后创建，从 root Agent 启动时即纳入进程树、I/O 和资源归属管理。目标语义不限定 launcher frontend；显式 CLI、IDE、daemon 或 Agent platform 可以提供不同入口，但都必须先请求 AScout 创建受管 execution。事后 attach 不能宣称具有同等的完整 Branch 语义。
 
-控制面是 Speculative Tree 视图与 Branch 关系的权威来源；Runtime 是节点执行状态和执行实体归属的机制来源。Agent 或其短命命令子进程只请求 branch；真正的 Branch 创建必须经 Runtime Adapter 触发 Runtime 的节点级操作，并作用于请求者所属的完整 Agent 进程树，不能退化为只复制发出请求的进程。
+控制面是 Speculative Tree 视图与 Branch 关系的权威来源；Runtime 是已建立节点的执行状态和执行实体归属的机制来源。Agent 或其短命命令子进程只请求 branch；逻辑 Branch 的创建先由控制面登记，只有当接入侧识别出需要独立 Branch-local 状态的操作时，才经 Runtime Adapter 触发 Runtime 的节点级环境建立操作。环境建立必须作用于请求者所属的完整 Agent 进程树，不能退化为只复制发出请求的进程。
 
-AScout 不定义创建 children 后长期冻结 parent 的 Parent barrier。它定义两个短暂且原子的执行边界：`Branch barrier` 在真实 operation 开始前作用于完整 Agent execution，建立共同 execution base、OutcomeSlot、candidate handles 和 capabilities，并让 parent/candidates 从同一个控制操作返回点按不同 role 恢复；`Resolution barrier` 在 Accept 或 parent fallback 时暂停受影响 executions，原子验证 obligations、转换 Speculative Tree/状态所有权、清理 losers，再恢复 winner 或 parent。
+AScout 不定义创建 children 后长期冻结 parent 的 Parent barrier。它定义两个短暂且原子的执行边界：`Branch barrier` 在真实 operation 开始前建立共同 execution base、OutcomeSlot、candidate handles 和 capabilities，并让 parent/candidates 从同一个控制操作返回点按不同 role 恢复；该边界只登记逻辑 Branch，不要求立即建立独立 Runtime 环境。接入侧识别出需要独立 Branch-local 状态的操作时，控制面再建立对应的环境边界，并在操作开始前让 candidate 获得独立环境；`Resolution barrier` 在 Accept 或 parent fallback 时暂停受影响 executions，原子验证 obligations、转换 Speculative Tree/状态所有权、清理 losers，再恢复 winner 或 parent。
 
-Branch barrier 建立期间，runtime 必须阻止新的进程、资源和未登记 external operation 越过边界，并确认 in-flight operation 已完成或已成为明确 obligation。建立失败不得留下半创建 Branch；若资源策略允许少于请求数量的 candidates，实际创建集合必须显式返回。Command 与 Hook 只是不同触发器，必须调用同一 barrier/lifecycle 语义。
+Branch barrier 建立期间，runtime 必须阻止新的进程、资源和未登记 external operation 越过边界，并确认 in-flight operation 已完成或已成为明确 obligation。逻辑 Branch 登记失败不得留下半创建 Branch；需要建立独立环境时，环境建立失败也不得把未完成的 Runtime 状态当作已对齐。若资源策略允许少于请求数量的 candidates，实际创建集合和环境建立集合都必须显式返回。Command 与 Hook 只是不同触发器，必须调用同一 barrier/lifecycle 语义。
 
-AScout 使用 outcome-guided continuation branching 支持跨步骤投机。在 pending-result boundary，runtime 从共同 execution base 实例化多个可继续运行的 Branch；parent 取得真实 operation outcome，candidates 接收不同 Proposal 并提前执行后续步骤。Branch 是活的计算延续，不称为 Snapshot，也不在目标模型中引入 Snapshot 实体。
+AScout 使用 outcome-guided continuation branching 支持跨步骤投机。在 pending-result boundary，控制面先从共同 execution base 登记多个逻辑 Branch；candidate 可以在受控共享执行视图中接收不同 Proposal 并提前执行后续步骤，直到某项操作要求独立状态时，Runtime 才从相应 base 建立该 Branch 的独立环境。parent 取得真实 operation outcome，candidates 按各自路径继续。Branch 是活的计算延续，不称为 Snapshot，也不在目标模型中引入 Snapshot 实体。
 
-完整 Agent 进程树的内存、线程、进程关系、环境变量和其他本地执行状态从 barrier 时的 execution base 开始独立演化。Branch 创建后，parent 的任意进程内存或 Agent context 修改不会透明传播给 children；需要同步的真实步骤结果通过显式 outcome event 交付。文件系统和输入继续遵循各自的动态 ancestor visibility 与 fan-out 规则。
+一旦某个 Branch 建立了独立环境，完整 Agent 进程树的内存、线程、进程关系、环境变量和其他被要求保护的本地执行状态从建立环境时的 execution base 开始独立演化。Branch 创建后，parent 的受保护本地状态修改不会透明传播给 children；需要同步的真实步骤结果通过显式 outcome event 交付。未被 Policy 或 Contract 要求保护、且不会影响保证范围的完全可逆变化可以继续共享或忽略。文件系统和输入继续遵循各自的动态 ancestor visibility 与 fan-out 规则。
 
 在 speculation window 内，parent 只负责执行或等待真实 operation、发布 outcome、查看受控 candidate metadata 并裁决 candidates，不与 candidates 同时推进相同的后续业务。若没有可接受 candidate，parent 从真实 outcome 继续；若接受 candidate，则不执行 parent/candidate state merge。
 
@@ -94,12 +94,12 @@ Sibling command reuse 是显式受控通信。接收方可以得知结果被复�
 
 对任意 Branch B，其可见执行环境由三部分共同组成：
 
-- B 的 local state；
-- B 在 branch barrier 上获得的 execution base；
+- B 已建立独立环境后的 local state（若已建立）；
+- B 在 branch barrier 上获得的 execution base，或在 lazy 创建独立环境时实际使用的 execution base；
 - 按文件系统、输入、outcome event 等类别规则对 B 可见的 ancestor state；
 - root Branch 所在 Speculative Tree 之外的全局计算环境。
 
-不同状态类别不共享一条笼统的 ancestor visibility 规则。完整 Agent 进程树的本地执行状态在 barrier 上形成 execution base，之后各 Branch 独立演化；文件系统可以动态解析 ancestor writes，输入可以继续 fan-out，真实步骤结果通过 outcome event 交付。Sibling local state 始终不可见。
+不同状态类别不共享一条笼统的 ancestor visibility 规则。已被要求保护的完整 Agent 进程树本地执行状态在建立独立环境后独立演化；在建立环境前，Branch 只能使用 Contract 允许共享的执行视图。文件系统可以动态解析 ancestor writes，输入可以继续 fan-out，真实步骤结果通过 outcome event 交付。Sibling local state 始终不可见。
 
 对于具有覆盖语义的 branch-local state，同一对象在可见范围内按最新修改解析：
 

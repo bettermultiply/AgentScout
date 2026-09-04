@@ -8,7 +8,7 @@ AScout 的完整调用路径涉及四侧。控制面居于中间，两端分别�
 
 Agent 接入侧定义 Agent 接入/使用 AScout 的方式，绑定某个 Agent Instance 的本地上下文。控制面通过接入侧来实现对 Instance 生命周期、状态、行为、环境信息的控制。
 
-控制面是 AScout 的主体部分，负责维护投机执行过程当中 Agent 的状态，特别是由多次投机执行组合嵌套形成的拓扑结构。同时还负责执行过程中的决策和检查，Policy 和 Adapter 都以可插拔的形式与该结构连接。这也意味着控制面还负责根据 Adapter 接入契约校验其是否符合 AScout 所要求的基本语义，并解析回传事件；加载与校验 Policy，并检查 Adapter 所声明和呈现的后端能力是否满足 Policy 需求。
+控制面负责维护投机执行过程当中 Agent 的控制状态，特别是由多次投机执行组合嵌套形成的拓扑结构。同时还负责执行过程中的决策和检查，Policy 和 Adapter 都以可插拔的形式与该结构连接。这也意味着控制面还负责根据 Adapter 接入契约校验其是否符合 AScout 所要求的基本语义，并解析回传事件；加载与校验 Policy，并检查 Adapter 所声明和呈现的后端能力是否满足 Policy 需求。逻辑 Branch 可以先进入控制面视图，独立 Runtime 环境按需建立，不要求每次投机执行都立即 fork。
 
 控制面定义自己接受的稳定 operation/event 边界和接入条件。Runtime Adapter 的作者依据该边界，把目标 Runtime 的原生能力映射成控制面可以使用的能力，并规范化结果与事件。AScout 不规定 Adapter 内部如何调用 Runtime、如何组织模块或选择 transport；这些属于 Adapter 实现。AScout 只能通过接入校验与运行期结果判断 Adapter 是否兑现其声明，不能直接控制 Adapter 的内部行为。
 
@@ -52,7 +52,7 @@ sequenceDiagram
 | Agent 接入侧 | ASC-Daemon、Interposer、Integration（Agent 接入：CLI、library、launcher 等） | 当前 Branch 的本地上下文绑定 |
 | 控制面 | Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定 |
 | Runtime Adapter | 实现控制面接入边界、能力映射、通信与事件规范化；内部实现由 Adapter 作者决定 | 不向控制面呈现第二份长期权威状态 |
-| Runtime | 内部组件由外部 Runtime 自行决定 | 实际节点执行、进程、资源、隔离与效果状态；仅经 Adapter 暴露 AScout 所需的可观察结果 |
+| Runtime | 内部组件由外部 Runtime 自行决定 | 已建立节点的实际执行、进程、资源、隔离与效果状态；仅经 Adapter 暴露 AScout 所需的可观察结果 |
 
 特别的，ASC-Daemon、Interposer 等 Agent 侧接入组件实际运行在 Runtime 创建的 Branch 隔离环境内。
 

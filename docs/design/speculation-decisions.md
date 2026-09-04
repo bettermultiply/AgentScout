@@ -261,7 +261,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 - **resolve 不独立成组件，住在 Speculation Coordinator 里** —— 它的状态（待决 Edge/Proposal 依赖）就是全局控制视图的一部分；`resolve()` 是对该视图执行确认、否定和处置推进的控制流程，不是独立的数据结构。体系结构对应：`Speculation Coordinator + resolve` 统一持有投机状态并负责 retire/squash，同时在同一视图上承载 issue/dispatch 所需的调度事实。
 - **不再设置独立 Scheduler** —— `select` 和 `rebalance` 仍由 Policy 决定，待选机会、运行状态和预算事实由 Speculation Coordinator 维护并在硬约束内执行。这样调度与依赖传播使用同一份全局视图，避免两个状态中心之间产生不一致。
-- **Effect Coordinator 独立** —— 它在控制面持有 Effect Catalog、效果分类与协调计划；真实 staged effect、obligation 和 materialization 状态属于 Runtime。两类状态都不属于 Assumption DAG，且失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。安全闸必须能被单独审计。
+- **Effect Coordinator 独立** —— 它在控制面持有 Effect Catalog、效果分类与协调计划；真实 staged effect、obligation 和独立环境建立状态属于 Runtime。两类状态都不属于 Assumption DAG，且失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。安全闸必须能被单独审计。
 
 ---
 
