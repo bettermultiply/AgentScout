@@ -29,7 +29,7 @@
 - **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，位于投机策略与执行机制之间，分离策略决策与具体运行时实现，使 Agent 能无修改地接入并获得投机执行能力。（`../mental-model.md`；`../architecture.md`；`../design-model.md`）
 - **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Node 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
-- **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；拥有 Speculative Tree 控制状态和 Branch 关系。（`../mental-model.md` §4.2）
+- **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；端用户通过它直接操作当前有效的权威执行主线，只看到该路径的内容与交互。（`../mental-model.md` §4.2；`agent-integration.md` §3）
 - **Agent 接入侧**：四侧调用路径的入口侧，包含 Agent/product integration，以及 CLI、library、launcher、ASC-Daemon、Interposer 与 Operation Integration 等接入职责。（`../architecture.md` §1；`agent-integration.md`）
 - **控制面**：四侧一级架构的控制侧；包含 Entry API、Policy Engine、Effect Coordinator、Assumption Manager、Scheduler 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释；是 AScout 自身实现的 Mechanism 主体，组件与实现见 `control-plane.md`。（`../architecture.md` §1；`control-plane.md`）
 

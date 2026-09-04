@@ -49,11 +49,15 @@ Agent / product
 
 当前只保留以下 operation slots：查询自身 `context`、查询 direct `children`、`branch`、`commit`、`accept`、`discard` 和等待 event。它们的参数、返回值、阻塞方式与 wire format 尚未定义，不能从这些名称推导实现接口。需要控制面代为裁决时，delegation 通过 task 或 Branch 创建配置表达，不新增日常命令。
 
+Agent-facing control surface 不等于端用户界面。端用户直接操作 AScoutAgent 当前有效的权威执行主线，不选择内部 Branch，也不参与 Branch 的接受、丢弃、重新挂载或清理。Policy 根据运行事实形成处置意图，控制面在固定生命周期约束内编排，并根据 Runtime Adapter 返回的结果更新当前有效主线。
+
+端用户只能看到当前权威路径产生的内容、状态与交互。Candidate 或其他仍携带未决 Proposal 的 Branch 可以在内部产生结果和事件，但不能直接向用户输出内容或发起交互；只有被接受并进入权威路径后，才可通过同一个 AScoutAgent 视图呈现其用户可见内容。用户输入由当前有效主线接收，之后是否作为输入事实传播给仍在运行的 descendants，遵循 Branch 输入传播规则。
+
 ## 4. 部署与生命周期
 
 ASC-Daemon、Interposer 与 Operation Integration 逻辑上属于 Agent 接入侧，但可以运行在外部 Runtime 为对应 Instance 提供的 Branch 隔离环境内。它们随该环境启动、停止或失效，不因此成为 Runtime 的内部组件，也不能持有跨 Branch 的可变权威状态。
 
-Agent 默认可以不感知投机；可选的显式协作入口可以让 Agent 或用户参与候选创建、输入提供或裁决，但仍受相同身份、single-winner、效果与 lifecycle 约束。
+Agent 默认可以不感知投机；可选的显式协作入口可以让 Agent 参与候选创建或裁决，但仍受相同身份、single-winner、效果与 lifecycle 约束。端用户只通过当前权威路径提供输入，不进入内部 Branch lifecycle control surface。
 
 ## 5. 固定约束与未定实现
 

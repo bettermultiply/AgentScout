@@ -28,6 +28,8 @@ Branch 之间传递信息必须使用显式的受控通道。通过受控通道�
 
 AScout 向 Agent 提供三类生命周期能力：创建 candidate Branch、提交一个 candidate subtree，以及裁决收到的 subtree。Candidate Agent 决定何时提交；direct children 的 resolver capability 默认由 parent Agent 持有，parent 可以将其显式委托给控制面。持有 resolver capability 的授权主体决定是否接受、等待或丢弃 candidate subtree；runtime 不替 Agent 或其 delegate 固化这些运行策略。
 
+这里的 Agent lifecycle capability 不向端用户暴露。端用户始终通过 AScoutAgent 视图直接操作当前有效的权威执行主线，只能看到该路径产生的内容、状态与交互。投机 Branch 不建立独立用户会话，也不能在携带未决 Proposal 时直接向用户输出或提问；Branch 接受、丢弃、重新挂载和清理由 Policy、授权 resolver 与控制面机制在内部完成，不要求端用户参与。Accept 改变权威路径后，用户继续操作更新后的有效主线，不需要选择或重绑定 Branch。
+
 Routine Agent-facing control surface 暂时只保留两类查询和五类 lifecycle/activity operation placeholders：查询自身 `context`、查询 direct `children`、`branch`、`commit`、`accept`、`discard` 和等待 event。`branch` 表示从当前 Branch 创建一个或多个 direct child；在投机场景中这些 child 才按角色称为 candidate。CLI 与 embedded function 调用先进入当前 Branch 隔离环境内的 ASC-Daemon；ASC-Daemon 隐藏并绑定当前 AScoutAgent/Branch context，再把 resolved typed request 交给 Entry API。Entry API 不从 caller context 重新解析，也不直接接触 Runtime，只把请求交给控制面；控制面再派发到对应 AScoutAgent 的 Branch-level operation。完整 Runtime 语义中 `branch` 可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override，未指定 resolver 时使用 AScoutAgent 配置中的默认 resolver。当前不定义这些 control-surface operation 的完整参数、返回值、阻塞方式、event model 或具体命令拼写；它们仍受已经确定的 Branch lifecycle 语义约束，不能被解释为运行时 no-op。Command 与 Hook 必须调用同一 semantic API。
 
 `PublishOutcome` 是 Runtime Adapter 上必需的 semantic operation，但不作为独立 Agent-facing command。Operation wrapper、Hook、effect broker 或 Operation Integration 在真实 operation 完成后自动把结果发布到 OutcomeSlot。Resolver capability 默认由 Parent Agent 持有；需要控制面代为裁决时，delegation 通过 AScoutAgent 创建或 Branch 创建配置表达，不作为日常 Agent command。
@@ -112,6 +114,8 @@ Sibling command reuse 是显式受控通信。接收方可以得知结果被复�
 进入某个 Branch 的新输入直接对该 Branch 及其全部 descendants 可见。每个 Branch 独立维护自己的输入读取位置，因此一个 Branch 读取输入不会使 sibling 或 descendant 失去同一输入。
 
 创建 child Branch 时，child 从 parent 当前的输入状态开始，此后拥有独立读取位置。Root Branch 运行期间收到的新输入会直接传播给当时仍在运行的全部 descendants；某个 child 的私有输入只传播给自己的 descendants，不进入 sibling subtree。
+
+输入传播不表示旧前提继续有效。用户阻止当前权威路径上的操作时，依赖该操作继续发生或依赖其原结果的 Proposal 前提已经改变。当前阶段不尝试兼容、修复或重新对齐这类 Branch；控制面将所有依赖已变更前提的 Branch 及其 subtree 视为不兼容并剪枝，经 Runtime Adapter 取消和清理。一般地，任何已识别的 Proposal 前提变更都使用同一保守规则；未受该前提影响的 Branch 不因无关输入而丢弃。
 
 输入是否已经读取或处理不限制 subtree 提交。Winner subtree 保留自己的输入状态继续运行，loser subtrees 的输入状态随其一起丢弃。
 

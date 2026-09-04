@@ -24,10 +24,16 @@
 
 当前目标范围是树形、单一 winner、无通用 merge、同级分支默认不协作的 Agent 分支执行。后续若支持 merge、多个 winner、DAG 或同级协作，应作为新的执行模型扩展，不能反向破坏当前基础语义。
 
+已收敛：端用户只通过 AScoutAgent 视图直接操作当前有效的权威执行主线，只能看到该路径产生的内容、状态与交互。投机 Branch 不建立另一条用户对话，也不能携带未决 Proposal 直接向用户输出或提问。用户输入或中断由当前有效主线接收后，仍可按输入传播规则交付给运行中的 descendants。
+
+已收敛：Branch 接受、丢弃、重新挂载与清理不需要端用户参与。Policy 与授权 resolver 形成决策或处置意图，控制面编排，Runtime 经 Adapter 落实状态转换。权威路径变化后，用户继续操作更新后的有效主线，不选择或重绑定 Branch。
+
+已收敛：用户阻止当前权威路径上的操作时，依赖该操作继续发生或依赖其原结果的 Proposal 前提已经变化。现阶段不做兼容判断、保留、挂起、修复或重新对齐；凡识别出 Proposal 前提变更，所有依赖它的 Branch 及其 subtree 一律剪枝、取消并清理。未依赖该前提的 Branch 不因无关输入而全局失效。
+
 下一项只讨论以下第 1 项，其他项目暂不展开：
 
 1. **Branch 执行状态与控制上下文**：明确 Branch 除树关系外需要保存的执行状态、假设、能力、提交证据、未决约束、等待/暂停/失败状态和 Runtime 对齐信息。当前 `committed: bool` 与 disposition 只能视为临时 skeleton，不能直接视为长期公共状态模型。
-2. **信息与约束传播**：明确用户或 parent 向 descendants 的传播、child 向 parent 的 proposal/outcome summary、同级 Branch 不直接协作的边界，以及新约束导致保留、修复、挂起或 discard 的基本语义。
+2. **信息与约束传播**：继续明确用户或 parent 向 descendants 的传播、child 向 parent 的 proposal/outcome summary，以及同级 Branch 不直接协作的边界；Proposal 前提变更导致受影响 subtree 一律剪枝的当前语义已经确定。
 3. **Resolution 与 canonical continuation**：明确 `accept` 选择的是后续 canonical continuation，而不是简单宣称 candidate 是客观 ground truth；继续明确 winner、旧 parent 和必要前置条件的关系。
 4. **控制面操作与后端结果对齐**：明确语义动作、Adapter 可观察结果、规范化事件和控制状态更新之间的闭环，特别是原子性、失败和状态对齐；不定义 Runtime 内部机制。
 5. **Policy 与用户自定义操作的组合边界**：明确 policy 可以选择什么、控制面固定什么、Adapter 必须证明后端落实什么，以及上层可使用的 Branch context、事件、outcome 和约束输入。
@@ -43,6 +49,7 @@
 
 ### 文档职责与 overview.md 解散
 
+- 已确认：`docs/development/ascout-agent-positioning.md` 中的全局定位、四侧架构、对象 ownership、控制面职责、Policy 边界、第一版接口和长期方向已有正式文档承接；连续 Agent 体验和用户操作导致的 Branch 前提变更也已经收敛并写入正式设计。该开发文档已无独有内容，因此删除，不保留空壳或索引引用。
 - 已确认：`docs/development/spec-exec-abstraction.md` 中“正交轴与取值域”整体迁入 `docs/design/policy-decisions.md`。本次先原样迁移，不同时修正其中的轴分类、论文证据、Fidelity 定位和 Mechanism/Policy 划线；这些内容后续在 Policy Decisions 文档中逐项整理。
 - 已确认：`docs/design/overview.md` 是职责混杂的"抓包"文档，不保留为合并决策的总文档；其内容按主题归位，详见下方清单。
 - 已确认：`docs/design/decisions.md` 与 `docs/design/speculation-decisions.md` 只是**速查手册与原始讨论记录**，记录决策当时的选择与理由，不替代正式主题文档，也不充当语义权威。每条决策的语义内容应分散到各自合适的主题文档。

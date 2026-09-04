@@ -235,7 +235,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **选择**：四类角色，只有一类写配置：端用户完全不感知（提任务、拿结果，只是更快）；Agent 开发者代码不改一行（唯一动作：提供工具 effect manifest）；Operator 选择 Policy、声明 task-level 配置、选隔离后端并设预算旋钮；Policy 作者（研究者）实现所需 Policy Decision。
 
-**关键设计**：policy 与任务的绑定发生在任务准入时，由路由规则或任务特征决定（底座自己选），不由端用户输入决定。**"端用户不感知"是默认值而非不变量** —— ISP 是唯一故意让端用户感知投机的（UI 协同设计、用户可在间隔内中断并注入自己的值作为 oracle），底座须支持把人作为 Authority 的 opt-in 模式。
+**关键设计**：policy 与任务的绑定发生在任务准入时，由路由规则或任务特征决定（底座自己选），不由端用户输入决定。端用户只操作当前有效的权威执行主线，只看到该路径的内容与交互，不进入内部 Branch lifecycle control surface。人仍可作为 Authority 提供输入或中断；这些交互发生在权威路径上，再按输入传播规则交付给仍在运行的 descendants，不要求向用户暴露投机 Branch。
 
 **effect manifest 是接入时唯一非零的人工成本且不可避免**（无法从函数签名推断幂等性）—— 从 MCP 的 `readOnlyHint` / `destructiveHint` / `idempotentHint` 或 OpenAPI 动词语义引导生成初稿，降到"自动引导 + 人工确认残余"。
 

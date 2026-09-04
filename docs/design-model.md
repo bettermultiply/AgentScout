@@ -66,7 +66,7 @@ Edge 是一个全局概念，从一个投机机会开始，到这个机会失效
 
 Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策，通过对不同 Policy Decision 的组合可以生成不同的执行策略。单条 Edge 上的局部决策、跨 Edge 的全局选择和已启动工作的调整由九类 policy decision 刻画：`admit`、`select`、`rebalance`、`extent`、`predict`、`launch`、`effect`、`match`、`dispose`。对每个 decision 的详细描述见 [Policy Decisions 设计](design/policy-decisions.md)。
 
-组合与嵌套：同一 Edge 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的 Edge，由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定都会使依赖它的后续工作失效。父 Proposal 被确认时，原父 Branch 的执行延续成为权威路径，仍有未决依赖的后代 Branch 保留原有隔离环境和执行进展并重新挂到该权威执行延续之下；后代 Branch 只有在自身依赖清空后才具备提交资格。AScout 以树形、single-winner 和受控信息流约束这些关系；当前 task 内的嵌套 Edge 使用同一个 Policy。Proposal 依赖、确认与否定、Branch 取消、父 Branch salvage 以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
+组合与嵌套：同一 Edge 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的 Edge，由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定或发生变化都会使依赖它的后续工作失效；当前阶段不修复或重新对齐这类 Branch。父 Proposal 被确认时，原父 Branch 的执行延续成为权威路径，仍有未决依赖的后代 Branch 保留原有隔离环境和执行进展并重新挂到该权威执行延续之下；后代 Branch 只有在自身依赖清空后才具备提交资格。AScout 以树形、single-winner 和受控信息流约束这些关系；当前 task 内的嵌套 Edge 使用同一个 Policy。Proposal 依赖、确认与否定、Branch 取消、父 Branch salvage 以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
 
 ### 3.2 状态与效果
 
