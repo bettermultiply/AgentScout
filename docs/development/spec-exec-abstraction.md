@@ -65,7 +65,7 @@ AssumptionSet、同一 Edge 上的并行候选、嵌套 Edge、single-winner、�
 **投机的收益是负载相关的，且在高负载下可以为负。** 因此底座必须提供承载以下 Policy 的机制与事实，而不是固定采用论文中的策略：
 
 1. **准入控制**：PASTE 的四道闸（executable / policy-safe / 置信度与预期收益 / 预算内）
-2. **task 内选择与运行调整**：控制面暂存尚未启动的机会，并向 Policy 提供同一 task 的待选、运行、暂停状态及资源事实；Policy 通过 `select` 决定启动顺序，通过 `rebalance` 决定暂停、恢复和抢占，Scheduler 在资源硬约束内执行
+2. **task 内选择与运行调整**：控制面暂存尚未启动的机会，并向 Policy 提供同一 task 的待选、运行、暂停状态及资源事实；Policy 通过 `select` 决定启动顺序，通过 `rebalance` 决定暂停、恢复和抢占，Speculation Coordinator 在资源硬约束内执行
 3. **等待期限 Policy**：SPAgent 的 `t_w` —— 等太久的投机请求直接丢，因为重叠价值已经过期（**不是抢占，是过期**，这两者语义不同）
 4. **跨层可见性**：底座必须看得到推理引擎的压力。PASTE 的 `EnginePressure(B) = DecodeLoad(B) + γ·KVLoad(B)` 维持在 `[P_low, P_high]` 带内；SPAgent 需要引擎暴露 hybrid batch 的 profiled timing 和 running request 计数
 5. **反向调度 Policy**：SPAgent 的 Inter-Request Schedule 用 SJF 让投机请求**插队** —— 投机输出通常 <10 token，延迟是排队主导的，不插队就赶不上主路径；而因为它们极小，插队几乎不拖慢推理请求

@@ -31,7 +31,7 @@
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
 - **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；端用户通过它直接操作当前有效的权威执行主线，只看到该路径的内容与交互。（`../mental-model.md` §4.2；`agent-integration.md` §3）
 - **Agent 接入侧**：四侧调用路径的入口侧，包含 Agent/product integration，以及 CLI、library、launcher、ASC-Daemon、Interposer 与 Operation Integration 等接入职责。（`../architecture.md` §1；`agent-integration.md`）
-- **控制面**：四侧一级架构的控制侧；包含 Entry API、Policy Engine、Effect Coordinator、Assumption Manager、Scheduler 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释；是 AScout 自身实现的 Mechanism 主体，组件与实现见 `control-plane.md`。（`../architecture.md` §1；`control-plane.md`）
+- **控制面**：四侧一级架构的控制侧；包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释；是 AScout 自身实现的 Mechanism 主体，组件与实现见 `control-plane.md`。（`../architecture.md` §1；`control-plane.md`）
 
 - **Runtime Adapter**：四侧调用路径的适配侧；按控制面的接入约定声明并呈现能力、operation result 与 event，并自行负责目标 Runtime 的能力映射、transport 和内部实现。（`../architecture.md` §1；`../development/runtime-adapter.md`）
 - **Runtime**：四侧调用路径中的外部运行侧；提供实际执行、资源、隔离与效果能力，其内部架构不由 AScout 定义。（`../architecture.md` §1）
@@ -63,20 +63,20 @@
 - **commit / commit request**：candidate 显式提交自己的子树。可 conditional commit：未验证前提随 subtree 保留为 obligation，验证前不能 Accept。（`decisions.md` D-025、D-037）
 - **accept**：接受一个 winner subtree（裁决 = Reuse / Promote）；候选被接受后保留自身 Branch identity 并替换 parent 在树中的位置。（`branch-semantics.md`；`decisions.md` D-009/D-023）
 - **discard**：丢弃整个 child subtree（= Disposition 的 Discard / Preempt）；不要求 candidate ready，不自动把 partial state 反馈给 parent。（`branch-semantics.md`；`decisions.md` D-023）
-- **resolve()**：权威值到达时进行匹配、选择处置并沿 Proposal 依赖传播的关键路径操作，由 Assumption Manager 协调。（`control-plane.md` §3.3；`policy-decisions.md`）
+- **resolve()**：权威值到达时进行匹配、选择处置并沿 Proposal 依赖传播的关键路径操作，由 Speculation Coordinator 协调。（`control-plane.md` §2.3；`policy-decisions.md`）
 - **Salvage**：失败后回收部分进展（`progress() / handoff()` 一等抽象）；warm-start、partial-token accept、promote 的共性。（`spec-exec-abstraction.md` §2 轴 6）
 - **PublishOutcome**：真实 operation 完成后把 outcome 发布到 OutcomeSlot 的机制操作；由 Operation wrapper / Hook / effect broker 自动执行，不作为独立 Agent-facing 命令。（`branch-semantics.md`；`decisions.md` D-037）
 
 ## 组件
 
-- **Policy Engine**：可替换 Policy 进入控制面的固定入口，解释 Policy Decision 并检查其取值在当前 Contract 与 Adapter 声明的后端能力下是否合法；加载期约束校验和运行期分发。（`control-plane.md` §3.2）
-- **Assumption Manager**：控制面内 Proposal 依赖与确认/否定状态的 owner；维护"谁依赖谁"、跟踪 `AssumptionSet`，强制信息流约束（非空 AssumptionSet 的数据不得流向空容器）。（`control-plane.md` §3.3；`speculation-decisions.md` D-019）
-- **Scheduler**：控制面内待选机会与调度状态的 owner；负责暂存机会、维护有效性、向 Policy 提供 task 内的调度事实，并在硬约束内落实 `select` 的启动选择与 `rebalance` 的暂停、恢复和抢占意图。（`control-plane.md` §3.4；`policy-decisions.md` §2.8–§2.9）
-- **Effect Coordinator**：控制面内效果处理的协调者；结合 Policy、Contract 与 Runtime 能力形成允许、暂存、转换、延迟、阻塞或补偿计划，经 Runtime Adapter 请求 Runtime 执行。它不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §3.5；`effect-management.md`）
-- **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §3.6；`speculation-contract.md` §3）
+- **Policy dialect**：Policy 经 Policy Engine 解析和校验后形成的运行期表示，供控制面及 Agent 接入侧执行 Policy Decision；不依赖或不改变全局状态的 Decision 可随其注入接入侧执行。
+- **Policy Engine**：可替换 Policy 进入控制面的固定入口，解释 Policy Decision 并检查其取值在当前 Contract 与 Adapter 声明的后端能力下是否合法；加载期约束校验和运行期分发。（`control-plane.md` §2.2）
+- **Speculation Coordinator**：控制面内全局投机视图与控制循环的协调核心；维护 Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系，激活受影响的 Policy Decision，协调 semantic operation，经 Runtime Adapter 执行并根据结果和事件更新视图。（`control-plane.md` §2.3）
+- **Effect Coordinator**：控制面内效果处理的协调者；结合 Policy、Contract 与 Runtime 能力形成允许、暂存、转换、延迟、阻塞或补偿计划，经 Runtime Adapter 请求 Runtime 执行。它不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §2.4；`effect-management.md`）
+- **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §2.5；`speculation-contract.md` §3）
 - **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地控制入口，绑定 Branch context，转发 Agent-facing request 并承载 lifecycle event；不拥有全局控制状态。（`agent-integration.md` §2.2）
 - **Interposer**：Agent 接入侧位于请求路径上的捕获与结果路由组件；具体可观察接缝由 integration profile 决定，不固定为四个接口。（`agent-integration.md` §2.3）
-- **Entry API**：控制面的稳定入口；接收 Agent 接入侧形成的请求并交给控制面中的相应组件，不构成独立一级侧面，也不直接接触 Runtime。（`decisions.md` D-038；`../architecture.md` §1）
+- **Agent Control Gateway**：控制面面向 Agent 接入侧的受管通信边界；管理 Task 启动、Agent 接入侧会话、Policy dialect、本地 Decision 结果、decision log 与受管控制请求的双向传递。Runtime 创建 Branch 执行环境后，它在该环境内创建并启动 Agent 接入侧；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态。（`control-plane.md` §2.1）
 
 ## 状态与生命周期
 

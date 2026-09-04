@@ -40,7 +40,7 @@ AScout 不追踪无限递归的理论因果链。Service Adapter 声明 `observa
 
 ## 2. 效果管理过程
 
-Effect Management 处理的是投机执行过程中的某个 operation 环节所产生的状态变化，而不是替代投机执行过程本身。它不负责生成 Proposal、验证 Proposal 的兼容性、选择 candidate 或决定投机执行过程的拓扑；这些决策由相应的 Policy、Assumption Manager 和其他控制面机制完成。它负责把这些决策涉及的状态变化落实为可检查、可执行和可清理的处理计划。
+Effect Management 处理的是投机执行过程中的某个 operation 环节所产生的状态变化，而不是替代投机执行过程本身。它不负责生成 Proposal、验证 Proposal 的兼容性、选择 candidate 或决定投机执行过程的拓扑；这些决策由相应的 Policy、Speculation Coordinator 和其他控制面机制完成。它负责把这些决策涉及的状态变化落实为可检查、可执行和可清理的处理计划。
 
 一次效果管理过程通常沿着以下顺序展开：
 

@@ -22,6 +22,10 @@
 
 2026-09-04 决定：废弃“所有投机工作固定低优先级”以及 Scheduler 根据内置价值排序自行暂停或抢占投机工作的表述。Scheduler 继续拥有运行队列、资源和硬约束，但暂停、恢复和价值驱动的抢占由独立 `rebalance` Policy Decision 选择；抢占后的处置由 `dispose` 决定。当前语义见 `docs/design/policy-decisions.md` §2.9 与 `docs/design/decisions.md` D-044。
 
+## D-033-I：Speculation Coordinator 吸收 Scheduler 的控制面职责
+
+2026-09-04 决定：在控制面组件模型中，不再将 Scheduler 作为独立组件。其待选机会、运行调整、预算和硬约束执行职责并入 Speculation Coordinator；`select` 与 `rebalance` 仍由 Policy Decision 决定，Speculation Coordinator 在统一的全局投机视图上负责激活、复核和执行这些意图。D-030-I 中关于 Scheduler 的描述保留为历史决策记录，当前组件结构以本条和 `docs/design/control-plane.md` 为准。
+
 ## D-031-I：废弃端用户直接参与投机 Branch 裁决
 
 2026-09-04 决定：废弃通过专门投机 UI 让端用户直接观察、选择或裁决内部 Branch 的表述。端用户只通过 AScoutAgent 视图操作当前有效的权威执行主线，并只能看到该路径的内容、状态与交互；人作为 Authority 提供输入或中断时，也通过该主线进入系统。Branch 接受、丢弃、重新挂载与清理在内部完成，不要求用户选择或重绑定 Branch。当前语义见 `docs/design/agent-integration.md`、`docs/design/branch-semantics.md` 与 `docs/design/decisions.md` D-045。
@@ -55,7 +59,7 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 3. Runtime Adapter；
 4. Runtime。
 
-这四侧不再直接作为 AScout 源码或子文档的一一对应拓扑。Entry API、Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 位于控制面内部；ASC-Daemon、Interposer、Operation Integration、CLI/library/launcher 位于 Agent 接入职责。控制面定义 Runtime Adapter 的接入边界，但 Adapter 作者自行负责目标 Runtime 的能力映射、transport 与事件规范化。Runtime 是外部后端，不属于 AScout 可定义的实现模块。
+这四侧不再直接作为 AScout 源码或子文档的一一对应拓扑。Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger 位于控制面内部；ASC-Daemon、Interposer、Operation Integration、CLI/library/launcher 位于 Agent 接入职责。控制面定义 Runtime Adapter 的接入边界，但 Adapter 作者自行负责目标 Runtime 的能力映射、transport 与事件规范化。Runtime 是外部后端，不属于 AScout 可定义的实现模块。
 
 Execution、Workspace、Input、Effect、Outcome 与 Operation Integration 六类扩展点的职责语义不绑定具体 crate、模块、进程或服务边界。
 

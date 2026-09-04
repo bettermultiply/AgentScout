@@ -251,9 +251,9 @@ select(frontier_view, scheduling_context) -> ordered subset[EdgeId]
 
 `frontier_view` 是 AScout 当前维护的、同一 task / AScoutAgent 中已经通过 `admit` 且仍然有效的全部待选机会快照。`scheduling_context` 提供可观察的预算、资源压力、机会等待时间、依赖与成本事实。该 task 绑定的 Policy 直接返回现在希望启动的有序机会子集；可以选择一个、多个或暂时一个都不选。排序公式、best-first、浅层优先、深层优先以及 breadth/depth 分配都属于具体 Policy，不是 AScout 的固定规则。
 
-未被选择的机会继续留在待选集合，之后可以随新的资源和执行事实再次参与选择。AScout 拥有并维护该集合，而 Policy 不拥有可变队列状态。等待期间，如果 pending result 已到达、所属任务结束、祖先依赖被否定或其他必要前提失效，AScout 将机会移出集合；启动前 Scheduler 还必须复核机会有效性、Contract 与资源硬约束。
+未被选择的机会继续留在待选集合，之后可以随新的资源和执行事实再次参与选择。AScout 拥有并维护该集合，而 Policy 不拥有可变队列状态。等待期间，如果 pending result 已到达、所属任务结束、祖先依赖被否定或其他必要前提失效，AScout 将机会移出集合；启动前 Speculation Coordinator 还必须复核机会有效性、Contract 与资源硬约束。
 
-Scheduler 落实 Policy 的选择，但不另行使用固定价值公式改写机会顺序。硬约束暂时不允许启动时，Scheduler 可以延后所选机会；这表示执行条件尚未满足，不构成新的 Policy 精判。
+Speculation Coordinator 落实 Policy 的选择，但不另行使用固定价值公式改写机会顺序。硬约束暂时不允许启动时，Coordinator 可以延后所选机会；这表示执行条件尚未满足，不构成新的 Policy 精判。
 
 `select` 只选择尚未启动的机会，不决定已经运行工作的暂停、恢复或抢占。
 
@@ -268,7 +268,7 @@ rebalance(active_view, paused_view, scheduling_context)
 
 `rebalance` 与 `extent` 回答不同问题：`extent` 决定单个投机过程基于自身进展应推进到哪里并等待裁决；`rebalance` 在多个已经启动的工作之间，根据当前资源和相对价值重新分配运行机会。暂停和恢复必须在 Runtime Adapter 声明支持的安全边界上执行。
 
-`preempt` 只决定终止运行；它使目标 Branch 以 `resolution = preempted` 进入现有 `dispose`，由 `dispose` 决定丢弃、残值回收、补偿和清理。Policy 不能通过 `rebalance` 绕过 Branch 生命周期、single-winner、效果纪律或资源硬约束，Scheduler 负责复核并执行这些动作。
+`preempt` 只决定终止运行；它使目标 Branch 以 `resolution = preempted` 进入现有 `dispose`，由 `dispose` 决定丢弃、残值回收、补偿和清理。Policy 不能通过 `rebalance` 绕过 Branch 生命周期、single-winner、效果纪律或资源硬约束，Speculation Coordinator 负责复核并执行这些动作。
 
 ## 3. 阶段映射与决策依赖
 
@@ -365,6 +365,17 @@ Policy 可以实现或组合九类 decision，但不能拥有待选集合、运�
 - Policy 声明与 Adapter 所呈现后端能力之间的 Speculation Contract 校验，以及 Fidelity 的加载期检查和运行期校验。
 
 Policy 决定“希望采用哪种策略”，Mechanism 保证该策略在正确性、隔离、资源、副作用和清理约束内执行。能力不足不能静默改变语义，只能拒绝、明确降级或选择其他合法路径。
+
+尽管控制面为 Policy 的设计保留了最大的灵活性，仍有无法被绕过的边界：以下内容是 Policy Decision 的设计边界，不允许交由 Policy 自定义。
+
+- Branch 生命周期与候选状态转换；
+- Proposal 依赖与 `AssumptionSet`；
+- single-winner 与候选之间的隔离和受控信息流；
+- 效果阻塞、commit barrier 与 obligation 边界；
+- 待选机会的有效性、资源硬约束、预算执行与取消；
+- 非空 `AssumptionSet` 的数据不得进入权威上下文。
+
+这些边界在运行期由控制面（Mechanism）校验并强制落实。
 
 ## 7. 扩展规则
 

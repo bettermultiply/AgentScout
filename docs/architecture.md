@@ -50,7 +50,7 @@ sequenceDiagram
 | 侧面 | 组件 | 状态 |
 |---|---|---|
 | Agent 接入侧 | ASC-Daemon、Interposer、Integration（Agent 接入：CLI、library、launcher 等） | 当前 Branch 的本地上下文绑定 |
-| 控制面 | Entry API、Policy Engine、Assumption Manager、Scheduler、Effect Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定 |
+| 控制面 | Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定 |
 | Runtime Adapter | 实现控制面接入边界、能力映射、通信与事件规范化；内部实现由 Adapter 作者决定 | 不向控制面呈现第二份长期权威状态 |
 | Runtime | 内部组件由外部 Runtime 自行决定 | 实际节点执行、进程、资源、隔离与效果状态；仅经 Adapter 暴露 AScout 所需的可观察结果 |
 

@@ -248,15 +248,15 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-038：ASC-Daemon 作为 Agent-facing context boundary
 
-**选择**：CLI/library 不直接向 Entry API 发送请求，而是先调用当前 Branch 隔离环境内的 ASC-Daemon。ASC-Daemon 通过自身绑定的 AScoutAgent/Branch context 隐藏当前身份，并将 resolved typed request 转交给 Entry API。
+**选择**：CLI/library 不直接向 Agent Control Gateway 发送请求，而是先调用当前 Branch 隔离环境内的 ASC-Daemon。ASC-Daemon 通过自身绑定的 AScoutAgent/Branch context 隐藏当前身份，并将 resolved typed request 转交给 Agent Control Gateway。
 
-**Entry API 边界**：Entry API 不从 caller context 重新解析 AScoutAgent、Branch 或 capability，也不直接接触 Runtime。它接收 ASC-Daemon 已解析的请求并交给控制面中的相应组件；控制面拥有 AScoutAgent/Branch metadata，并负责后续 lifecycle orchestration 与 Runtime 交互。
+**Agent Control Gateway 边界**：Agent Control Gateway 不从 caller context 重新解析 AScoutAgent、Branch 或 capability，也不直接接触 Runtime。它接收 ASC-Daemon 已解析的请求并交给控制面中的相应组件；控制面拥有 AScoutAgent/Branch metadata，并负责后续 lifecycle orchestration 与 Runtime 交互。Runtime 创建 Branch 执行环境后，Agent Control Gateway 在该环境内创建并启动 Agent 接入侧，形成完整的 Branch Node。
 
 **运输约束**：ASC-Daemon 的具体 transport 不属于 AScout 语义。第一版实现可以使用 Branch 隔离环境内约定端口的 HTTP Server；HTTP wire format、端口数值和 server/client 部署细节属于实现决策，不能改变 Agent-facing operation semantics。
 
 **范围**：当前 AScoutAgent 只表示控制面 Speculative Tree metadata；Runtime connection 与受管启动 handshake 留待后续议题。
 
-**原因**：把上下文隐藏和本地调用入口收敛到 ASC-Daemon，可以让 CLI/library 使用稳定的无身份请求，同时保持 Entry API 的统一、无状态和 Runtime 无关。
+**原因**：把上下文隐藏和本地调用入口收敛到 ASC-Daemon，可以让 CLI/library 使用稳定的无身份请求，同时保持 Agent Control Gateway 的统一通信边界，并将控制面与 Runtime 的状态责任分开。
 
 ## D-039：四侧一级架构
 
@@ -264,7 +264,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **Agent 接入侧**：包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon、Interposer 与 Operation Integration 等接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
 
-**控制面**：包含 Entry API、Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或 materialization 状态。
+**控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或 materialization 状态。
 
 **Runtime Adapter**：位于控制面与 Runtime 之间，按控制面定义的稳定、typed、可版本化 operation/event 接入边界声明并呈现能力、结果和事件。其作者自行决定如何映射目标 Runtime 的能力、原语与 transport；AScout 不控制其内部实现，只通过接入校验与运行期结果判断它是否兑现声明。Runtime Adapter 不向控制面呈现第二份长期权威状态。
 
@@ -304,11 +304,11 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-043：待选机会由 AScout 暂存，Policy 直接选择启动项
 
-**选择**：`admit` 只决定投机机会是否进入待选集合，不决定立即启动。其粗判识别可能的投机入口，精判决定机会是否值得登记和保留；通过精判后不在 `select` 前重复精判。控制面 Scheduler 拥有待选集合并维护机会有效性。
+**选择**：`admit` 只决定投机机会是否进入待选集合，不决定立即启动。其粗判识别可能的投机入口，精判决定机会是否值得登记和保留；通过精判后不在 `select` 前重复精判。控制面 Speculation Coordinator 拥有待选集合并维护机会有效性。
 
 新增独立的 `select(frontier_view, scheduling_context)` Policy Decision。一个 task / AScoutAgent 绑定的 Policy 在该 task 内所有仍有效的待选 Edge 之间进行全局权衡，直接选择当前希望启动的有序子集，可以选择一个、多个或暂时不选。未被选择的机会继续保留，直到后来被选择或因 pending result 到达、任务结束、祖先依赖否定等客观原因失效；不需要额外的主动放弃接口。
 
-**机制边界**：Scheduler 向 Policy 提供集合快照和可观察调度事实，并在资源、Contract 与正确性硬约束内落实选择。启动前只做有效性与硬约束复核，不进行第二次 Policy 精判，也不使用固定价值公式替代 Policy 的跨 Edge 排序。best-first、具体排序公式、浅层分叉、深层单链和 breadth/depth 分配均为可选 Policy，不能成为 AScout 固定规则。`select` 只处理尚未启动的机会，不负责已经运行工作的状态调整。
+**机制边界**：Speculation Coordinator 向 Policy 提供集合快照和可观察调度事实，并在资源、Contract 与正确性硬约束内落实选择。启动前只做有效性与硬约束复核，不进行第二次 Policy 精判，也不使用固定价值公式替代 Policy 的跨 Edge 排序。best-first、具体排序公式、浅层分叉、深层单链和 breadth/depth 分配均为可选 Policy，不能成为 AScout 固定规则。`select` 只处理尚未启动的机会，不负责已经运行工作的状态调整。
 
 **原因**：单 Edge 的独立“现在是否启动”无法表达多个机会竞争同一资源时的整体取舍，也会永久丢弃暂时不能启动但稍后仍有价值的机会。把登记、全局选择与机制复核分开，可以保留机会并让策略控制调度，同时不把队列状态或资源所有权交给 Policy。
 
@@ -318,9 +318,9 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **与其他决策的关系**：`extent` 根据单个过程自身进展决定推进边界，`rebalance` 根据多个已启动工作的相对价值与资源条件调整运行分配。`rebalance` 的 `preempt` 只触发 `resolution = preempted`，后续丢弃、Salvage、补偿和清理由 `dispose` 决定。
 
-**机制边界**：Scheduler 提供运行与暂停集合的事实快照，并在 Runtime Adapter 声明的安全暂停/恢复能力、资源所有权、Branch 生命周期和效果纪律约束内执行 Policy 意图。Policy 不拥有运行队列，也不能直接修改 Runtime 状态。
+**机制边界**：Speculation Coordinator 提供运行与暂停集合的事实快照，并在 Runtime Adapter 声明的安全暂停/恢复能力、资源所有权、Branch 生命周期和效果纪律约束内执行 Policy 意图。Policy 不拥有运行队列，也不能直接修改 Runtime 状态。
 
-**原因**：已经启动工作的价值会随权威进展、资源压力和其他机会变化。若暂停或抢占由 Scheduler 的固定排序规则决定，就会把运行策略固化进 Mechanism；将其作为独立 Policy Decision，既保留策略控制，也避免扩大 `select` 的职责。
+**原因**：已经启动工作的价值会随权威进展、资源压力和其他机会变化。若暂停或抢占由 Speculation Coordinator 的固定排序规则决定，就会把运行策略固化进 Mechanism；将其作为独立 Policy Decision，既保留策略控制，也避免扩大 `select` 的职责。
 
 ## D-045：端用户只操作当前权威执行主线
 

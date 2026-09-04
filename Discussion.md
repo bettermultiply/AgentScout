@@ -18,7 +18,7 @@
 
 已收敛：文档拆分。`docs/design/speculation-contract.md` 收窄为"定位 / 约束什么（单节）/ 如何约束 / 完整控制闭环"；控制面内部机制（组件分工、状态 owner、操作编排、失败清理）下沉到 `docs/design/control-plane.md`。同步更新 glossary、design-model、mental-model、index、effect-management、decisions 与 architecture 的相关引用。
 
-已收敛：`spec-exec-abstraction.md` 不再保留独立的“控制面组件职责”章节。Entry API 的目标职责补入 `control-plane.md`；Policy Engine、Assumption Manager、Scheduler、Effect Coordinator 与 Ledger 的现行职责以该文档为准。论文相关表格和数据继续作为事实依据，分别留在札记的 Effect、资源与准入、Shadow/Replay 等研究主题中；旧六插件、`site`、旧状态模型和重复贯穿示例不迁移。
+已收敛：`spec-exec-abstraction.md` 不再保留独立的“控制面组件职责”章节。Agent Control Gateway 的目标职责补入 `control-plane.md`；Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger 的现行职责以该文档为准。论文相关表格和数据继续作为事实依据，分别留在札记的 Effect、资源与准入、Shadow/Replay 等研究主题中；旧六插件、`site`、旧状态模型和重复贯穿示例不迁移。
 
 ### ASCout Agent 分支执行底座
 
@@ -60,7 +60,7 @@
 ### Edge 的定位与粒度（design-model §3.1）
 
 - 已确认：**Edge 是一次投机机会**（`u` 的输出 pending、`v` 依赖该输出的可投机依赖点）；一个 Edge 上可有多个 Proposal / SpecTask / candidate Branch。它是**抽象模型**，不是注册实体。可投机性由效果纪律与决策点共同承载，不再使用独立的 admissibility 元数据。
-- 已确认：**投机注册动作 = 在 pending-result boundary 上创建携带 Proposal 的 candidate Branch**（即 branch-semantics 的 branch 调用），不引入 site / "Edge 注册"作为额外注册实体；Assumption Manager 的 `(site, proposal)` 状态改为 `(edge_id, proposal_id)`，site 并入 edge 术语。
+- 已确认：**投机注册动作 = 在 pending-result boundary 上创建携带 Proposal 的 candidate Branch**（即 branch-semantics 的 branch 调用），不引入 site / "Edge 注册"作为额外注册实体；Speculation Coordinator 的 `(edge_id, proposal_id)` 依赖状态以 Edge 和 Proposal 标识关联，site 并入 edge 术语。
 - 已确认：Edge 的职责定位 = ① 统一不同投机对象（LLM 调用、工具、命令、远程请求、人类回复）的抽象；② 作为设计 policy decision 与 contract 的作用对象；③ 局部视角（单次投机机会如何投机的决策点）。嵌套与组合是补充的全局视角（多次投机机会如何串联、共享前提与信息流）。
 - 已确认：policy decision 多数挂机会粒度：权威启动（N 个候选共享同一 `A_u` 与真值 `i`）、BestOfN(breadth)、single-winner 处置都在 round 层面；逐 Proposal 的是 Predictor 与 Equivalence。机制侧证据：同一 Edge 下的 Proposal 共享权威依据并统一进入裁决，`edge_id` 与全局唯一的 `proposal_id` 各自承担机会归组与候选引用，§2.1 允许“一个或多个 Proposal”。
 - 已确认：**设计模型决策面 = 组合视图，不与 §2.1 阶段流程逐段对应**。§2.1 阶段是流程视图（机会发现→…→处置），§3.1 决策面是组合视图（policy 真正被问的作用点）；决策面是 Policy 的落地接口。
@@ -84,7 +84,7 @@
 - 已确认：`effect` 对每个 step 的已识别效果返回 `EffectPlan`，模式包括 `default`、`simulate`、`transform`、`stage`、`mediate`、`block`、`allow` 和 `deny`。`simulate` 是伪装执行：服务 Adapter 拦截请求，不访问真实服务，在 Branch 内返回标记为 synthetic 的模拟响应；该响应不是真实 Authority，必须带来源和未验证假设，并由后续 Authority、validator 或明确规则验证。`default` 使用 Adapter/Contract 声明的默认方案，未声明时不得静默放行。`StateDomain` 与 `EffectClass` 保持正交，处理模式需经 Effect Management、Contract 和 Runtime capability 校验。
 - 已确认：组合与嵌套当前只定义用户输入这一类跨 Edge 信息传播。用户中断也是用户输入的一种，和普通用户输入一样传播给当时仍在运行的全部 descendants；普通输入作为输入事实进入 Branch，中断触发各 Branch 独立停止/取消和清理。中断不通过 `AssumptionSet` 传播，也不引入集中式子树回收机制。
 - 已确认：组合与嵌套的完整边界已写入 `policy-decisions.md` §4：同一 Edge 上的 Proposal/Branch 只是并行候选，由 `predict` 的 breadth、隔离和 single-winner 约束决定，不另设组合语义；嵌套 Edge 继续使用当前 task 已绑定的同一 Policy 及其 task-level 配置。`AssumptionSet` 只表达未验证依赖，跨 Edge 还通过树结构归属、用户输入传播和生命周期控制连接。祖先假设被否定时，控制面向受影响 Branch 直接发送取消命令，各 Branch 独立停止和清理，不设置集中式整棵子树回收机制。
-- 已确认：AScout 暂存通过 `admit` 但尚未启动的 Edge；粗判识别可能的投机入口，精判只决定是否登记和保留，不决定立即生效。Policy 的独立 `select` 在同一 task / AScoutAgent 内的全部有效待选机会间直接选择当前启动的有序子集，可选一个、多个或暂时不选；未选机会继续等待，直到后来被选中或客观前提失效，不要求额外的主动放弃接口。Scheduler 拥有待选集合、维护有效性并在资源、Contract 与正确性硬约束内执行选择，启动前不重复 Policy 精判，也不使用固定价值公式替代 Policy。独立的 `rebalance` 面向已运行或暂停的投机 Branch，决定暂停、恢复或抢占；`preempt` 以 `resolution = preempted` 进入 `dispose`。best-first、跨 Edge 排序公式、浅层分叉/深层单链与 breadth/depth 分配均为可选 Policy。
+- 已确认：AScout 暂存通过 `admit` 但尚未启动的 Edge；粗判识别可能的投机入口，精判只决定是否登记和保留，不决定立即生效。Policy 的独立 `select` 在同一 task / AScoutAgent 内的全部有效待选机会间直接选择当前启动的有序子集，可选一个、多个或暂时不选；未选机会继续等待，直到后来被选中或客观前提失效，不要求额外的主动放弃接口。Speculation Coordinator 维护待选集合及其有效性，并在资源、Contract 与正确性硬约束内执行选择，启动前不重复 Policy 精判，也不使用固定价值公式替代 Policy。独立的 `rebalance` 面向已运行或暂停的投机 Branch，决定暂停、恢复或抢占；`preempt` 以 `resolution = preempted` 进入 `dispose`。best-first、跨 Edge 排序公式、浅层分叉/深层单链与 breadth/depth 分配均为可选 Policy。
 - 已确认：`spec-exec-abstraction.md` §9 压缩为“论文覆盖”“成本证据与候选 Policy”“正式边界、能力依据与研究问题”三节。Edge/Branch 生命周期、待选集合、`select`、`rebalance`、依赖传播和重新挂载不再重复定义；论文覆盖、命中率与能力表格继续作为事实依据，survival、深层误接受风险和不同决策组合的成本/保证继续作为待验证假设。
 - 已确认：删除单独的 `Assumption` 概念，保留 `AssumptionSet` 作为 Branch 的未决 Proposal 依赖集合；Proposal ID 全局唯一，`AssumptionSet = frozenset[ProposalId]`。集合元素只是对尚未确认 Proposal 的引用，不是另一种实体；Proposal 确认时移除其 ID，否定时向受影响 Branch 直接发送取消命令。
 - 已确认：`design-model.md` 的组合与嵌套只保留宽泛叙述，细节统一下沉到 `policy-decisions.md` §4。原有未决依赖形式化、反射 gating、`P(实例存活)`、frontier budget 和浅层/深层成本分析不保留在上层设计模型，也不未经重新讨论直接迁入 Policy Decisions；其中“候选 Branch 像普通执行一样继续运行并自然遇到新 Edge”补入 `policy-decisions.md` §4.2。
@@ -100,14 +100,32 @@
 - 已确认：Interposer / ASC-Daemon 的语义由控制面定义（决定它们做什么）；它们部署在 Runtime 创建的 Branch 隔离环境内，运行生命周期由 Runtime 管理（决定它们在哪里跑、何时启停）。该决定不推翻"ASC-Daemon 能在 Branch 隔离环境内独立运行、不与控制面长期 metadata owner 混同部署"的既有约束。
 - 已确认：保留 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 四侧调用路径，但不再将其解释为对称的四个 AScout 子系统或四份实现拓扑。控制面居中，Agent 接入侧是 AScout 自有接入边界，另一端经 Runtime Adapter 使用外部 Runtime。
 
+### 控制面 §2 组件与状态的引入与整体职责
+
+- 已收敛：本节（`control-plane.md` §2）的目标是阐明 §1 所述控制面职责在控制面内部如何落实，读者应能从本节回答：每一类责任与固定语义由哪个组件承担，以及每个组件自身的职责（即使不属于控制面的主要责任也要讲清）；各组件拥有/不拥有哪些控制状态（状态归属）；组件之间通过什么入口、按什么顺序协作，哪些修改必须走固定状态入口。
+- 已收敛：本节是组件职责与状态归属的权威描述，但只定义目标职责、状态与协作边界；实现细节与论文依据留在 `docs/development/spec-exec-abstraction.md` 对应主题。
+- 已收敛：不保留抽象的 owner 总则（如“有状态组件只能修改自己拥有的状态，无状态组件不能代替状态 owner 作决定”）。该约定是软件设计的基本纪律，不承载设计信息；信息应落在每个组件“负责什么 / 维护哪些状态、不持有哪些状态 / 与谁如何协作”的具体描述上。删除对象为 `control-plane.md` §2 引入中的该类总则句。
+- 已确认：项目内其余 “owner/拥有” 表述若为具体边界（控制面与 Runtime 的状态归属、Policy 不拥有队列或运行状态、Effect Coordinator 不持有真实效果状态等），是有效信息，不属于要删除的抽象总则。
+- 已收敛：Policy 由控制面统一加载、解析、校验和版本管理。所有不依赖或不改变全局状态的 Decision，可以通过 Policy Engine 生成的执行表示注入 Agent 接入侧执行，以降低高频路径上的通信延迟；接入侧必须记录本地 decision log，并把结果与日志交给控制面。控制面不重复执行已经满足本地范围条件的 Decision，但仍确认执行表示、Branch 上下文和结果格式有效。依赖或改变全局状态的 Decision，以及所有 Speculative Tree、Branch 生命周期、资源、效果和 Runtime 状态转换，仍由控制面负责。
+- 待展开：Agent Control Gateway 的接收与传输方式属开发未定事项；可考虑进程内调用、本地 IPC 或网络，但同进程部署不是强隔离 Runtime 下的架构要求。既有原则是 typed operation/event 语义不随 transport 改变。
+- 已收敛：以 Agent Control Gateway 替代 Entry API，作为 Agent 接入侧进入控制面的统一受管通信边界。Runtime 创建 Branch 执行环境后，Agent Control Gateway 在该环境内创建并启动 Agent 接入侧，二者共同形成完整的 Branch Node。Gateway 负责 Task 启动、Agent 接入侧会话，以及 Policy dialect、本地 Decision 结果、decision log、运行事件和受管控制请求的双向传递，并进行入口级上下文、权限和格式检查；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态，不直接操控 Runtime，也不独立决定 Policy Decision 或 Branch 生命周期转换。
+- 已收敛：Agent Control Gateway 不绑定网络接口。进程内调用、本地 IPC 或网络属于部署与开发选择；同进程部署不是强隔离 Runtime 下的架构要求。无论采用何种传输，Gateway 接受的 typed request/event 及其控制语义保持一致。
+- 已收敛：以 Speculation Coordinator 替代 Assumption Manager，并吸收原 Scheduler 的控制面职责。Speculation Coordinator 作为全局投机视图与控制循环的协调核心，根据 Agent 接入侧和 Runtime 经 Runtime Adapter 规范化后的事件，以及当前依赖和 Branch 状态，激活受影响 Edge 的 Policy Decision；各专业组件形成相应的操作意图，所有 semantic operation 经统一的控制面操作出口交给 Runtime Adapter 执行，并由返回结果或事件更新全局视图。它不直接触发固定 Runtime 操作，也不重复执行已经满足本地范围条件的 Decision。
+- 已确认：投机 Branch 的逻辑创建与独立 Runtime 环境的创建可以分离。采用 lazy 物化时，控制面先在 Speculative Tree 中登记和推进逻辑 Branch；只有在即将发生需要独立 Branch-local 状态的操作前，才请求 Runtime 建立独立环境。物理环境完成相应操作后，控制面再把逻辑视图标记为已与实际状态对应，并区分逻辑视图已推进但物理状态尚未对齐的阶段。
+- 已确认：Branch-local 状态不因属于内存、进程上下文或其他完全可逆状态就一律要求强隔离。默认只保证 Policy 或 Contract 要求保护的状态域；未被要求保护且不会影响保证范围的可逆变化可以共享或忽略。若后续操作需要该状态按 Branch 独立延续，仍必须在操作前物化，不能把已经共享的状态事后假定为可分支状态。
+- 已确认：Agent 接入侧负责在高频路径上识别即将发生的 Branch-local 变化，并在变化发生前请求 lazy 物化；未知或无法确认的操作按需要物化处理。Effect Coordinator 不负责普通 Branch-local 操作，而专门协调共享、外部及 Policy 要求纳管的效果，尤其通过可扩展的服务效果插件支持 `simulate`。插件只在控制面启动或 Policy 加载阶段注册；Task 使用的 Policy 生效后不热替换插件目录，具体注册接口和插件实现留在开发文档。
+- 已确认：效果插件实际运行在控制面内，由 Effect Coordinator 统一注册、选择和调用。Agent 接入侧只在效果真正发生前识别命令或 URL，并将受管请求转交控制面；插件可以基于全局视图执行去重、统一审计及跨 Branch 的效果协调。`simulate` 等可在控制面完成的结果由插件生成后经 Agent Control Gateway 返回；只有需要 Runtime 提供暂存、代理、转换或其他执行机制时，才经 Runtime Adapter 请求 Runtime。
+
 ## 暂停讨论
 
 以下事项已经记录，但要等当前分支执行模型或源码基础进一步稳定后再展开：
 
 ### 控制面执行模型与 Policy
 
-- 控制面拥有 AScoutAgent、Speculative Tree 控制状态、Policy、请求校验、操作编排与 Runtime event 解释。
-- 控制面内部包括 Entry API、Policy Engine、Effect Coordinator、Assumption Manager、Scheduler 与 Ledger，不设置额外的总控 Core。
+- 已确认：Policy 是由 Policy Decision 及相关决策逻辑组成的静态定义，不是用户编写并直接参与运行控制的程序。控制面通过 Policy Engine 使用 Policy 作出运行时高层决策，再将决策编排为 semantic operation；机制没有固化 Policy 决策，一切策略选择仍依照 Policy。
+- 已确认：控制面维护每个 Task 的 Speculative Tree 控制面视图。AScoutAgent 是这棵 Tree 向用户呈现的统一抽象，Branch 是 Tree 中的子树，三者不是并列且彼此独立的状态对象。
+- 已确认：semantic operation 经 Runtime Adapter 请求 Runtime 执行；控制面收到结果或事件后校验操作是否按语义完成并更新 Tree 的控制面视图，同时记录运行事实用于状态对齐、问题定位和审计校验。
+- 控制面内部包括 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，不设置额外的总控 Core。
 - Policy 只能在 AScout 固定生命周期、single-winner、capability、obligation、隔离和 cleanup 语义内作选择，不能拥有或修改 Runtime mutable state。
 
 ### Agent-facing control surface

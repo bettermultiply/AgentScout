@@ -155,7 +155,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 **选择**：不能，底座必须提供承载以下 Policy 所需的机制与事实：
 
 1. **准入控制** —— 四道闸：executable / policy-safe / 置信度与预期收益 / 预算内
-2. **启动选择与运行调整** —— Policy 通过 `select` 选择待选机会，通过 `rebalance` 暂停、恢复或抢占已启动投机工作；Scheduler 只在硬约束内执行
+2. **启动选择与运行调整** —— Policy 通过 `select` 选择待选机会，通过 `rebalance` 暂停、恢复或抢占已启动投机工作；Speculation Coordinator 只在硬约束内执行
 3. **等待期限策略** —— `t_w`：等太久的投机请求直接丢（与抢占语义不同，重叠价值已过期）
 4. **跨层可见性** —— 推理引擎压力（PASTE 的 `EnginePressure(B) = DecodeLoad(B) + γ·KVLoad(B)` 维持在带内）。**范围决策（D-013 修订）**：engine plane 不做后引擎内部压力不可见，该项降级为 API 可观测信号（延迟、限流、配额余量）；引擎级压力感知留给未来自托管场景
 5. **反向调度策略** —— SJF 让投机请求插队（投机输出 <10 token，延迟排队主导，插队几乎不拖慢推理）
@@ -241,11 +241,11 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 ---
 
-## D-019：Assumption Manager 是什么？
+## D-019：Speculation Coordinator 是什么？
 
 **问题**：负责假设 DAG 的组件叫什么、语义是什么？
 
-**选择**：**Assumption Manager** —— 全系统唯一的"谁依赖谁"真相源。假设 DAG 与实例树是**同一份状态的两个索引**（`by_assumption` / `by_instance`）。它调 Equivalence 插件、强制信息流规则、坐在关键路径上执行决策过程（`resolve()` 本质是一次 commit 决策），不是被动的数据结构。
+**选择**：**Speculation Coordinator** —— 全系统的全局投机视图与控制循环核心。它维护 Speculative Tree、Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系；假设关系与实例树是同一份控制状态的不同索引（`by_assumption` / `by_instance`）。它协调匹配、处置、调度和 semantic operation 的执行，不是被动的数据结构。
 
 **内部强制的不变量**（集中在一处，调用者无法违反）：`A == ∅ ⟺ role == Authority`；refute 沿依赖闭包级联；AssumptionSet 非空的数据不得流向空容器。
 
@@ -259,8 +259,8 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **选择**：三处独立，各有一个理由：
 
-- **resolve 不独立成组件，住在 Assumption Manager 里** —— 它的"状态"（待决 site 表）就是图本身（pending 状态的 assumption 节点恰好是 `(site, proposal)` 对），是**对图的无状态逻辑**，未通过"一个盒子 = 一份独立状态 + 一份独立接口"检验。体系结构对应：`Assumption Manager + resolve ≈ ROB`（持有投机状态 + retire/squash）；`Scheduler ≈ issue/dispatch`。
-- **Scheduler 独立** —— 有自己的状态（优先队列、预算热计数器、压力读数）；延迟类别不同：`resolve` 在关键路径上（权威路径阻塞等待），调度决策晚 50ms 只是少赚，共享事件循环产生**队头阻塞**，把调度簿记压到权威路径上（Speculative Tool Calls 实测短工具场景下逐出/重入簿记盖过延迟隐藏收益 —— 关键路径簿记吃掉赢面是真实失败模式）。
+- **resolve 不独立成组件，住在 Speculation Coordinator 里** —— 它的状态（待决 Edge/Proposal 依赖）就是全局控制视图的一部分；`resolve()` 是对该视图执行确认、否定和处置推进的控制流程，不是独立的数据结构。体系结构对应：`Speculation Coordinator + resolve` 统一持有投机状态并负责 retire/squash，同时在同一视图上承载 issue/dispatch 所需的调度事实。
+- **不再设置独立 Scheduler** —— `select` 和 `rebalance` 仍由 Policy 决定，待选机会、运行状态和预算事实由 Speculation Coordinator 维护并在硬约束内执行。这样调度与依赖传播使用同一份全局视图，避免两个状态中心之间产生不一致。
 - **Effect Coordinator 独立** —— 它在控制面持有 Effect Catalog、效果分类与协调计划；真实 staged effect、obligation 和 materialization 状态属于 Runtime。两类状态都不属于 Assumption DAG，且失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。安全闸必须能被单独审计。
 
 ---
@@ -269,7 +269,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **问题**：Ledger / Fidelity Monitor / Trace & Shadow Store 如何组织？
 
-**选择**：**一个 Ledger**（记录 · 回放 · 校验）—— 三者本质都是记录与校验数据、都在异步旁路上。预算计数器**不**挂在 Ledger 上：**预算计数器归 Scheduler**（它是花钱的那个，CostGate 每次决策都要同步读），**成本归属分类归 Ledger**（分类天然发生在 resolve 之后，由 Reconciler 发分类事件、Ledger 存档）。
+**选择**：**一个 Ledger**（记录 · 回放 · 校验）—— 三者本质都是记录与校验数据、都在异步旁路上。预算计数器**不**挂在 Ledger 上：**预算计数器归 Speculation Coordinator**（它需要在决策和执行时同步读取），**成本归属分类归 Ledger**（分类天然发生在 resolve 之后，由协调流程发分类事件、Ledger 存档）。
 
 ---
 
