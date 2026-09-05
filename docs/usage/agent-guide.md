@@ -12,7 +12,7 @@ AScout 当前没有任何实现，当前仓库只有设计文档。Agent-facing 
 
 ## 计划中的 Agent Surface
 
-Routine Agent-facing control 计划通过 Branch-local ASC-Daemon 进入 Agent Control Gateway。ASC-Daemon 隐藏当前 AScoutAgent/Branch context；当前实现计划使用隔离环境内约定端口的 HTTP Server。计划覆盖以下操作：
+Routine Agent-facing control 计划通过当前执行环境中的 ASC-Daemon 进入 Agent Control Gateway。ASC-Daemon 隐藏当前 Agent 执行上下文；当前实现计划使用执行环境内约定端口的 HTTP Server。计划覆盖以下操作：
 
 - 查询当前 Branch context；
 - 查询 direct children；

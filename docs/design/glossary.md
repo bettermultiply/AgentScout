@@ -76,7 +76,7 @@
 - **Effect Coordinator**：控制面内共享、外部及 Policy 要求纳管效果的协调者；通过控制面内注册的服务效果插件处理命令或 URL，可直接生成明确标记并记录来源的模拟响应、拒绝或阻塞请求，也可在需要 Runtime 参与时结合 Policy、Contract 与 Runtime 能力形成处理计划，经 Runtime Adapter 请求 Runtime 执行。它不负责普通 Branch-local 操作，也不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §2.4；`effect-management.md`）
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §2.5；`speculation-contract.md` §3）
 - **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地控制入口，绑定 Branch context，转发 Agent-facing request 并承载 lifecycle event；不拥有全局控制状态。（`agent-integration.md` §2.2）
-- **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 执行和 outcome 路由的责任实体；具体可观察接缝由 integration profile 决定。（`agent-integration.md` §2.3）
+- **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 执行和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）
 - **Agent Control Gateway**：控制面面向 Agent 接入侧的受管通信边界；管理 Task 启动、Agent 接入侧会话、Policy dialect、本地 Decision 结果、decision log 与受管控制请求的双向传递。Runtime 创建 Branch 执行环境后，它在该环境内创建并启动 Agent 接入侧；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态。（`control-plane.md` §2.1）
 
 ## 状态与生命周期

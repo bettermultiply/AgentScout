@@ -133,8 +133,7 @@
 
 ### Agent-facing control surface
 
-- Routine Agent surface 暂时保留 `context`、`children`、创建、`commit`、`accept`、`discard` 和 event wait 这些 operation placeholders。
-- 当前不定义参数、返回值、阻塞方式、event model 或具体命令拼写。
+- 已确认：当前不向 Agent 暴露主动使用 AScout 控制能力的控制面接口；Agent-facing control surface 不作为当前 Agent 接入路径。
 - 不提供独立 `publish-outcome`；它仍是由 Interposer 自动触发的 Runtime lifecycle semantic operation。
 
 ### Interposer 与 Operation Integration 合并
@@ -149,12 +148,21 @@
 - 已收敛：不引入“本地控制循环”作为 Interposer 或端侧管理节点的设计概念。单次处理等待控制面结果属于该次 Agent 执行的处理过程，不表示存在持续运行的本地调度循环。
 - 不提供日常 `delegate-resolver`；需要控制面代为裁决时，delegation 作为 managed launch 或 Branch 创建配置表达。
 
+### ASC-Daemon 职责
+
+- 已收敛：ASC-Daemon 是端侧管理节点与控制面之间的本地通信入口。它建立并维护双方的通信会话，同时证明当前通信来自对应的端侧管理节点，避免信息伪造。
+- 已收敛：ASC-Daemon 负责传递端侧提交的事实、请求、Decision 结果和 outcome，以及控制面返回的命令、结果和事件。
+- 已收敛：ASC-Daemon 不负责解析或路由 Branch 上下文，不执行 Agent 步骤或本地 Decision；这些职责分别由 Interposer 和端侧管理节点承担。
+- 已收敛：ASC-Daemon 启动后与控制面建立通信会话，在会话建立过程中确认通信双方的身份，并在后续通信中通过通信凭证证明消息来自对应的端侧管理节点。一个 ASC-Daemon 对应一个端侧管理节点及其 Interposer；具体凭证、会话建立方式、消息格式和传输协议留给实现决定。
+
+
 ### 端侧管理节点与 Branch、Instance 的关系
 
 - 已收敛：端侧管理节点围绕一组 Agent 进程及其执行活动提供本地管理。Agent 主进程及其 sub-agent 进程共同构成一个 Agent 执行实体，由同一个端侧管理范围统一观察和处理。
 - 已收敛：Branch 为执行活动提供逻辑归属，端侧管理节点为每个 Branch 承载独立的本地管理上下文，并依据 Branch identity、operation 归属和 capability 路由事件与控制命令。
 - 已收敛：多个 Branch 在尚未需要独立 Branch-local 状态时，可以由同一个端侧管理节点在共享执行环境中承载，各 Branch 仍保持独立的管理上下文。Branch 需要独立环境时，其管理上下文随执行活动进入相应环境；具体是复用、迁移还是重新建立实际承载方式，留给实现决定。
 - 已收敛：sub-agent 的推理、工具和命令活动，只要处于 integration profile 可观察范围内，就由同一个 Interposer 按所属 Branch 上下文处理，并归属于该 Branch。sub-agent 与主 Agent 的普通协作属于同一 Agent 执行实体；只有显式创建新的 AScout Branch 时，才形成新的 Branch 上下文。
+- 已收敛：一个执行环境建立一个端侧管理节点，环境内的每个 Agent 在启动时通过 Integration 接入该节点，并持有独立的 Agent 执行上下文；同一节点可以承载环境内多个 Agent 及其 Branch 上下文。
 
 ### Agent product 接入能力
 
@@ -162,12 +170,29 @@
 - 已收敛：接入 profile 需要支持 operation 开始、`pending-result boundary`、完成和 outcome 的识别；需要管理的 Agent 主进程及其 sub-agent 执行活动也应处于可观察范围内。
 - 已收敛：暂停或阻止真实执行后，Interposer 可以等待控制面结果或执行本地 Decision，再让真实 operation 继续执行，或让当前调用沿 Agent 原有的完成路径使用已经获得语义授权的结果完成。Agent product 提供的是观察和拦截接缝；Branch 上下文、Decision、控制面通信、日志和结果授权属于端侧管理节点与控制面职责。
 
+### Interposer 职责补充
+
+- 已收敛：Interposer 负责处理 Agent 的拦截步骤，从拦截点提取步骤事实，识别 operation、`pending-result boundary`、Branch-local 状态和 Effect，并根据本地 Decision 或控制面处置结果控制步骤继续、暂停、阻止或跳过。
+- 已收敛：Interposer 可以暂停一次 Agent 步骤，等待本地 Decision 或控制面结果返回后继续处理。继续时沿产品原有路径执行；跳过时不执行真实 operation，并在需要时使用已经获得语义授权的结果沿原有完成路径结束。
+- 已收敛：Interposer 在 Branch-local 状态或受纳管 Effect 发生前提交相应请求，保证真实 operation once-only，从原调用返回路径取得 outcome，将其归属对应 Branch 并通过 ASC-Daemon 提交控制面，同时记录本地 Decision 的输入事实、执行内容、Policy 版本、结果和执行上下文。
+
+### Integration 的步骤接入约定
+
+- 已收敛：Integration 是面向具体 Agent product 的产品适配组件，依据接入约定以最小改造将产品执行接缝连接到端侧管理节点。
+- 已收敛：Agent 即将执行可管理步骤时，Integration 将步骤交给端侧管理节点并等待返回处置结果。返回继续时按产品原有路径执行；返回跳过时不执行原步骤，并在需要时让调用沿产品原有完成路径使用端侧管理节点提供的结果结束。暂停通过等待处置结果体现。
+- 已收敛：Integration 从被拦截步骤的原调用返回路径自动取得成功、失败或取消结果，并将其交给端侧管理节点形成 outcome；产品不需要提供额外的完成回调。
+- 已收敛：不同 integration profile 可以使用不同的产品接缝和步骤表示，但遵循相同的步骤接入约定。Integration 不解释步骤的投机语义，不判断 Policy Decision、Branch 或生命周期，也不决定跳过步骤时使用的结果。
+
 ### Agent 接入侧职责与当前范围
 
 - 已收敛：Agent 接入侧不是单纯的请求适配层，而是对应 Agent 的**端侧管理节点**。它负责管理 Agent 的本地执行、观察 Agent 行为，并承担授权范围内本地 Decision 的独立判断和执行责任。
 - 已收敛：Agent 接入侧可以执行由 Policy Engine 注入的、不依赖或不改变全局状态的本地 Decision，并向控制面报告 Decision 内容、结果、输入事实、Policy 版本和执行上下文。涉及全局控制状态或生命周期权威的决策必须交还控制面。
 - 已收敛：当前不承诺“完全无修改、无需了解 Agent 内部实现”的通用接入，只支持具备足够拦截点或 Hook 的特定 Agent product。接入适配可以依赖产品内部执行结构，以观察和控制所需的推理、工具及 operation 生命周期；后续再评估更通用的接入方式。
 - 已确认但未展开：是否允许 Agent 发起显式协作请求，以及 Agent-facing 请求的上下文绑定与转发边界，继续作为后续议题讨论。
+
+### Agent 接入侧文档结构
+
+- 已收敛：删除 `agent-integration.md` 的“固定约束与未定实现”整节。固定约束已在前文和相关设计文档中说明，具体实现问题由开发或使用文档承载，不在本文重复总结。
 
 ### 通用控制面框架
 
