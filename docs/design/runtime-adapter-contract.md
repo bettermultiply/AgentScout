@@ -1,14 +1,10 @@
 # Runtime Adapter 契约设计
 
-本文定义 Runtime Adapter 面向 AScout 控制面的正式接入契约。它回答两个问题：Adapter 必须向控制面提供什么环境语义，以及 Adapter 如何声明这些语义并接受 Registry 校验。
-
-本文不定义 Runtime 的内部架构、原生接口或 transport，也不定义 Agent 的投机语义。Agent 执行实体、Branch context、operation 归属和 capability 路由由 Agent 接入侧管理；Speculative Tree、Branch 生命周期和 Policy 由控制面管理；Runtime 负责承载这些活动的隔离执行环境及环境级状态。
+本文定义 Runtime Adapter 面向 AScout 控制面的正式接入契约，说明 Adapter 提供的环境语义、能力声明、Registry 校验以及环境操作的结果和事件。
 
 ## 1. 契约边界
 
-Runtime Adapter 是控制面与外部 Runtime 之间的唯一接入边界。控制面向 Adapter 发出固定的环境操作，Adapter 将其映射到目标 Runtime，并把环境结果和事件规范化返回。
-
-Adapter 不向控制面呈现第二份 Speculative Tree 或 Branch 状态，也不要求 Runtime 理解 Proposal、Edge、winner、discard 或其他投机概念。控制面上层语义与 Runtime 环境操作不是同一层：环境操作成功，不自动表示 Branch 操作已经成功。
+Runtime Adapter 连接控制面与外部 Runtime。控制面向 Adapter 发出固定的环境操作，Adapter 将其映射到目标 Runtime，并把环境结果和事件规范化返回。契约的核心是 Runtime 提供的环境能力：环境建立、环境内操作、静止、恢复、终止和清理，以及这些操作对不同环境内容形成的隔离保证。
 
 Adapter 可以使用 Runtime 原生隔离、权限控制、代理、拦截或拒绝来兑现声明。Registry 检查的是 Adapter 在边界上呈现的最终环境保证，不检查某一种内部实现。
 
@@ -16,22 +12,26 @@ Adapter 可以使用 Runtime 原生隔离、权限控制、代理、拦截或拒
 
 所有合格 Adapter 都必须支持以下固定操作语义，不把它们作为可选能力声明：
 
-- **建立环境**：从控制面指定的环境基础建立可用的隔离环境；
-- **环境内操作**：建立 Agent 接入侧，并执行接入侧无权完成的环境级操作；
-- **静止环境**：阻止新的环境操作，并让正在进行的环境操作完成或返回明确的未完成状态；
-- **恢复环境**：让仍然有效的静止环境继续接受操作，且已有状态和隔离边界保持不变；
-- **终止环境**：不可恢复地停止环境内由 Runtime 管理的执行；
-- **清理环境**：清理 Runtime 管理的进程、资源、临时状态、句柄和租约。
+- **`establish_environment`（建立环境）**：从控制面指定的环境基础建立可用的隔离环境；
+- **`operate_environment`（环境内操作）**：在环境内建立 Agent 接入侧，并执行接入侧无权完成的环境级操作；
+- **`suspend_environment`（静止环境）**：阻止新的环境操作，并让正在进行的环境操作完成或返回明确的未完成状态；
+- **`resume_environment`（恢复环境）**：让仍然有效的静止环境继续接受操作，且已有状态和隔离边界保持不变；
+- **`terminate_environment`（终止环境）**：不可恢复地停止环境内由 Runtime 管理的执行；
+- **`cleanup_environment`（清理环境）**：清理 Runtime 管理的进程、资源、临时状态、句柄和租约。
 
 环境的基本状态闭环是：建立完成后可用；可用环境可以进入静止状态并再次恢复；可用或静止环境可以终止；终止后完成清理。操作失败或部分完成时，Adapter 必须返回环境实际停留的状态，控制面不能根据预期状态继续推进。
 
-隔离贯穿以上所有操作，是接入资格的固定语义，不是可以关闭的能力。动态迁移等额外操作只有在形成统一的 AScout 语义后，才能成为新的标准操作；Adapter 不能通过声明自行增加控制面可调用的私有操作。
+隔离贯穿以上所有操作，是接入资格的固定语义。
+
+### 2.1 扩展环境操作
+
+固定操作之外的环境操作属于扩展操作。扩展操作只有在 AScout 定义统一语义、结果和验证要求后，才能进入契约。例如，环境迁移可以定义为 `migrate_environment`。在该语义形成前，Adapter 可以在内部使用迁移机制，但控制面不直接调用它。
+
+扩展操作必须说明适用条件、对环境状态的影响、失败收敛方式和验证方法。Adapter 不能通过能力声明自行增加控制面可调用的私有操作。
 
 ## 3. 隔离声明
 
-Adapter 的核心声明不是“支持哪些操作”，而是：
-
-> 在固定环境操作下，当前 Runtime 实例对哪些内容提供什么隔离保证。
+Adapter 声明当前 Runtime 实例在固定环境操作下，对不同环境内容提供的隔离保证。
 
 声明覆盖以下内容。某一项可以标记为 `not_applicable`，表示当前实例不承担这类保证；这不表示该项已经通过验证，也不允许控制面把它当作可用隔离能力。
 
@@ -45,7 +45,7 @@ Adapter 的核心声明不是“支持哪些操作”，而是：
 | `resource` | CPU、内存额度、进程数、文件描述符和临时存储等环境资源 |
 | `environment-local control surface` | 环境内接入侧使用的本地控制入口及其环境级权限 |
 
-每项声明使用同一组可扩展的语义维度：
+每项声明使用同一组可扩展的隔离属性：
 
 - `visibility`：其他环境能否观察该内容；
 - `modification`：其他环境能否直接修改该内容；
@@ -55,29 +55,88 @@ Adapter 的核心声明不是“支持哪些操作”，而是：
 - `scope`：保证覆盖的对象、路径、通道或配置范围；
 - `limitations`：已知例外、依赖条件和未覆盖路径。
 
-三个访问维度分别表达不同问题，不能合并成一个总等级。例如内容可以对其他环境不可见，但仍因共享 CPU 产生干扰；也可以允许受控读取，但禁止跨环境修改。`scope` 和 `limitations` 必须能够被 Registry 解析和比较，不能只依赖无法解释的自由文本。
-
-`input`、`outcome`、Branch context、Proposal 和 capability 的投机含义不属于这组 Runtime 隔离内容。它们由 Agent 接入侧和控制面通过受控信息流管理。数据库写入、邮件、payment、webhook 等外部业务状态也不属于 Runtime 隔离声明，由 Effect/Service Adapter 负责相应效果语义。
+`visibility`、`modification` 和 `interference` 分别描述观察、直接变更和间接影响三个隔离属性。`scope` 和 `limitations` 用于限定保证边界，必须能够被 Registry 解析和比较。
 
 ## 4. 能力声明与解析
 
 Adapter 声明描述当前 Adapter 实例和当前 Runtime 配置下实际声称的保证，不描述理论最大能力。未启用的功能和依赖其他部署配置的功能不得混入当前声明。当前实例声称但 Registry 无法充分证明的保证仍可保留在声明中，由 Registry 标记为未验证。
 
-声明至少包含：
+### 4.1 AdapterDeclaration
 
-- 契约版本；
-- 七类内容的隔离语义、范围和限制；
-- 当前实例的部署条件；
-- Adapter 能识别并配合验证的环境状态和事件范围。
+Adapter 提交一个 `AdapterDeclaration`。它描述一个确定的 Adapter 实例在一个确定的 Runtime 配置下提供的环境保证：
 
-声明不包含由 Registry 产生的验证状态。Registry 解析声明时：
+```text
+AdapterDeclaration {
+    contract_version
+    adapter_instance
+    runtime_configuration
+    environment_contents: [ContentIsolation, ...]
+    deployment_conditions
+}
+```
 
-1. 检查契约版本、内容类型、维度取值和范围描述是否合法；
-2. 检查声明是否覆盖基础环境要求，内部是否自相矛盾；
-3. 对声明的保证执行接入时主动验证，尽可能使用真实环境操作；
-4. 生成带验证状态的能力视图，供 Policy Engine 使用。
+`environment_contents` 为每类环境内容提供一项隔离声明。当前实例不承担某类内容时，仍需提交 `not_applicable` 声明；同一类环境内容不得出现相互竞争的多项有效声明。
 
-Registry 发布的是能力事实，不表达 Policy 要求，也不判断某个 Policy 是否满足。Policy Engine 将 Policy 声明与能力视图匹配；能力不足时拒绝 Policy 或按明确语义降级。
+### 4.2 ContentIsolation
+
+每项 `ContentIsolation` 描述一类环境内容在固定环境操作下的隔离保证：
+
+```text
+ContentIsolation {
+    content
+    visibility
+    modification
+    interference
+    lifetime
+    cleanup
+    scope
+    limitations
+}
+```
+
+`visibility`、`modification` 和 `interference` 分别描述观察、直接变更和间接影响；`lifetime` 和 `cleanup` 描述环境生命周期对该内容的处理；`scope` 和 `limitations` 限定保证适用的对象、路径、通道和条件。
+
+### 4.3 CapabilityView
+
+Registry 将声明解析为规范化的 `CapabilityView`，并附加验证结果：
+
+```text
+CapabilityView {
+    contract_version
+    adapter_instance
+    runtime_configuration
+    environment_contents: [VerifiedContentIsolation, ...]
+    deployment_conditions
+}
+
+VerifiedContentIsolation {
+    declaration: ContentIsolation
+    validation_status
+    validation_evidence
+}
+```
+
+`CapabilityView` 是控制面使用的当前能力视图。验证状态由 Registry 根据解析和主动验证结果生成，Adapter 不能自行填写验证状态。
+
+### 4.4 Registry 处理流程
+
+Registry 按以下顺序处理 Adapter 声明：
+
+```text
+AdapterDeclaration
+    -> 结构解析
+    -> 规范化与一致性检查
+    -> Registry 建立验证环境
+    -> Registry 执行验证场景并观察结果
+    -> 对照声明生成验证状态
+    -> CapabilityView
+```
+
+结构解析确认契约版本、内容类型、隔离属性和部署条件可以被识别。规范化与一致性检查确认声明覆盖完整、同类内容没有冲突、范围和限制能够被解释。Registry 自主建立验证环境，使用固定环境操作执行验证场景，并根据实际观察结果检查声明中的保证。Adapter 提供环境建立和观察验证所需的接入信息，但不提交自测结果作为验证依据。
+
+Registry 将最终 `CapabilityView` 提供给 Policy Engine。Policy Engine 依据它检查 Policy 的要求是否存在合法执行路径，并决定接受、拒绝或降级 Policy。配置 identity 是能力视图的一部分；配置变化必须产生新的声明并重新经过 Registry 处理。
+
+原始声明中 Registry 无法充分证明的保证进入 `unverified` 范围，主动验证证明不成立的保证进入 `verification_failed` 范围。
 
 ## 5. 验证状态
 
@@ -89,7 +148,7 @@ Registry 发布的是能力事实，不表达 Policy 要求，也不判断某个
 
 用户确认承担未验证能力的部署风险，不会把它变成已验证能力。能力视图必须保留状态、范围和限制，不能把未验证或验证失败的范围混入普通可用范围。
 
-接入时主动验证是主要证明手段，运行期验证用于发现主动验证遗漏和实际偏差。运行期验证不能替代接入验证。
+接入时由 Registry 主动验证是主要证明手段，运行期验证用于发现接入验证遗漏和实际偏差。运行期验证不能替代接入验证。
 
 ## 6. 结果、事件与失败
 

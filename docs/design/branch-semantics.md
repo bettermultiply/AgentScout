@@ -30,11 +30,11 @@ AScout 向 Agent 提供三类生命周期能力：创建 candidate Branch、提�
 
 这里的 Agent lifecycle capability 不向端用户暴露。端用户始终通过 AScoutAgent 视图直接操作当前有效的权威执行主线，只能看到该路径产生的内容、状态与交互。投机 Branch 不建立独立用户会话，也不能在携带未决 Proposal 时直接向用户输出或提问；Branch 接受、丢弃、重新挂载和清理由 Policy、授权 resolver 与控制面机制在内部完成，不要求端用户参与。Accept 改变权威路径后，用户继续操作更新后的有效主线，不需要选择或重绑定 Branch。
 
- Routine Agent-facing control surface 暂时只保留两类查询和五类 lifecycle/activity operation placeholders：查询自身 `context`、查询 direct `children`、`branch`、`commit`、`accept`、`discard` 和等待 event。`branch` 表示从当前 Branch 创建一个或多个 direct child；在投机场景中这些 child 才按角色称为 candidate。CLI 与 embedded function 调用先进入当前 Branch 隔离环境内的 ASC-Daemon；ASC-Daemon 隐藏并绑定当前 AScoutAgent/Branch context，再把 resolved typed request 交给 Agent Control Gateway。Agent Control Gateway 不从 caller context 重新解析，也不直接接触 Runtime，只把请求交给控制面；控制面再派发到对应 AScoutAgent 的 Branch-level operation。完整 Runtime 语义中 `branch` 可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override，未指定 resolver 时使用 AScoutAgent 配置中的默认 resolver。当前不定义这些 control-surface operation 的完整参数、返回值、阻塞方式、event model 或具体命令拼写；它们仍受已经确定的 Branch lifecycle 语义约束，不能被解释为运行时 no-op。
+Routine Agent-facing control surface 暂时只保留两类查询和五类 lifecycle/activity operation placeholders：查询自身 `context`、查询 direct `children`、`branch`、`commit`、`accept`、`discard` 和等待 event。这里的 placeholders 表示目标语义中的 operation slots，不表示当前 Agent product 已经实际暴露完整的 Agent-facing 接口。`branch` 表示从当前 Branch 创建一个或多个 direct child；在投机场景中这些 child 才按角色称为 candidate。CLI 与 embedded function 调用先进入当前 Branch 隔离环境内的 ASC-Daemon；ASC-Daemon 隐藏并绑定当前 AScoutAgent/Branch context，再把 resolved typed request 交给 Agent Control Gateway。Agent Control Gateway 不从 caller context 重新解析，也不直接接触 Runtime，只把请求交给控制面；控制面再派发到对应 AScoutAgent 的 Branch-level operation。完整 Runtime 语义中 `branch` 可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override，未指定 resolver 时使用 AScoutAgent 配置中的默认 resolver。当前不定义这些 control-surface operation 的完整参数、返回值、阻塞方式、event model 或具体命令拼写；它们仍受已经确定的 Branch lifecycle 语义约束，不能被解释为运行时 no-op。
 
 `PublishOutcome` 是 Agent 接入侧必须完成的内部 semantic operation，但不作为独立 Agent-facing command，也不要求通用 Runtime 理解。Interposer 可以通过 operation wrapper、Hook、effect broker 或其他产品适配机制，在真实 operation 完成后自动把结果发布到 OutcomeSlot。Resolver capability 默认由 Parent Agent 持有；需要控制面代为裁决时，delegation 通过 AScoutAgent 创建或 Branch 创建配置表达，不作为日常 Agent command。
 
-AScout 作为 Agent 外部的控制面管理完整 Agent execution。当前支持具备足够拦截点或 Hook 的特定 Agent product；launcher、CLI、library、Command + Skill 和 embedded in-Agent adapter 等其他接入方式留待后续评估。接入方式必须提供足够的 safe point、context/outcome 注入和 operation lifecycle 捕获能力，具体产品适配可以依赖其内部执行结构。
+AScout 作为 Agent 外部的控制面管理完整 Agent execution。当前支持具备足够观察和拦截能力的特定 Agent product，并以 `Command + Skill` 作为基础接入 profile；Hook、embedded in-Agent adapter、launcher 和 library 可以作为不同接入形式，但具体产品能力和实现方式另行定义。当前不承诺对任意 Agent 的完全无修改接入。接入方式必须提供足够的 safe point、context/outcome 注入和 operation lifecycle 捕获能力，具体产品适配可以依赖其内部执行结构。
 
 控制面、Agent 接入侧与外部 Runtime 之间必须具有明确的状态边界，并通过 Runtime Adapter 交换 typed API 数据。控制面拥有 speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图；Agent 接入侧拥有 Agent 执行实体的本地管理上下文、operation 归属、Branch context 和本地 Decision；Runtime 只拥有隔离执行环境及其环境级执行、资源和边界状态。AScout 不定义 Runtime 如何组织环境内部状态；控制面和接入侧只能根据 Adapter 返回的结果和事件更新各自视图，也不向后端传递 Agent prompt、模型格式或 candidate 质量等控制面含义。
 
@@ -92,7 +92,7 @@ Sibling command reuse 是显式受控通信。接收方可以得知结果被复�
 
 ## 5. Branch 的可见执行环境
 
-对任意 Branch B，其可见执行环境由三部分共同组成：
+对任意 Branch B，其可见执行环境由以下部分共同组成：
 
 - B 已建立独立环境后的 local state（若已建立）；
 - B 在 branch barrier 上获得的 execution base，或在 lazy 创建独立环境时实际使用的 execution base；

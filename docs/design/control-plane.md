@@ -42,7 +42,7 @@ Policy Engine 是可替换 Policy 进入控制面的固定入口。它在 Policy
 
 ### 2.3 Adapter Registry
 
-Adapter Registry 是 Runtime Adapter 进入控制面的固定入口，负责 Adapter 的接入登记、契约兼容性检查、能力声明校验和接入时主动语义测试。接入验证应尽可能通过真实环境操作完成；运行期持续验证用于发现主动验证遗漏和实际偏差，不代替接入验证。
+Adapter Registry 是 Runtime Adapter 进入控制面的固定入口，负责 Adapter 的接入登记、契约兼容性检查、能力声明校验，以及建立验证环境、执行验证场景和观察结果。接入验证应尽可能通过真实环境操作完成；运行期持续验证用于发现接入验证遗漏和实际偏差，不代替接入验证。
 
 Adapter Registry 维护 Adapter 的接入状态、契约版本、能力声明快照和校验结果，但不持有 Speculative Tree、Branch 生命周期或 Runtime 的执行状态。它向 Policy Engine 发布能力事实及其验证状态。未验证能力默认视为不可用，只有部署方主动确认后才能在指定部署范围内使用；验证失败不能通过确认绕过。具体的 operation/event 契约与校验标准见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
 

@@ -107,6 +107,9 @@
 - 已收敛：`runtime-adapter-contract.md` 定义正式的能力声明、Registry 解析与验证、固定环境操作、结果/事件语义和能力降级；`runtime-adapter.md` 只负责依据该契约指导 Adapter 的实现、声明编写、主动验证、注册、排查和实现选择。两篇文档不再拆出第三篇 operation/event 文档。
 - 已收敛：Adapter 声明描述当前实例、当前 Runtime 配置下的实际隔离保证，不描述理论最大能力。隔离内容按 `process`、`workspace`、`memory`、`I/O`、`network`、`resource` 和 `environment-local control surface` 分别声明，并使用 `visibility`、`modification`、`interference`、`lifetime`、`cleanup`、`scope`、`limitations` 等维度；`input`、`outcome`、Branch context 和外部业务效果分别属于受控信息流或 Effect/Service Adapter。
 - 已收敛：Adapter 配置注册后不得运行期变化。若实际能力与声明不符，全部任务使用降级后的已验证范围；依赖失效能力的投机活动停止并清理，不依赖的活动可以继续；重新验证通过后才恢复新的能力范围。
+- 已收敛：Adapter 契约使用形式化的 `AdapterDeclaration -> CapabilityView` 模型。声明描述当前 Adapter 实例和当前 Runtime 配置下的实际隔离保证；`ContentIsolation` 按 `content`、`visibility`、`modification`、`interference`、`lifetime`、`cleanup`、`scope`、`limitations` 描述；Registry 解析、规范化、主动验证并附加验证状态，Policy Engine 再将 Policy 要求与能力视图匹配。最终 wire schema 和属性枚举留待实现阶段，但必须保持该对象关系与验证语义。
+- 已确认：`runtime-adapter.md` 中的工作表用于把 Adapter 的声明落实为 Runtime 机制、可观察证据和验证方案，为 Registry 的主动验证准备依据；它不是新的对外契约。没有设计依据或实际证据的“常见错误”清单不进入接入指南；实现部分统一说明 Adapter 作者可自行选择的实现方式。
+- 已收敛：接入验证由 Adapter Registry 自主完成。Registry 建立验证环境、执行验证场景并观察结果；Adapter 只提交声明并提供建立验证环境、执行环境操作和观察结果所需的接入信息，不提交自测结果作为接入证明。`runtime-adapter.md` 不包含 Adapter 内部工程实现方式或 Adapter 作者自建验证方案。
 
 ### 控制面 §2 组件与状态的引入与整体职责
 
