@@ -17,8 +17,8 @@
 | `resolve()` | Resolution barrier 的验证部分 | 层间映射 |
 | Equivalence `≈` | Proposal compatibility 条件 | 层间映射 |
 | Branch | Speculative Tree 中的子树 | 同一结构实体 |
-| Branch Node | Branch 的根节点 | 同一结构实体 |
-| Instance | Runtime 中承载已建立独立环境的 Branch Node 的执行单元 | 逻辑 Branch 建立独立环境后对应 |
+| Branch Root | Branch 的根节点 | 同一结构实体 |
+| Instance | Runtime 中承载已建立独立环境的 Branch Root 执行活动的执行单元 | 逻辑 Branch 建立独立环境后对应 |
 | OutcomeSlot | 同名同义 | 共享语义 |
 | Predictor | 无直接对应 | 底座独有 |
 | Salvage | 无直接对应 | 底座独有 |
@@ -27,10 +27,10 @@
 ## 系统级
 
 - **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，位于投机策略与执行机制之间，分离策略决策与具体运行时实现，使 Agent 能无修改地接入并获得投机执行能力。（`../mental-model.md`；`../architecture.md`；`../design-model.md`）
-- **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Node 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
+- **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Root 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
 - **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；端用户通过它直接操作当前有效的权威执行主线，只看到该路径的内容与交互。（`../mental-model.md` §4.2；`agent-integration.md` §3）
-- **Agent 接入侧**：四侧调用路径的入口侧，包含 Agent/product integration，以及 Interposer、ASC-Daemon 和其他产品接入职责；其中 Interposer 统一承担 Agent 拦截与 operation integration。（`../architecture.md` §1；`agent-integration.md`）
+- **Agent 接入侧**：四侧调用路径的入口侧，负责 Agent 执行实体、执行活动、Branch context、operation 归属、Interposer、ASC-Proxy 和 Product Integration 等接入职责；其中 Interposer 统一承担 Agent 拦截与 operation integration。（`../architecture.md` §1；`agent-integration.md`）
 - **控制面**：四侧一级架构的控制侧；包含 Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释；是 AScout 自身实现的 Mechanism 主体，组件与实现见 `control-plane.md`。（`../architecture.md` §1；`control-plane.md`）
 
 - **Runtime Adapter**：四侧调用路径的适配侧；按控制面的接入约定声明并呈现能力、operation result 与 event，并自行负责目标 Runtime 的能力映射、transport 和内部实现。（`../architecture.md` §1；`../development/runtime-adapter.md`）
@@ -40,8 +40,8 @@
 ## 实体
 
 - **Branch**：Speculative Tree 中的一个子树，是树中的计算延续和投机世界的结构实体。（`../mental-model.md` §4.2）
-- **Branch Node**：Branch 对应的根节点，表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
-- **Instance**：在 Runtime 提供的已建立独立环境中，由 Agent 接入侧承载和管理的 Branch Node 实际执行单元；逻辑 Branch 可以在建立独立环境前暂时没有对应 Instance。（`../mental-model.md` §4.2）
+- **Branch Root**：Branch 对应的根节点，具有稳定 identity 并直接拥有该根的 local state；表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
+- **Instance**：在 Runtime 提供的已建立独立环境中，由 Agent 接入侧承载和管理的 Branch Root 执行活动单元；逻辑 Branch 可以在建立独立环境前暂时没有对应 Instance。（`../mental-model.md` §4.2）
 - **Proposal** `î`：具有全局唯一 `ProposalId` 的投机候选输入；候选 Branch 基于其 payload 提前执行后续步骤。（`../design-model.md` §3.1；`policy-decisions.md` §2.3）
 - **AssumptionSet**：Instance/SpecTask 携带的未决 Proposal ID 集合（`frozenset[ProposalId]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`../design-model.md` §3.1；`policy-decisions.md` §4.2）
 - **Edge**：一个投机机会，是投机执行的抽象模型与 Policy 的作用对象；同一条 Edge 上可以有多个 Proposal。可投机性由 `effect`、`admit` 及相应能力校验共同决定，不另设 admissibility 元数据。（`../design-model.md` §3.1；`policy-decisions.md`）
@@ -75,7 +75,7 @@
 - **Speculation Coordinator**：控制面内全局投机视图与控制循环的协调核心；维护 Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系，激活受影响的 Policy Decision，协调 semantic operation，经 Runtime Adapter 执行并根据结果和事件更新视图。（`control-plane.md` §2.4）
 - **Effect Coordinator**：控制面内共享、外部及 Policy 要求纳管效果的协调者；通过控制面内注册的服务效果插件处理命令或 URL，可直接生成明确标记并记录来源的模拟响应、拒绝或阻塞请求，也可在需要 Runtime 参与时结合 Policy、Contract 与 Runtime 能力形成处理计划，经 Runtime Adapter 请求 Runtime 执行。它不负责普通 Branch-local 操作，也不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §2.5；`effect-management.md`）
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §2.6；`speculation-contract.md` §3）
-- **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地控制入口，绑定 Branch context，转发 Agent-facing request 并承载 lifecycle event；不拥有全局控制状态。（`agent-integration.md` §2.2）
+- **ASC-Proxy**：Agent 接入侧与控制面之间的受管通信代理，负责会话、身份确认以及 request、fact、result 和 event 的双向传递；不拥有全局控制状态。（`agent-integration.md` §2.2）
 - **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 执行和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）
 - **Agent Control Gateway**：控制面面向 Agent 接入侧的受管通信边界；管理 Task 启动、Agent 接入侧会话、Policy dialect、本地 Decision 结果、decision log 与受管控制请求的双向传递。Runtime 创建 Branch 执行环境后，它在该环境内创建并启动 Agent 接入侧；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态。（`control-plane.md` §2.1）
 

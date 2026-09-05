@@ -61,7 +61,7 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 3. Runtime Adapter；
 4. Runtime。
 
-这四侧不再直接作为 AScout 源码或子文档的一一对应拓扑。Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger 位于控制面内部；Interposer、ASC-Daemon 及产品接入方式位于 Agent 接入职责。控制面定义 Runtime Adapter 的接入边界，但 Adapter 作者自行负责目标 Runtime 的能力映射、transport 与事件规范化。Runtime 是外部后端，不属于 AScout 可定义的实现模块。
+这四侧不再直接作为 AScout 源码或子文档的一一对应拓扑。Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger 位于控制面内部；Interposer、ASC-Proxy 及 Product Integration 位于 Agent 接入职责。控制面定义 Runtime Adapter 的接入边界，但 Adapter 作者自行负责目标 Runtime 的能力映射、transport 与事件规范化。Runtime 是外部后端，不属于 AScout 可定义的实现模块。
 
 Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义不绑定具体 crate、模块、进程或服务边界。
 

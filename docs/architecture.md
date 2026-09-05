@@ -4,9 +4,9 @@
 
 ## 1. 架构总览
 
-AScout 的完整调用路径涉及四侧。控制面居于中间，两端分别通过 Adapter 类边界连接：一侧是 Agent 接入侧，其内部 Interposer 承担 Agent 侧的拦截与操作集成，ASC-Daemon 承担本地控制通信；另一侧是外部执行 Runtime，通过 Runtime Adapter 接入。Agent 接入侧与控制面是 AScout 自身可以定义和实现的系统部分；Runtime Adapter 是面向控制面的接入实现；Runtime 是 AScout 依赖但不拥有的外部能力来源。
+AScout 的完整调用路径涉及四侧。控制面居于中间，两端分别通过 Adapter 类边界连接：一侧是 Agent 接入侧，其内部 Interposer 承担 Agent 侧的拦截与操作集成，ASC-Proxy 承担受管控制通信；另一侧是外部执行 Runtime，通过 Runtime Adapter 接入。Agent 接入侧与控制面是 AScout 自身可以定义和实现的系统部分；Runtime Adapter 是面向控制面的接入实现；Runtime 是 AScout 依赖但不拥有的外部能力来源。
 
-Agent 接入侧围绕一组 Agent 进程及其执行活动提供端侧管理。Branch 为执行活动提供逻辑归属，端侧管理节点为每个 Branch 承载独立的本地管理上下文；控制面通过接入侧获取 Agent 行为事实、发出控制命令，并协调 Branch 与 Instance 的全局状态。一个端侧管理节点可以在共享执行环境中承载多个 Branch 上下文，Branch 建立独立环境后，其管理上下文随执行活动进入相应环境。
+Agent 接入侧围绕一组 Agent 进程及其执行活动提供本地管理。Branch 为执行活动提供逻辑归属，Agent 接入侧为每个 Branch 承载独立的本地管理上下文；控制面通过接入侧获取 Agent 行为事实、发出控制命令，并协调 Branch 与 Instance 的全局状态。多个 Branch 可以在共享执行环境和接入侧承载中共存，Branch 建立独立环境后，其管理上下文随执行活动进入相应环境。
 
 控制面负责维护投机执行过程当中 Agent 的控制状态，特别是由多次投机执行组合嵌套形成的拓扑结构。同时还负责执行过程中的决策和检查，Policy 和 Adapter 都以可插拔的形式与该结构连接。这也意味着控制面还负责根据 Adapter 接入契约校验其是否符合 AScout 所要求的基本语义，并解析回传事件；加载与校验 Policy，并检查 Adapter 所声明和呈现的后端能力是否满足 Policy 需求。逻辑 Branch 可以先进入控制面视图，独立 Runtime 环境按需建立，不要求每次投机执行都立即 fork。
 
@@ -49,12 +49,12 @@ sequenceDiagram
 
 | 侧面 | 组件 | 状态 |
 |---|---|---|
-| Agent 接入侧 | Interposer（拦截与操作集成）、ASC-Daemon（本地控制通信）、Integration（产品接入） | 当前 Agent 与 Branch 的本地执行上下文 |
+| Agent 接入侧 | Interposer（拦截与操作集成）、ASC-Proxy（受管控制通信）、Product Integration（产品接入） | 当前 Agent 与 Branch 的本地执行上下文 |
 | 控制面 | Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator、Effect Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、Adapter 接入状态 |
 | Runtime Adapter | 实现控制面接入边界、能力映射、通信与事件规范化；内部实现由 Adapter 作者决定 | 不向控制面呈现第二份长期权威状态 |
 | Runtime | 内部组件由外部 Runtime 自行决定 | 隔离执行环境及其环境级执行、进程、资源和边界状态；仅经 Adapter 暴露控制面所需的可观察结果 |
 
-特别的，ASC-Daemon、Interposer 等 Agent 侧组件运行在 Agent 执行实体当前使用的执行环境内；该环境可以是多个逻辑 Branch 暂时共享的执行环境，也可以是 Runtime 为某个 Branch 建立的独立环境。
+特别的，ASC-Proxy、Interposer 等 Agent 接入侧组件可以运行在 Agent 执行实体当前使用的执行环境内；该环境可以是多个逻辑 Branch 暂时共享的执行环境，也可以是 Runtime 为某个 Branch 建立的独立环境。
 
 ## 4. 相关文档
 

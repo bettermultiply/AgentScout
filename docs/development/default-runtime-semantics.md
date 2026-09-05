@@ -21,7 +21,7 @@ Runtime 为 Branch 的 Instance 提供执行承载。承载可以从 Branch barr
 - 资源、权限与环境内控制入口；
 - 停止、残留和 cleanup。
 
-这些内容是 Runtime/Adapter 的能力与验证对象，不是 Branch Node 的结构定义。
+这些内容是 Runtime/Adapter 的能力与验证对象，不是 Branch Root 的结构定义。
 
 ## 3. 可选的强化语义
 

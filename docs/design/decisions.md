@@ -46,13 +46,13 @@
 
 **原因**：接受的是完整 candidate subtree，而不是把 candidate 压平回 parent identity。保留 winner identity 和 descendants 可以让 Accept 成为树指向变换，并避免强制 bottom-up。
 
-## D-015：Branch 与 Branch Node 如何区分？
+## D-015：Branch 与 Branch Root 如何区分？
 
-**选择**：Branch 表示 Speculative Tree 中的一个子树，是计算延续和投机世界的结构实体；Branch Node 是该子树的根节点。每棵 Speculative Tree 从 root Authority Instance 对应的 root Branch Node 开始；Branch Node 直接拥有 local state，并包含零个或多个 child Branch Node。逻辑 Branch 可以先存在并推进；需要独立执行状态时才由 Runtime 建立 Instance。
+**选择**：Branch 表示 Speculative Tree 中的一个子树，是计算延续和投机世界的结构实体；Branch Root 是该子树的根节点。每棵 Speculative Tree 从 root Authority Instance 对应的 root Branch Root 开始；Branch Root 直接拥有 local state，并包含零个或多个 child Branch Root。逻辑 Branch 可以先存在并推进；需要独立执行状态时才由 Runtime 建立 Instance。
 
-**术语**：`local state of A` 只表示 Branch Node A 直接拥有的状态层；`Branch A` 表示 A 以及全部 descendants 构成的子树。不再使用 `subtree(A)` 作为现行术语。
+**术语**：`local state of A` 只表示 Branch Root A 直接拥有的状态层；`Branch A` 表示 A 以及全部 descendants 构成的子树。不再使用 `subtree(A)` 作为现行术语。
 
-**原因**：Branch 操作以整个子树为范围，而控制面和 Runtime 仍需要指称其根节点及其对应执行单元。显式区分 Branch 与 Branch Node 可以避免把子树范围和单节点状态混为一谈。
+**原因**：Branch 操作以整个子树为范围，而控制面和 Runtime 仍需要指称其根节点及其对应执行单元。显式区分 Branch 与 Branch Root 可以避免把子树范围和单节点状态混为一谈。
 
 ## D-016：Ancestor 输入直接 fan-out 到 descendants
 
@@ -246,23 +246,23 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **原因**：Agent 只需要表达自身意图，不应承担 Runtime 内部 outcome routing、capability transfer 或状态机复合操作。缩小 routine surface 可以避免裸 identity、隐式权限和 profile-specific lifecycle。
 
-## D-038：ASC-Daemon 作为 Agent-facing context boundary
+## D-038：ASC-Proxy 作为 Agent-facing context boundary
 
-**选择**：CLI/library 不直接向 Agent Control Gateway 发送请求，而是先调用当前 Branch 隔离环境内的 ASC-Daemon。ASC-Daemon 通过自身绑定的 AScoutAgent/Branch context 隐藏当前身份，并将 resolved typed request 转交给 Agent Control Gateway。
+**选择**：CLI/library 不直接向 Agent Control Gateway 发送请求，而是先调用当前 Agent 接入侧提供的 ASC-Proxy。ASC-Proxy 通过自身绑定的 AScoutAgent/Branch context 隐藏当前身份，并将 resolved typed request 转交给 Agent Control Gateway。
 
-**Agent Control Gateway 边界**：Agent Control Gateway 不从 caller context 重新解析 AScoutAgent、Branch 或 capability，也不直接接触 Runtime。它接收 ASC-Daemon 已解析的请求并交给控制面中的相应组件；控制面拥有 AScoutAgent/Branch metadata，并负责后续 lifecycle orchestration 与 Runtime 交互。Runtime 创建 Branch 执行环境后，Agent Control Gateway 在该环境内创建并启动 Agent 接入侧，形成完整的 Branch Node。
+**Agent Control Gateway 边界**：Agent Control Gateway 不从 caller context 重新解析 AScoutAgent、Branch 或 capability，也不直接接触 Runtime。它接收 ASC-Proxy 已解析的请求并交给控制面中的相应组件；控制面拥有 AScoutAgent/Branch metadata，并负责后续 lifecycle orchestration 与 Runtime 交互。Runtime 创建 Branch 执行环境后，Agent Control Gateway 在该环境内创建并启动 Agent 接入侧，形成完整的 Branch Root 执行承载。
 
-**运输约束**：ASC-Daemon 的具体 transport 不属于 AScout 语义。当前实现计划使用 Branch 隔离环境内约定端口的 HTTP Server；HTTP wire format、端口数值和 server/client 部署细节属于实现决策，不能改变 Agent-facing operation semantics。
+**运输约束**：ASC-Proxy 的具体 transport 不属于 AScout 语义。它可以由进程内组件、本地 IPC 客户端、网络客户端或独立进程实现；wire format、端口数值和 client/server 部署细节属于实现决策，不能改变 Agent-facing operation semantics。
 
 **范围**：当前 AScoutAgent 只表示控制面 Speculative Tree metadata；Runtime connection 与受管启动 handshake 留待后续议题。
 
-**原因**：把上下文隐藏和本地调用入口收敛到 ASC-Daemon，可以让 CLI/library 使用稳定的无身份请求，同时保持 Agent Control Gateway 的统一通信边界，并将控制面与 Runtime 的状态责任分开。
+**原因**：把上下文隐藏和本地调用入口收敛到 ASC-Proxy，可以让 CLI/library 使用稳定的无身份请求，同时保持 Agent Control Gateway 的统一通信边界，并将控制面与 Runtime 的状态责任分开。
 
 ## D-039：四侧一级架构
 
 **选择**：AScout 的完整调用路径按 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 组织。AScout control 请求通常沿该方向下行，结果与事件沿相反方向返回。四侧是逻辑责任与 API 边界，不直接等同于四个由 AScout 拥有的子系统，也不直接等同于 crate、进程、服务或部署单元。
 
-**Agent 接入侧**：包含 Agent/product，以及 Interposer、ASC-Daemon 和其他产品接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
+**Agent 接入侧**：包含 Agent/product，以及 Interposer、ASC-Proxy 和 Product Integration 等接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
 
 **控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或独立环境建立状态。
 

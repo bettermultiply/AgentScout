@@ -8,39 +8,39 @@
 
 ## 1. Branch 与 Speculative Tree
 
-Branch 是 Speculative Tree 中的子树，也是可继续运行和继续分叉的计算延续。每个 Branch 的根节点称为 Branch Node；Branch Node 直接拥有自己的 local state，并可包含零个或多个 child Branch Node。
+Branch 是 Speculative Tree 中的子树，也是可继续运行和继续分叉的计算延续。每个 Branch 的根节点称为 Branch Root；Branch Root 直接拥有自己的 local state，并可包含零个或多个 child Branch Root。
 
 一棵 Speculative Tree 可以直观地表示为：
 
 ```text
 Speculative Tree T
-└── Branch Node r
+└── Branch Root r
     ├── local state of r
-    ├── Branch Node a
+    ├── Branch Root a
     │   ├── local state of a
-    │   └── Branch Node c
+    │   └── Branch Root c
     │       └── local state of c
-    └── Branch Node b
+    └── Branch Root b
         └── local state of b
 ```
 
-形式化地，令 `T = (N, parent)` 为一棵以 `r` 为根的有根树，其中 `N` 是 Branch Node 集合，`parent` 描述节点之间的派生关系。对任意节点 `n ∈ N`：
+形式化地，令 `T = (R, parent)` 为一棵以 `r` 为根的有根树，其中 `R` 是 Branch Root 集合，`parent` 描述根之间的派生关系。对任意根 `r_n ∈ R`：
 
 ```text
-BranchNode(n) = n 及其直接拥有的 local state
-Branch(n)     = n 及其全部 descendants 构成的子树
-children(n)   = n 的直接 child Branch Node 集合
+BranchRoot(r_n) = r_n 及其直接拥有的 local state
+Branch(r_n)     = r_n 及其全部 descendants 构成的子树
+children(r_n)   = r_n 的直接 child Branch Root 集合
 ```
 
-因此，`local state of n` 不包含 child Branch Node；`Branch n` 则包含 `n` 以及它的全部 descendants。Speculative Tree 从 root Authority Instance 对应的 root Branch Node 开始；状态本身不是另一棵独立的树。
+因此，`local state of r_n` 不包含 child Branch Root；`Branch r_n` 则包含 `r_n` 以及它的全部 descendants。Speculative Tree 从 root Authority Instance 对应的 root Branch Root 开始；状态本身不是另一棵独立的树。
 
-一个 AScoutAgent 恰好拥有一棵控制面 Speculative Tree。Branch Node identity、candidate handle、capability、commit/discard 和 resolution 都只在这棵 tree 内有意义；同一部署承载多个 AScoutAgent 不形成更高层的 Branch 关系。
+一个 AScoutAgent 恰好拥有一棵控制面 Speculative Tree。Branch Root identity、candidate handle、capability、commit/discard 和 resolution 都只在这棵 tree 内有意义；同一部署承载多个 AScoutAgent 不形成更高层的 Branch 关系。
 
 ## 2. Branch 状态、身份与依赖
 
-Branch Node 在 Speculative Tree 中存在，与对应执行活动当前是否 running、waiting 或 suspended 是两套正交状态。一个 live Branch Node 可以暂时没有正在占用 CPU 的执行活动，但仍保留 parent/child relationship、Branch 状态和 capabilities，并可在事件到达后恢复。AScout 不为此引入 `lineage` 实体或专门术语。
+Branch Root 在 Speculative Tree 中存在，与对应执行活动当前是否 running、waiting 或 suspended 是两套正交状态。一个 live Branch Root 可以暂时没有正在占用 CPU 的执行活动，但仍保留 parent/child relationship、Branch 状态和 capabilities，并可在事件到达后恢复。AScout 不为此引入 `lineage` 实体或专门术语。
 
-Branch 可以关联一个或多个承载其执行活动的 Instance。Instance 绑定到一个 Branch Node，并承载该 Branch 的执行活动；逻辑 Branch 可以在 Instance 建立前先存在并推进。
+Branch Root 可以关联一个或多个承载其执行活动的 Instance。Instance 绑定到一个 Branch Root，并承载该 Branch Root 所属 Branch 的执行活动；逻辑 Branch 可以在 Instance 建立前先存在并推进。
 
 每个 candidate Branch 携带其路径上的未决 Proposal ID 集合：
 

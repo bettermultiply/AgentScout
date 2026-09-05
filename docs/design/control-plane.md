@@ -6,7 +6,7 @@
 
 控制面是抽象责任模型中 Mechanism 的实现主体，也是 Speculation Contract 的实现方。其主要目的是协调整个投机执行过程，并为 Policy 与 Runtime Adapter 的接入和运行提供协调与验证，避免策略意图与后端能力之间因语义不匹配而无法正确执行。
 
-控制面为每个 task 维护一棵完整的 Speculative Tree 控制面视图。对外这棵树以单一 Agent 的形式呈现给用户，对内我们将这棵树视作整个投机执行生命周期中由多个子树组成的派生嵌套关系。
+控制面为每个 task 维护一棵完整的 Speculative Tree 控制面视图。对外这棵树以单一 Agent 的形式呈现给用户，对内我们将这棵树视作整个投机执行生命周期中由多个子树组成的派生嵌套关系。这个单一 Agent 视图和控制域称为 `AScoutAgent`。
 
 控制面的工作方式是一条贯穿 Policy、控制结构与外部 Runtime 的闭环，Policy 的表达与 Runtime Adapter 的接入都经由控制面获得一致的校验与编排。
 
@@ -28,7 +28,7 @@
 
 ### 2.1 Agent Control Gateway
 
-Agent Control Gateway（以下简称 ACGateway）是控制面面向 Agent 接入侧的受管通信边界，负责统一管理控制面与接入侧之间的通信。它接收某个 Task 的开始请求，并在控制面协调下建立逻辑 Branch Node；当该 Branch 需要独立执行环境时，Runtime 创建对应的 Branch 执行环境，ACGateway 再在该环境内创建并启动对应的 Agent 接入侧，二者共同形成完整的物理执行节点。尚未建立独立环境的 Branch 可以先由受控接入侧在共享执行视图中推进。
+Agent Control Gateway（以下简称 ACGateway）是控制面面向 Agent 接入侧的受管通信边界，负责统一管理控制面与接入侧之间的通信。它接收某个 Task 的开始请求，并在控制面协调下建立逻辑 Branch Root；当该 Branch 需要独立执行环境时，Runtime 创建对应的 Branch 执行环境，ACGateway 再在该环境内创建并启动对应的 Agent 接入侧，二者共同形成完整的物理执行节点。尚未建立独立环境的 Branch 可以先由受控接入侧在共享执行视图中推进。
 
 Task 运行期间，它维护与 Agent 接入侧之间的通信会话，双向传递控制面与接入侧所需的信息和命令，包括 Policy dialect、本地 Decision 结果、decision log、运行事件和受管控制请求，并进行入口级的上下文、权限和格式检查。除通信会话所需的暂时状态外，它不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态。
 
@@ -52,7 +52,7 @@ Adapter Registry 不直接编排 Branch 生命周期，也不替代 Speculation 
 
 ### 2.4 Speculation Coordinator
 
-Speculation Coordinator 是控制面的全局投机视图与控制循环的协调核心。它维护每个 Task 的 Speculative Tree 视图，以及 Edge、Branch、Proposal、`AssumptionSet`、待选机会、调度状态和逻辑视图与 Runtime 实际状态之间的对应关系。它接收 Agent 接入侧的事件，以及 Runtime 经 Runtime Adapter 规范化后返回的结果和事件，据此更新全局视图，识别受影响的 Edge/Branch，并判断当前被激活的 Policy Decision。
+Speculation Coordinator 是控制面的全局投机控制器，持有全局投机视图并驱动控制循环。它维护每个 Task 的 Speculative Tree 视图，以及 Edge、Branch、Proposal、`AssumptionSet`、待选机会、调度状态和逻辑视图与 Runtime 实际状态之间的对应关系。它接收 Agent 接入侧的事件，以及 Runtime 经 Runtime Adapter 规范化后返回的结果和事件，据此更新全局视图，识别受影响的 Edge/Branch，并判断当前被激活的 Policy Decision。
 
 Speculation Coordinator 通过 Policy Engine 执行需要全局视图的 Decision，并接收 Agent 接入侧已经完成的、不依赖或不改变全局状态的本地 Decision 结果；对已经满足本地范围条件的 Decision 不重复执行。它根据 Policy Decision 和当前全局视图协调各专业组件形成操作意图，将这些意图编排为 semantic operation：需要 Runtime 参与的操作经统一的控制面操作出口交给 Runtime Adapter，Effect Coordinator 在控制面内直接处理的效果则通过 Agent Control Gateway 返回结果，并根据结果或事件继续更新全局视图。
 
