@@ -351,7 +351,7 @@ Fidelity 不是独立的 Policy Decision，而是由决策组合、Runtime 能�
 | **Bounded-degradation** | 明确允许有损，但退化受到声明的边界约束 |
 | **Best-effort** | 不提供严格的等价或退化保证 |
 
-具体的 Fidelity 字段、Contract 校验和运行期校验见 [Speculation Contract 设计](speculation-contract.md)。
+具体的 Fidelity 字段、Contract 校验和运行期校验见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
 
 ## 6. Policy 与 Mechanism 的边界
 

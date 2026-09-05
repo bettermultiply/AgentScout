@@ -48,7 +48,7 @@ Context、direct children、candidate 创建、commit、accept、discard 和 eve
 
 ## Loser 的进程和资源会怎样？
 
-AScout 只接受能够通过 Adapter 证明其后端可管理完整 Agent process tree 和 Branch-private resources 的接入。Accept 或 discard 的结果必须表明 loser processes、resources、state 和受管 effect obligations 已被清理；这不能只依赖 Agent 自愿合作。
+AScout 只接受能够通过 Adapter 证明其 Runtime 能提供隔离执行环境、环境级资源边界、停止和 cleanup 的接入；Agent 接入侧负责管理完整 Agent process tree 及其 Branch context。Accept 或 discard 的整体结果仍必须表明相关 Agent 执行活动、环境资源和受管 effect obligations 已按各自责任边界收敛，不能只依赖 Agent 自愿合作。
 
 ## External effects 会自动回滚吗？
 
@@ -56,7 +56,7 @@ AScout 只接受能够通过 Adapter 证明其后端可管理完整 Agent proces
 
 ## 默认 Runtime 会 sandbox 恶意 Child 吗？
 
-不会。默认 Runtime 面向可信 Child Agent 和高效 sibling isolation。Identity/capability validation、资源归属、loser cleanup 与受管 effect control 仍是强制正确性要求；对抗恶意 workload 的宿主 containment 需要另行选择 sandbox/hardened Runtime。
+不会。默认 Runtime 面向可信 Child Agent 和高效环境隔离。环境边界、资源归属、停止和 cleanup 仍是强制环境要求；Branch identity、capability validation 和投机 lifecycle 由 Agent 接入侧与控制面负责。对抗恶意 workload 的宿主 containment 需要另行选择 sandbox/hardened Runtime。
 
 ## 当前有可运行实现吗？
 

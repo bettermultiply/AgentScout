@@ -101,6 +101,9 @@
 - 已确认：保留 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 四侧调用路径，但不再将其解释为对称的四个 AScout 子系统或四份实现拓扑。控制面居中，Agent 接入侧是 AScout 自有接入边界，另一端经 Runtime Adapter 使用外部 Runtime。
 - 已收敛：Runtime Adapter 的具体接入契约不并入 `speculation-contract.md`，单独建立 Adapter 契约设计文档；`speculation-contract.md` 只保留 Contract 的总体定位、Policy 与 Adapter 之间的关系，以及到具体契约文档的引用。`runtime-adapter.md` 继续作为面向 Adapter 作者的开发与接入指南。
 - 已收敛：控制面新增 `Adapter Registry`，负责 Runtime Adapter 的接入登记、接入校验和已通过校验的能力信息发布。它是控制面内的固定职责，不是 Runtime Adapter 本身；Policy Engine 使用其发布的能力信息进行 Policy 匹配，Speculation Coordinator 不承担 Adapter 接入登记职责。
+- 已收敛：通用 Runtime 只负责隔离执行环境及其环境级执行、资源和边界状态；完整 Agent 执行实体、Branch context、operation 归属和 capability 路由由 Agent 接入侧管理，Speculative Tree 与 Branch 投机语义由控制面管理。Runtime Adapter 接入检查不能把这些上层职责转嫁给 Runtime。
+- 已收敛：Runtime Adapter 的基础门槛包括建立隔离环境、在环境内建立 Agent 接入侧并执行接入侧无权完成的环境级操作、停止和清理环境，以及继续使用仍有效的环境。隔离是贯穿所有环境操作的固定语义，不是可关闭的 capability；校验按进程、workspace、I/O 与通信、资源、权限、停止残留、cleanup 和继续状态分别进行。
+- 已收敛：Adapter Registry 以接入时主动验证为主要证明手段，运行期持续验证只负责发现主动验证遗漏和实际偏差。能力状态分为已验证、未验证和验证失败；未验证能力默认不可用，但部署方可以主动确认并限制在指定部署范围内使用；验证失败不能通过确认绕过。
 
 ### 控制面 §2 组件与状态的引入与整体职责
 

@@ -76,7 +76,7 @@
 
 ## D-019：Runtime 节点状态与外部 Branch 执行
 
-**选择**：控制面是 AScoutAgent、Speculative Tree 视图和 Branch 关系的权威来源；Runtime 是节点执行状态和执行实体归属的权威来源。Agent 或 CLI 只发出 branch 请求；控制面经 Runtime Adapter 要求 Runtime 在受控 barrier 上分支请求者所属的完整 Agent 进程树，并分别向产生的世界交付结果。
+**选择**：控制面是 AScoutAgent、Speculative Tree 视图和 Branch 关系的权威来源；Agent 接入侧管理 Agent 执行实体及其本地 Branch context；Runtime 管理承载它们的隔离环境及环境级执行状态。Agent 或 CLI 只发出 branch 请求；控制面经 Runtime Adapter 请求建立所需环境，由接入侧在其中承载相应 Agent 执行活动。
 
 **原因**：Agent 调用的 CLI 通常只是短命子进程。让它在自身内部执行 fork 只会复制调用进程，不能满足 D-004 的完整 Agent 进程树语义。
 
@@ -90,7 +90,7 @@
 
 ## D-021：Agent-facing context 与 opaque candidate handle
 
-**选择**：Runtime 内部保留稳定 Branch identity，但 Agent 查询自身 context 时不要求暴露裸 Branch ID。Context 提供动态 depth、lifecycle state、Proposal 和当前 capabilities；depth 是树位置的派生信息，不能替代 identity 或用于推导权限。
+**选择**：控制面保留稳定 Branch identity，Agent 接入侧绑定本地 Branch context，但 Agent 查询自身 context 时不要求暴露裸 Branch ID。Context 提供动态 depth、lifecycle state、Proposal 和当前 capabilities；depth 是树位置的派生信息，不能替代 identity 或用于推导权限。
 
 **Child view**：Branch 可以查询 direct children 的受控 metadata。默认 context 只返回紧凑统计；详细查询返回 session-scoped opaque candidate handle、state、Proposal 和显式 commit summary。Handle 只授权 direct-child 操作，不提供对 sibling、transitive descendant 或 child local state 的读取能力。
 
@@ -114,7 +114,7 @@
 
 **术语**：Branch 是活的计算延续，不称为 Snapshot，目标模型不引入 Snapshot 实体。具体 backend 可以内部使用 checkpoint、VM snapshot 或其他 capture 技术，但不能把实现术语提升为 Branch 语义。
 
-**选择**：在 pending-result boundary，控制面在受控 barrier 上从共同 execution base 登记多个逻辑 Branch。Candidate 可以在 Contract 允许的共享执行视图中接收不同 Proposal 并提前执行后续步骤；当接入侧识别到需要独立状态的操作时，Runtime 再建立对应的完整 Agent 进程树。被要求保护的本地状态在独立环境建立后独立演化，parent later writes 不透明传播；真实步骤结果通过显式 outcome event 交付，文件系统和输入使用各自的状态规则。
+**选择**：在 pending-result boundary，控制面在受控 barrier 上从共同 execution base 登记多个逻辑 Branch。Candidate 可以在 Contract 允许的共享执行视图中接收不同 Proposal 并提前执行后续步骤；当接入侧识别到需要独立状态的操作时，经 Runtime Adapter 请求建立对应的隔离环境，并由接入侧继续管理其中的 Agent 执行实体。被要求保护的本地状态在独立环境建立后独立演化，parent later writes 不透明传播；真实步骤结果通过显式 outcome event 交付，文件系统和输入使用各自的状态规则。
 
 **Parent lane**：Speculation window 内 parent 只负责真实 operation、outcome 发布、受控 evaluation 和 candidate 裁决，不与 candidates 同时推进相同的后续业务。没有 candidate 被接受时 parent 从真实 outcome 继续；接受 candidate 时执行 single-winner replacement，不做 merge。
 
@@ -138,7 +138,7 @@
 
 ## D-027：控制面、Runtime Adapter 与 Runtime 解耦
 
-**状态边界**：控制面拥有 Agent/product integration 的控制语义、speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图。节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理实际存在于外部 Runtime。AScout 不定义 Runtime 内部如何组织或传播这些状态；Runtime Adapter 只向控制面呈现所需能力、结果与事件，不能把后端状态冒充为整体 Speculative Tree 视图。
+**状态边界**：控制面拥有 speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图。Agent 接入侧拥有 Agent 执行实体的本地管理上下文、operation 归属、Branch context 和本地 Decision；Runtime 只拥有隔离环境及其环境级执行、资源和边界状态。AScout 不定义 Runtime 内部如何组织或传播这些状态；Runtime Adapter 只向控制面呈现所需的环境能力、结果与事件，不能把后端状态冒充为整体 Speculative Tree 视图。
 
 **接口**：控制面与 Runtime 经 Runtime Adapter 交换 typed、可版本化的粗粒度 command/event。Runtime Adapter 定义稳定 contract，并把它映射到目标 Runtime 的能力、原语、transport 与事件。控制面不得直接修改 Runtime mutable state；Runtime 不解释 Agent prompt、模型格式、candidate 质量或整体 Speculative Tree 视图。复杂 Proposal 验证可以由持有 validator capability 的控制面计算；obligation 与 Accept 相关的状态转换必须经 Runtime Adapter 交给 Runtime 执行。
 
@@ -158,7 +158,7 @@
 
 ## D-029：外部效果使用声明式 Observation surface
 
-**选择**：Effect Management 管理投机分支对分支外部、共享或最终执行状态产生的影响，以及这些影响在投机期间的暂存、限制、提交、取消和清理。它管理 Branch 运行中需要保护的状态变化，但以共享、可观察的业务变化为描述中心；Branch-local state 主要由 Runtime 自动完成隔离、清理和 winner 延续，Outcome 与 operational footprint 是否纳入额外效果管理由 Policy 决定。AScout 不对所有理论上可能的间接因果影响做无限闭包，而是在 service adapter 声明的 observation surface 和 guarantee horizon 内提供 sibling non-interference。
+**选择**：Effect Management 管理投机分支对分支外部、共享或最终执行状态产生的影响，以及这些影响在投机期间的暂存、限制、提交、取消和清理。它管理 Branch 运行中需要保护的状态变化，但以共享、可观察的业务变化为描述中心；Agent 接入侧管理 Agent 执行实体的本地 Branch context，Runtime 提供其所处的环境隔离和环境级资源边界，Outcome 与 operational footprint 是否纳入额外效果管理由 Policy 决定。AScout 不对所有理论上可能的间接因果影响做无限闭包，而是在 service adapter 声明的 observation surface 和 guarantee horizon 内提供 sibling non-interference。
 
 Semantic effect footprint 包括当前窗口内可直接观察的响应、受管状态、服务契约定义的触发动作，以及直接改变后续请求结果的共享约束。
 

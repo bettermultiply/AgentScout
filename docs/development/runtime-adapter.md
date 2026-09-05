@@ -1,6 +1,6 @@
 # Runtime Adapter 接入指南
 
-本文面向 Runtime Adapter 作者，说明如何把一个外部 Runtime 接到 AScout 控制面。它是开发与接入指南，不定义 Runtime 内部架构，也不把建议实现提升为 AScout 目标语义。控制面接入边界的规范来源是 [Speculation Contract](../design/speculation-contract.md)；完整 operation/event schema 尚未收敛。
+本文面向 Runtime Adapter 作者，说明如何把一个外部 Runtime 接到 AScout 控制面。它是开发与接入指南，不定义 Runtime 内部架构，也不把建议实现提升为 AScout 目标语义。控制面接入边界的规范来源是 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)；完整 operation/event schema 尚未收敛。
 
 ## 1. 接入责任
 
@@ -62,6 +62,7 @@ Adapter 应报告它借助目标 Runtime 能兑现的能力、保证范围、成
 ## 相关文档
 
 - [AScout 架构](../architecture.md)：Runtime Adapter 在四侧调用路径中的位置
-- [Speculation Contract](../design/speculation-contract.md)：控制面接入边界与校验
+- [Speculation Contract](../design/speculation-contract.md)：Policy 与 Adapter 的总体语义关系
+- [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)：具体接入契约与校验要求
 - [控制面设计](../design/control-plane.md)：Adapter 的直接调用方
 - [效果管理设计](../design/effect-management.md)：效果能力与结果要求

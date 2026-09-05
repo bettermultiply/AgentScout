@@ -74,7 +74,7 @@ Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根�
 
 投机产物在验证、提交和必要的状态转换完成前不能进入最终语义状态。效果处理能力不足时，Effect Management 可以让投机执行阻塞在相关效果边界并保留前置进展；只有无法安全阻塞、接受后继续或淘汰后清理时，才拒绝相关环节的投机或明确降级。具体的 `EffectClass × StateDomain` 分类、交叉规则和后端能力要求见 [效果管理设计](design/effect-management.md)。
 
-控制面中的 Effect Coordinator 负责效果分类、计划与协调；外部 Runtime 承载 staged effect、obligation、效果提交生效、隔离和清理等实际状态，Runtime Adapter 负责向控制面呈现这些操作是否完成。前者形成控制计划，后端负责实际执行；AScout 不通过修改控制状态代替后端执行。
+控制面中的 Effect Coordinator 负责效果分类、计划与协调；相应的 Effect backend 承载 staged effect、obligation、效果提交生效和清理等实际效果状态，Runtime 负责隔离执行环境及其环境级状态，Agent 接入侧负责 Agent 执行实体和本地投机上下文。Runtime Adapter 负责向控制面呈现各自负责的操作是否完成。前者形成控制计划，后端负责实际执行；AScout 不通过修改控制状态代替后端执行。
 
 ### 3.3 Speculation Contract
 
@@ -82,7 +82,7 @@ Speculation Contract 约束 Policy 的表达以及 Runtime Adapter 在控制面�
 
 Policy Engine 在加载或任务准入时检查 Policy 的决策取值能否由当前接入的后端能力承载；无法满足时必须拒绝，或明确报告降级。运行期间，控制面通过 Authority、validator、效果处理和 Runtime 返回的实际结果检查声明是否被兑现。
 
-Contract 不拥有 Branch 或 Runtime 的运行状态，也不直接约束 Runtime 内部实现。具体的契约语义、校验路径、降级结果和运行期证据见 [Speculation Contract 设计](design/speculation-contract.md)，控制面如何落实见 [控制面设计](design/control-plane.md)。
+Contract 不拥有 Branch 或 Runtime 的运行状态，也不直接约束 Runtime 内部实现。总体关系见 [Speculation Contract 设计](design/speculation-contract.md)，Runtime Adapter 的具体契约、校验路径、降级结果和运行期证据见 [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)，控制面如何落实见 [控制面设计](design/control-plane.md)。
 
 ## 4. 跨领域设计约束
 

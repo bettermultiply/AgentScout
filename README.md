@@ -13,7 +13,7 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 - 新实现使用 Rust。具体 crate、模块、进程和部署边界按四侧 ownership 重新决定（D-024-I）。
 - 扩展点的职责语义已确认：Execution、Workspace、Input、Effect 和 Outcome 属于 Runtime；Interposer 属于 Agent 接入侧，统一负责识别 pending-result boundary、保证真实 operation 只执行一次并自动发布 outcome。
 - 默认 Runtime 面向可信 Child Agent，优先高效 sibling isolation；对抗恶意 workload 的 containment 由另行选择的 Runtime 提供。
-- Runtime 必须强制维护 identity/capability、sibling isolation、资源归属、loser cleanup 和受管 external effect 路径。
+- Runtime 必须强制维护隔离环境、环境级资源边界、环境内受控操作、停止和 cleanup；Agent 接入侧负责 Agent 执行实体、Branch context、operation 归属和 capability 路由，受管 external effect 由相应 Effect backend 负责。
 
 ## 文档
 

@@ -1,6 +1,6 @@
 # Speculation Contract 设计
 
-Speculation Contract 是 AScout 用于规范用户自定义 Policy，并定义 Runtime Adapter 控制面接入边界的契约。它通过主动的静态校验和运行期校验，保证 Policy 意图与 Adapter 实际呈现的后端能力保持一致，避免 Policy 的制订或 Adapter 的接入结果破坏 AScout 的抽象。AScout 不通过这份 Contract 定义 Runtime 内部实现。
+Speculation Contract 是 AScout 用于规范用户自定义 Policy，并规定 Policy 与 Runtime Adapter 接入契约之间关系的总体契约。具体的 Runtime Adapter 接入契约、能力声明、operation/event 和校验要求见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。AScout 不通过这份 Contract 定义 Runtime 内部实现。
 
 ## 1. Contract 的定位
 
@@ -46,17 +46,9 @@ Policy 通过 Policy Decision 表达策略，其设计空间已经被约束，�
 
 检查通过后，Policy 的结果仍只是策略意图。实际 Branch、生命周期、效果与 Runtime 操作由控制面固定机制形成，Policy 不能通过返回一个特殊值绕过控制面状态转换。
 
-### 3.2 对 Runtime Adapter：接入校验与运行期校验
+### 3.2 对 Runtime Adapter：具体接入契约
 
-Adapter 由固定接口约束其输入输出形态，但相同的接口约束下，后端实际能提供的隔离度并不相同。投机执行最终要改变真实执行环境——创建和停止进程、管理 workspace 与资源、隔离不同 Branch、处理影响 Branch 外部的效果——这些语义能否达成，取决于 Adapter 能用后端原生能力组合到什么程度。
-
-AScout 不要求后端是专为 AScout 设计的 Runtime。Runtime 可以是通用执行后端，例如容器、虚拟机或一组本地进程管理能力。因此，Adapter 需要先声明它能在控制面边界上提供什么能力，以及它承诺用后端原生能力组合出 AScout 基本操作语义后能保证多大程度的隔离。Adapter 内部如何完成组合不由 Contract 规定。
-
-但往往 Adapter 开发者本身也无法完全保证声称的隔离度符合需求，所以会通过仅接入时进行一次的基本语义测试，来规范其是否正确实现了所声明的隔离状态。接入校验的对象是 Adapter 而不是 Runtime 本身：控制面无法越过 Adapter 直接触碰后端，因此只要 Adapter 能忠实表达基本操作语义，就代表它背后的 Runtime 具备接入资格；反过来，一个后端能力再强，如果 Adapter 表达不出这些语义，也不能接入。无法完成这些语义时，该 Adapter 没有完整接入路径；对于基本语义之上的附加能力，Adapter 报告支持范围和限制，供 Policy Engine 判断具体策略是否有可行执行路径。
-
-同时由于基本测试难以覆盖所有场景，同样会通过运行期校验来兜底：运行期间根据实际操作和事件确认 Contract 是否真的被兑现。运行期需要产生的至少包括 Policy 决策及其上下文、Branch 与 Proposal 的状态变化、验证依据、效果与 obligation 的处理结果、资源使用、取消与清理结果，以及 Adapter 映射或 Runtime 执行失败。Ledger 以异步旁路记录这些事实，用于状态对齐、问题定位、shadow/replay 和契约校验。接入时检查只能确认声明在形式上相容，运行期校验才能发现"声明与实际不符"并触发对应处理。
-
-运行期间，Adapter 不能静默放宽 AScout 语义。它把 discard 翻译成后端真正停止对应执行并处理资源与效果的动作，而不是降成"删除一条记录"；把 accept 翻译成后端完成对应状态转换，而不是只返回"请求已发送"。后端确实无法完成某个语义时，Adapter 应返回明确失败或部分完成结果。
+Runtime Adapter 的具体接入契约、能力声明、接入校验、运行期校验和 operation/event 边界，见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。本 Contract 只规定这些具体约束必须服务于 Policy 与后端能力的语义对齐，不在此重复定义 Adapter 接口。
 
 ### 3.3 失败如何处理
 
@@ -97,6 +89,7 @@ Policy 产生推进或处置决策
 ## 相关文档
 
 - [控制面设计](control-plane.md)：控制面如何作为 Mechanism 落实 Contract
+- [Runtime Adapter 契约设计](runtime-adapter-contract.md)：Runtime Adapter 的具体接入契约与校验要求
 - [Policy Decisions 设计](policy-decisions.md)：Policy 决策面
 - [Branch 语义设计](branch-semantics.md)：Branch 生命周期
 - [效果管理设计](effect-management.md)：状态与效果
