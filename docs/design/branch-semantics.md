@@ -32,9 +32,9 @@ AScout 向 Agent 提供三类生命周期能力：创建 candidate Branch、提�
 
  Routine Agent-facing control surface 暂时只保留两类查询和五类 lifecycle/activity operation placeholders：查询自身 `context`、查询 direct `children`、`branch`、`commit`、`accept`、`discard` 和等待 event。`branch` 表示从当前 Branch 创建一个或多个 direct child；在投机场景中这些 child 才按角色称为 candidate。CLI 与 embedded function 调用先进入当前 Branch 隔离环境内的 ASC-Daemon；ASC-Daemon 隐藏并绑定当前 AScoutAgent/Branch context，再把 resolved typed request 交给 Agent Control Gateway。Agent Control Gateway 不从 caller context 重新解析，也不直接接触 Runtime，只把请求交给控制面；控制面再派发到对应 AScoutAgent 的 Branch-level operation。完整 Runtime 语义中 `branch` 可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override，未指定 resolver 时使用 AScoutAgent 配置中的默认 resolver。当前不定义这些 control-surface operation 的完整参数、返回值、阻塞方式、event model 或具体命令拼写；它们仍受已经确定的 Branch lifecycle 语义约束，不能被解释为运行时 no-op。Command 与 Hook 必须调用同一 semantic API。
 
-`PublishOutcome` 是 Runtime Adapter 上必需的 semantic operation，但不作为独立 Agent-facing command。Operation wrapper、Hook、effect broker 或 Operation Integration 在真实 operation 完成后自动把结果发布到 OutcomeSlot。Resolver capability 默认由 Parent Agent 持有；需要控制面代为裁决时，delegation 通过 AScoutAgent 创建或 Branch 创建配置表达，不作为日常 Agent command。
+`PublishOutcome` 是 Runtime Adapter 上必需的 semantic operation，但不作为独立 Agent-facing command。Interposer 可以通过 operation wrapper、Hook、effect broker 或其他产品适配机制，在真实 operation 完成后自动把结果发布到 OutcomeSlot。Resolver capability 默认由 Parent Agent 持有；需要控制面代为裁决时，delegation 通过 AScoutAgent 创建或 Branch 创建配置表达，不作为日常 Agent command。
 
-AScout 作为 Agent 外部的控制面管理完整 Agent execution。Command + Skill 是必须支持的基础接入；Agent Hook 与 embedded in-Agent adapter 是可替代的可选增强，不是正确性前提。优先使用 Hook 提供 safe point、context/outcome 注入和 tool lifecycle 捕获；只有 Hook 无法同步阻塞、替换结果、覆盖 sub-agent 或提供必要内部 identity 等能力缺口得到证明后，才引入 embedded adapter。两者不要求同时存在。
+AScout 作为 Agent 外部的控制面管理完整 Agent execution。当前支持具备足够拦截点或 Hook 的特定 Agent product；launcher、CLI、library、Command + Skill 和 embedded in-Agent adapter 等其他接入方式留待后续评估。接入方式必须提供足够的 safe point、context/outcome 注入和 operation lifecycle 捕获能力，具体产品适配可以依赖其内部执行结构。
 
 控制面与外部 Runtime 之间必须具有明确的状态边界，并通过 Runtime Adapter 交换 typed API 数据。控制面拥有 speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图；节点级执行状态、进程与资源归属、barrier、状态隔离、capability、obligation、受控状态转换和清理实际存在于外部 Runtime。AScout 不定义 Runtime 如何组织这些状态；控制面只能根据 Adapter 返回的结果和事件更新自身视图，也不向后端传递 Agent prompt、模型格式或 candidate 质量等控制面含义。
 

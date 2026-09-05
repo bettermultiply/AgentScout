@@ -22,9 +22,10 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 4. [术语表](design/glossary.md)：每个术语的一句话定义、权威出处，以及两套设计视角之间的术语映射。
 5. [Policy Decisions 设计](design/policy-decisions.md)：Policy 可作出的决策集合、阶段映射、扩展边界与 Mechanism 约束。
 6. [效果管理设计](design/effect-management.md)：世界状态分类、EffectClass、StateDomain、提交屏障与外部效果可见性。
-7. [Speculation Contract 设计](design/speculation-contract.md)：约束 Policy 表达与 Runtime Adapter 控制面接入行为的语义对齐契约，及其校验、降级与运行期校验。
-8. [Agent 接入侧设计](design/agent-integration.md)：Agent/product integration、ASC-Daemon、Interposer 与 Operation Integration 的责任边界。
-9. [控制面设计](design/control-plane.md)：控制面作为 Mechanism 的实现主体，如何把 Contract 落到投机执行的控制路径。
+7. [Speculation Contract 设计](design/speculation-contract.md)：Policy 与 Runtime Adapter 之间的总体语义对齐契约。
+8. [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)：Runtime Adapter 面向控制面的具体接入契约与校验要求。
+9. [Agent 接入侧设计](design/agent-integration.md)：Agent/product integration、Interposer 与 ASC-Daemon 的责任边界。
+10. [控制面设计](design/control-plane.md)：控制面作为 Mechanism 的实现主体，如何把 Contract 落到投机执行的控制路径。
 
 ## 使用文档
 

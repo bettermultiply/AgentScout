@@ -30,10 +30,11 @@
 - **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Node 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
 - **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；端用户通过它直接操作当前有效的权威执行主线，只看到该路径的内容与交互。（`../mental-model.md` §4.2；`agent-integration.md` §3）
-- **Agent 接入侧**：四侧调用路径的入口侧，包含 Agent/product integration，以及 CLI、library、launcher、ASC-Daemon、Interposer 与 Operation Integration 等接入职责。（`../architecture.md` §1；`agent-integration.md`）
-- **控制面**：四侧一级架构的控制侧；包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释；是 AScout 自身实现的 Mechanism 主体，组件与实现见 `control-plane.md`。（`../architecture.md` §1；`control-plane.md`）
+- **Agent 接入侧**：四侧调用路径的入口侧，包含 Agent/product integration，以及 Interposer、ASC-Daemon 和其他产品接入职责；其中 Interposer 统一承担 Agent 拦截与 operation integration。（`../architecture.md` §1；`agent-integration.md`）
+- **控制面**：四侧一级架构的控制侧；包含 Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释；是 AScout 自身实现的 Mechanism 主体，组件与实现见 `control-plane.md`。（`../architecture.md` §1；`control-plane.md`）
 
 - **Runtime Adapter**：四侧调用路径的适配侧；按控制面的接入约定声明并呈现能力、operation result 与 event，并自行负责目标 Runtime 的能力映射、transport 和内部实现。（`../architecture.md` §1；`../development/runtime-adapter.md`）
+- **Adapter Registry**：控制面内 Runtime Adapter 的固定接入入口；负责登记、契约兼容性检查、能力声明校验和接入时基本语义测试，并发布已校验的能力信息；不拥有 Runtime 或 Speculative Tree 的执行状态。（`control-plane.md` §2.3；`runtime-adapter-contract.md`）
 - **Runtime**：四侧调用路径中的外部运行侧；提供实际执行、资源、隔离与效果能力，其内部架构不由 AScout 定义。（`../architecture.md` §1）
 
 ## 实体
@@ -75,7 +76,7 @@
 - **Effect Coordinator**：控制面内共享、外部及 Policy 要求纳管效果的协调者；通过控制面内注册的服务效果插件处理命令或 URL，可直接生成明确标记并记录来源的模拟响应、拒绝或阻塞请求，也可在需要 Runtime 参与时结合 Policy、Contract 与 Runtime 能力形成处理计划，经 Runtime Adapter 请求 Runtime 执行。它不负责普通 Branch-local 操作，也不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §2.4；`effect-management.md`）
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §2.5；`speculation-contract.md` §3）
 - **ASC-Daemon**：Agent 接入侧部署在 Branch 隔离环境内的本地控制入口，绑定 Branch context，转发 Agent-facing request 并承载 lifecycle event；不拥有全局控制状态。（`agent-integration.md` §2.2）
-- **Interposer**：Agent 接入侧位于请求路径上的捕获与结果路由组件；具体可观察接缝由 integration profile 决定，不固定为四个接口。（`agent-integration.md` §2.3）
+- **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 执行和 outcome 路由的责任实体；具体可观察接缝由 integration profile 决定。（`agent-integration.md` §2.3）
 - **Agent Control Gateway**：控制面面向 Agent 接入侧的受管通信边界；管理 Task 启动、Agent 接入侧会话、Policy dialect、本地 Decision 结果、decision log 与受管控制请求的双向传递。Runtime 创建 Branch 执行环境后，它在该环境内创建并启动 Agent 接入侧；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态。（`control-plane.md` §2.1）
 
 ## 状态与生命周期

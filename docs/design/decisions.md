@@ -238,7 +238,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **Routine surface placeholders**：Agent-facing surface 暂时只保留查询自身 context、查询 direct children、`branch`、commit、accept、discard 和等待 lifecycle/outcome event 这些 operation slots。`branch` 表示从当前 Branch 创建一个或多个 direct child；投机场景中这些 child 才按角色称为 candidate。当前不决定参数 schema、返回值、阻塞方式、event model 或具体命令拼写；“空操作”表示 control-surface contract 尚未展开，不表示已经确定的 lifecycle operation 在运行时不产生效果。
 
-**Outcome publication**：`PublishOutcome` 保留为经 Runtime Adapter 传递的 lifecycle operation，但不作为独立 Agent-facing command。Operation wrapper、Hook、effect broker 或 Operation Integration 必须在真实 operation 完成后自动把 outcome 发布到对应 OutcomeSlot。
+**Outcome publication**：`PublishOutcome` 保留为经 Runtime Adapter 传递的 lifecycle operation，但不作为独立 Agent-facing command。Interposer 可以通过 operation wrapper、Hook、effect broker 或其他产品适配机制，在真实 operation 完成后自动把 outcome 发布到对应 OutcomeSlot。
 
 **Resolver delegation**：Direct-child resolver capability 默认由 Parent Agent 持有。需要控制面代为裁决时，delegation 作为 AScoutAgent 创建或 Branch 创建配置表达，不提供日常 `delegate-resolver` 命令。
 
@@ -252,7 +252,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **Agent Control Gateway 边界**：Agent Control Gateway 不从 caller context 重新解析 AScoutAgent、Branch 或 capability，也不直接接触 Runtime。它接收 ASC-Daemon 已解析的请求并交给控制面中的相应组件；控制面拥有 AScoutAgent/Branch metadata，并负责后续 lifecycle orchestration 与 Runtime 交互。Runtime 创建 Branch 执行环境后，Agent Control Gateway 在该环境内创建并启动 Agent 接入侧，形成完整的 Branch Node。
 
-**运输约束**：ASC-Daemon 的具体 transport 不属于 AScout 语义。第一版实现可以使用 Branch 隔离环境内约定端口的 HTTP Server；HTTP wire format、端口数值和 server/client 部署细节属于实现决策，不能改变 Agent-facing operation semantics。
+**运输约束**：ASC-Daemon 的具体 transport 不属于 AScout 语义。当前实现计划使用 Branch 隔离环境内约定端口的 HTTP Server；HTTP wire format、端口数值和 server/client 部署细节属于实现决策，不能改变 Agent-facing operation semantics。
 
 **范围**：当前 AScoutAgent 只表示控制面 Speculative Tree metadata；Runtime connection 与受管启动 handshake 留待后续议题。
 
@@ -262,7 +262,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **选择**：AScout 的完整调用路径按 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 组织。AScout control 请求通常沿该方向下行，结果与事件沿相反方向返回。四侧是逻辑责任与 API 边界，不直接等同于四个由 AScout 拥有的子系统，也不直接等同于 crate、进程、服务或部署单元。
 
-**Agent 接入侧**：包含 Agent/product，以及 CLI、library、launcher、Agent integration、ASC-Daemon、Interposer 与 Operation Integration 等接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
+**Agent 接入侧**：包含 Agent/product，以及 Interposer、ASC-Daemon 和其他产品接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
 
 **控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或独立环境建立状态。
 
