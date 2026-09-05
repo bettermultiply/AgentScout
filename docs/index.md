@@ -35,11 +35,9 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 ## 开发文档
 
 1. [开发决策](development/decisions.md)：已经接受的实现架构选择（含 D-024-I：四侧一级架构）。
-2. [开发路线图](development/roadmap.md)：当前实现状态与剩余任务。
-3. [验收状态](development/verification.md)：当前证据和后续 acceptance gates。
-4. [首要验证 Workload](development/reference-workload.md)：delayed-choice coding 场景与指标。
-5. [投机执行底座：抽象设计札记](development/spec-exec-abstraction.md)：投机执行底座的完整研究札记，包括论文调研、轴推导、机制/策略划线、嵌套投机、内部组件与部署视角、问题陈述和评测指标。一级架构以 [AScout 架构](architecture.md) 为准，研究结论的权威条目见 [设计文档 3](design/speculation-decisions.md)。
-6. [Runtime Adapter 接入指南](development/runtime-adapter.md)：面向 Adapter 作者的接入责任、状态边界、实现建议与尚待定义的接口事项。
+2. [首要验证 Workload](development/reference-workload.md)：delayed-choice coding 场景与指标。
+3. [投机执行底座：抽象设计札记](development/spec-exec-abstraction.md)：投机执行底座的论文调研与研究札记。已确定的设计以正式设计文档为准。
+4. [Runtime Adapter 接入指南](development/runtime-adapter.md)：面向 Adapter 作者的接入责任、状态边界、实现建议与尚待定义的接口事项。
 
 ## 状态术语
 

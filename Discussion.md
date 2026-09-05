@@ -234,6 +234,11 @@
 - **Effect Management 的范围**：已确认 Effect Management 管理投机分支对分支外部、共享或最终执行状态产生的影响，以及这些影响在投机期间的暂存、限制、提交、取消和清理。Branch-local state 也属于管理范围，但主要由 Runtime 自动完成隔离、清理和 winner 延续；描述中心放在共享、可观察的业务变化。Outcome 和 operational footprint 的管理方式与共享业务变化相似，但是否纳入额外的 Effect 管理由 Policy 决定。单个动作或工具调用只是投机执行过程中的一个环节，不称为一次投机执行。正式语义见 `docs/design/effect-management.md`。
 - **Effect Management 文档组织**：已确认按“目的与描述中心 -> 管理范围与保证边界 -> 效果管理过程 -> 效果处理纪律与状态域 -> 责任边界 -> 固定保证与明确边界”的逻辑组织。管理范围与保证边界合并为第 1 节，并保留 `1.1` 到 `1.5`；不设置独立的 Branch 生命周期章节，Branch 的 lifecycle 由 Branch 语义文档负责。`EffectClass` 与 `StateDomain` 在同一节中以完整连续内容说明，不拆成多个概念小节。正式文本见 `docs/design/effect-management.md`。
 - **伪装执行命名**：已确认“伪装执行”为正式中文名，对应 `effect` 决策中的 `simulate` 模式标识符，二者并存并建立术语映射。伪装执行是对已接入专门 Adapter 的服务拦截请求、不转发给真实服务、在 Branch 内生成明确标记并记录来源的模拟响应，以避免不可逆外部影响的处理方式；模拟响应作为未验证假设参与 AssumptionSet 确认/否定，仍需 Authority、validator 或其他明确规则验证后才能被 winner 依赖。正式语义见 `docs/design/effect-management.md`，决策模式见 `docs/design/policy-decisions.md` §2.5。
+- **Agent 接入表述**：Agent 可以在不修改自身执行逻辑的情况下接入 AScout，但具体产品可能需要 Product Integration、Hook 或其他拦截适配，接入实现应尽可能保持修改面小。该表述不承诺完全不修改产品，也不要求 Agent 主动参与 Branch 生命周期。
+- **Mechanism 与四侧架构的关系**：Mechanism 不是第五侧，而是横跨 Agent 接入侧与控制面的抽象实现责任。Agent 接入侧负责拦截和本地落实，控制面负责全局编排、校验和状态协调。
+- **Effect Coordinator 的责任边界**：不引入独立的 `Effect backend`。Effect Coordinator 是外部效果的统一实际执行者，负责受管效果的实际处理及其执行状态；服务级 `simulate` 通过可注册的效果插件扩展。Runtime 负责隔离执行环境及环境级执行状态，不承担外部效果的实际执行责任。
+- **抽象设计札记边界**：`docs/development/spec-exec-abstraction.md` 只保留论文事实和论文调研观察，不定义 AScout 设计；所有当前设计以正式设计文档为准。
+- **过期 Agent 生命周期决策**：原 `docs/design/decisions.md` D-001 已过期并删除。当前默认 Agent 不感知 Branch，显式 Agent 感知只保留为未来设计位置。
 
 - 项目定位、名称、四侧架构和控制面/Runtime ownership：见 `docs/mental-model.md`、`docs/architecture.md`、`docs/design-model.md`。
 - Policy Decisions、Proposal、Authority、Equivalence 和 Disposition：见 `docs/design/policy-decisions.md`。
@@ -241,4 +246,4 @@
 - Speculation Contract：见 `docs/design/speculation-contract.md`。
 - Branch、Accept、Discard、Commit、single-winner、输入传播和生命周期：见 `docs/design/branch-semantics.md`、`docs/design/decisions.md` 与 `docs/design/speculation-decisions.md`。
 - Branch barrier、Resolution barrier、外部效果 observation surface 和 Agent execution activity：见 `docs/design/branch-semantics.md` 及对应设计决策。
-- 首要验证 workload、默认 Runtime 和新 Rust 实现边界：见 `docs/development/reference-workload.md`、`docs/development/decisions.md` 与 `docs/development/roadmap.md`。
+- 首要验证 workload、默认 Runtime 和新 Rust 实现边界：见 `docs/development/reference-workload.md` 与 `docs/development/decisions.md`。

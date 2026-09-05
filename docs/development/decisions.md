@@ -42,7 +42,7 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 
 ## D-016-I：默认 Runtime 优先高效隔离
 
-默认 Runtime 面向可信 Child Agent 与工具，优先低开销环境隔离，不提供 adversarial containment。它必须强制维护隔离环境、环境级资源边界、环境内受控操作、停止和 cleanup。Agent 执行实体、Branch context、operation 归属和 capability 路由由 Agent 接入侧管理；受管 external effect 由相应 Effect backend 负责。
+默认 Runtime 面向可信 Child Agent 与工具，优先低开销环境隔离，不提供 adversarial containment。它必须强制维护隔离环境、环境级资源边界、环境内受控操作、停止和 cleanup。Agent 执行实体、Branch context、operation 归属和 capability 路由由 Agent 接入侧管理；受管 external effect 由控制面内的 Effect Coordinator 负责实际处理。
 
 旧的“Runtime 直接维护 Branch identity/capability、完整 Agent 执行实体和所有 effect obligation”划分已废弃；它把投机执行职责固化进通用 Runtime，违背 Runtime 只提供环境能力的边界。
 

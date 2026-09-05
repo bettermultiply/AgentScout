@@ -4,14 +4,6 @@
 
 本文只记录已经确定的 AScout 语义选择。具体 backend、原型折衷和实现重评条件记录在开发决策中。
 
-## D-001：Agent 控制生命周期策略
-
-**选择**：AScout 提供创建 Branch、提交 candidate subtree 和裁决 candidate subtree 的底层能力。Candidate Agent 决定提交时机；direct children 的 resolver capability 默认由 parent Agent 持有，parent 可以将其显式委托给控制面。持有 resolver capability 的授权主体决定接受、等待或丢弃策略。
-
-**原因**：AScout 负责可靠地表达和执行 Speculative Tree 转换，不规定 Agent 应采用何种搜索、调度或评估策略。显式委托只改变谁代表 Agent 执行策略，不把评价策略转移给 runtime。
-
-**接口边界**：世界状态操作可以使用原生 API、透明 proxy 或 AScout-aware 接口；接口形式不能改变 Branch 语义。
-
 ## D-004：Branch 覆盖完整 Agent 进程树
 
 **选择**：Branch 的可分支执行实体包括 Agent 主进程及其全部 sub-agent，而不是单独的调用线程或主进程。
@@ -212,7 +204,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-034：OS privilege 留在外部执行后端一侧
 
-**选择**：建立节点执行、进程与资源所有权、隔离边界或外部效果执行边界所需的 OS privilege 留在外部执行后端一侧。Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权，也不能用控制状态更新代替后端的特权操作。
+**选择**：建立节点执行、进程与资源所有权、隔离边界所需的 OS privilege 留在外部执行后端一侧。Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权，也不能用控制状态更新代替后端的特权操作。外部效果的实际执行由控制面内的 Effect Coordinator 负责，不把外部效果执行边界归入 Runtime。
 
 **外部实现**：具体 Runtime 可以使用 privileged helper、daemon、sandbox monitor、hypervisor 或其他方式管理特权，但其内部拆分不由 AScout 定义。Runtime Adapter 可以连接相应接口，但不因负责协议适配而获得 OS privilege 或后端 mutable state 所有权。
 
@@ -264,11 +256,11 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **Agent 接入侧**：包含 Agent/product，以及 Interposer、ASC-Proxy 和 Product Integration 等接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
 
-**控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 只拥有效果分类、计划与协调视图，不拥有 Runtime staged effect、obligation 或独立环境建立状态。
+**控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 拥有效果分类、计划、效果执行状态与协调视图，是外部效果的统一实际执行者；服务级 `simulate` 通过可注册插件扩展。Runtime 只负责环境边界及环境级执行状态。
 
 **Runtime Adapter**：位于控制面与 Runtime 之间，按控制面定义的稳定、typed、可版本化 operation/event 接入边界声明并呈现能力、结果和事件。其作者自行决定如何映射目标 Runtime 的能力、原语与 transport；AScout 不控制其内部实现，只通过接入校验与运行期结果判断它是否兑现声明。Runtime Adapter 不向控制面呈现第二份长期权威状态。
 
-**Runtime**：AScout 依赖但不拥有的外部执行后端。实际节点执行、进程、资源、隔离和效果状态位于这一侧；其内部架构、组件和原生接口由具体 Runtime 自行决定。AScout 不直接约束或读取这些内部状态，只判断 Adapter 在控制面边界上呈现的能力、结果和事件。
+**Runtime**：AScout 依赖但不拥有的外部执行后端。实际节点执行、进程、资源和隔离环境状态位于这一侧；外部效果状态与效果处理责任位于控制面内的 Effect Coordinator。Runtime 的内部架构、组件和原生接口由具体 Runtime 自行决定；AScout 不直接约束或读取 Runtime 内部状态，只判断 Adapter 在控制面边界上呈现的能力、结果和事件。
 
 **约束**：Agent 接入侧不能绕过控制面发起 AScout lifecycle/control operation。控制面不能绕过 Runtime Adapter 依赖具体 Runtime，也不接受会放宽 lifecycle、single-winner、capability、obligation 或 cleanup 语义的 Adapter 声明或结果。跨侧只交换显式 contract data，不共享可变内部状态。
 

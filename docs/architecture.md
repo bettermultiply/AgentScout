@@ -1,6 +1,6 @@
 # AScout 架构
 
-本文只定义 AScout 的一级分层、各侧责任与跨侧调用方向。四侧是一次完整调用中的逻辑位置，不表示四侧都由 AScout 实现或拥有。
+本文只定义 AScout 的一级分层、各侧责任与跨侧调用方向。四侧是一次完整调用中的逻辑位置，不表示四侧都由 AScout 实现或拥有。Mechanism 不是第五侧，而是横跨 Agent 接入侧与控制面的抽象实现责任。
 
 ## 1. 架构总览
 
@@ -12,13 +12,13 @@ Agent 接入侧围绕一组 Agent 进程及其执行活动提供本地管理。B
 
 控制面定义自己接受的稳定 operation/event 边界和接入条件。Runtime Adapter 的作者依据该边界，把目标 Runtime 的原生能力映射成控制面可以使用的能力，并规范化结果与事件。AScout 不规定 Adapter 内部如何调用 Runtime、如何组织模块或选择 transport；这些属于 Adapter 实现。AScout 只能通过接入校验与运行期结果判断 Adapter 是否兑现其声明，不能直接控制 Adapter 的内部行为。
 
-Runtime 是外部执行后端，例如容器、虚拟机或进程管理能力。AScout 不定义其内部架构，也不要求它提供 AScout 专用接口。执行、隔离、资源和外部效果最终由 Runtime 的原生机制承载，但 AScout 只对 Runtime Adapter 在控制面边界上呈现的能力与行为作判断。Agent-facing integration 组件可以部署在 Runtime 提供的 Branch 隔离环境内，其运行生命周期随该环境管理，但不因此成为 AScout 可以定义的 Runtime 内部组件。
+Runtime 是外部执行后端，例如容器、虚拟机或进程管理能力。AScout 不定义其内部架构，也不要求它提供 AScout 专用接口。Runtime 负责执行环境、隔离、资源和环境级生命周期；由 Agent 造成且可能影响全局的外部效果由控制面内的 Effect Coordinator 实际处理，不属于 Runtime 的效果执行责任。Agent-facing integration 组件可以部署在 Runtime 提供的 Branch 隔离环境内，其运行生命周期随该环境管理，但不因此成为 AScout 可以定义的 Runtime 内部组件。
 
 ### 1.1 架构边界
 
-- 所有跨边界的操作都必须遵守路径，并仅传输数据，而不能代为控制。跨侧调用沿 `Agent 接入侧 <-> 控制面 <-> Runtime Adapter <-> Runtime` 方向进行，各侧不越过相邻边界直接控制其他侧，也不共享跨侧可变状态。
+- 所有跨边界的操作都必须遵守路径。跨侧可以传输受契约约束的请求、命令、结果和事件，但不能越过相邻边界直接控制其他侧，也不共享跨侧可变状态；调用方不能仅凭发送请求或更新自身状态伪造目标侧已完成的状态。
 - 控制面不接受会放宽 AScout 基本语义的 Adapter 结果；策略需求与 Adapter 声明或实际兑现的能力不匹配时，由控制面拒绝或明确降级。
-- 所需 OS privilege 留在外部执行后端一侧，Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权。控制面只形成效果计划与协调请求，Adapter 负责证明目标 Runtime 能用原生机制承载相应执行。
+- 所需 OS privilege 留在外部执行后端一侧，Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权。Runtime 的 OS 特权只用于环境、进程、资源和隔离边界；外部效果由 Effect Coordinator 负责处理，不转化为 Runtime 的效果执行责任。
 
 ## 2. 控制闭环
 
@@ -41,7 +41,7 @@ sequenceDiagram
     C-->>A: Agent-facing result / event
 ```
 
-控制面是整体 Speculative Tree 与控制语义的权威来源。执行、资源和机制转换状态实际存在于外部 Runtime；控制面只接受 Runtime Adapter 按接入约定返回的能力、结果与事件，不直接定义或读取 Runtime 内部状态。
+控制面是整体 Speculative Tree、控制语义和外部效果状态的权威来源。Runtime 内部的执行、资源和环境状态实际存在于外部 Runtime；控制面只接受 Runtime Adapter 按接入约定返回的环境能力、结果与事件，不直接定义或读取 Runtime 内部状态。
 
 ## 3. 责任与状态边界
 

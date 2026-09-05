@@ -83,4 +83,4 @@ Adapter 配置注册后不得在运行期变化。若发现 Runtime 实际行为
 - [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)：正式接入契约
 - [控制面设计](../design/control-plane.md)：Adapter Registry 与控制面协作
 - [Agent 接入侧设计](../design/agent-integration.md)：环境内 Agent 接入侧的责任
-- [效果管理设计](../design/effect-management.md)：外部效果和相应 backend 的责任
+- [效果管理设计](../design/effect-management.md)：Effect Coordinator 的效果处理责任，以及 Runtime 的环境能力边界

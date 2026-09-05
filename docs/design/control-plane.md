@@ -10,7 +10,7 @@
 
 控制面的工作方式是一条贯穿 Policy、控制结构与外部 Runtime 的闭环，Policy 的表达与 Runtime Adapter 的接入都经由控制面获得一致的校验与编排。
 
-控制面先通过 Policy Engine 解释并执行组成 Policy 的多个 Decision，在运行期针对每个阶段作出实时的决策。得到合理决策后，再把决策编排为受管语义操作；需要 Runtime 参与的操作经 Runtime Adapter 请求外部 Runtime 执行，Effect Coordinator 插件可以在控制面内直接处理受管效果并经 Agent Control Gateway 返回结果。控制面收到 Runtime 返回的结果或事件后，解析并校验该操作是否确实按语义完成，再据实更新 Speculative Tree 的控制面视图。控制面还记录运行事实，操作结果用于确认受管操作是否按语义完成，结果与事件记录用于状态对齐、问题定位和审计校验。控制面不定义或直接触碰 Runtime 内部状态，只经 Runtime Adapter 交换需要后端参与的 typed operation 与 event。
+控制面先通过 Policy Engine 解释并执行组成 Policy 的多个 Decision，在运行期针对每个阶段作出实时的决策。得到合理决策后，再把决策编排为受管语义操作；需要 Runtime 参与的环境操作经 Runtime Adapter 请求外部 Runtime 执行，外部效果由 Effect Coordinator 在控制面内直接处理并经 Agent Control Gateway 返回结果。控制面收到 Runtime 返回的结果或事件后，解析并校验该操作是否确实按语义完成，再据实更新 Speculative Tree 的控制面视图。控制面还记录运行事实，操作结果用于确认受管操作是否按语义完成，结果与事件记录用于状态对齐、问题定位和审计校验。控制面不定义或直接触碰 Runtime 内部状态，只经 Runtime Adapter 交换需要后端参与的 typed operation 与 event。
 
 这些校验与编排都必须落在 Policy 无法绕过的固定语义边界之内。该边界的清单与说明见 [Policy Decisions](policy-decisions.md) §6；控制面负责在运行期使这些语义被一致地落实。
 
@@ -62,7 +62,7 @@ Coordinator 不使用固定价值公式替代 Policy 的跨 Edge 权衡，也不
 
 ### 2.5 Effect Coordinator
 
-Effect Coordinator 负责控制面内共享、外部及 Policy 要求纳管的效果处理。Agent 接入侧在效果真正发生前识别受管的命令或 URL，将请求交给 Effect Coordinator；Effect Coordinator 根据已注册的服务效果插件、效果分类与状态域，结合 Policy、Contract 与 Adapter 声明的后端能力形成处理结果或计划。插件可以在控制面内直接生成明确标记并记录来源的模拟响应，也可以拒绝或阻塞请求；只有需要 Runtime 提供暂存、代理、转换、提交或清理机制时，才经 Runtime Adapter 请求后端执行。Effect Coordinator 不负责普通 Branch-local 操作，也不持有真实的暂存效果、obligation 或隔离状态——这些状态位于外部 Runtime，但其内部组织不由 AScout 定义。
+Effect Coordinator 负责控制面内共享、外部及 Policy 要求纳管的外部效果处理，是外部效果的统一实际执行者。重点纳管由 Agent 造成且可能影响全局的外部效果，例如调用外部 API。Agent 接入侧在效果真正发生前识别受管的命令或 URL，将请求交给 Effect Coordinator；Effect Coordinator 根据已注册的服务效果插件、效果分类与状态域，结合 Policy 和 Contract 形成处理结果、执行或处理计划。插件可以在控制面内直接生成明确标记并记录来源的模拟响应，也可以拒绝、阻塞、暂存、转换、提交、取消、清理或补偿其负责的效果。Effect Coordinator 不负责普通 Branch-local 操作；Runtime 只负责 Agent 执行所需的隔离环境及环境级执行状态，不承担外部效果的实际执行责任。
 
 效果插件在控制面启动或 Policy 加载阶段注册，并在对应 Task 使用的 Policy 生效时确定，不在运行中的 Task 内热替换。插件可以根据 Task、Branch 和控制面效果状态执行去重、审计及跨 Branch 协调；其生成的模拟结果必须明确标记为模拟结果并记录生成来源，按既定的假设与验证语义处理。效果阻塞发生在效果边界：投机执行遇到不能安全暂存或释放的效果时停在门口，保留此前的前置进展，等待裁决。
 
@@ -74,7 +74,7 @@ Ledger 以异步旁路记录控制面需要保留的运行事实，包括 Policy
 
 对尚未被接受的投机 Branch，控制面在失败时把它视作在 Speculative Tree 中从未被创建：不重放该操作，不保留它的部分结果作为成功。被接受的 Branch 已完成使命，不适用这一语义。
 
-落到机制上，控制面沿固定状态入口撤销对应 Branch 的控制状态，并经 Runtime Adapter 请求 Runtime 停止对应执行、处理资源与受管效果。清理具体如何编排由 Runtime 与 Effect backend 落实。Salvage 是可选的额外能力：若某段投机工作产生了可移交权威路径的残值，可以在失败默认之上回收；它不是失败处理的必要条件。
+落到机制上，控制面沿固定状态入口撤销对应 Branch 的控制状态，由 Effect Coordinator 处理受管效果的取消、清理与必要补偿，并经 Runtime Adapter 请求 Runtime 停止对应执行和处理环境资源。Salvage 是可选的额外能力：若某段投机工作产生了可移交权威路径的残值，可以在失败默认之上回收；它不是失败处理的必要条件。
 
 ## 4. 与 Runtime Adapter 的衔接
 

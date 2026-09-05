@@ -233,7 +233,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **问题**：系统的使用模型是什么？
 
-**选择**：四类角色，只有一类写配置：端用户完全不感知（提任务、拿结果，只是更快）；Agent 开发者代码不改一行（唯一动作：提供工具 effect manifest）；Operator 选择 Policy、声明 task-level 配置、选隔离后端并设预算旋钮；Policy 作者（研究者）实现所需 Policy Decision。
+**选择**：四类角色，只有一类写配置：端用户完全不感知（提任务、拿结果，只是更快）；Agent 可以在不修改自身执行逻辑的情况下接入，具体产品适配尽可能保持修改面小；Operator 选择 Policy、声明 task-level 配置、选隔离后端并设预算旋钮；Policy 作者（研究者）实现所需 Policy Decision。
 
 **关键设计**：policy 与任务的绑定发生在任务准入时，由路由规则或任务特征决定（底座自己选），不由端用户输入决定。端用户只操作当前有效的权威执行主线，只看到该路径的内容与交互，不进入内部 Branch lifecycle control surface。人仍可作为 Authority 提供输入或中断；这些交互发生在权威路径上，再按输入传播规则交付给仍在运行的 descendants，不要求向用户暴露投机 Branch。
 
@@ -261,7 +261,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 - **resolve 不独立成组件，住在 Speculation Coordinator 里** —— 它的状态（待决 Edge/Proposal 依赖）就是全局控制视图的一部分；`resolve()` 是对该视图执行确认、否定和处置推进的控制流程，不是独立的数据结构。体系结构对应：`Speculation Coordinator + resolve` 统一持有投机状态并负责 retire/squash，同时在同一视图上承载 issue/dispatch 所需的调度事实。
 - **不再设置独立 Scheduler** —— `select` 和 `rebalance` 仍由 Policy 决定，待选机会、运行状态和预算事实由 Speculation Coordinator 维护并在硬约束内执行。这样调度与依赖传播使用同一份全局视图，避免两个状态中心之间产生不一致。
-- **Effect Coordinator 独立** —— 它在控制面持有 Effect Catalog、效果分类与协调计划；真实 staged effect、obligation 和独立环境建立状态属于 Runtime。两类状态都不属于 Assumption DAG，且失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。安全闸必须能被单独审计。
+- **Effect Coordinator 独立** —— 它在控制面持有 Effect Catalog、效果分类、效果执行状态与协调计划，是外部效果的统一实际执行者；服务级 `simulate` 通过可注册插件扩展。独立环境建立状态属于 Runtime，但不属于效果执行责任。效果状态不属于 Assumption DAG，且失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。安全闸必须能被单独审计。
 
 ---
 
@@ -337,7 +337,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 | database | STAGEABLE | 未提交事务 / savepoint |
 | email, payment | COMPENSABLE / IRREVERSIBLE | outbox 模式延迟投递 / 硬闸 |
 
-**这个矩阵定义 Effect Coordinator 的控制面协调空间，以及 Runtime Effect backend 必须实现的机制空间。**
+**这个矩阵定义 Effect Coordinator 的效果处理空间；Runtime 只提供其自身环境边界和环境级资源能力。**
 
 ---
 

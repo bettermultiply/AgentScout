@@ -1,6 +1,6 @@
 # AScout 心智模型
 
-AScout（Agent Scout）是面向 Agent 投机执行的通用底座，Agent 能无修改地接入并获得投机执行能力。AScout 分离策略决策与具体运行时实现：上层仅设计不同的投机执行策略，而不关心具体实现；下层由 Runtime 提供投机执行所需的基本能力，而不会与某个特定投机执行策略耦合。
+AScout（Agent Scout）是面向 Agent 投机执行的通用底座。Agent 可以在不修改自身执行逻辑的情况下接入，但接入实现应尽可能保持修改面小；具体产品仍可能需要 Product Integration、Hook 或其他拦截适配。AScout 分离策略决策与具体运行时实现：上层仅设计不同的投机执行策略，而不关心具体实现；下层由 Runtime 提供投机执行所需的基本能力，而不会与某个特定投机执行策略耦合。
 
 ## 1. 定位 - 为什么需要 AScout
 
@@ -12,7 +12,7 @@ AScout 通过统一的投机执行机制连接策略与运行时，承接不同�
 
 落在使用上：
 - 端用户提交任务并得到结果，通常无需感知背后的投机分支。
-- Agent 可以在不修改自身执行逻辑的情况下接入 AScout，并获得由 AScout 和 Runtime 共同提供的投机执行能力。
+- Agent 可以在不修改自身执行逻辑的情况下接入 AScout，并获得由 AScout 和 Runtime 共同提供的投机执行能力；具体接入方式应尽可能保持修改面小。
 - 部署方负责选择和配置可用的 Runtime 以及相应的 Runtime Adapter，并根据部署条件选择可运行的 Policy。
 - Policy 作者只需专注于算法设计，例如如何预测、如何判断命中、如何选择拓扑、成本和处置方式，不必负责底层机制的具体实现。
 
@@ -22,7 +22,7 @@ AScout 不是某个固定算法，也不是替代所有 Runtime 的统一运行�
 
 投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 待选准入 -> 启动选择 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。AScout 可以暂存已经准入但尚未启动的机会；一个 task / AScoutAgent 绑定的 Policy 在该 task 内全部有效待选机会之间选择现在启动哪些，并可以调整已经运行或暂停的投机工作。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、转正或结束。
 
-Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Mechanism 把抽象落实为执行并兜底正确性、隔离与资源约束；Runtime 是提供原生执行能力的外部后端。Speculation Contract 约束 Policy 的表达以及 Runtime Adapter 在控制面接入边界上的可观察行为；控制面作为 Mechanism 的实现方，通过编排与校验把约束落实为可执行的投机路径。AScout 不直接约束或定义 Runtime 内部实现。
+Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Mechanism 横跨 Agent 接入侧和控制面，把抽象落实为执行并兜底正确性、隔离与资源约束；Runtime 是提供原生执行能力的外部后端。Speculation Contract 约束 Policy 的表达以及 Runtime Adapter 在控制面接入边界上的可观察行为；Agent 接入侧与控制面共同作为 Mechanism 的实现部分，通过拦截、编排与校验把约束落实为可执行的投机路径。AScout 不直接约束或定义 Runtime 内部实现。
 
 工作模型的完整权威描述见 [设计模型](design-model.md) §2。
 
@@ -31,7 +31,7 @@ Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面
 AScout 用三个支撑模型承接不同投机执行策略在预测、验证、拓扑和处置等方面的差异：
 
 - **投机边与 Policy Decisions**：投机边 Edge 是 Policy 的作用对象；开发者可以根据任务、上下文、资源和 Runtime 能力，通过组合 Edge 上的 Policy Decision 设计可替换的决策 Policy，并处理多次投机的组合与嵌套。
-- **状态与效果**：把投机执行过程中需要保护的文件、进程、输入、结果和外部服务交互放入统一的管理框架，根据状态域和效果纪律选择隔离、暂存、延迟、阻塞、补偿或清理方式；具体处理由 Effect Management 与 Runtime 落实。
+- **状态与效果**：把投机执行过程中需要保护的文件、进程、输入、结果和外部服务交互放入统一的管理框架，根据状态域和效果纪律选择隔离、暂存、延迟、阻塞、补偿或清理方式；Branch-local state 的环境承载由 Runtime 提供，Agent 造成且可能影响全局的外部效果（例如调用外部 API）由控制面内的 Effect Coordinator 实际处理。
 - **Speculation Contract**：约束 Policy 表达与 Runtime Adapter 接入行为的语义对齐契约，使策略需求、后端接入通过同一条可检查、可执行的路径衔接，并让拒绝或降级原因可见。
 
 支撑模型的完整权威描述见 [设计模型](design-model.md) §3；各模型的细节分别见 [Policy Decisions 设计](design/policy-decisions.md)、[效果管理设计](design/effect-management.md)、[Speculation Contract 设计](design/speculation-contract.md) 与 [控制面设计](design/control-plane.md)。

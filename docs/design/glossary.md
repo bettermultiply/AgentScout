@@ -26,7 +26,7 @@
 
 ## 系统级
 
-- **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，位于投机策略与执行机制之间，分离策略决策与具体运行时实现，使 Agent 能无修改地接入并获得投机执行能力。（`../mental-model.md`；`../architecture.md`；`../design-model.md`）
+- **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，位于投机策略与执行机制之间，分离策略决策与具体运行时实现；Agent 可以在不修改自身执行逻辑的情况下接入，具体接入实现应尽可能保持修改面小。（`../mental-model.md`；`../architecture.md`；`../design-model.md`）
 - **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Root 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
 - **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；端用户通过它直接操作当前有效的权威执行主线，只看到该路径的内容与交互。（`../mental-model.md` §4.2；`agent-integration.md` §3）
@@ -35,7 +35,7 @@
 
 - **Runtime Adapter**：四侧调用路径的适配侧；按控制面的接入约定声明并呈现能力、operation result 与 event，并自行负责目标 Runtime 的能力映射、transport 和内部实现。（`../architecture.md` §1；`../development/runtime-adapter.md`）
 - **Adapter Registry**：控制面内 Runtime Adapter 的固定接入入口；负责登记、契约兼容性检查、能力声明校验和接入时基本语义测试，并发布已校验的能力信息；不拥有 Runtime 或 Speculative Tree 的执行状态。（`control-plane.md` §2.3；`runtime-adapter-contract.md`）
-- **Runtime**：四侧调用路径中的外部运行侧；提供实际执行、资源、隔离与效果能力，其内部架构不由 AScout 定义。（`../architecture.md` §1）
+- **Runtime**：四侧调用路径中的外部运行侧；提供 Agent 执行所需的环境、资源和隔离能力，其内部架构不由 AScout 定义；外部效果由控制面内的 Effect Coordinator 负责。（`../architecture.md` §1）
 
 ## 实体
 
@@ -73,7 +73,7 @@
 - **Policy dialect**：Policy 经 Policy Engine 解析和校验后形成的运行期表示，供控制面及 Agent 接入侧执行 Policy Decision；不依赖或不改变全局状态的 Decision 可随其注入接入侧执行。
 - **Policy Engine**：可替换 Policy 进入控制面的固定入口，解释 Policy Decision 并检查其取值在当前 Contract 与 Adapter 声明的后端能力下是否合法；加载期约束校验和运行期分发。（`control-plane.md` §2.2）
 - **Speculation Coordinator**：控制面内全局投机视图与控制循环的协调核心；维护 Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系，激活受影响的 Policy Decision，协调 semantic operation，经 Runtime Adapter 执行并根据结果和事件更新视图。（`control-plane.md` §2.4）
-- **Effect Coordinator**：控制面内共享、外部及 Policy 要求纳管效果的协调者；通过控制面内注册的服务效果插件处理命令或 URL，可直接生成明确标记并记录来源的模拟响应、拒绝或阻塞请求，也可在需要 Runtime 参与时结合 Policy、Contract 与 Runtime 能力形成处理计划，经 Runtime Adapter 请求 Runtime 执行。它不负责普通 Branch-local 操作，也不持有真实 staged effect、obligation 或效果提交生效状态。（`control-plane.md` §2.5；`effect-management.md`）
+- **Effect Coordinator**：控制面内共享、外部及 Policy 要求纳管外部效果的统一实际执行者；重点处理由 Agent 造成且可能影响全局的效果，例如调用外部 API。它通过控制面内注册的服务效果插件处理命令或 URL，可生成明确标记并记录来源的模拟响应，也可拒绝、阻塞、暂存、转换、提交、取消、清理或补偿效果。它不负责普通 Branch-local 操作；Runtime 不承担外部效果的实际执行责任。（`control-plane.md` §2.5；`effect-management.md`）
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §2.6；`speculation-contract.md` §3）
 - **ASC-Proxy**：Agent 接入侧与控制面之间的受管通信代理，负责会话、身份确认以及 request、fact、result 和 event 的双向传递；不拥有全局控制状态。（`agent-integration.md` §2.2）
 - **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 执行和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）

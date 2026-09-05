@@ -20,7 +20,7 @@ Runtime（具体后端原语）
 
 **Policy：作者只需面对抽象。** Policy 作者面对的是一组抽象的决策点——在哪些环节投机（推理、工具执行等）、预测什么、如何判定命中、用什么公式判断是否值得投机、如何展开与处置投机工作。作者只需要给出这些决策的实现或选择，不需要知道系统是怎么落实的：命令如何被拦截、隔离环境如何创建、资源如何管理、失败分支如何清理，都由 Mechanism 负责。分层把"作者可以灵活定制"的部分与"必须可靠执行"的部分分开：作者在算法层面自由选择，正确性、隔离与资源约束由 Mechanism 兜底。
 
-**Mechanism：把抽象落实为执行。** Mechanism 是抽象的实现责任：在 Agent 接入侧通过 Interposer 拦截命令与推理调用等环节，在控制面组织执行、验证与调度，并通过 Runtime Adapter 使用外部后端的隔离、资源与效果能力。它不一定只是组合 Runtime 原语——拦截、效果管理、调度等能力本身就是 Mechanism 的一部分；Adapter 无法证明后端具备所需能力时，降级或拒绝，不让策略悄悄跑偏。
+**Mechanism：把抽象落实为执行。** Mechanism 不是四侧中的独立一侧，而是横跨 Agent 接入侧和控制面的实现责任：Agent 接入侧通过 Interposer 拦截命令与推理调用等环节，控制面组织执行、验证与调度，并通过 Runtime Adapter 使用外部后端能力。它不一定只是组合 Runtime 原语；拦截、编排、校验和调度等能力本身就是 Mechanism 的一部分。Adapter 无法证明后端具备所需能力时，Mechanism 必须拒绝或明确降级，不让策略悄悄跑偏。
 
 **Runtime：外部能力来源。** Runtime 是具体执行后端，例如容器、虚拟机或进程管理能力。AScout 不定义其内部结构，也不要求不同 Runtime 原生提供同一组 AScout 原语。Runtime Adapter 负责判断并说明目标 Runtime 的原生能力能否组合出控制面所需语义。
 
@@ -74,7 +74,7 @@ Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根�
 
 投机产物在验证、提交和必要的状态转换完成前不能进入最终语义状态。效果处理能力不足时，Effect Management 可以让投机执行阻塞在相关效果边界并保留前置进展；只有无法安全阻塞、接受后继续或淘汰后清理时，才拒绝相关环节的投机或明确降级。具体的 `EffectClass × StateDomain` 分类、交叉规则和后端能力要求见 [效果管理设计](design/effect-management.md)。
 
-控制面中的 Effect Coordinator 负责效果分类、计划与协调；相应的 Effect backend 承载 staged effect、obligation、效果提交生效和清理等实际效果状态，Runtime 负责隔离执行环境及其环境级状态，Agent 接入侧负责 Agent 执行实体和本地投机上下文。Runtime Adapter 负责向控制面呈现各自负责的操作是否完成。前者形成控制计划，后端负责实际执行；AScout 不通过修改控制状态代替后端执行。
+控制面中的 Effect Coordinator 负责外部效果的分类、计划、实际处理与协调；它是外部效果的统一实际执行者，并通过可注册的服务效果插件扩展特定服务的 `simulate` 等处理方式。这里重点纳管由 Agent 造成且可能影响全局的外部效果，例如调用外部 API。Effect Coordinator 持有效果处理所需的控制状态，Agent 接入侧负责 Agent 执行实体和本地投机上下文，Runtime 负责隔离执行环境及其环境级状态。AScout 不引入独立的 Effect backend，也不把外部效果的实际执行责任转移给 Runtime。
 
 ### 3.3 Speculation Contract
 
