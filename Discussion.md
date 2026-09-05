@@ -104,6 +104,9 @@
 - 已收敛：通用 Runtime 只负责隔离执行环境及其环境级执行、资源和边界状态；完整 Agent 执行实体、Branch context、operation 归属和 capability 路由由 Agent 接入侧管理，Speculative Tree 与 Branch 投机语义由控制面管理。Runtime Adapter 接入检查不能把这些上层职责转嫁给 Runtime。
 - 已收敛：Runtime Adapter 的基础门槛包括建立隔离环境、在环境内建立 Agent 接入侧并执行接入侧无权完成的环境级操作、停止和清理环境，以及继续使用仍有效的环境。隔离是贯穿所有环境操作的固定语义，不是可关闭的 capability；校验按进程、workspace、I/O 与通信、资源、权限、停止残留、cleanup 和继续状态分别进行。
 - 已收敛：Adapter Registry 以接入时主动验证为主要证明手段，运行期持续验证只负责发现主动验证遗漏和实际偏差。能力状态分为已验证、未验证和验证失败；未验证能力默认不可用，但部署方可以主动确认并限制在指定部署范围内使用；验证失败不能通过确认绕过。
+- 已收敛：`runtime-adapter-contract.md` 定义正式的能力声明、Registry 解析与验证、固定环境操作、结果/事件语义和能力降级；`runtime-adapter.md` 只负责依据该契约指导 Adapter 的实现、声明编写、主动验证、注册、排查和实现选择。两篇文档不再拆出第三篇 operation/event 文档。
+- 已收敛：Adapter 声明描述当前实例、当前 Runtime 配置下的实际隔离保证，不描述理论最大能力。隔离内容按 `process`、`workspace`、`memory`、`I/O`、`network`、`resource` 和 `environment-local control surface` 分别声明，并使用 `visibility`、`modification`、`interference`、`lifetime`、`cleanup`、`scope`、`limitations` 等维度；`input`、`outcome`、Branch context 和外部业务效果分别属于受控信息流或 Effect/Service Adapter。
+- 已收敛：Adapter 配置注册后不得运行期变化。若实际能力与声明不符，全部任务使用降级后的已验证范围；依赖失效能力的投机活动停止并清理，不依赖的活动可以继续；重新验证通过后才恢复新的能力范围。
 
 ### 控制面 §2 组件与状态的引入与整体职责
 

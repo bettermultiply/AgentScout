@@ -46,6 +46,8 @@ Adapter Registry 是 Runtime Adapter 进入控制面的固定入口，负责 Ada
 
 Adapter Registry 维护 Adapter 的接入状态、契约版本、能力声明快照和校验结果，但不持有 Speculative Tree、Branch 生命周期或 Runtime 的执行状态。它向 Policy Engine 发布能力事实及其验证状态。未验证能力默认视为不可用，只有部署方主动确认后才能在指定部署范围内使用；验证失败不能通过确认绕过。具体的 operation/event 契约与校验标准见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
 
+Adapter 配置在运行期不允许变化。若运行期发现 Adapter 的实际能力不符合声明，Registry 将其降级到仍然经过验证的范围，并让全部任务使用降级后的能力视图；依赖失效能力的投机活动停止并清理，不依赖的活动可以继续。重新验证通过后，Adapter 才能恢复新的能力范围。
+
 Adapter Registry 不直接编排 Branch 生命周期，也不替代 Speculation Coordinator 解释运行期事件。Speculation Coordinator 只使用 Registry 提供的接入结果和能力信息协调 Task 运行。
 
 ### 2.4 Speculation Coordinator

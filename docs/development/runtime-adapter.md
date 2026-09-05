@@ -1,68 +1,131 @@
 # Runtime Adapter 接入指南
 
-本文面向 Runtime Adapter 作者，说明如何把一个外部 Runtime 接到 AScout 控制面。它是开发与接入指南，不定义 Runtime 内部架构，也不把建议实现提升为 AScout 目标语义。控制面接入边界的规范来源是 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)；完整 operation/event schema 尚未收敛。
+本文面向 Runtime Adapter 作者，说明如何依据 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md) 把一个外部 Runtime 接入 AScout。契约文档定义必须满足的语义；本文说明准备、实现、验证、注册和排查方法，不增加新的目标语义。
 
-## 1. 接入责任
+## 1. 接入前先画清边界
 
-Runtime Adapter 位于控制面与外部 Runtime 之间，主要完成四件事：
+Adapter 只负责把控制面的固定环境操作接到 Runtime：建立环境、环境内操作、静止、恢复、终止和 cleanup。Agent 执行实体、Branch context、operation 归属和 capability 路由由 Agent 接入侧负责；Proposal、Branch 生命周期和 Policy 由控制面负责。
 
-1. 声明目标 Runtime 能兑现的执行、隔离、资源、效果与清理能力；
-2. 把控制面的 semantic operation 映射为目标 Runtime 的一个或多个原生调用；
-3. 把后端结果、事件、能力变化与错误规范化为控制面可解释的数据；
-4. 在无法完整兑现语义时返回明确失败或部分完成状态，而不是把较弱行为伪装成成功。
+先确认以下事实：
 
-AScout 能规定的是控制面接受什么输入输出和证据，不能规定 Adapter 内部怎样组织代码、怎样调用 Runtime 或使用什么 transport。
+- 当前 Runtime 实例使用了哪些配置；
+- 哪些环境可以建立、静止、恢复、终止和清理；
+- Agent 接入侧如何在环境内建立并获得本地控制入口；
+- 接入侧无权完成的环境级操作由哪一侧执行；
+- 进程、workspace、memory、I/O、network、resource 和环境内控制入口分别有什么边界；
+- 哪些路径依赖拦截，拦截是否能在影响发生前覆盖全部声明范围；
+- 哪些保证当前无法证明，应标记为未验证或不适用。
 
-## 2. 状态边界
+不要从 Runtime 的理论能力出发编写声明。声明必须反映当前 Adapter 实例和当前配置的实际保证。
 
-Adapter 可以维护连接、协议协商结果、后端 handle 和能力映射缓存，但这些只是适配状态。它不能向控制面呈现第二份长期权威执行状态，也不能从缓存推断一次后端转换已经完成。
+## 2. 编写能力声明
 
-Speculative Tree、Branch 关系、Policy 绑定和控制状态属于控制面；实际进程、workspace、资源、隔离和效果状态位于外部 Runtime。Adapter 负责在两者之间传递足以对齐状态的结果与事件，而不取得任一侧的状态所有权。
+能力声明的中心是隔离保证，不是操作列表。固定环境操作由契约统一规定，声明描述这些操作作用于不同内容时能保证什么。
 
-## 3. 建议接入过程
+每类内容按以下维度整理：
 
-### 3.1 识别后端原生能力
+| 维度 | 要回答的问题 |
+|---|---|
+| `visibility` | 其他环境能看到什么？ |
+| `modification` | 其他环境能直接修改什么？ |
+| `interference` | 其他环境还能通过什么路径产生影响？ |
+| `lifetime` | 静止、恢复、终止和清理如何影响它？ |
+| `cleanup` | 清理后是否还有残留？ |
+| `scope` | 保证覆盖哪些对象、路径或配置？ |
+| `limitations` | 哪些例外和路径不在保证范围？ |
 
-先列出目标 Runtime 实际提供的创建、停止、隔离、资源管理、效果处理、状态查询和事件能力，不假设不同 Runtime 具有统一原语。容器可能通过新建环境与状态重建表达分支，具有 COW 能力的后端可能提供更低成本路径；这些差异应成为能力与成本事实，而不是泄漏成控制面私有 backend handle。
+这组维度可以随着契约演进扩展。不要用一个 `isolation_level` 掩盖不同内容之间的差异，也不要用自由文本替代可解析的范围和限制。
 
-### 3.2 建立语义映射
+每项内容可以标记为 `not_applicable`，但必须仍然遵守接口契约并返回明确结果。`not_applicable`、`unsupported`、`unverified` 和 `verification_failed` 含义不同，不能混用。
 
-对控制面要求的每项 semantic operation，说明它由哪些后端调用组成、何时算完成、失败后可观察到什么，以及是否存在部分完成。映射可以是一次原生调用，也可以是有明确失败收敛的调用序列。
+## 3. 建立映射表
 
-不要仅凭“请求已发送”返回成功。控制面需要依据 Adapter 的结果或事件判断创建、接受、丢弃、清理或效果转换是否真正达到对应语义状态。
+实现前为每个声明项建立内部映射表：
 
-### 3.3 报告能力与限制
+| 内容 | 声明的保证 | Runtime 原语或拦截 | 完成证据 | 限制 |
+|---|---|---|---|---|
+| workspace | 当前实例的 workspace 范围 | 具体环境机制 | 可重复的读写与清理结果 | 未覆盖的挂载路径 |
+| resource | 环境级资源边界 | quota、namespace 或其他机制 | 资源使用和释放事件 | 共享资源的干扰 |
 
-Adapter 应报告它借助目标 Runtime 能兑现的能力、保证范围、成本和已知限制。Policy Engine 使用这些事实判断 Policy 是否存在合法执行路径。无法承载的能力应标为不可用；较弱保证只能作为显式降级报告，不能静默替代。
+表中的 Runtime 原语只是实现记录，不是对外契约。一个保证可以由多个原语组合实现，也可以通过接入侧拦截或明确拒绝实现。若无法在影响发生前识别和拦截，就不能把该范围写入已验证保证。
 
-### 3.4 规范化结果、事件与错误
+## 4. 实现固定环境操作
 
-后端专有的状态码、连接错误、资源压力和异步事件需要转换成控制面可以稳定解释的结果。规范化至少要保留操作身份、完成程度、失败位置和后续是否仍需清理等信息；具体字段将在 operation/event contract 中另行确定。
+对每个固定操作，明确完成条件和失败收敛：
 
-### 3.5 通过接入与运行期校验
+- 建立环境后，必须能证明环境已经可用，才能返回完成；
+- 环境内操作需要返回实际建立、执行或拒绝的结果；
+- 静止必须阻止新的环境操作，并说明未完成工作；
+- 恢复必须让原环境重新可用，并保持已有状态和隔离边界；
+- 终止必须不可恢复地停止 Runtime 管理的执行；
+- cleanup 必须处理 Runtime 管理的进程、资源、临时状态、句柄和租约；
 
-接入校验用于检查 Adapter 的能力声明与基本语义是否相符；运行期校验根据真实结果与事件发现声明和实际行为之间的偏差。Adapter 通过校验只表示它在声明范围内可以接入，不表示 AScout 认证了 Runtime 的内部设计或所有安全属性。
+多个后端调用组成一个操作时，Adapter 要定义中间失败如何暴露，以及后续是否必须 cleanup。不要把请求发送、metadata 更新或本地缓存变化当作 Runtime 已完成。
 
-## 4. 实现建议而非规范
+## 5. 准备接入验证
+
+Adapter Registry 以接入时主动验证为主要证明手段。准备验证时，按契约中的七类内容分别设计场景，至少覆盖：
+
+- 环境间的进程观察、控制和终止；
+- workspace 的可见性、修改边界、恢复和清理；
+- memory 是否存在跨环境观察或影响；
+- I/O 和本地通信是否存在越界路径；
+- network 端点、端口和环境间访问；
+- 资源限制、资源归属和释放；
+- 环境内控制入口的建立、权限边界和跨环境拒绝。
+
+验证必须同时覆盖正常路径、失败路径、重复操作和必要的并发关系。测试结果应能区分已完成、部分完成、失败和未验证，不要用“没有报错”代替证据。
+
+接入验证只证明声明范围内的环境语义，不证明 Runtime 内部设计、所有安全属性或外部业务效果。外部效果由相应 Effect/Service Adapter 负责。
+
+## 6. 注册和运行
+
+注册流程如下：
+
+```text
+固定当前 Runtime 配置
+    -> 提交当前实例的能力声明
+    -> Registry 解析声明并检查一致性
+    -> 执行主动接入验证
+    -> Registry 发布带验证状态的能力视图
+    -> Policy Engine 检查 Policy 是否匹配
+```
+
+Adapter 配置注册后不得在运行期变化。若发现 Runtime 实际行为不符合声明，Adapter 必须提供足够证据让 Registry 和控制面识别偏差；不能继续返回旧的成功能力。
+
+未验证能力默认不进入普通可用范围。部署方可以主动确认，并把它限制在指定部署范围内使用；Adapter 作者必须明确记录这项能力的范围、限制和风险。验证失败的能力不能通过用户确认绕过。
+
+## 7. 运行期偏差和排查
+
+运行期验证是接入验证的兜底，不是替代。发现声明与实际行为不符时，控制面会把 Adapter 降级到仍然成立的能力范围；全部任务使用降级后的范围，依赖失效能力的投机活动停止并清理，不依赖的活动可以继续。重新验证通过后才能恢复新的能力范围。
+
+常见错误包括：
+
+- 把环境句柄当作 Branch identity；
+- 只处理调用分支接口的短命进程，没有建立环境级边界；
+- 只终止主进程，留下 Runtime 管理范围内的后台资源；
+- cleanup 只删除 metadata；
+- 把“请求已发送”返回为“操作已完成”；
+- 把 Runtime 环境成功返回为 Branch accept 或 discard 成功；
+- 把未验证能力声明为已验证；
+- 依赖缓存推断 Runtime 已经完成状态转换；
+- 通过事后检测声明已经发生影响前的隔离保证。
+
+## 8. 实现选择
 
 以下内容由 Adapter 作者根据目标 Runtime 决定：
 
-- 进程内调用、Unix socket、daemon IPC、VM channel 或远程 RPC 等 transport；
-- discovery、连接、重连、关闭和协议协商方式；
-- 后端 handle、缓存和通信组件的内部组织；
-- 一个 semantic operation 如何拆成后端调用；
-- 针对性能、批处理、重试与资源压力的优化。
+- 进程内调用、Unix socket、daemon IPC、VM channel 或远程 RPC；
+- discovery、连接、重连、关闭和协议协商；
+- 后端 handle、lease、generation、缓存和内部模块组织；
+- 一个固定操作如何拆成后端调用；
+- 重试、批处理、超时和资源压力优化。
 
-这些选择不能改变控制面看到的 operation 语义、身份与能力边界、失败可见性或 cleanup 结果。
-
-## 5. 尚待收敛
-
-当前尚未定义完整的 operation/event 集合、版本协商、幂等键、事件顺序、取消、超时、断线恢复和部分完成表示。它们需要从控制面实际所需语义出发逐项讨论，不能从某个候选 Runtime 的接口反推。
+这些选择不能改变控制面看到的环境操作、隔离范围、结果状态、失败可见性或 cleanup 语义。
 
 ## 相关文档
 
-- [AScout 架构](../architecture.md)：Runtime Adapter 在四侧调用路径中的位置
-- [Speculation Contract](../design/speculation-contract.md)：Policy 与 Adapter 的总体语义关系
-- [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)：具体接入契约与校验要求
-- [控制面设计](../design/control-plane.md)：Adapter 的直接调用方
-- [效果管理设计](../design/effect-management.md)：效果能力与结果要求
+- [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)：正式接入契约
+- [控制面设计](../design/control-plane.md)：Adapter Registry 与控制面协作
+- [Agent 接入侧设计](../design/agent-integration.md)：环境内 Agent 接入侧的责任
+- [效果管理设计](../design/effect-management.md)：外部效果和相应 backend 的责任
