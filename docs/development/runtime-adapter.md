@@ -2,7 +2,7 @@
 
 本文面向 Runtime Adapter 作者，说明如何准备能力声明、实现环境操作、参加 Registry 验证、完成注册并处理运行期偏差。正式语义和接入条件见 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)。
 
-## 1. 接入前先画清边界
+## 1. 接入边界
 
 Adapter 接入工作的对象是 Runtime 环境：`establish_environment`、`operate_environment`、`suspend_environment`、`resume_environment`、`terminate_environment` 和 `cleanup_environment`。能力声明描述这些固定操作对不同环境内容形成的实际隔离保证。
 

@@ -50,7 +50,7 @@ Policy 通过 Policy Decision 表达策略，其设计空间已经被约束，�
 
 Runtime Adapter 的具体接入契约、能力声明、接入校验、运行期校验和 operation/event 边界，见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。本 Contract 只规定这些具体约束必须服务于 Policy 与后端能力的语义对齐，不在此重复定义 Adapter 接口。
 
-### 3.3 失败如何处理
+### 3.3 失败处理
 
 跨层操作可能在不同位置失败：Policy 可能无法产生有效 Proposal，控制面可能发现当前状态不允许某项转换，Effect Coordinator 可能无法完成效果处理，Adapter 可能无法把环境操作映射到后端，Runtime 可能在执行中遇到资源或清理错误。失败结果需要说明操作处于什么状态、接下来如何收敛，不能让某一层用成功值掩盖。
 
