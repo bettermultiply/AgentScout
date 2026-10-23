@@ -9,6 +9,7 @@
 
 - 复杂场景已收敛并修复：候选主动失败会被 Discard、不会发布缓冲文本，parent 继续；权威回调失败会清理候选并由 parent 处理工具错误；不合作且永不返回的权威回调不会再让 AScout 永久等待，取消只结束 AScout 等待，不宣称外部操作已取消。稳定入口取消当前轮时会轮换 AbortController、清除已完成的 winner completion；`abort-recover` 随后的新请求已真实返回 `RECOVERED`。`queue-many` 的 ALPHA／BETA／GAMMA 按提交顺序到达 winner。驱动中的 `candidate-error`、`authority-error`、`authority-hang`、`abort-recover` 均作为针对性回归场景，Pi check、Agent／Agent-loop 80 项测试和 Rust Policy 测试通过。
 
+- 用户已确认继续实现三项修正：清理“候选必须完成后才能 Promote”的历史表述；所有 AScout 对 Agent 的候选建立、运行、Resolving、Promote、Discard、失败和清理都必须落到真实 Tree 状态；增加最小控制状态记录。已批准并采用 `SpeculativeTree`、`BranchRecord`、`ControlState` 名称。当前 Pi 原型已实现接入侧内存状态：Policy 求值记录、Branch 父子关系与生命周期、Promote 前置 Tree 更新、Discard／失败／清理记录；这仍不是完整持久化控制面 Tree 或多候选协调器。
 
 本文件是设计讨论队列，不代表其中内容已经成为设计决策。讨论完成后的目标语义应写入 `docs/design/`，实现细节应写入 `docs/development/`。已经下沉到权威文档的历史讨论不在此重复保留。
 

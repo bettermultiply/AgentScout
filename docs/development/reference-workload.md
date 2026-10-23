@@ -14,6 +14,8 @@
 
 以上场景均使用真实 `deepseek/deepseek-flash` 调用；候选仍无业务工具，权威操作仍只调用一次。Pi `npm run check`、Agent／Agent-loop 80 项测试和 Rust Policy 测试均通过。
 
+当前 Pi 接入还维护最小 `ControlState`：`SpeculativeTree` 保存 Branch 父子关系、角色、生命周期和每次 Policy 求值；Promote 先把候选 Branch 转为新的 authority 并使 parent／sibling 失效，再更新用户路由；Discard、候选失败和清理结果也写入同一状态。它是接入侧的最小控制状态记录，不等同于完整控制面 Tree、持久化 Ledger 或多候选协调器。
+
 ## Delayed-choice coding
 
 第一阶段通过具备足够观察和拦截接缝的 Product Integration，在真实代码仓库执行 delayed-choice coding benchmark。不要求 Agent 主动调用 AScout，也不开放显式生命周期协作；候选创建、Proposal 注入、outcome 发布、提交条件与裁决由接入侧和控制面完成。Parent 等待一个延迟、有限且可验证的真实 outcome；多个 candidates 分别接收互斥 Proposal，并提前完成对应的后续代码修改、工具执行和测试。具体 Agent product 与接入方式尚未选择。
