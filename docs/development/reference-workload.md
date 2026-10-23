@@ -2,6 +2,18 @@
 
 本文记录 AScout 第一阶段的开发与验证 workload，不定义 AScout 的全部目标语义，也不预先选择 continuation branching backend。
 
+### 复杂失败与恢复验证（2026-10-23）
+
+在同一稳定入口上增加了持续交互和失败注入场景：
+
+- `queue-many`：Promote 发生时连续提交 `ALPHA`、`BETA`、`GAMMA`，入口在外部串行化轮次，并在实际送达时读取当前权威执行；三轮答案顺序保持为 `ALPHA`、`BETA`、`GAMMA`，没有进入旧 parent 队列。候选首轮请求仍为 1，后续总请求数为 5。
+- `candidate-error`：候选开始真实流式请求后主动取消，权威结果延迟返回；候选收到取消信号并走 `Discard`，没有 Promote 或候选文本发布，parent 继续从权威结果完成 100 行输出。
+- `authority-error`：候选开始产生文本后，权威回调抛出错误；候选被清理，未接受的候选增量没有发布，parent 收到工具错误并正常生成可见的错误说明。这里的 parent 回退文本不是候选泄漏。
+- `authority-hang`：权威回调永不主动完成，但入口在 300ms 后取消当前轮；AScout 的等待层响应取消并清理候选，进程不再永久挂起。这个保证只结束 AScout 的等待，不虚假声称非合作的外部权威操作已经停止。
+- `abort-recover`：Promote 后取消在飞 winner，旧轮 Promise 明确失败；随后轮换入口的 AbortController 并清除已完成的 winner completion，新的请求返回 `RECOVERED`。这固定了一个可复现的取消后无法继续对话问题，驱动场景本身作为回归覆盖。
+
+以上场景均使用真实 `deepseek/deepseek-flash` 调用；候选仍无业务工具，权威操作仍只调用一次。Pi `npm run check`、Agent／Agent-loop 80 项测试和 Rust Policy 测试均通过。
+
 ## Delayed-choice coding
 
 第一阶段通过具备足够观察和拦截接缝的 Product Integration，在真实代码仓库执行 delayed-choice coding benchmark。不要求 Agent 主动调用 AScout，也不开放显式生命周期协作；候选创建、Proposal 注入、outcome 发布、提交条件与裁决由接入侧和控制面完成。Parent 等待一个延迟、有限且可验证的真实 outcome；多个 candidates 分别接收互斥 Proposal，并提前完成对应的后续代码修改、工具执行和测试。具体 Agent product 与接入方式尚未选择。

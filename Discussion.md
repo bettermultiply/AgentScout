@@ -7,6 +7,8 @@
 - 必须保留的边界：仅 compatible 不等于可以接替，提交条件、未决依赖和效果约束仍须满足；已展示的旧路径内容不可撤回，候选未验证输出不提前展示；切换前后输入、中断和输出事件须保持归属与顺序，旧主路径失去发布权后仍需受管停止／清理，不能依赖前端断开代替生命周期操作。无用户会话中断不表示可以承诺任意在飞工具都无需暂停或没有取消成本。当前先收敛此交互方向，不展开传输、事件协议或在飞工具交接细节。
 - 已实现原型并真实验证：Pi ascout.ts 不再等待候选模型生成结束，受限无业务工具候选在其唯一 Proposal 获确认后具备接替条件；通过 onPromote 将存活 session 和完成 Promise 交给稳定用户入口。入口保持 prompt／subscribe／abort，候选输出接受前缓冲、接受后依序发布并继续实时转发，输入在入口排队并按实际送达时的权威执行路由。真实运行证明切换时 candidateEnded=false、oldParentStillRunning=true，候选首轮请求一次且无 abort，旧主路径请求一次、权威工具一次；切换附近排队输入送到 winner，之后再问答仍使用同一入口；用户主动中断可取消在飞 winner。失配取消候选且不发布其内容；默认策略不创建候选。完整 Pi check 通过。当前是 /tmp/opencode/ascout.ts 中的可调用用户端原型，非完整 TUI／Web 或通用跨进程控制面；未完成任意在飞工具、后代管理、持久化或断线恢复，不据此声称零成本切换。
 
+- 复杂场景已收敛并修复：候选主动失败会被 Discard、不会发布缓冲文本，parent 继续；权威回调失败会清理候选并由 parent 处理工具错误；不合作且永不返回的权威回调不会再让 AScout 永久等待，取消只结束 AScout 等待，不宣称外部操作已取消。稳定入口取消当前轮时会轮换 AbortController、清除已完成的 winner completion；`abort-recover` 随后的新请求已真实返回 `RECOVERED`。`queue-many` 的 ALPHA／BETA／GAMMA 按提交顺序到达 winner。驱动中的 `candidate-error`、`authority-error`、`authority-hang`、`abort-recover` 均作为针对性回归场景，Pi check、Agent／Agent-loop 80 项测试和 Rust Policy 测试通过。
+
 
 本文件是设计讨论队列，不代表其中内容已经成为设计决策。讨论完成后的目标语义应写入 `docs/design/`，实现细节应写入 `docs/development/`。已经下沉到权威文档的历史讨论不在此重复保留。
 
