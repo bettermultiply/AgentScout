@@ -94,6 +94,8 @@ Accept 后 candidate 保留自己的 Branch identity，并替换 parent 在 Spec
 
 Candidate 按各状态类别规则已经可见的 parent state、已提交生效的 external effect 和已验证 outcome 必须随 winner 延续。parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播，也不执行 parent/candidate state merge。
 
+Promote 不以 candidate 会话或当前模型请求结束为前提；已满足提交、依赖和效果条件的在飞 candidate 可以在保留执行进展的情况下转为权威延续。用户端维持同一 AScoutAgent 视图，只更新该视图对应的权威执行及受控输入输出路由；不能因用户会话切换而取消或重启 winner。此保证不取消 resolution barrier，也不豁免旧 parent 和其他 loser 的停止、效果收敛与清理责任。
+
 ### 4.6 Discard、失败与清理
 
 控制面可以依据 `dispose`、资源压力、Proposal 前提失效、任务结束或其他固定取消条件，在 live direct child 尚未达到提交条件时 discard 整个 child subtree。Discard 不要求 candidate ready，也不自动把 child partial state 或结果反馈给 parent。Commit 与 discard 的控制语义由控制面线性化；涉及执行承载的停止和清理经相应承载机制落实。

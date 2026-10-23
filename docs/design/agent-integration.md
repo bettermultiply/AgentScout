@@ -46,6 +46,8 @@ Interposer 还负责在 Branch-local 状态或受纳管 Effect 发生前识别�
 
 ## 3. Agent 执行接入路径
 
+用户交互入口与后端 Agent 执行实体分离：用户始终使用同一 AScoutAgent 视图，接入实现依据控制面已确认的权威执行处理输入、输出和中断路由。Promote 不要求用户重新连接、加载另一个 session 或等待候选会话结束，也不为路由变化取消或重启候选正在进行的执行。已展示内容不可撤回，未获接受的候选内容不得提前发布；切换时必须保持输入归属及输出顺序，旧主路径失去发布权后仍按生命周期规则停止和清理。运行能力不满足时应拒绝该接替路径，不能以路由切换伪造接受或效果处理完成。
+
 Agent 按照自身原有流程执行步骤。当 Agent 即将执行处于接入范围内的步骤时，Product Integration 将该步骤交给 Interposer。Interposer 根据本地 Decision 或控制面返回的处置结果处理该步骤；需要控制面参与时，Interposer 通过 ASC-Proxy 传递相关事实和请求，并接收控制面返回的结果或命令。Product Integration 根据 Interposer 的处置结果让原步骤继续执行，或跳过真实执行并沿 Agent 原有的完成路径结束当前调用。
 
 真实步骤继续执行时，Product Integration 从原调用返回路径取得结果并交给 Interposer；Interposer 将其作为 outcome 归属对应 Branch，并通过 ASC-Proxy 提交控制面。Agent 主进程及其 sub-agent 产生的可观察步骤都经过同一处理路径，因此 AScout 介入的是步骤执行边界，而不改变 Agent 原有的执行流程。
