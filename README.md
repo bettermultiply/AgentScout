@@ -4,11 +4,53 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 ## 仓库状态
 
-仓库当前只有设计文档，没有实现。当前没有可用的 AScout lifecycle、Agent-facing 命令、control protocol、真实 Runtime backend 或 security sandbox。
+仓库现在有一个按控制面 ownership 实现的最小真实 Agent 闭环：Rust 控制面拥有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入，使用独立目录隔离 Candidate，并由控制面调用 Policy 落实 Promote/Discard/Cleanup。它还不是完整 Runtime、通用 Agent 产品或 coding workload；当前验证的是两个真实 Pi AgentSession 和真实模型请求。
 
 目标语义与一级架构已经形成。AScout 按 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 组织。Runtime Adapter 对控制面提供稳定 typed contract，并负责目标 Runtime 的能力映射与协议适配。设计文档是语义权威；开发文档记录已接受的实现选择与剩余任务。
 
 ## 已确认的实现边界
+
+### 运行真实 Pi 闭环
+
+控制面二进制是系统入口，不是一次性场景驱动器。它接收 prompt，创建由 AScout 管理的工作目录，并通过 socket 启动 Pi 接入。Pi 接入只运行 AgentSession、收集模型输出事实和执行控制命令。
+
+先编译允许 Candidate 的测试 Policy：
+
+```sh
+tmp=/tmp/opencode/ascout-control-plane-e2e
+mkdir -p "$tmp"
+cp assets/policy/decisions.py "$tmp/decisions.py"
+sed 's/max_edges: 0/max_edges: 1/' assets/policy/policy.yaml > "$tmp/policy.yaml"
+cargo run --example policy -- compile "$tmp/policy.yaml" "$tmp/policy.json"
+```
+
+启动控制面：
+
+```sh
+cargo run --bin ascout-control-plane -- \
+  "$tmp/agent.sock" "$tmp/workspaces" "$tmp/policy.json" \
+  'Respond with exactly the word example.'
+```
+
+另一个终端启动 Pi 接入：
+
+```sh
+cd ../pi-8a2ebd38549c3521a02db0e5d758a24320e97f94
+node --import packages/coding-agent/src/experimental/source-resolver.ts \
+  packages/coding-agent/src/core/agent-access.ts \
+  /tmp/opencode/ascout-control-plane-e2e/agent.sock pi-agent
+```
+
+运行结果应同时看到 Policy 的 `match`/`dispose`、真实模型名称、Candidate Promote，以及控制面输出的 Tree。Candidate 目录保留为当前 winner；旧 Authority 目录由控制面删除。
+
+Policy YAML 编译与受限 Python 求值已可独立运行：
+
+```sh
+cargo run --example policy -- compile assets/policy/policy.yaml /tmp/opencode/policy.json
+cargo run --example policy -- evaluate /tmp/opencode/policy.json extent assets/policy/extent-input.json
+```
+
+需要 Linux、Python 3、bubblewrap 和 libseccomp。当前接口、支持范围及未完成能力见 [Policy Engine 原型](docs/development/policy-engine.md)；这条路径不等同于完整 Branch 生命周期接入。
 
 - 新实现使用 Rust。具体 crate、模块、进程和部署边界按四侧 ownership 重新决定（D-024-I）。
 - 扩展点的职责语义已确认：Execution、Workspace、Input、Effect 和 Outcome 属于 Runtime；Interposer 属于 Agent 接入侧，统一负责识别 pending-result boundary、保证真实 operation 只执行一次并自动发布 outcome。

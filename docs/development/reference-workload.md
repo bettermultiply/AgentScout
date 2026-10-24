@@ -1,77 +1,55 @@
 # 首要验证 Workload
 
-本文记录 AScout 第一阶段的开发与验证 workload，不定义 AScout 的全部目标语义，也不预先选择 continuation branching backend。
+本文记录当前 AScout 第一阶段的开发与验证范围，不定义全部目标语义，也不声称已经完成完整 Runtime 或 coding workload。
 
-### 复杂失败与恢复验证（2026-10-23）
+## 当前最小闭环
 
-在同一稳定入口上增加了持续交互和失败注入场景：
+首个真实接入对象是固定 commit `8a2ebd38549c3521a02db0e5d758a24320e97f94` 的 Pi。Rust 控制面启动并管理一个 Pi 接入连接；Pi 的 `agent-access.ts` 只负责创建 `AgentSession`、执行控制面命令、收集模型输出事实和回传 outcome。
 
-- `queue-many`：Promote 发生时连续提交 `ALPHA`、`BETA`、`GAMMA`，入口在外部串行化轮次，并在实际送达时读取当前权威执行；三轮答案顺序保持为 `ALPHA`、`BETA`、`GAMMA`，没有进入旧 parent 队列。候选首轮请求仍为 1，后续总请求数为 5。
-- `candidate-error`：候选开始真实流式请求后主动取消，权威结果延迟返回；候选收到取消信号并走 `Discard`，没有 Promote 或候选文本发布，parent 继续从权威结果完成 100 行输出。
-- `authority-error`：候选开始产生文本后，权威回调抛出错误；候选被清理，未接受的候选增量没有发布，parent 收到工具错误并正常生成可见的错误说明。这里的 parent 回退文本不是候选泄漏。
-- `authority-hang`：权威回调永不主动完成，但入口在 300ms 后取消当前轮；AScout 的等待层响应取消并清理候选，进程不再永久挂起。这个保证只结束 AScout 的等待，不虚假声称非合作的外部权威操作已经停止。
-- `abort-recover`：Promote 后取消在飞 winner，旧轮 Promise 明确失败；随后轮换入口的 AbortController 并清除已完成的 winner completion，新的请求返回 `RECOVERED`。这固定了一个可复现的取消后无法继续对话问题，驱动场景本身作为回归覆盖。
+当前闭环包含：
 
-以上场景均使用真实 `deepseek/deepseek-flash` 调用；候选仍无业务工具，权威操作仍只调用一次。Pi `npm run check`、Agent／Agent-loop 80 项测试和 Rust Policy 测试均通过。
+- 两个跨进程 Pi AgentSession：Authority 和 Candidate；
+- 两次真实 `deepseek/deepseek-flash` 模型请求；
+- 控制面创建的两个不同工作目录；
+- Rust 控制面调用 Policy 的 `admit`、`select`、`launch`、`predict`、`match`、`dispose`；
+- Candidate 报告输出事实，不能直接决定生命周期；
+- 只有 Policy 的 `dispose` 返回 Promote 时，控制面才更新 Tree 的 authority；
+- 旧 Authority 的目录由控制面删除，当前 winner 的目录保留。
 
-当前 Pi 接入还维护最小 `ControlState`：`SpeculativeTree` 保存 Branch 父子关系、角色、生命周期和每次 Policy 求值；Promote 先把候选 Branch 转为新的 authority 并使 parent／sibling 失效，再更新用户路由；Discard、候选失败和清理结果也写入同一状态。它是接入侧的最小控制状态记录，不等同于完整控制面 Tree、持久化 Ledger 或多候选协调器。
+## 可观察证据
 
-## Delayed-choice coding
-
-第一阶段通过具备足够观察和拦截接缝的 Product Integration，在真实代码仓库执行 delayed-choice coding benchmark。不要求 Agent 主动调用 AScout，也不开放显式生命周期协作；候选创建、Proposal 注入、outcome 发布、提交条件与裁决由接入侧和控制面完成。Parent 等待一个延迟、有限且可验证的真实 outcome；多个 candidates 分别接收互斥 Proposal，并提前完成对应的后续代码修改、工具执行和测试。具体 Agent product 与接入方式尚未选择。
-
-最小场景使用二选一 outcome，例如等待用户、配置服务或可控 oracle 在固定延迟后选择 `sqlite` 或 `postgres`：
+控制面输出的 Tree 应显示：
 
 ```text
-Parent: 等待真实 choice
-├── Candidate A: proposal=sqlite，提前实现 sqlite 路径
-└── Candidate B: proposal=postgres，提前实现 postgres 路径
+authority_branch_id = candidate
+authority.status = cleaned
+candidate.role = authority
+candidate.status = promoted
 ```
 
-真实 outcome 到达后，控制面依据 Policy 丢弃不匹配 candidate，检查匹配 candidate 的提交证据，并编排 Accept 或安排 parent 从真实 outcome 继续。Outcome source 可以先使用确定性延迟 oracle；candidate 执行必须作用于真实仓库、进程和测试，不能用纯 metadata 分支冒充端到端 workload。
+控制面 stderr 应显示 Policy 结果：
 
-## 验证路径
-
-1. 首先实现控制面最小闭环；设计初期只编写少量端到端测试，具体测试方案须在业务逻辑实现前经用户确认。
-2. 通过产品观察和拦截接缝接入首个真实 Agent，自动识别 operation、pending-result boundary 与 outcome，不依赖 Agent 主动调用控制接口。
-3. 验证候选执行、winner continuation、fallback 和实际 loser cleanup，再进行真实仓库上的收益对照。
-4. 暂不深度修改 Agent loop；以后用第二种 Agent 验证 Product Integration 的可移植性。
-
-这种顺序把 runtime 机制、speculation policy 和 Agent integration 分开验证，避免同时修改 Agent 与 AScout 后无法判断失败来源。
-
-## 对照与指标
-
-同一 Agent、模型设置、代码任务、outcome 和资源预算至少运行两种模式：
-
-- Sequential baseline：等待真实 outcome 后再执行后续工作。
-- AScout speculation：等待期间并行执行 hypotheses，真实 outcome 到达后只保留一个 winner 或回退 parent。
-
-正确性指标：
-
-- 真实 operation 只执行一次；
-- siblings 的文件、进程和内部状态互不可见；
-- loser 进程、修改和 effect obligations 被清理；
-- Proposal 验证和 Accept gate 不可绕过；
-- 无匹配 candidate 时 parent 可以从真实 outcome 正常继续；
-- 最终结果满足与 sequential execution 相同的任务验收条件。
-
-有效性指标：
-
-- end-to-end wall-clock latency 与 speedup；
-- barrier、Branch 创建、outcome injection、Accept 和 discard latency；
-- Proposal hit rate 与提前完成的有效工作比例；
-- loser 消耗的 token、CPU、内存和工具调用；
-- 每单位额外资源换取的 latency reduction。
-
-理想延迟关系为：
-
-```text
-Sequential ~= outcome latency + downstream work
-AScout        ~= max(outcome latency, downstream work) + AScout overhead
+```json
+{"event":"policy","match":{"verdict":"compatible"},"disposition":{"actions":[{"intent":"Promote"}]}}
 ```
 
-只有正确性成立且测得的 latency reduction 能覆盖额外成本，才能说明该 workload 上的 AScout 机制有效。
+Pi stderr 应显示真实模型请求，例如：
 
-## 后续扩展
+```json
+{"event":"model_request_finished","branch_id":"candidate","role":"candidate","model":"deepseek/deepseek-flash","output_characters":7}
+```
 
-二选一 exact outcome 闭环后，再依次加入多类别 predicate、实际 payload 差异、virtual-value mapping、真实 CI/test result、用户审批和远程服务 outcome。外部不可逆 effect 不作为首个 workload 的前置条件。
+这些证据分别证明：控制面拥有 Tree、Policy 由控制面执行、Pi 使用真实模型完成了 Branch 请求。
+
+## 当前边界
+
+首轮不经过完整 Runtime Adapter，Candidate 使用控制面创建的独立目录作为最低程度的文件系统边界。候选暂不开放业务工具、写文件或 shell。尚未实现多 Candidate、Reuse、断线恢复、完整 pending-result 拦截、进程确认式清理和真实仓库 coding workload。
+
+外部命令只模拟用户启动控制面和 Pi 接入，不拥有 Tree、Policy 或 Branch 生命周期。旧的 Pi-local `SpeculativeTree`、`BranchRecord`、`ControlState`、一次性根目录驱动和旧 Rust 示例均已删除；废弃原因只记录在开发决策中。
+
+## 后续验证顺序
+
+1. 增加控制面与 Pi 的命令确认和断线处理。
+2. 在相同协议下验证 Discard 和 Candidate 失败清理。
+3. 接入真实 pending-result boundary，而不是当前由控制面安排的最小双会话场景。
+4. 再验证多 Candidate、状态交接和真实 coding workload。

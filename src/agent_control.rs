@@ -65,7 +65,9 @@ impl SpeculativeTree {
 pub enum AgentCommand {
     StartBranch {
         branch_id: String,
+        role: BranchRole,
         workspace: PathBuf,
+        prompt: String,
     },
     Promote {
         branch_id: String,
@@ -83,10 +85,30 @@ pub enum AgentCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AgentMessage {
-    Hello { agent_id: String },
-    BranchStarted { branch_id: String },
-    CandidateOutcome { branch_id: String, compatible: bool },
-    BranchFailed { branch_id: String, reason: String },
+    Hello {
+        agent_id: String,
+    },
+    BranchStarted {
+        branch_id: String,
+    },
+    CandidateOutcome {
+        branch_id: String,
+        completed: bool,
+        output_characters: usize,
+        output: String,
+    },
+    BranchFailed {
+        branch_id: String,
+        reason: String,
+    },
+}
+
+/// Agent socket 上的双向消息。长度前缀由传输层负责，消息本身只描述方向。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+pub enum AgentWireMessage {
+    Command(AgentCommand),
+    Message(AgentMessage),
 }
 
 /// 控制面当前管理的一个 Agent。
@@ -122,7 +144,11 @@ impl AgentController {
     }
 
     /// 由控制面登记初始权威 Branch，并要求 Pi 启动它。
-    pub fn create_authority(&mut self, branch_id: impl Into<String>) -> io::Result<AgentCommand> {
+    pub fn create_authority(
+        &mut self,
+        branch_id: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> io::Result<AgentCommand> {
         let branch_id = branch_id.into();
         self.insert_branch(
             &branch_id,
@@ -132,8 +158,10 @@ impl AgentController {
         )?;
         self.state.tree.authority_branch_id = Some(branch_id.clone());
         Ok(AgentCommand::StartBranch {
+            role: BranchRole::Authority,
             workspace: self.workspace_for(&branch_id),
             branch_id,
+            prompt: prompt.into(),
         })
     }
 
@@ -142,6 +170,7 @@ impl AgentController {
         &mut self,
         parent_branch_id: &str,
         branch_id: impl Into<String>,
+        prompt: impl Into<String>,
     ) -> io::Result<AgentCommand> {
         let branch_id = branch_id.into();
         let parent = self
@@ -160,8 +189,10 @@ impl AgentController {
             BranchStatus::Created,
         )?;
         Ok(AgentCommand::StartBranch {
+            role: BranchRole::Candidate,
             workspace: self.workspace_for(&branch_id),
             branch_id,
+            prompt: prompt.into(),
         })
     }
 
@@ -178,10 +209,9 @@ impl AgentController {
                 branch.status = BranchStatus::Running;
                 Ok(vec![])
             }
-            AgentMessage::CandidateOutcome {
-                branch_id,
-                compatible,
-            } => self.resolve_candidate(&branch_id, compatible),
+            AgentMessage::CandidateOutcome { .. } => Err(invalid_input(
+                "candidate outcome requires a control-plane Policy decision",
+            )),
             AgentMessage::BranchFailed { branch_id, .. } => {
                 let branch = self.branch_mut(&branch_id)?;
                 branch.status = BranchStatus::Discarded;
@@ -194,7 +224,7 @@ impl AgentController {
     }
 
     /// 只有控制面可以接受 Candidate；接受后旧权威失去权威身份。
-    fn resolve_candidate(
+    pub fn resolve_candidate(
         &mut self,
         branch_id: &str,
         compatible: bool,
@@ -313,14 +343,16 @@ mod tests {
     fn control_plane_owns_candidate_workspace_and_promotes_it() {
         let root = tempfile::tempdir().unwrap();
         let mut controller = AgentController::new("agent-1", root.path()).unwrap();
-        let start = controller.create_authority("parent").unwrap();
+        let start = controller.create_authority("parent", "test").unwrap();
         assert!(matches!(start, AgentCommand::StartBranch { .. }));
         controller
             .handle_message(AgentMessage::BranchStarted {
                 branch_id: "parent".into(),
             })
             .unwrap();
-        let candidate_start = controller.create_candidate("parent", "candidate").unwrap();
+        let candidate_start = controller
+            .create_candidate("parent", "candidate", "test")
+            .unwrap();
         let candidate_workspace = match candidate_start {
             AgentCommand::StartBranch { workspace, .. } => workspace,
             _ => unreachable!(),
@@ -331,12 +363,7 @@ mod tests {
                 branch_id: "candidate".into(),
             })
             .unwrap();
-        let commands = controller
-            .handle_message(AgentMessage::CandidateOutcome {
-                branch_id: "candidate".into(),
-                compatible: true,
-            })
-            .unwrap();
+        let commands = controller.resolve_candidate("candidate", true).unwrap();
         assert!(
             commands
                 .iter()
@@ -356,24 +383,21 @@ mod tests {
     fn mismatch_discards_and_cleans_candidate_directory() {
         let root = tempfile::tempdir().unwrap();
         let mut controller = AgentController::new("agent-1", root.path()).unwrap();
-        controller.create_authority("parent").unwrap();
+        controller.create_authority("parent", "test").unwrap();
         controller
             .handle_message(AgentMessage::BranchStarted {
                 branch_id: "parent".into(),
             })
             .unwrap();
-        controller.create_candidate("parent", "candidate").unwrap();
+        controller
+            .create_candidate("parent", "candidate", "test")
+            .unwrap();
         controller
             .handle_message(AgentMessage::BranchStarted {
                 branch_id: "candidate".into(),
             })
             .unwrap();
-        let commands = controller
-            .handle_message(AgentMessage::CandidateOutcome {
-                branch_id: "candidate".into(),
-                compatible: false,
-            })
-            .unwrap();
+        let commands = controller.resolve_candidate("candidate", false).unwrap();
         assert!(
             commands
                 .iter()
