@@ -91,11 +91,15 @@ pub enum AgentMessage {
     BranchStarted {
         branch_id: String,
     },
-    CandidateOutcome {
+    ParentOutcome {
+        branch_id: String,
+        operation_id: String,
+        outcome: String,
+    },
+    CandidateCompleted {
         branch_id: String,
         completed: bool,
         output_characters: usize,
-        output: String,
     },
     BranchFailed {
         branch_id: String,
@@ -124,7 +128,7 @@ pub struct AgentController {
 }
 
 impl AgentController {
-    /// 建立控制面状态，并创建由 AScout 管理的目录根。
+    /// 建立控制面状态，并请求当前 Runtime 承载使用的工作根。
     pub fn new(
         agent_id: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
@@ -165,7 +169,7 @@ impl AgentController {
         })
     }
 
-    /// 由控制面创建 Candidate 的独立目录；Pi 不负责创建此隔离边界。
+    /// 由控制面为 Candidate 请求独立执行环境；当前承载暂以工作目录表示。
     pub fn create_candidate(
         &mut self,
         parent_branch_id: &str,
@@ -209,9 +213,11 @@ impl AgentController {
                 branch.status = BranchStatus::Running;
                 Ok(vec![])
             }
-            AgentMessage::CandidateOutcome { .. } => Err(invalid_input(
-                "candidate outcome requires a control-plane Policy decision",
-            )),
+            AgentMessage::ParentOutcome { .. } | AgentMessage::CandidateCompleted { .. } => {
+                Err(invalid_input(
+                    "outcomes are resolved only after the control-plane Policy evaluation",
+                ))
+            }
             AgentMessage::BranchFailed { branch_id, .. } => {
                 let branch = self.branch_mut(&branch_id)?;
                 branch.status = BranchStatus::Discarded;

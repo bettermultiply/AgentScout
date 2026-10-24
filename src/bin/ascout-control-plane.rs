@@ -1,13 +1,15 @@
 //! 真实 Pi Agent 的最小 AScout 控制面入口。
 //!
-//! 该进程拥有 AgentController 和 Tree；Pi 只通过 Unix socket 接收命令、运行
-//! AgentSession 并报告事实。这个入口用于外部端到端测试，不是固定场景驱动器。
+//! 该进程拥有 AgentController 和 Tree，并负责启动 Pi 接入进程；Pi 只通过
+//! Unix socket 接收命令、运行 AgentSession 并报告事实。当前仍是开发入口，
+//! 尚未连接真实 pending-result boundary。
 
 use std::env;
 use std::fs;
 use std::io;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 
 use ascout::agent_control::{AgentCommand, AgentController, AgentMessage, AgentWireMessage};
 use ascout::policy::{CompiledPolicy, Decision, PolicyEngine};
@@ -16,9 +18,9 @@ use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.len() != 4 {
+    if args.len() != 5 {
         return Err(
-            "usage: ascout-control-plane <socket> <workspace-root> <policy-artifact> <prompt>"
+            "usage: ascout-control-plane <socket> <workspace-root> <policy-artifact> <prompt> <pi-root>"
                 .into(),
         );
     }
@@ -26,8 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace = PathBuf::from(&args[1]);
     let artifact = PathBuf::from(&args[2]);
     let prompt = args[3].clone();
+    let pi_root = PathBuf::from(&args[4]);
     let _ = fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket)?;
+    let mut pi = start_pi(&pi_root, &socket)?;
     let (mut stream, _) = listener.accept()?;
     let mut controller = AgentController::new("pi-agent", &workspace)?;
     let policy = PolicyEngine::default();
@@ -90,10 +94,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         }
                     }
-                    AgentMessage::CandidateOutcome {
-                        branch_id, output, ..
+                    AgentMessage::ParentOutcome {
+                        branch_id,
+                        operation_id: _,
+                        outcome,
                     } => {
-                        let evidence = json!({"payload": output});
+                        // 当前接入仍把一轮模型文本作为占位事实；正确实现必须
+                        // 从 Parent 的真实 operation outcome 取得这里的 evidence。
+                        let evidence = json!({"payload": outcome});
                         let proposal = json!({"payload": proposal_payload});
                         let matched = policy.evaluate(
                             &compiled,
@@ -125,6 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{}", serde_json::to_string_pretty(controller.state())?);
                         break;
                     }
+                    AgentMessage::CandidateCompleted { .. } => {}
                     AgentMessage::BranchFailed { branch_id, reason } => {
                         let commands = controller
                             .handle_message(AgentMessage::BranchFailed { branch_id, reason })?;
@@ -146,7 +155,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let _ = fs::remove_file(socket);
+    let _ = pi.kill();
+    let _ = pi.wait();
     Ok(())
+}
+
+fn start_pi(pi_root: &PathBuf, socket: &PathBuf) -> io::Result<Child> {
+    Command::new("node")
+        .arg("--import")
+        .arg(pi_root.join("packages/coding-agent/src/experimental/source-resolver.ts"))
+        .arg(pi_root.join("packages/coding-agent/src/core/agent-access.ts"))
+        .arg(socket)
+        .arg("pi-agent")
+        .current_dir(pi_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
 }
 
 fn send(stream: &mut std::os::unix::net::UnixStream, message: AgentWireMessage) -> io::Result<()> {

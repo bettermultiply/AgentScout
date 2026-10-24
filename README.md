@@ -4,7 +4,7 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 ## 仓库状态
 
-仓库现在有一个按控制面 ownership 实现的最小真实 Agent 闭环：Rust 控制面拥有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入，使用独立目录隔离 Candidate，并由控制面调用 Policy 落实 Promote/Discard/Cleanup。它还不是完整 Runtime、通用 Agent 产品或 coding workload；当前验证的是两个真实 Pi AgentSession 和真实模型请求。
+仓库现在有一个按控制面 ownership 实现的 Agent 管理原型：Rust 控制面拥有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入，当前 Runtime 承载以不同目录提供最低程度的环境隔离。它还不是正确完成的投机验证闭环、完整 Runtime、通用 Agent 产品或 coding workload。
 
 目标语义与一级架构已经形成。AScout 按 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 组织。Runtime Adapter 对控制面提供稳定 typed contract，并负责目标 Runtime 的能力映射与协议适配。设计文档是语义权威；开发文档记录已接受的实现选择与剩余任务。
 
@@ -12,7 +12,7 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 ### 运行真实 Pi 闭环
 
-控制面二进制是系统入口，不是一次性场景驱动器。它接收 prompt，创建由 AScout 管理的工作目录，并通过 socket 启动 Pi 接入。Pi 接入只运行 AgentSession、收集模型输出事实和执行控制命令。
+目标系统入口是控制面：用户请求进入控制面，控制面启动 Pi Agent 及其接入组件。Pi 接入只运行 AgentSession、收集 Agent 行为事实和执行控制命令，不是用户入口。
 
 先编译允许 Candidate 的测试 Policy：
 
@@ -24,24 +24,16 @@ sed 's/max_edges: 0/max_edges: 1/' assets/policy/policy.yaml > "$tmp/policy.yaml
 cargo run --example policy -- compile "$tmp/policy.yaml" "$tmp/policy.json"
 ```
 
-启动控制面：
+当前开发验证入口启动控制面：
 
 ```sh
 cargo run --bin ascout-control-plane -- \
   "$tmp/agent.sock" "$tmp/workspaces" "$tmp/policy.json" \
-  'Respond with exactly the word example.'
+  'Respond with exactly the word example.' \
+  ../pi-8a2ebd38549c3521a02db0e5d758a24320e97f94
 ```
 
-另一个终端启动 Pi 接入：
-
-```sh
-cd ../pi-8a2ebd38549c3521a02db0e5d758a24320e97f94
-node --import packages/coding-agent/src/experimental/source-resolver.ts \
-  packages/coding-agent/src/core/agent-access.ts \
-  /tmp/opencode/ascout-control-plane-e2e/agent.sock pi-agent
-```
-
-运行结果应同时看到 Policy 的 `match`/`dispose`、真实模型名称、Candidate Promote，以及控制面输出的 Tree。Candidate 目录保留为当前 winner；旧 Authority 目录由控制面删除。
+当前命令只能验证控制面自动启动 Pi、接入通信和会话管理。它还不能证明正确的 Promote：当前 `ParentOutcome` 仍是占位的模型文本，正确实现必须从 Parent 的真实 operation outcome 取得 evidence，再与 Candidate hypothesis 比较。真正的用户交互入口和 pending-result boundary 仍待实现。
 
 Policy YAML 编译与受限 Python 求值已可独立运行：
 
