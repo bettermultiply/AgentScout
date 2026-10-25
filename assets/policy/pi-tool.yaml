@@ -11,6 +11,8 @@ decisions:
     feasibility_pass:
       file: decisions.py
       function: feasibility_pass
+      policy_config:
+        example_tools_only: true
   select:
     file: decisions.py
     function: select
@@ -28,7 +30,8 @@ decisions:
     file: decisions.py
     function: predict
     policy_config:
-      candidates: ["example"]
+      candidates: ["example", "true", "false"]
+      sample_count: 2
   launch:
     file: decisions.py
     function: launch

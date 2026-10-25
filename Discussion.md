@@ -17,10 +17,12 @@
 - 用户已批准 `/ascout`：AScout TUI 内打开当前 AScoutAgent 整棵 Speculative Tree 的只读观察入口，展示 Branch 关系、当前主路径与投机状态，再允许选择具体 Branch 深入查看执行活动、输出及处置依据。选择只改变观察对象，不改变主对话路由，不接受或丢弃 Branch，不向所选候选发送用户对话；不是调用 Agent 自带的同名命令，也不是跨 Tree 查询。定义同步到术语表。
 - 用户已批准持续交互通信名称：`Prompt` 给指定 Branch 发送用户输入；`Abort` 中断指定 Branch 当前执行；`Output` 报告该 Branch 的实际输出或工具活动；`TurnCompleted` 报告本轮执行结束，不表示可以转正；`CleanupCompleted` 表示接入侧确认已停止并释放会话，不代表环境目录已清理。它们扩展现有 AgentCommand/AgentMessage，不新增组件。首步接通真实持续对话与观察，尚未接通的投机路径明确说明，不制造候选或结果。
 - 首步已实现：AScout 自有终端界面自动启动 Pi，按协议展示实时文本、工具活动和模型错误，保留 session 用于持续对话；`/ascout` 展示控制面 Tree，可按编号查看 Branch，观察不改变主对话。已有占位双会话路径已移除，不再把模型回答当作 ParentOutcome。Rust 编译、已有两个控制状态测试、Pi 完整 check 通过。真实 tmux 操作确认启动、输入、Tree 和 Branch 观察，以及中断后的结束事实；默认模型服务返回 503 `model_not_found`，未获得成功模型回答。真实投机、完整编辑排版、宽字符与退出确认式清理仍未完成，详见开发文档。
-- 用户已批准真实等待点通信名称：`ToolPending`＝接入侧报告 Parent 已产生真实工具调用但尚未执行，带操作标识、工具名、参数和可继续上下文；`StartCandidate`＝控制面在 Policy 允许后要求接入侧从该上下文注入预测工具结果并继续 Candidate；`ResolvePending`＝控制面收到真实工具结果后要求接入侧把结果送回 Parent，或在 Promote 时让 Candidate 运行路径接替主路径。它们是既有 AgentCommand/AgentMessage 的协议消息，不是新组件。
-- 当前最小真实投机路径：Pi `beforeToolCall` 报告 `ToolPending` 后立即让真实工具执行一次，不等控制面；`afterToolCall` 保留产品原有结果处理，再报告已确认的 `ParentOutcome`，等待 `ResolvePending` 才交回模型。控制面调用 Policy `admit`、`select`、`predict`、`launch`、`match`、`dispose`；Candidate 从独立目录、独立 SessionManager 中保存的共同消息与预测 toolResult 续跑，未验证期间下一次工具执行被挂起。只有 Policy Promote 且真实结果非错误时才接替主对话，按顺序发布已缓冲输出，保留正在运行的 Candidate；不命中或失败回退 Parent。默认 `policy.yaml` 仍使用 `max_edges: 0`，显式选用 `assets/policy/pi-tool.yaml` 才启用每次一个候选和文本预测 `example`。接入仅支持单工具调用、标准消息上下文和受限的只读/字面量等待命令；并发、任意 shell、图像结果、多候选、嵌套和完整 Runtime 隔离不在本次实现范围。
+- 用户已批准真实等待点通信名称：`ToolPending`＝接入侧报告 Parent 已产生真实工具调用但尚未执行，带操作标识、工具名、参数和可继续上下文；`StartCandidate`＝控制面在 Policy 允许后要求接入侧从该上下文注入预测工具结果并继续 Candidate；`ResolvePending`＝控制面报告等待点的裁决，不再阻塞 Parent 结果交付；Promote 仍使用对应命令。它们是既有 AgentCommand/AgentMessage 的协议消息，不是新组件。
+- 当前路径：`ToolPending` 后真实工具执行一次；原有产品钩子处理后报告 `ParentOutcome`，Parent 立即用真实结果继续，与验证并行。Policy 决定准入、预测、比较与处置；控制面保存 Parent/operation/Candidate 的明确归属，至多一个 Candidate Promote，其余及旧 Parent 被取消清理，保留胜出 session。`pi-tool.yaml` 无固定种子地从 example/true/false 中抽取两个不同预测；默认 Policy 仍禁用候选。标准上下文限制暂缓解决。并行工具逐项处理，候选补齐其他工具真实结果后续跑，不重跑效果；专项验证未完成。等待点准入和匹配已移至 Policy；复杂预测转换、未验证工具执行的 Policy/能力协商仍未完成。
+- 用户确认的 Workload：Parent 随机产生 example/true/false，两个 Candidate 执行 `sleep 1; printf 'Predicted{n}: {预测值}'`；Parent 默认继续执行 `sleep 1; printf 'spec fail'`，仅 Promote 时停止旧 Parent。Workload 不等于 Policy，非固定随机不等于结果可确定复现。新增独立脚本模型接口承载该场景，不将业务命令写入控制面。实测两个候选在真值前完成、命中后单一 Promote 与 sibling/Parent 清理；脚本不是大模型成功证据。
 - 验证：本地可控模型接口（脚本，不是真实大模型）通过真实 Pi、socket、TUI、Policy 隔离求值和真实 bash 工具运行，已验证工具返回前候选输出、返回后在飞 Promote、继续流式输出、保留上下文处理 follow-up，以及下一轮不命中 Discard、Parent 使用真实结果恢复、候选清理。模型接口与 Pi 配置位于 `/tmp/opencode`，不修改用户原配置。真实大模型成功验证仍未完成；当前服务此前返回 `503 model_not_found`。既有两个控制状态测试、Rust 编译与 Pi 完整 check 通过。`events.jsonl` 记录 Branch 消息、真实 outcome 与最终处置；退出仍不声称任意工具后代/外部资源已清理。
-- 待确定实现细节：保留运行中候选进展的输入输出接替方式，以及首个用户可操作的真实等待场景；不在本轮同时展开全部底层协议。
+- 待完成：未验证工具的 Policy/能力协商、复杂结果转换与并行工具专项验证，详见开发文档；不在本轮展开更深层协议。
+- 仅记录、暂不展开：非标准消息上下文的复制与恢复支持。
 - 仅记录、暂不展开：用户希望外部副作用隔离以容易插入系统的轻量插件提供，使用感类似 Runtime。后续确认其接入与责任边界；本轮不据此把外部效果实际执行责任移到 Runtime 或新增一级组件。
 
 ### 用户交互与执行实体分离（2026-10-23）

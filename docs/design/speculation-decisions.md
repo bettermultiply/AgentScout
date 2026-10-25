@@ -83,7 +83,7 @@
 
 **问题**：投机任务的处置集合是什么？
 
-**选择**：Reuse / Promote / Discard / Preempt / Re-execute / Compensate / Overwrite / **Salvage**。其中 Salvage（残值回收：失败后回收部分进展）是关键设计 —— 三个独立实例在三个层次：Skim 的 warm-start（被拒后只有 URL 过界）、SPORK 的 partial-token accept（被拒 probe 变 draft）、PASTE 的 promote（在飞进度转正）。共性：投机工作往往有"公共前缀"结构。
+**选择**：Reuse / Promote / Discard / Preempt / Re-execute / Compensate / Overwrite / **Salvage**。其中 Salvage（残值回收：失败后回收部分进展）是关键设计 —— 三个独立实例在三个层次：Skim 的 warm-start（被拒后只有 URL 过界）、SPORK 的 partial-token accept（被拒 probe 变 draft）、PASTE 的 promote（在飞进度 Promote）。共性：投机工作往往有"公共前缀"结构。
 
 **设计**：底座把"部分进展的表示与移交"做成一等抽象，而非每个算法自己发明：
 

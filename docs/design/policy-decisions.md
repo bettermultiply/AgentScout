@@ -282,7 +282,7 @@ rebalance(active_view, paused_view, scheduling_context)
 | 预测生成 | `predict` | 生成一个或多个 Proposal |
 | 过程执行 | `extent`、`effect`、`rebalance` | 限制单个过程推进、管理每个 step 的外部效果，并在多个已启动工作之间暂停、恢复或抢占 |
 | 验证 | `match` | 获得验证依据并判断 Proposal 是否兼容或可接受；权威值是否可取由 launch 决定 |
-| 处置与提交 | `dispose` | 复用、继续、转正、重执行、清理、回收或补偿 |
+| 处置与提交 | `dispose` | Reuse、继续、Promote、重执行、清理、回收或补偿 |
 
 一个 decision 可以跨越多个阶段。例如，`effect` 的处理会影响过程执行和最终处置，`launch` 同时影响启动和验证依据的可用时间，`rebalance` 的抢占结果会进入 `dispose`。阶段映射用于说明责任，不应被解释为把九类 decision 串成不可替换的固定流程。
 

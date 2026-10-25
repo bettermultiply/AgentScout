@@ -64,11 +64,11 @@
 - **Prompt**：控制面要求接入侧向指定 Branch 的 AgentSession 发送用户输入。（用户确认：2026-10-25；`../../Discussion.md`）
 - **Abort**：控制面要求接入侧中断指定 Branch 的当前执行，不表示外部操作已撤销。（用户确认：2026-10-25；`../../Discussion.md`）
 - **Output**：接入侧报告指定 Branch 的实际文本输出或工具活动；显示不赋予候选权威身份。（用户确认：2026-10-25；`../../Discussion.md`）
-- **TurnCompleted**：接入侧报告本轮执行结束，不表示预测已确认或候选可以转正。（用户确认：2026-10-25；`../../Discussion.md`）
+- **TurnCompleted**：接入侧报告本轮执行结束，不表示预测已确认或候选可以 Promote。（用户确认：2026-10-25；`../../Discussion.md`）
 - **CleanupCompleted**：接入侧确认指定 Branch 已停止并释放会话，不代表环境目录或任意外部资源已清理。（用户确认：2026-10-25；`../../Discussion.md`）
 - **ToolPending**：接入侧报告 Parent 已产生真实工具调用但工具尚未执行，并携带操作标识、工具名、参数和可继续上下文。（用户确认：2026-10-25；`../../Discussion.md`）
 - **StartCandidate**：控制面要求接入侧根据共同上下文和预测工具结果启动 Candidate 续跑；预测不是 Parent 的真实证据。（用户确认：2026-10-25；`../../Discussion.md`）
-- **ResolvePending**：控制面在真实工具结果到达后要求接入侧继续 Parent，或按 Promote 让 Candidate 运行路径接替主路径；它本身不改变 Policy 裁决。（用户确认：2026-10-25；`../../Discussion.md`）
+- **ResolvePending**：控制面报告真实等待点的裁决，不阻塞 Parent 取得真实结果并继续；接替主路径由 Promote 命令落实，它本身不改变 Policy 裁决。（用户确认：2026-10-25；`../../Discussion.md`）
 
 - **branch**：从当前 Branch 创建一个或多个 direct child；投机场景中这些 child 才按角色称为 candidate。完整语义可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override。（`branch-semantics.md` §Agent 最小感知模型；`decisions.md` D-037）
 - **commit / commit request**：candidate 显式提交自己的子树。可 conditional commit：未验证前提随 subtree 保留为 obligation，验证前不能 Accept。（`decisions.md` D-025、D-037）

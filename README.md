@@ -28,9 +28,9 @@ cargo run --bin ascout-control-plane -- /tmp/opencode ../pi-code
 cargo run --bin ascout-control-plane -- /tmp/opencode ../pi-code assets/policy/pi-tool.yaml
 ```
 
-该示例预测文本 `example`。可要求 Agent 执行精确命令 `sleep 6; printf 'example'` 观察命中，或 `sleep 6; printf 'different'` 观察拒绝（模型须实际调用该命令）。`/ascout` 查看预测、实际结果、处置和清理；运行目录的 `events.jsonl` 保留原始事实。已用本地脚本模型接口和真实 Pi/bash 验证在飞转正及不命中恢复，尚未取得真实大模型成功验证，不宣称预测效果或加速收益。
+该示例 Policy 从 `example`、`true`、`false` 中无固定种子地抽取两个不同预测。具体随机场景、脚本模型接口及启动方式见 [验证 Workload](docs/development/reference-workload.md)。`/ascout` 查看预测、实际结果、处置和清理；运行目录的 `events.jsonl` 保留原始事实。已有脚本模型接口加真实 Pi/bash 的验证，不冒充真实大模型验证，不宣称预测质量或加速收益。
 
-当前仅支持单工具调用、标准消息上下文、单文本结果，以及受限只读工具/上述字面量等待命令；未验证候选的后续工具调用必须等待裁决。多候选、嵌套、任意外部效果隔离、完整 Runtime Adapter、多行编辑/排版和退出确认式清理仍未完成。详见 [当前实现与验证边界](docs/development/reference-workload.md)。
+Parent 收到真实结果立即继续，验证并行进行；仅 Promote 时停止旧 Parent。已接入同一等待点的两个 Candidate，至多一个胜出，其余被取消。工具等待点逐项交给 Policy；并行消息续跑需补齐其他工具的真实结果，不重跑这些工具。接入目前只转换文本预测，未验证工具仍有安全能力限制；非标准上下文、嵌套、完整效果隔离、Runtime Adapter、多行编辑及确认式退出清理仍未完成。详见 [当前实现与验证边界](docs/development/reference-workload.md)。
 
 Policy YAML 编译与受限 Python 求值已可独立运行：
 

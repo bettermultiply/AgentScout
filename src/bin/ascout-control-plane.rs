@@ -18,6 +18,7 @@ use serde_json::json;
 
 struct Pending {
     parent: String,
+    operation_id: String,
     candidate: String,
     proposal: Value,
     outcome: Option<Value>,
@@ -234,12 +235,12 @@ fn run(
                     4 => break,
                     3 => {
                         input.clear();
-                        for (op, work) in std::mem::take(&mut pending) {
+                        for (_, work) in std::mem::take(&mut pending) {
                             send(
                                 stream,
                                 AgentCommand::ResolvePending {
                                     branch_id: work.parent,
-                                    operation_id: op,
+                                    operation_id: work.operation_id,
                                     accepted: false,
                                 },
                             )?;
@@ -359,9 +360,8 @@ fn run(
                         arguments,
                         context,
                     } => {
-                        let prediction = if pending.is_empty()
-                            && controller.state().tree.authority_branch_id.as_ref()
-                                == Some(branch_id)
+                        let predictions = if controller.state().tree.authority_branch_id.as_ref()
+                            == Some(branch_id)
                         {
                             match predict(policy, operation_id, tool_name, arguments) {
                                 Ok(value) => value,
@@ -369,13 +369,18 @@ fn run(
                                     details.entry(branch_id.clone()).or_default().push_str(
                                         &format!("\n[Policy error; Parent fallback] {error}\n"),
                                     );
-                                    None
+                                    Vec::new()
                                 }
                             }
                         } else {
-                            None
+                            Vec::new()
                         };
-                        if let Some(prediction) = prediction {
+                        if predictions.is_empty() {
+                            notice = format!(
+                                "ToolPending {tool_name}; Policy did not admit speculation; Parent continues"
+                            );
+                        }
+                        for prediction in predictions {
                             sequence += 1;
                             let candidate_id = format!("candidate-{sequence}");
                             let _ = controller.create_candidate(&branch_id, &candidate_id, "")?;
@@ -399,10 +404,12 @@ fn run(
                                 }
                                 continue;
                             }
+                            let pending_id = format!("{operation_id}:{candidate_id}");
                             pending.insert(
-                                operation_id.clone(),
+                                pending_id.clone(),
                                 Pending {
                                     parent: branch_id.clone(),
+                                    operation_id: operation_id.clone(),
                                     candidate: candidate_id.clone(),
                                     proposal: prediction.clone(),
                                     outcome: None,
@@ -423,23 +430,15 @@ fn run(
                             )?;
                             details.entry(candidate_id).or_default().push_str(&format!(
                                 "[Candidate requested for {operation_id}; hypothesis={}]\n",
-                                pending[operation_id].proposal
+                                pending[&pending_id].proposal
                             ));
                             notice = format!(
-                                "ToolPending {tool_name}; Candidate started; Parent is waiting for the real result"
+                                "ToolPending {tool_name}; {} Candidates started; Parent continues",
+                                pending
+                                    .values()
+                                    .filter(|work| work.parent == *branch_id)
+                                    .count()
                             );
-                        } else {
-                            notice = format!(
-                                "ToolPending {tool_name}; Policy did not admit speculation, executing Parent normally"
-                            );
-                            send(
-                                stream,
-                                AgentCommand::ResolvePending {
-                                    branch_id: branch_id.clone(),
-                                    operation_id: operation_id.clone(),
-                                    accepted: false,
-                                },
-                            )?;
                         }
                     }
                     AgentMessage::ParentOutcome {
@@ -447,24 +446,14 @@ fn run(
                         operation_id,
                         outcome,
                     } => {
-                        if let Some(work) = pending
-                            .get_mut(operation_id)
-                            .filter(|work| &work.parent == branch_id)
-                        {
+                        for work in pending.values_mut().filter(|work| {
+                            work.parent == *branch_id && work.operation_id == *operation_id
+                        }) {
                             work.outcome = Some(outcome.clone());
                             details
                                 .entry(work.candidate.clone())
                                 .or_default()
                                 .push_str(&format!("\n[Actual Parent outcome] {outcome}\n"));
-                        } else {
-                            send(
-                                stream,
-                                AgentCommand::ResolvePending {
-                                    branch_id: branch_id.clone(),
-                                    operation_id: operation_id.clone(),
-                                    accepted: false,
-                                },
-                            )?;
                         }
                         continue;
                     }
@@ -497,7 +486,7 @@ fn run(
                                 stream,
                                 AgentCommand::ResolvePending {
                                     branch_id: work.parent.clone(),
-                                    operation_id: key,
+                                    operation_id: work.operation_id.clone(),
                                     accepted: false,
                                 },
                             )?;
@@ -552,11 +541,13 @@ fn run(
             .map(|(id, _)| id.clone())
             .collect();
         for key in keys {
-            let work = pending.remove(&key).unwrap();
+            let Some(work) = pending.remove(&key) else {
+                continue;
+            };
             let accepted = work
                 .outcome
                 .as_ref()
-                .map(|outcome| matches_outcome(policy, &key, &work.proposal, outcome))
+                .map(|outcome| matches_outcome(policy, &work.operation_id, &work.proposal, outcome))
                 .transpose()
                 .unwrap_or_else(|error| {
                     details
@@ -565,12 +556,15 @@ fn run(
                         .push_str(&format!("\n[Policy error; Parent fallback] {error}\n"));
                     None
                 })
-                .unwrap_or(false);
+                .unwrap_or(false)
+                && controller.state().tree.authority_branch_id.as_ref() == Some(&work.parent)
+                && controller.state().tree.branches[&work.candidate].status
+                    == ascout::agent_control::BranchStatus::Running;
             send(
                 stream,
                 AgentCommand::ResolvePending {
-                    branch_id: work.parent,
-                    operation_id: key,
+                    branch_id: work.parent.clone(),
+                    operation_id: work.operation_id.clone(),
                     accepted,
                 },
             )?;
@@ -602,6 +596,29 @@ fn run(
                 json!({"branch_id": work.candidate, "disposition": if accepted { "Promote" } else { "Discard" }, "hypothesis": work.proposal, "actual": work.outcome})
             )?;
             if accepted {
+                // Promote invalidates every other continuation of the old Parent,
+                // including candidates for other concurrently pending operations.
+                let obsolete: Vec<_> = pending
+                    .iter()
+                    .filter(|(_, sibling)| sibling.parent == work.parent)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in obsolete {
+                    let sibling = pending.remove(&id).unwrap();
+                    for command in controller.resolve_candidate(&sibling.candidate, false)? {
+                        send(stream, command)?;
+                    }
+                    buffered.remove(&sibling.candidate);
+                    details
+                        .entry(sibling.candidate.clone())
+                        .or_default()
+                        .push_str("\n[Discard: another Candidate replaced Parent]\n");
+                    writeln!(
+                        events,
+                        "{}",
+                        json!({"branch_id": sibling.candidate, "operation_id": sibling.operation_id, "disposition": "Discard", "reason": "Parent replaced"})
+                    )?;
+                }
                 chat.push_str(&buffered.remove(&work.candidate).unwrap_or_default());
                 running = !finished.contains(&work.candidate);
                 ready = true;
@@ -631,12 +648,13 @@ fn predict(
     operation_id: &str,
     tool_name: &str,
     arguments: &serde_json::Value,
-) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error>> {
+) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
     let engine = PolicyEngine::default();
     let op = json!({"kind": tool_name, "produces_result": true, "result_pending": true, "has_predictor": true});
-    if engine.evaluate(policy, Decision::OpportunityPass, &json!({"op": op}))? != true ||
-        engine.evaluate(policy, Decision::FeasibilityPass, &json!({"op": op, "state": {}, "contract_context": {"isolation": "directory-only", "candidate_tools": "held_until_resolution"}}))? != true {
-        return Ok(None);
+    let opportunity = engine.evaluate(policy, Decision::OpportunityPass, &json!({"op": op}))?;
+    let feasibility = engine.evaluate(policy, Decision::FeasibilityPass, &json!({"op": op, "state": {}, "contract_context": {"arguments": arguments, "isolation": "directory-only", "candidate_tools": "reads_and_literal_delay_printf"}}))?;
+    if opportunity != true || feasibility != true {
+        return Ok(Vec::new());
     }
     let edge = json!({"edge_id": operation_id, "tool_name": tool_name, "arguments": arguments});
     let selected = engine.evaluate(
@@ -648,7 +666,7 @@ fn predict(
         .as_array()
         .is_some_and(|ids| ids.contains(&json!(operation_id)))
     {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let data = json!({
         "edge_context": edge,
@@ -663,14 +681,14 @@ fn predict(
         &json!({"edge_context": edge, "authority_state": {}, "candidate_view": []}),
     )? != true
     {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     Ok(result["proposals"]
         .as_array()
-        .and_then(|items| items.first())
-        .and_then(|item| item.get("payload"))
-        .filter(|payload| payload.is_string())
-        .cloned())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("payload").cloned())
+        .collect())
 }
 
 fn matches_outcome(
@@ -688,9 +706,7 @@ fn matches_outcome(
             "match_context": {"operation_id": operation_id}
         }),
     )?;
-    let compatible = result["verdict"] == "compatible"
-        && outcome["is_error"] == false
-        && outcome["payload"].is_string();
+    let compatible = result["verdict"] == "compatible";
     let disposition = PolicyEngine::default().evaluate(
         policy,
         Decision::Dispose,

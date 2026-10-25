@@ -58,6 +58,8 @@ Agent 按照自身原有流程执行步骤。当 Agent 即将执行处于接入�
 
 真实步骤继续执行时，Product Integration 从原调用返回路径取得结果并交给 Interposer；Interposer 将其作为 outcome 归属对应 Branch，并通过 ASC-Proxy 提交控制面。Agent 主进程及其 sub-agent 产生的可观察步骤都经过同一处理路径，因此 AScout 介入的是步骤执行边界，而不改变 Agent 原有的执行流程。
 
+Parent 获得真实结果后沿原路径继续，不以候选比较完成为结果交付前提；只有控制面确认 Promote 时旧 Parent 才失去权威并受管停止。每个工具 operation 独立提交事实和判断准入，同一消息包含多个调用本身不是拒绝条件；候选续跑前必须保证全部调用与结果正确配对，不得为了恢复上下文而重复执行其他调用的效果。工具与结果兼容性由 Policy 结合接入能力判断，能力不足须明确报告或回退，不能伪造结果。
+
 ## 4. 部署与生命周期
 
 Agent 接入侧可以在执行环境中按需要建立其本地承载，并由 ASC-Proxy 与控制面建立会话。环境内的每个 Agent 在启动时通过 Product Integration 接入 Agent 接入侧，并持有独立的 Agent 执行上下文。多个 Agent 及其 Branch 可以暂时共享同一个执行环境和接入侧承载；当某个 Branch 需要独立的 Branch-local 状态时，控制面通过 Runtime Adapter 建立相应的独立执行环境，并使该 Branch 的执行活动和管理上下文进入该环境。具体承载方式由实现决定，但必须保持各 Agent 和 Branch 上下文的独立性。
