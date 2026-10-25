@@ -1,57 +1,26 @@
 # 首要验证 Workload
 
-本文记录当前 AScout 第一阶段的开发与验证范围，不定义全部目标语义，也不声称已经完成完整 Runtime 或 coding workload。
+首个真实接入对象是 Pi，当前源码位于相邻的 `pi-code`。本文只记录当前交互实现，不定义完整 Runtime 或 coding workload。
 
-## 当前开发骨架
+## 当前可运行范围
 
-首个真实接入对象是固定 commit `8a2ebd38549c3521a02db0e5d758a24320e97f94` 的 Pi。Rust 控制面启动并管理一个 Pi 接入连接；Pi 的 `agent-access.ts` 只负责创建 `AgentSession`、执行控制面命令、收集模型输出事实和回传 outcome。
+运行方式见 [README](../../README.md)。Rust 控制面自动启动 Pi 接入进程，并提供 AScout 自己的终端界面；Pi 只管理本地 AgentSession、执行控制命令和报告事实，没有 Tree 或 Policy 裁决权。
 
-当前闭环包含：
+- 初始 Authority 在本次独立管理目录中建立，连续请求使用同一 AgentSession。
+- 模型选择与认证使用 Pi 现有配置，不写死 provider。
+- 模型文本、工具启动与工具结果经接入协议实时回传，由 AScout 展示；模型错误如实显示。
+- `/ascout` 展示当前控制面 Tree，可按编号深入只读查看 Branch 的记录和执行输出；选择观察对象不改变权威路径。
+- Ctrl-C 请求中断；Ctrl-D 退出。运行目录和 `agent.log` 保留用于诊断。
+- 不创建演示候选，不用最终模型回答充当 Parent operation outcome。
 
-- 两个跨进程 Pi AgentSession：Authority 和 Candidate；
-- 两次真实 `deepseek/deepseek-flash` 模型请求；
-- 控制面请求并由当前接入 Runtime 以两个不同工作目录承载的两个独立执行环境；
-- Rust 控制面调用 Policy 的 `admit`、`select`、`launch`、`predict`、`match`、`dispose`；
-- Candidate 报告完成事实，不能直接决定生命周期；
-- 协议已经区分 `ParentOutcome` 和 `CandidateCompleted`；
-- 但当前 `ParentOutcome` 仍是模型文本占位，尚未来自真实 operation outcome；
-- 只有 Policy 的 `dispose` 返回 Promote 时，控制面才更新 Tree 的 authority；
-- 旧 Authority 的目录由控制面删除，当前 winner 的目录保留。
+## 实际检查（2026-10-25）
 
-## 可观察证据
+在 tmux 真实终端启动，确认 Pi 接入成功、Authority 启动、主对话输入送达、模型错误实时回传、Tree 展示和 Branch 详情显示。Pi 默认模型 `gpt-5.5` 的当前服务返回 HTTP 503 `model_not_found`；没有伪造模型成功回答。中断后收到本轮结束事实。Rust 编译与已有两个控制状态测试通过，Pi 完整 `npm run check` 通过。
 
-控制面输出的 Tree 应显示：
+## 尚未完成
 
-```text
-authority_branch_id = candidate
-authority.status = cleaned
-candidate.role = authority
-candidate.status = promoted
-```
+真实等待点的捕获、从共同上下文注入预测并续跑候选、Policy 的运行期接入、真实 Parent outcome 比较、Promote 的输出接替，以及相应的候选运行观察均待实现。当前界面明确显示投机尚未接通，不能作为完成真实投机执行的证据。
 
-控制面 stderr 应显示 Policy 结果：
+完整多行编辑、Markdown 和工具专门排版、宽字符排版、产品特有交互、断线恢复、资源硬限制与确认式退出清理尚未实现。当前是简单终端原型，不宣称已达到原 Agent 全部交互能力。
 
-```json
-{"event":"policy","match":{"verdict":"compatible"},"disposition":{"actions":[{"intent":"Promote"}]}}
-```
-
-Pi stderr 应显示真实模型请求，例如：
-
-```json
-{"event":"model_request_finished","branch_id":"candidate","role":"candidate","model":"deepseek/deepseek-flash","output_characters":7}
-```
-
-这些证据只能证明：控制面拥有 Tree、Policy 由控制面执行、Pi 使用真实模型完成了 Branch 请求；不能证明真实 pending-result boundary 或正确的 Parent-outcome 匹配。
-
-## 当前边界
-
-首轮使用最低程度的 Runtime 承载：当前 Adapter 以不同目录实现独立 Candidate 环境，但目录不是控制面抽象本身。候选暂不开放业务工具、写文件或 shell。尚未实现多 Candidate、Reuse、断线恢复、真实 pending-result 拦截、Parent operation outcome 获取、进程确认式清理和真实仓库 coding workload。当前控制面可以自动启动 Pi 接入，但仍是开发验证入口，不是最终用户交互入口。
-
-外部命令只模拟用户启动控制面和 Pi 接入，不拥有 Tree、Policy 或 Branch 生命周期。旧的 Pi-local `SpeculativeTree`、`BranchRecord`、`ControlState`、一次性根目录驱动和旧 Rust 示例均已删除；废弃原因只记录在开发决策中。
-
-## 后续验证顺序
-
-1. 增加控制面与 Pi 的命令确认和断线处理。
-2. 在相同协议下验证 Discard 和 Candidate 失败清理。
-3. 接入真实 pending-result boundary，而不是当前由控制面安排的最小双会话场景。
-4. 再验证多 Candidate、状态交接和真实 coding workload。
+环境管理暂不接通完整 Runtime Adapter 是已确认的开发顺序；目录不代表任意 shell 或外部效果已隔离。接入进程退出只确认该进程退出，不证明任意工具后代均已停止或环境资源已清理。首轮不开放候选业务工具。

@@ -10,30 +10,19 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 ## 已确认的实现边界
 
-### 运行真实 Pi 闭环
+### 运行 AScout TUI（首步交互实现）
 
 目标系统入口是控制面：用户请求进入控制面，控制面启动 Pi Agent 及其接入组件。Pi 接入只运行 AgentSession、收集 Agent 行为事实和执行控制命令，不是用户入口。
 
-先编译允许 Candidate 的测试 Policy：
+从真实终端启动：
 
 ```sh
-tmp=/tmp/opencode/ascout-control-plane-e2e
-mkdir -p "$tmp"
-cp assets/policy/decisions.py "$tmp/decisions.py"
-sed 's/max_edges: 0/max_edges: 1/' assets/policy/policy.yaml > "$tmp/policy.yaml"
-cargo run --example policy -- compile "$tmp/policy.yaml" "$tmp/policy.json"
+cargo run --bin ascout-control-plane -- /tmp/opencode ../pi-code
 ```
 
-当前开发验证入口启动控制面：
+第一个参数是本次运行目录的父目录，第二个参数是 Pi 源码路径。AScout 自动启动接入进程，在本次新建目录内运行 Agent，并使用 Pi 自身配置的模型与认证，不写死 provider。AScout 自己呈现流式回答和工具活动，不使用 Pi 主界面。输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；再次输入 `/ascout` 或按 Esc 返回主对话。Ctrl-C 请求中断，Ctrl-D 退出，主对话中 ↑/↓ 滚动。运行目录及 `agent.log` 保留用于检查。
 
-```sh
-cargo run --bin ascout-control-plane -- \
-  "$tmp/agent.sock" "$tmp/workspaces" "$tmp/policy.json" \
-  'Respond with exactly the word example.' \
-  ../pi-8a2ebd38549c3521a02db0e5d758a24320e97f94
-```
-
-当前命令只能验证控制面自动启动 Pi、接入通信和会话管理。它还不能证明正确的 Promote：当前 `ParentOutcome` 仍是占位的模型文本，正确实现必须从 Parent 的真实 operation outcome 取得 evidence，再与 Candidate hypothesis 比较。真正的用户交互入口和 pending-result boundary 仍待实现。
+当前只接通持续对话和只读观察，尚未连接 Policy、真实等待点候选续跑或 Promote；界面明确说明没有发生投机，不再运行无共同等待点的双会话示例。候选创建、真实 Parent outcome 比较、确认式退出清理、完整多行编辑、Markdown 排版与产品特有交互仍待实现。不能据此声称已完成可尝试的投机执行。
 
 Policy YAML 编译与受限 Python 求值已可独立运行：
 

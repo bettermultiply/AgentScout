@@ -63,6 +63,13 @@ impl SpeculativeTree {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AgentCommand {
+    Prompt {
+        branch_id: String,
+        prompt: String,
+    },
+    Abort {
+        branch_id: String,
+    },
     StartBranch {
         branch_id: String,
         role: BranchRole,
@@ -85,6 +92,16 @@ pub enum AgentCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AgentMessage {
+    Output {
+        branch_id: String,
+        text: String,
+    },
+    TurnCompleted {
+        branch_id: String,
+    },
+    CleanupCompleted {
+        branch_id: String,
+    },
     Hello {
         agent_id: String,
     },
@@ -218,6 +235,14 @@ impl AgentController {
                     "outcomes are resolved only after the control-plane Policy evaluation",
                 ))
             }
+            AgentMessage::Output { branch_id, .. } | AgentMessage::TurnCompleted { branch_id } => {
+                self.branch(&branch_id)?;
+                Ok(vec![])
+            }
+            AgentMessage::CleanupCompleted { branch_id } => {
+                self.cleanup_completed(&branch_id)?;
+                Ok(vec![])
+            }
             AgentMessage::BranchFailed { branch_id, .. } => {
                 let branch = self.branch_mut(&branch_id)?;
                 branch.status = BranchStatus::Discarded;
@@ -283,6 +308,9 @@ impl AgentController {
 
     /// 清理命令完成后由控制面删除目录并收束状态。
     pub fn cleanup_completed(&mut self, branch_id: &str) -> io::Result<()> {
+        if self.branch(branch_id)?.status != BranchStatus::Discarded {
+            return Err(invalid_input("branch is not awaiting cleanup"));
+        }
         let workspace = self.branch(branch_id)?.workspace.clone();
         if workspace.exists() {
             fs::remove_dir_all(&workspace)?;
