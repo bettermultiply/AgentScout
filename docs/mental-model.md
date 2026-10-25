@@ -68,7 +68,7 @@ task
 
 `task` 是 session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。task 准入时绑定 Policy 及其 task-level 配置，并建立初始 Agent，称为 root Authority Instance。在运行过程中，随着投机执行的不断发生和结束，Authority Instance 不断变化，由此形成树形结构。树中的每个子树都称为 `Branch`。`Branch` 是树中的计算延续，也是投机世界的结构实体；Branch 对应的根节点称为 `Branch Root`。`Branch Root` 具有稳定 identity 并直接拥有该根的 local state；`Instance` 是由外部 Runtime 承载 Branch Root 执行活动的实际执行单元。逻辑 Branch 可以在没有立即建立独立 Instance 的情况下先存在并推进，直到其状态或效果要求独立 Runtime 环境。
 
-对外，为只呈现一个单一 Agent，这个统一视图称为 `AScoutAgent`。端用户直接操作当前有效的权威执行主线，只能看到这条路径产生的内容与交互；投机 Branch 的输出、事件和生命周期转换不形成另一条用户对话。一个 task 对应一个 AScoutAgent，一个 AScoutAgent 拥有一棵 Speculative Tree；控制面拥有 Tree、Branch 关系、逻辑推进和实际环境对齐状态，已建立 Instance 的实际执行、资源和隔离状态位于外部 Runtime，控制面只能通过 Adapter 观察所需结果。
+对外，为只呈现一个单一 Agent，这个统一视图称为 `AScoutAgent`。端用户通过主对话直接操作当前有效的权威执行主线；另可只读观察候选 Branch 的运行状态与明确标记为未验证的内容，以了解投机是否真实发生及其处理过程。观察不形成另一条用户对话，不表示候选已被接受，也不改变 Branch 的裁决权限或向其他 Branch 传播候选内容。一个 task 对应一个 AScoutAgent，一个 AScoutAgent 拥有一棵 Speculative Tree；控制面拥有 Tree、Branch 关系、逻辑推进和实际环境对齐状态，已建立 Instance 的实际执行、资源和隔离状态位于外部 Runtime，控制面只能通过 Adapter 观察所需结果。
 
 用户端保持稳定的 AScoutAgent 交互入口，不绑定某个后端 Agent session。合法 Promote 改变该视图对应的权威执行及输入输出路由，不要求用户切换对话，也不以候选会话结束为前提；候选保留自己的执行状态和在飞进展，接受与效果约束仍然有效。
 

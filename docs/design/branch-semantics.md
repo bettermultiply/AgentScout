@@ -157,7 +157,7 @@ Agent 接入侧负责从产品执行接缝中识别并规范化 operation 及其
 
 未来的 routine Agent-facing control surface 可以保留两类查询和五类 lifecycle/activity operation slots：查询自身 `context`、查询 direct `children`、`branch`、`commit`、`accept`、`discard` 和等待 event。这里的 operation slots 不表示当前 Agent product 已经实际暴露接口。`branch` 表示从当前 Branch 创建一个或多个 direct child；在投机场景中这些 child 才按角色称为 candidate。完整语义中 `branch` 可以携带 candidate 数量、Proposal、outcome slot 和可选 resolver override，未指定 resolver 时使用 AScoutAgent 配置中的默认 resolver。具体参数、返回值、阻塞方式、event model、命令拼写以及 Agent-facing 组件和接入形式，见 [Agent 接入侧设计](agent-integration.md)，并须继续受本文件规定的 Branch lifecycle 语义约束。
 
-显式 Agent 感知不向端用户扩展独立用户会话。端用户始终通过 AScoutAgent 视图直接操作当前有效的权威执行主线，只能看到该路径产生的内容、状态与交互；携带未决 Proposal 的投机 Branch 不能直接向端用户输出或提问。Branch 接受、丢弃、重新挂载和清理仍由 Policy、授权 resolver 与控制面机制在内部完成，Accept 改变权威路径后，用户继续操作更新后的有效主线。
+显式 Agent 感知不向端用户扩展独立用户会话。端用户始终通过 AScoutAgent 主对话直接操作当前有效的权威执行主线；携带未决 Proposal 的投机 Branch 不能作为正式回复向端用户输出或提问。独立的只读候选观察允许展示明确标记为未验证的状态与内容，不建立候选用户对话，不将其内容注入其他 Branch 上下文，也不表示 commit、Accept 或效果提交。Branch 接受、丢弃、重新挂载和清理仍由 Policy、授权 resolver 与控制面机制在内部完成，Accept 改变权威路径后，用户继续操作更新后的有效主线。
 
 未来的 Agent-facing context 不要求暴露 Runtime 内部的裸 Branch ID。若获得相应 capability，Agent 可以查询当前 depth、lifecycle state、Proposal 和 capabilities，也可以获取 direct children 的受控 metadata view；depth 是 Accept 后树位置的派生信息，不能代替稳定 identity 或用于推导权限。Direct-child 操作使用 session-scoped opaque candidate handle，不能借此读取不属于授权视图范围的 Branch 状态。
 
