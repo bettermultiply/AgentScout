@@ -50,6 +50,10 @@ Interposer 还负责在 Branch-local 状态或受纳管 Effect 发生前识别�
 
 用户可通过独立的只读观察查看候选状态及内容，内容必须明确标记为未验证并与主对话分开。接入侧按 Branch 报告实际模型、工具和执行活动；控制面提供预测、比较、处置与生命周期事实。界面应区分请求已发送、实际开始、执行结束和清理确认，不能把未知状态显示为已完成。只读观察不使候选获得用户对话或裁决权限，也不把其内容注入其他 Branch 的上下文。
 
+AScout 自己接收并呈现 Agent 的输出和运行事件，并将用户输入和中断交给相应接入实现；不通过复用 Pi 或其他 Agent 的主界面形成产品依赖。对应产品的交互能力按实际接入范围整合，未支持的能力明确说明，不承诺不同产品的全部交互完全一致。
+
+观察先展示当前 AScoutAgent 整棵 Speculative Tree 的 Branch 关系、当前权威路径与投机状态，再允许选择具体 Branch 深入只读查看。选择 Branch 不改变权威执行、输入路由或接受条件，也不向该候选建立用户对话。用户界面可拦截自己的观察操作，不把它作为普通提示词交给 Agent；本地 TUI 的具体操作见开发文档与术语表。
+
 Agent 按照自身原有流程执行步骤。当 Agent 即将执行处于接入范围内的步骤时，Product Integration 将该步骤交给 Interposer。Interposer 根据本地 Decision 或控制面返回的处置结果处理该步骤；需要控制面参与时，Interposer 通过 ASC-Proxy 传递相关事实和请求，并接收控制面返回的结果或命令。Product Integration 根据 Interposer 的处置结果让原步骤继续执行，或跳过真实执行并沿 Agent 原有的完成路径结束当前调用。
 
 真实步骤继续执行时，Product Integration 从原调用返回路径取得结果并交给 Interposer；Interposer 将其作为 outcome 归属对应 Branch，并通过 ASC-Proxy 提交控制面。Agent 主进程及其 sub-agent 产生的可观察步骤都经过同一处理路径，因此 AScout 介入的是步骤执行边界，而不改变 Agent 原有的执行流程。

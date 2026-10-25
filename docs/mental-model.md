@@ -72,6 +72,8 @@ task
 
 用户端保持稳定的 AScoutAgent 交互入口，不绑定某个后端 Agent session。合法 Promote 改变该视图对应的权威执行及输入输出路由，不要求用户切换对话，也不以候选会话结束为前提；候选保留自己的执行状态和在飞进展，接受与效果约束仍然有效。
 
+用户界面由 AScout 接收并呈现 Agent 输出和运行事件，整合对应 Agent 的使用体验，不绑定某个 Agent 产品的原生界面。用户可从当前 AScoutAgent 的整棵 Tree 查看 Branch 关系与投机状态，并选择具体 Branch 深入只读观察；选择观察对象不改变权威路径或 Branch 生命周期。
+
 ## 相关文档
 
 - 问题与目标的完整论证见 [问题与目标](problems-and-goals.md)

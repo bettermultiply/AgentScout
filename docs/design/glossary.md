@@ -29,7 +29,8 @@
 - **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，位于投机策略与执行机制之间，分离策略决策与具体运行时实现；Agent 可以在不修改自身执行逻辑的情况下接入，具体接入实现应尽可能保持修改面小。（`../mental-model.md`；`../architecture.md`；`../design-model.md`）
 - **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Root 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
-- **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；端用户通过它直接操作当前有效的权威执行主线，只看到该路径的内容与交互。（`../mental-model.md` §4.2；`agent-integration.md` §3）
+- **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；主对话操作当前有效的权威执行主线，另可只读观察该 Tree 的 Branch 状态与明确标记为未验证的候选内容，不改变主对话路由或生命周期权限。（`../mental-model.md` §4.2；`agent-integration.md` §3）
+- **`/ascout`**：AScout TUI 内打开当前 AScoutAgent 整棵 Speculative Tree 的只读观察操作，可从 Branch 关系与投机状态选择具体 Branch 深入查看；选择仅改变观察对象，不切换主对话、不向候选发送对话，也不接受或丢弃 Branch。它不是 Agent 产品自身的命令，不查询其他 Tree。（用户确认：2026-10-25；`../../Discussion.md`；`../development/decisions.md`）
 - **Agent 接入侧**：四侧调用路径的入口侧，负责 Agent 执行实体、执行活动、Branch context、operation 归属、Interposer、ASC-Proxy 和 Product Integration 等接入职责；其中 Interposer 统一承担 Agent 拦截与 operation integration。（`../architecture.md` §1；`agent-integration.md`）
 - **控制面**：四侧一级架构的控制侧；包含 Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释；是 AScout 自身实现的 Mechanism 主体，组件与实现见 `control-plane.md`。（`../architecture.md` §1；`control-plane.md`）
 
