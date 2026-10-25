@@ -22,7 +22,15 @@ cargo run --bin ascout-control-plane -- /tmp/opencode ../pi-code
 
 第一个参数是本次运行目录的父目录，第二个参数是 Pi 源码路径。AScout 自动启动接入进程，在本次新建目录内运行 Agent，并使用 Pi 自身配置的模型与认证，不写死 provider。AScout 自己呈现流式回答和工具活动，不使用 Pi 主界面。输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；再次输入 `/ascout` 或按 Esc 返回主对话。Ctrl-C 请求中断，Ctrl-D 退出，主对话中 ↑/↓ 滚动。运行目录及 `agent.log` 保留用于检查。
 
-当前只接通持续对话和只读观察，尚未连接 Policy、真实等待点候选续跑或 Promote；界面明确说明没有发生投机，不再运行无共同等待点的双会话示例。候选创建、真实 Parent outcome 比较、确认式退出清理、完整多行编辑、Markdown 排版与产品特有交互仍待实现。不能据此声称已完成可尝试的投机执行。
+已接通受限真实工具等待点：Candidate 从共同消息上下文与预测工具结果续跑；Parent 工具执行一次，真实结果返回后由 Policy 比较并 Promote 或 Discard。Promote 保留候选会话和在飞输出，用户仍使用同一个主对话；不命中则 Parent 使用真实结果继续。默认 Policy 禁用候选；可显式启用文本预测示例：
+
+```sh
+cargo run --bin ascout-control-plane -- /tmp/opencode ../pi-code assets/policy/pi-tool.yaml
+```
+
+该示例预测文本 `example`。可要求 Agent 执行精确命令 `sleep 6; printf 'example'` 观察命中，或 `sleep 6; printf 'different'` 观察拒绝（模型须实际调用该命令）。`/ascout` 查看预测、实际结果、处置和清理；运行目录的 `events.jsonl` 保留原始事实。已用本地脚本模型接口和真实 Pi/bash 验证在飞转正及不命中恢复，尚未取得真实大模型成功验证，不宣称预测效果或加速收益。
+
+当前仅支持单工具调用、标准消息上下文、单文本结果，以及受限只读工具/上述字面量等待命令；未验证候选的后续工具调用必须等待裁决。多候选、嵌套、任意外部效果隔离、完整 Runtime Adapter、多行编辑/排版和退出确认式清理仍未完成。详见 [当前实现与验证边界](docs/development/reference-workload.md)。
 
 Policy YAML 编译与受限 Python 求值已可独立运行：
 

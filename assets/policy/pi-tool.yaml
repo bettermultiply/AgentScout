@@ -1,0 +1,43 @@
+version: 1
+language: python
+files:
+  - decisions.py
+fidelity: Best-effort
+decisions:
+  admit:
+    opportunity_pass:
+      file: decisions.py
+      function: opportunity_pass
+    feasibility_pass:
+      file: decisions.py
+      function: feasibility_pass
+  select:
+    file: decisions.py
+    function: select
+    policy_config:
+      max_edges: 1
+  rebalance:
+    file: decisions.py
+    function: rebalance
+  extent:
+    file: decisions.py
+    function: extent
+    policy_config:
+      max_steps: 5
+  predict:
+    file: decisions.py
+    function: predict
+    policy_config:
+      candidates: ["example"]
+  launch:
+    file: decisions.py
+    function: launch
+  effect:
+    file: decisions.py
+    function: effect
+  match:
+    file: decisions.py
+    function: match_proposal
+  dispose:
+    file: decisions.py
+    function: dispose

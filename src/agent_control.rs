@@ -9,6 +9,7 @@ use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// 一个 Agent 内 Branch 的角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +71,20 @@ pub enum AgentCommand {
     Abort {
         branch_id: String,
     },
+    StartCandidate {
+        branch_id: String,
+        parent_branch_id: String,
+        operation_id: String,
+        tool_name: String,
+        workspace: PathBuf,
+        prediction: Value,
+        context: Vec<Value>,
+    },
+    ResolvePending {
+        branch_id: String,
+        operation_id: String,
+        accepted: bool,
+    },
     StartBranch {
         branch_id: String,
         role: BranchRole,
@@ -99,6 +114,13 @@ pub enum AgentMessage {
     TurnCompleted {
         branch_id: String,
     },
+    ToolPending {
+        branch_id: String,
+        operation_id: String,
+        tool_name: String,
+        arguments: Value,
+        context: Vec<Value>,
+    },
     CleanupCompleted {
         branch_id: String,
     },
@@ -111,7 +133,7 @@ pub enum AgentMessage {
     ParentOutcome {
         branch_id: String,
         operation_id: String,
-        outcome: String,
+        outcome: Value,
     },
     CandidateCompleted {
         branch_id: String,
@@ -200,7 +222,10 @@ impl AgentController {
             .branches
             .get(parent_branch_id)
             .ok_or_else(|| invalid_input("parent branch does not exist"))?;
-        if !matches!(parent.status, BranchStatus::Created | BranchStatus::Running) {
+        if !matches!(
+            parent.status,
+            BranchStatus::Created | BranchStatus::Running | BranchStatus::Promoted
+        ) {
             return Err(invalid_input("parent branch cannot create a candidate"));
         }
         self.insert_branch(
@@ -224,6 +249,14 @@ impl AgentController {
             AgentMessage::Hello { .. } => Err(invalid_input("agent id does not match controller")),
             AgentMessage::BranchStarted { branch_id } => {
                 let branch = self.branch_mut(&branch_id)?;
+                // A start fact already in transit may arrive after cancellation.
+                // It must not resurrect a discarded Branch or abort Parent fallback.
+                if matches!(
+                    branch.status,
+                    BranchStatus::Discarded | BranchStatus::Cleaned
+                ) {
+                    return Ok(vec![]);
+                }
                 if branch.status != BranchStatus::Created {
                     return Err(invalid_input("branch was not awaiting start"));
                 }
@@ -236,6 +269,10 @@ impl AgentController {
                 ))
             }
             AgentMessage::Output { branch_id, .. } | AgentMessage::TurnCompleted { branch_id } => {
+                self.branch(&branch_id)?;
+                Ok(vec![])
+            }
+            AgentMessage::ToolPending { branch_id, .. } => {
                 self.branch(&branch_id)?;
                 Ok(vec![])
             }
@@ -267,7 +304,10 @@ impl AgentController {
             .get(branch_id)
             .ok_or_else(|| invalid_input("candidate branch does not exist"))?
             .clone();
-        if candidate.role != BranchRole::Candidate || candidate.status != BranchStatus::Running {
+        if candidate.role != BranchRole::Candidate
+            || !(candidate.status == BranchStatus::Running
+                || (!compatible && candidate.status == BranchStatus::Created))
+        {
             return Err(invalid_input("branch is not a running candidate"));
         }
 
@@ -290,6 +330,11 @@ impl AgentController {
             .authority_branch_id
             .clone()
             .ok_or_else(|| invalid_input("tree has no authority branch"))?;
+        if candidate.parent_branch_id.as_deref() != Some(&old_authority) {
+            return Err(invalid_input(
+                "candidate is not a child of current authority",
+            ));
+        }
         self.branch_mut(&old_authority)?.status = BranchStatus::Discarded;
         let promoted = self.branch_mut(branch_id)?;
         promoted.role = BranchRole::Authority;

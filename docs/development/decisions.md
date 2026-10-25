@@ -4,13 +4,15 @@
 
 ## 2026-10-25：TUI 与实际投机过程观察优先
 
-先实现稳定的 AScoutAgent TUI，由 AScout 接收 Agent 输出和运行事件并呈现，输入与中断经对应 Agent 接入实现传递；产品差异留在接入实现，不依赖 Pi 原有主界面。增加当前 AScoutAgent 整棵 Tree 的只读观察，可选择具体 Branch 深入查看。先使用简单环境，不把接通完整 Runtime Adapter 环境管理作为前置条件；不据此声称已实现完整环境隔离。实际启动、执行、预测比较、Policy 处置与清理必须有事实依据，不能用两个独立模型请求或发送命令代替完成证据。当前尚未实现该 TUI 与真实等待点续跑路径；现有开发入口不满足本轮验收要求。
+先实现稳定的 AScoutAgent TUI，由 AScout 接收 Agent 输出和运行事件并呈现，输入与中断经对应 Agent 接入实现传递；产品差异留在接入实现，不依赖 Pi 原有主界面。增加当前 AScoutAgent 整棵 Tree 的只读观察，可选择具体 Branch 深入查看。先使用简单环境，不把接通完整 Runtime Adapter 环境管理作为前置条件；不据此声称已实现完整环境隔离。实际启动、执行、预测比较、Policy 处置与清理必须有事实依据，不能用两个独立模型请求或发送命令代替完成证据。当前已完成自有 TUI 与受限单工具真实等待点续跑，具体可用范围以 reference-workload.md 为准。
 
 用户已批准 `/ascout` 为 AScout TUI 内的整棵 Tree 观察操作，选择 Branch 只改变观察对象，不切换主对话或触发生命周期操作；命令由 AScout 处理，不作为提示词发送给 Agent。该名称与含义记录于术语表。
 
 废弃助手提出的“复用 Pi 主界面”的实现方向；目标是整合原 Agent 的体验，而非把 AScout 用户端绑定到 Pi TUI。首版仍接入 Pi，不同时实现其他 Agent 的适配。
 
-首步实现：现有 `ascout-control-plane` 开发入口改为 AScout 自有终端界面，保持 socket 接入、控制面 Tree 和连续 Pi AgentSession，加入流式输出与只读 Tree/Branch 观察。废弃该入口原先在 Branch 启动时直接发起无共同等待点的候选、把模型最终文本作为 ParentOutcome 的演示路径；接入侧不再产生该占位结果。当前尚未连接真实投机流程，界面必须明确显示这一限制。退出保留运行目录和诊断文件，不声称已确认所有工具后代及环境清理。
+首步实现：现有 `ascout-control-plane` 开发入口改为 AScout 自有终端界面，保持 socket 接入、控制面 Tree 和连续 Pi AgentSession，加入流式输出与只读 Tree/Branch 观察。废弃该入口原先在 Branch 启动时直接发起无共同等待点的候选、把模型最终文本作为 ParentOutcome 的演示路径；接入侧不再产生该占位结果。退出保留运行目录和诊断文件，不声称已确认所有工具后代及环境清理。
+
+本轮连接真实投机：ToolPending 报告后让真实工具继续一次，仅在 afterToolCall 挂起结果交付；复用既定 ParentOutcome 名称表示真实工具结果，不另引入 ToolOutcome。Candidate 使用独立目录与独立内存 SessionManager，保存共同上下文和预测 toolResult 后 continue，不以新用户提示词伪造续跑。控制面求值 admit/select/predict/launch/match/dispose，在合法 Promote 后发布缓冲输出并保持活跃 Candidate，不命中回退 Parent。未验证候选下一次工具执行必须挂起，Pi 原有工具钩子保留。当前仅支持文档列出的受限读操作和字面量等待命令；一个在飞候选与 120 秒启动/结果等待上限是原型容量和超时限制，不是目标策略规则。默认示例不自动开启投机，新增可显式选择的 pi-tool.yaml。实测使用本地脚本模型接口加真实 Pi/bash，不能作为真实大模型效果证据。
 
 废弃 D-031-I 中“用户不可直接观察候选”的限制；保留主对话只属于权威路径、候选不建立用户对话、用户不直接裁决 Branch 的边界。只读观察明确标记候选内容未验证，不向其他 Branch 反馈这些内容。
 
