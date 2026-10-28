@@ -21,13 +21,13 @@
 
 ## 当前等待点与使用范围
 
-第三个参数可指定 Policy YAML，例如 `assets/policy/pi-tool.yaml`：该示例无固定种子地从三种文本值抽取两个不同预测。默认 `assets/policy/policy.yaml` 仍禁用候选（`max_edges: 0`）。编译在终端进入 raw mode 前完成，运行期分别求值 admit/select/predict/launch/match/dispose；Policy 错误回退 Parent，不把未知结果当作接受。
+第三个参数可指定 Policy YAML，例如 `assets/policy/pi-tool.yaml`：该示例声明字符串枚举 `example`、`true`、`false`，无固定种子地抽取其中两个不同预测。布尔类型也可由 Policy 声明为 `value_type: boolean`，其候选必须是 JSON `true`/`false`，与字符串枚举成员 `"true"`/`"false"` 不同。默认 `assets/policy/policy.yaml` 仍禁用候选（`max_edges: 0`）。编译在终端进入 raw mode 前完成，运行期分别求值 admit/select/predict/launch/match/dispose；Policy 错误回退 Parent，不把未知结果当作接受。
 
 接入报告 ToolPending 后立即执行真实工具；真实结果经 Pi 原有 afterToolCall 处理后报告为 ParentOutcome，立即交回 Parent，不等待 ResolvePending。比较使用 Parent 与 operation 的明确归属。Candidate 在独立目录和独立会话管理器中保存共同消息及配对预测工具结果，以 `agent.continue()` 续跑。控制面只在实际 BranchStarted 后接受 Candidate；缓冲输出只在合法 Promote 后进入主对话，未命中输出不发布。Promote 保留胜出会话并取消旧 Parent 下全部其他 Candidate，含尚在创建的候选。
 
-目前转换标准 system/user/assistant/toolResult 消息与文本预测；真实结果携带原始 content，匹配与错误结果是否兼容由 Policy 决定。等待点工具准入在示例 Policy 中，不按同一消息的工具数量整组拒绝。并行消息中，候选自己的调用使用预测，其余调用等待并复用真实结果，全部配对后才请求模型，不复制工具效果；此路径尚未完成专项端到端验证。非标准上下文问题仅记录、暂缓处理。
+目前转换标准 system/user/assistant/toolResult 消息与字符串、布尔预测；真实结果携带原始 content，匹配与错误结果是否兼容由 Policy 决定。Candidate 的工具执行由 AScout 的 Branch 生命周期统一控制：未 Promote 前等待，Promote 后放行，Discard 时取消；Pi 不按工具名或命令格式筛选。并行消息中，候选自己的调用使用预测，其余调用等待并复用真实结果，全部配对后才请求模型，不复制工具效果；此路径尚未完成专项端到端验证。非标准上下文问题仅记录、暂缓处理。
 
-未验证 Candidate 的 read/ls/find/grep 和严格字面量 `sleep N; printf 'TEXT'` 可提前执行；其他工具等待 Promote。这里仍是接入侧硬编码的安全能力限制，尚未全部接通 Policy/Effect 能力协商，不能声称这项需求已完成。目录复制拒绝符号链接及特殊文件；这不是完整隔离。
+Candidate 不再由 Pi 判断工具是否安全；所有未验证 Candidate 工具调用统一等待 AScout 的生命周期处置。当前控制面仍使用目录复制作为最低程度的环境方案，不能把它当作完整 Runtime 隔离；Runtime 能力、Policy 决定和 AScout 的正确性约束仍需接入到正式的执行控制路径。
 
 ## 随机三结果场景
 
@@ -52,8 +52,29 @@ PI_CODING_AGENT_DIR=/tmp/opencode/ascout-check-config cargo run --bin ascout-con
 
 ## 尚未完成
 
-嵌套、并行工具专项验证、非标准消息、图像/复杂预测转换、多种结果元数据的一致性、Extent/Rebalance 的持续运行管理和完整依赖/效果提交仍未完成。当前不能推广为任意 coding workload 的正确 Promote。Candidate 共同上下文保存在独立内存 SessionManager 中，不提供进程重启后的恢复保证。
+嵌套、并行工具专项验证、非标准消息、图像等复杂结果转换、多种结果元数据的一致性、Extent/Rebalance 的持续运行管理和完整依赖/效果提交仍未完成。当前不能推广为任意 coding workload 的正确 Promote。字符串枚举和布尔预测已支持，但 Pi 仍把它们转换成工具接口所需的文本内容；图像、结构化多段结果和工具专有元数据尚未转换。Candidate 共同上下文保存在独立内存 SessionManager 中，不提供进程重启后的恢复保证。
 
 完整多行编辑、Markdown 和工具专门排版、宽字符排版、产品特有交互、断线恢复、资源硬限制与确认式退出清理尚未实现。当前是简单终端原型，不宣称已达到原 Agent 全部交互能力。
 
 环境管理暂不接通完整 Runtime Adapter 是已确认的开发顺序；目录不代表任意 shell 或外部效果已隔离，尤其不隔离扩展自身的代码及网络行为。接入进程退出只确认该进程退出，不证明任意工具后代均已停止或环境资源已清理。
+
+## 真实游戏端到端验证方向（2026-10-28）
+
+当前首个真实多步 Agent workload 优先尝试真实的二维迷雾地图游戏，而不是继续扩展随机脚本 workload。目标是让真实模型通过多次观察、移动、计算和重新观察逐步探索地图；地图信息不能在开局一次性提供，Candidate 的命中或不命中必须由游戏本身的隐藏状态和揭示机制自然产生，不能由测试额外故意制造。
+
+候选接入顺序如下：
+
+1. **NetHack + NLE**：NLE 提供 Gym 风格的 `reset()` / `step(action)` 与结构化观察，实际基础游戏是 NetHack 3.6.6。它不是 DCSS 的接口；接入前必须核实本地构建、可见区域限制、动作结果和状态复制／恢复能力。
+2. **DCSS + dcss-ai-wrapper**：DCSS 有独立的 AI wrapper，但当前资料显示它依赖本地或 Docker 中的 DCSS Web 服务。若采用，必须单独核实逐步动作、观察、权限和状态分支能力，不能把它与 NLE 混称。
+3. **简化二维迷雾游戏**：只有在真实游戏接口不能提供本次验证所需的动作、观察或分支能力时才制作。简化游戏借鉴真实游戏的迷雾、二维地图、逐步揭示和回合机制，但作为 workload adapter 存在，不改变 Runtime 的一般语义。
+
+真实游戏代码和其运行环境属于外部 workload／接入边界，不直接成为 AScout Runtime 核心。Runtime 的一般契约仍然是建立、操作、分支、静止、恢复、终止和清理，并如实声明能力。对于地图游戏，动作暂存、在 Candidate 分支中执行，或 Promote 后提交，都只是具体 Policy、Runtime 能力和 workload 共同选择的实现策略。
+
+首段验收至少需要证明：
+
+- Parent 使用 Agent 原有权限执行真实游戏动作；Candidate 不得扩大这些权限；
+- Candidate 的动作同时满足 Agent 权限、Policy 准入和 Runtime 能力，任一不满足都阻止并记录真实原因；
+- Candidate 只能使用当时可见的游戏观察和自己的预测，不能读取隐藏地图或伪造观察结果；
+- Parent 的真实动作结果作为权威依据，驱动预测比较及 Promote／Discard；
+- 游戏状态、动作、观察、Candidate 启动／阻止、比较、处置和清理均可观测；
+- 如果某个游戏接口不能提供独立状态或真实结果核对，则不能声称已完成真实投机验证，应转入简化游戏方案。

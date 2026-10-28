@@ -4,6 +4,15 @@
 
 ## 当前讨论
 
+### 真实大模型多步任务的端到端验证方向（2026-10-28）
+
+- 用户确认首个真正可用的端到端验证不能以单步任务为目标；目标应是一个真实大模型参与的多步 Agent 任务。实现时可以先截取其中一小段作为原型，但这段原型必须属于多步任务的真实流程，并能逐步扩展，而不是继续使用与实际 Agent 流程无关的静态 workload。
+- 用户确认 Parent 保持 Agent 原有的能力和权限，不因接入 AScout 被额外收紧。只有 Candidate 需要增加额外控制；Candidate 的实际动作必须同时满足 Policy、Runtime 能力和 Agent 本身已有的权限，不能通过投机执行扩大 Agent 原有权限。用户未授权访问的文件等资源，Candidate 同样不能访问。
+- 因此后续端到端用例必须同时验证：真实模型参与 Parent 与 Candidate 的多步推理；真实工具结果驱动比较；Candidate 的不支持动作被阻止且不伪造结果；Parent 不因 Candidate 受阻而失去原有执行能力；整个过程可观察。具体业务任务和第一段原型范围尚未收敛。
+- 用户提出首个多步端到端任务采用二维地图解谜小游戏：开局隐藏大量地图信息，Agent 每次探索后才能获得该格及邻近区域的视野；怪物、陷阱、道具和地形事前不可见，不能在开局规划完整路线，必须根据新情报逐步调整。Candidate 的命中或不命中必须由游戏自身的隐藏状态和揭示机制自然产生，不能由测试额外故意制造。
+- 当前适合的机制是：隐藏地图保持只读；Parent 与 Candidate 各自拥有当前位置、路径和已揭示区域等局部状态。一次探索产生真实的地图观察结果，Candidate 只能根据当时可见信息预测该结果并提前推理；没有新信息时下一步可能可由现有信息推导，有新信息时路线可能自然改变。Candidate 的探索若超出 Agent 权限、Policy 准入或 Runtime 能力，必须被阻止，不能访问隐藏地图或伪造观察结果。具体地图规则、工具接口和第一段原型仍待收敛。
+- 用户同意优先尝试真实 NetHack + NLE；如果其接口或状态分支能力不适合当前验证，再评估 DCSS + dcss-ai-wrapper；两者都不适用时才制作一个借鉴真实游戏迷雾、二维地图、逐步揭示和回合机制的简化小游戏。NLE 实际基于 NetHack，不是 DCSS 的接口。用户指出：Runtime 的核心形态不能被概括为保存 Candidate 动作后接受才执行；这只是地图游戏和特定投机策略下的一种可选实现。Runtime 的一般责任仍是提供可声明、可观察、可停止、可清理的执行能力，具体策略是否暂存动作、建立分支状态或接受后提交，应由对应的控制面、Policy、Runtime 能力和 workload 共同决定。用户使用的“暂存器”目前只作为说明性比喻，尚未批准为正式术语。
+
 ### 优先实现可使用的 TUI 与候选观察（2026-10-25）
 
 - 用户确认项目目标不变，当前优先级是先做出正确的用户体验，使用户能实际尝试一次投机执行，并能观察运行过程、确认候选是否真实执行；不是先完成完整 Runtime。
@@ -18,7 +27,7 @@
 - 用户已批准持续交互通信名称：`Prompt` 给指定 Branch 发送用户输入；`Abort` 中断指定 Branch 当前执行；`Output` 报告该 Branch 的实际输出或工具活动；`TurnCompleted` 报告本轮执行结束，不表示可以转正；`CleanupCompleted` 表示接入侧确认已停止并释放会话，不代表环境目录已清理。它们扩展现有 AgentCommand/AgentMessage，不新增组件。首步接通真实持续对话与观察，尚未接通的投机路径明确说明，不制造候选或结果。
 - 首步已实现：AScout 自有终端界面自动启动 Pi，按协议展示实时文本、工具活动和模型错误，保留 session 用于持续对话；`/ascout` 展示控制面 Tree，可按编号查看 Branch，观察不改变主对话。已有占位双会话路径已移除，不再把模型回答当作 ParentOutcome。Rust 编译、已有两个控制状态测试、Pi 完整 check 通过。真实 tmux 操作确认启动、输入、Tree 和 Branch 观察，以及中断后的结束事实；默认模型服务返回 503 `model_not_found`，未获得成功模型回答。真实投机、完整编辑排版、宽字符与退出确认式清理仍未完成，详见开发文档。
 - 用户已批准真实等待点通信名称：`ToolPending`＝接入侧报告 Parent 已产生真实工具调用但尚未执行，带操作标识、工具名、参数和可继续上下文；`StartCandidate`＝控制面在 Policy 允许后要求接入侧从该上下文注入预测工具结果并继续 Candidate；`ResolvePending`＝控制面报告等待点的裁决，不再阻塞 Parent 结果交付；Promote 仍使用对应命令。它们是既有 AgentCommand/AgentMessage 的协议消息，不是新组件。
-- 当前路径：`ToolPending` 后真实工具执行一次；原有产品钩子处理后报告 `ParentOutcome`，Parent 立即用真实结果继续，与验证并行。Policy 决定准入、预测、比较与处置；控制面保存 Parent/operation/Candidate 的明确归属，至多一个 Candidate Promote，其余及旧 Parent 被取消清理，保留胜出 session。`pi-tool.yaml` 无固定种子地从 example/true/false 中抽取两个不同预测；默认 Policy 仍禁用候选。标准上下文限制暂缓解决。并行工具逐项处理，候选补齐其他工具真实结果后续跑，不重跑效果；专项验证未完成。等待点准入和匹配已移至 Policy；复杂预测转换、未验证工具执行的 Policy/能力协商仍未完成。
+- 当前路径：`ToolPending` 后真实工具执行一次；原有产品钩子处理后报告 `ParentOutcome`，Parent 立即用真实结果继续，与验证并行。Policy 决定准入、预测、比较与处置；控制面保存 Parent/operation/Candidate 的明确归属，至多一个 Candidate Promote，其余及旧 Parent 被取消清理，保留胜出 session。`pi-tool.yaml` 无固定种子地从 example/true/false 中抽取两个不同字符串枚举预测；默认 Policy 仍禁用候选。布尔预测作为独立 JSON 类型支持，不能与字符串 `"true"` 混同；Pi 仅把二者转换为 Agent 工具所需的文本表示。标准上下文限制暂缓解决。并行工具逐项处理，候选补齐其他工具真实结果后续跑，不重跑效果；专项验证未完成。等待点准入和匹配已移至 Policy；复杂预测转换仍未完成。
 - 用户确认的 Workload：Parent 随机产生 example/true/false，两个 Candidate 执行 `sleep 1; printf 'Predicted{n}: {预测值}'`；Parent 默认继续执行 `sleep 1; printf 'spec fail'`，仅 Promote 时停止旧 Parent。Workload 不等于 Policy，非固定随机不等于结果可确定复现。新增独立脚本模型接口承载该场景，不将业务命令写入控制面。实测两个候选在真值前完成、命中后单一 Promote 与 sibling/Parent 清理；脚本不是大模型成功证据。
 - 验证：本地可控模型接口（脚本，不是真实大模型）通过真实 Pi、socket、TUI、Policy 隔离求值和真实 bash 工具运行，已验证工具返回前候选输出、返回后在飞 Promote、继续流式输出、保留上下文处理 follow-up，以及下一轮不命中 Discard、Parent 使用真实结果恢复、候选清理。模型接口与 Pi 配置位于 `/tmp/opencode`，不修改用户原配置。真实大模型成功验证仍未完成；当前服务此前返回 `503 model_not_found`。既有两个控制状态测试、Rust 编译与 Pi 完整 check 通过。`events.jsonl` 记录 Branch 消息、真实 outcome 与最终处置；退出仍不声称任意工具后代/外部资源已清理。
 - 待完成：未验证工具的 Policy/能力协商、复杂结果转换与并行工具专项验证，详见开发文档；不在本轮展开更深层协议。
