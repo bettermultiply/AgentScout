@@ -12,13 +12,13 @@
 |---|---|---|
 | 在 Edge 启动 SpecTask | `branch`（创建 candidate） | 同一操作的两种表述 |
 | `commit` / `commit request` | candidate 显式提交 subtree | 同一提交语义 |
-| Reuse / Promote | `accept`（winner 转正） | 层间映射 |
+| Reuse / Promote | `accept`（resolution = accepted）的两种落实：Reuse 交结果，Promote 替换主延续 | 层间映射 |
 | Discard / Preempt | `discard`（含 live-child discard） | 层间映射 |
 | `resolve()` | Resolution barrier 的验证部分 | 层间映射 |
 | Equivalence `≈` | Proposal compatibility 条件 | 层间映射 |
 | Branch | Speculative Tree 中的子树 | 同一结构实体 |
 | Branch Root | Branch 的根节点 | 同一结构实体 |
-| Instance | Runtime 中承载已建立独立环境的 Branch Root 执行活动的执行单元 | 逻辑 Branch 建立独立环境后对应 |
+| Instance | Runtime 中承载 Branch Root 执行活动的执行单元；可位于共享或独立环境 | 逻辑 Branch 可先于 Instance 存在 |
 | OutcomeSlot | 同名同义 | 共享语义 |
 | Predictor | 无直接对应 | 底座独有 |
 | Salvage | 无直接对应 | 底座独有 |
@@ -42,13 +42,13 @@
 
 - **Branch**：Speculative Tree 中的一个子树，是树中的计算延续和投机世界的结构实体。（`../mental-model.md` §4.2）
 - **Branch Root**：Branch 对应的根节点，具有稳定 identity 并直接拥有该根的 local state；表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
-- **Instance**：在 Runtime 提供的已建立独立环境中，由 Agent 接入侧承载和管理的 Branch Root 执行活动单元；逻辑 Branch 可以在建立独立环境前暂时没有对应 Instance。（`../mental-model.md` §4.2）
+- **Instance**：由 Runtime 承载 Branch Root 执行活动的执行单元；多个 Branch 可以在共享执行环境中由不同 Instance／本地上下文承载，也可以在独立环境中承载。逻辑 Branch 可以在建立 Instance 前先存在并推进。（`../mental-model.md` §4.2）
 - **Proposal** `î`：具有全局唯一 `ProposalId` 的投机候选输入；候选 Branch 基于其 payload 提前执行后续步骤。（`../design-model.md` §3.1；`policy-decisions.md` §2.3）
 - **AssumptionSet**：Instance/SpecTask 携带的未决 Proposal ID 集合（`frozenset[ProposalId]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`../design-model.md` §3.1；`policy-decisions.md` §4.2）
 - **Edge**：一个投机机会，是投机执行的抽象模型与 Policy 的作用对象；同一条 Edge 上可以有多个 Proposal。可投机性由 `effect`、`admit` 及相应能力校验共同决定，不另设 admissibility 元数据。（`../design-model.md` §3.1；`policy-decisions.md`）
-- **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；控制面在此从共同 execution base 登记多个逻辑 Branch，Runtime 按需建立其独立执行环境。（`branch-semantics.md`；`decisions.md` D-024；术语收敛）
+- **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；控制面在此从共同 execution base 登记多个逻辑 Branch，Runtime 按需建立其执行承载（共享或独立环境）。（`branch-semantics.md`；`decisions.md` D-024；术语收敛）
 - **SpecTask**：基于 Proposal 启动的投机工作单元，运行在隔离域中，携带 AssumptionSet。对应 candidate Branch。（`../design-model.md` §3.1；`policy-decisions.md` §4）
-- **Authority** `A_u`：提供真实输入、结果或外部权威判断的可选来源（主生成流、真实环境、用户/人或远程服务）；`Authority` 可以为空。它对应 parent（producer lane）与真实 operation，不等同于 validator。权威值来自谁是 Edge 的固有事实，不是可替换的决策槽；是否取得、何时取得由 `launch` 决定（Eager / Lazy / Absent）。（`../design-model.md` §3.1；`policy-decisions.md` §2.4）
+- **Authority** `A_u`：提供真实输入、结果或外部权威判断的可选来源（主生成流、真实环境、用户/人或远程服务）；`Authority` 可以为空。它对应 parent（producer lane）与真实 operation，不等同于 validator。权威值来自谁是 Edge 的固有事实，不是可替换的决策槽；是否取得、何时取得由 `launch(input) -> bool` 决定，Eager、Absent 和 Lazy 只是系统提供的快捷定义。（`../design-model.md` §3.1；`policy-decisions.md` §2.4）
 - **validator**：独立的验证器；在有 Authority 时可辅助判断 Proposal 是否兼容，在 Authority 为空时可依据结果或约束直接作可接受性判断。validator 不是 Authority 的一种。（`spec-exec-abstraction.md` §2 轴 4、轴 5）
 - **Predictor** `S_u`：`u` 的廉价实现，产出 Proposal；由 `predict` decision 表达。（`policy-decisions.md` §2.3）
 - **Reconciliation**：权威值到达时判定 `î ≈ i` 并选择处置的过程；对应 Resolution barrier 的验证部分。（`policy-decisions.md` §2.6–§2.7；术语收敛）
@@ -72,7 +72,7 @@
 
 - **branch**：从当前 Branch 创建一个或多个 direct child；投机场景中这些 child 才按角色称为 candidate。完整语义可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override。（`branch-semantics.md` §Agent 最小感知模型；`decisions.md` D-037）
 - **commit / commit request**：candidate 显式提交自己的子树。可 conditional commit：未验证前提随 subtree 保留为 obligation，验证前不能 Accept。（`decisions.md` D-025、D-037）
-- **accept**：接受一个 winner subtree（裁决 = Reuse / Promote）；候选被接受后保留自身 Branch identity 并替换 parent 在树中的位置。（`branch-semantics.md`；`decisions.md` D-009/D-023）
+- **accept**：对 candidate 作出的接受裁决（resolution = accepted）；`Promote` 让候选保留自身 Branch identity 并替换 parent 在树中的位置，`Reuse` 只把已验证结果和按声明移交的受管状态交给现有权威延续并清理候选。（`branch-semantics.md`；`decisions.md` D-009/D-023）
 - **discard**：丢弃整个 child subtree（= Disposition 的 Discard / Preempt）；不要求 candidate ready，不自动把 partial state 反馈给 parent。（`branch-semantics.md`；`decisions.md` D-023）
 - **resolve()**：权威值到达时进行匹配、选择处置并沿 Proposal 依赖传播的关键路径操作，由 Speculation Coordinator 协调。（`control-plane.md` §2.3；`policy-decisions.md`）
 - **Salvage**：失败后回收部分进展（`progress() / handoff()` 一等抽象）；warm-start、partial-token accept、promote 的共性。（`spec-exec-abstraction.md` §2 轴 6）
@@ -80,14 +80,15 @@
 
 ## 组件
 
-- **Policy dialect**：Policy 经 Policy Engine 解析和校验后形成的运行期表示，供控制面及 Agent 接入侧执行 Policy Decision；不依赖或不改变全局状态的 Decision 可随其注入接入侧执行。
-- **Policy Engine**：可替换 Policy 进入控制面的固定入口，解释 Policy Decision 并检查其取值在当前 Contract 与 Adapter 声明的后端能力下是否合法；加载期约束校验和运行期分发。（`control-plane.md` §2.2）
+- **PolicyDefinition**：Policy 作者使用 Policy DSL 编写的具体 Policy，由声明部分及其引用的独立算法源码共同组成；展开并编译后，九类 Policy Decision 均具有明确的决策行为。（`control-plane/policy-engine.md` §2）
+- **Policy DSL**：PolicyDefinition 的唯一入口，规定其结构、九类 Decision 各自的输入与输出、可读取事实、可使用能力及组合约束。（`control-plane/policy-engine.md` §2）
+- **Policy Engine**：Policy 进入 AScout 的固定入口，只有两项职责：编译 Policy，以及根据规定输入对已编译的 Policy Decision 求值、作出本次 Policy Decision。作出 Policy Decision 不等于落实 Policy Decision；它不负责把 Policy Decision 应用到 Branch、Speculative Tree、外部效果或 Runtime，也不负责选择运行位置或向 Agent 接入侧交付编译结果。（`control-plane/policy-engine.md`）
 - **Speculation Coordinator**：控制面内全局投机视图与控制循环的协调核心；维护 Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系，激活受影响的 Policy Decision，协调 semantic operation，经 Runtime Adapter 执行并根据结果和事件更新视图。（`control-plane.md` §2.4）
 - **Effect Coordinator**：控制面内共享、外部及 Policy 要求纳管外部效果的统一实际执行者；重点处理由 Agent 造成且可能影响全局的效果，例如调用外部 API。它通过控制面内注册的服务效果插件处理命令或 URL，可生成明确标记并记录来源的模拟响应，也可拒绝、阻塞、暂存、转换、提交、取消、清理或补偿效果。它不负责普通 Branch-local 操作；Runtime 不承担外部效果的实际执行责任。（`control-plane.md` §2.5；`effect-management.md`）
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §2.6；`speculation-contract.md` §3）
 - **ASC-Proxy**：Agent 接入侧与控制面之间的受管通信代理，负责会话、身份确认以及 request、fact、result 和 event 的双向传递；不拥有全局控制状态。（`agent-integration.md` §2.2）
-- **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 执行和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）
-- **Agent Control Gateway**：控制面面向 Agent 接入侧的受管通信边界；管理 Task 启动、Agent 接入侧会话、Policy dialect、本地 Decision 结果、decision log 与受管控制请求的双向传递。Runtime 创建 Branch 执行环境后，它在该环境内创建并启动 Agent 接入侧；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态。（`control-plane.md` §2.1）
+- **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 求值和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）
+- **Agent Control Gateway**：控制面面向 Agent 接入侧的受管通信边界；管理 Task 启动、Agent 接入侧会话、已编译的本地 Decision、本地 Decision 结果、decision log 与受管控制请求的双向传递。Runtime 创建 Branch 执行环境后，它在该环境内创建并启动 Agent 接入侧；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态。（`control-plane.md` §2.1）
 
 ## 状态与生命周期
 

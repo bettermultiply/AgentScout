@@ -26,11 +26,13 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 8. [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)：Runtime Adapter 面向控制面的具体接入契约与校验要求。
 9. [Agent 接入侧设计](design/agent-integration.md)：Product Integration、Interposer 与 ASC-Proxy 的责任边界。
 10. [控制面设计](design/control-plane.md)：控制面作为 Mechanism 的实现主体，如何把 Contract 落到投机执行的控制路径。
+    - [Policy Engine 设计](design/control-plane/policy-engine.md)：Policy DSL、编译、查询、执行与跨侧交付边界。
 
 ## 使用文档
 
 1. [Agent 接入状态](usage/agent-guide.md)：当前可用性和计划中的接入边界。
-2. [FAQ](usage/faq.md)：不依赖具体 backend 的目标级问答。
+2. [试一次 AScout 投机执行（NLE）](usage/try-speculation.md)：从准备 Pi 配置到观察 Promote／Discard 的完整操作说明。
+3. [FAQ](usage/faq.md)：不依赖具体 backend 的目标级问答。
 
 ## 开发文档
 
@@ -38,6 +40,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 2. [首要验证 Workload](development/reference-workload.md)：delayed-choice coding 场景与指标。
 3. [投机执行底座：抽象设计札记](development/spec-exec-abstraction.md)：投机执行底座的论文调研与研究札记。已确定的设计以正式设计文档为准。
 4. [Runtime Adapter 接入指南](development/runtime-adapter.md)：面向 Adapter 作者的接入责任、状态边界、实现建议与尚待定义的接口事项。
+5. [Policy Engine 原型](development/policy-engine.md)：实际 YAML 编译、Python 求值接口、示例与当前限制。
 
 ## 状态术语
 

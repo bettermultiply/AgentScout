@@ -2,11 +2,116 @@
 
 本文记录已接受的实现架构与验证决策。目标语义归 `docs/design/` 所有。
 
+## 2026-11-02：Candidate 最终失败不再等同于立即丢弃
+
+问题：Candidate 已进入 `Promoting` 时，模型返回 429，Pi 立即报告 `branch_failed`；控制面把它当作普通 Candidate 失败并丢弃，而 Pi 已先切换 authority，造成两侧权威分叉。
+
+现在的行为：
+
+- Promote 仍是一步决策；Candidate 的模型续跑使用 `AgentSession.continue()`，保留 Pi 的自动重试、压缩和 settle 流程。
+- Pi 只在重试耗尽等最终失败后报告 `branch_failed`，并记录失败/取消状态；此后的迟到 Promote 被拒绝，不切换 authority。
+- 控制面在 `Running` 收到失败时丢弃 Candidate；在 `Promoting` 时暂存失败，等 Promote 结果；Promote 已应用后失败属于权威失败，显式结束 run，而不是当 Candidate 丢弃。
+- Runtime 增加固定生命周期操作 `promote_environment`，在 Agent Promote 前调用；共享环境实现可以 no-op。Runtime promote 失败则丢弃 Candidate，不切换 Agent authority。
+
+验证：新增 Rust 状态机回归测试和 TypeScript `AgentSession.continue()`／PiAdapter 晚到 Promote 测试；`cargo check`、`cargo test --lib --bins`、`npm run check` 通过。未运行真实 NLE。
+
+## 2026-11-02：Pi 模型参数直接传入接入入口
+
+AScout 启动的是 Pi 的 `agent-access` 接入入口，不是 Pi 交互式 CLI。此前该入口没有解析模型参数，只能回退到 Pi 配置中的默认模型；用户配置里的默认模型过期时，会错误地落到不可用模型。
+
+现在 `agent-access` 接受 `--model <provider>/<model>` 和 `--thinking <level>`，通过 Pi 的 `ModelRuntime` 与 `resolveCliModel` 解析后传给 `createAgentSession`。控制面把这两个参数原样转发给接入进程；Authority 使用显式模型，Candidate 继续继承 Parent 的模型与 thinking level。认证仍使用 Pi 默认配置，不再需要复制独立的 `PI_CODING_AGENT_DIR`。
+
+同时把 NLE 演示依赖改为可复现的相对布局：`requirements-nle.txt` 固定 `nle==1.3.0` 与 `gymnasium==1.2.0`，`nle-runtime.json` 使用 `../.venv-nle/bin/python` 和 `examples/nle-runtime-bridge.py`。Runtime 配置由 Policy 的 `runtime` 字段选择，控制面只在需要覆盖时读取 `ASCOUT_RUNTIME_CONFIG`。
+
+验证：`npm run check`、`cargo build`、`cargo test --lib --bins` 通过；使用 `--model deepseek/deepseek-flash --thinking low` 和默认 Pi 认证运行 NLE，12 次动作中 11 次 Promote、1 次 Discard、0 次 `branch_failed`，模型调用均为 `deepseek-flash`。
+
+## 2026-11-02：NLE 游戏内容留在 Runtime
+
+- `nle_action` 的 `result`（位置、生命、消息、地图摘要）和 `evidence` 的构造移到 `examples/nle-runtime-bridge.py`；`NleBackend` 只转发，不解析 `blstats`、`chars`、`message`。
+- 控制面只解析通用的 `{result, evidence}` 外层；Pi 只把 `result` 文本交给 Agent；只有 Policy 读取结构化 evidence 做游戏语义判断。
+- 完整 NetHack 3.6 Guidebook 来自 NLE 1.3.0 源码包，放在 `examples/nle/Guidebook.txt`；Runtime 通过 `nethack_guide` 工具按章节提供，不再把手工摘要当作完整规则。
+
+## 手动试用后的展示修正
+
+历史方案：曾讨论以独立 PTY 与终端模拟器嵌入 Pi 原生渲染，但该方案已被放弃，不是当前目标。当前只通过 Pi 公开 SDK 获取 AgentSession 的消息、思考、工具调用、结果和事件，由 AScout UI 自行排版；不修改 Pi 源码、不调用 Pi 内部展示组件，也不捕获 Pi 原生终端画面。
+
+当前限制：不接管 Pi 完整 InteractiveMode、原生编辑器或命令菜单；输入使用 AScout 的 Prompt/Abort 路径。图片和其他尚未映射的消息内容会明确标记为未展示，不伪造为普通文本。
+
+验证：零模型调用的真实 PTY 检查覆盖原生 Markdown、中文、工具结果、分支内容分隔、窗口 resize、socket 断开退出；控制面检查覆盖 Tree、非法编号、Branch 查看、Tab 运行事实、Esc 返回及 Ctrl-D。Pi 完整 `PATH=/usr/bin:$PATH npm run check` 通过。Promote 后连续流式展示未做真实模型验收。清理确认后释放 PTY 文件描述符，只保留模拟器的最后画面；未变化画面不重复刷屏。
+
+- Runtime Adapter 部署形式暂不变更；先修正 `/ascout` 无效编号、Branch 上下文和工具展示。
+- 展示代码放在 `src/bin/ascout-control-plane/view.rs`，只格式化已有事实，不改变 Branch 生命周期或输入路由。
+- 分支详情使用结构化文本，分别显示运行事实、创建时继承的展示上下文、分支自身输出；候选创建后不再跟随 Parent 的后续输出。
+- Pi 接入侧不再把工具事件拼接成 Output 文本；控制面根据已有 Transcript 显示工具调用和返回。Output 只承载实时模型正文和明确错误，Ledger 的原始事实记录保持不变。
+- NLE 任务知识放在外部示例 `examples/nle-task.md`，由用户提供给 Agent；动作表基于实际 `NetHackScore-v0` 环境核对，不把游戏规则写入核心。
+- 当前只做基础配色与内容层次，完整 Pi 风格 Markdown、工具折叠、多行输入及宽字符排版仍未完成。
+
+## 2026-11-02：Runtime 启动 Agent 接入侧，运行目录与 Ledger 归位
+
+已确认三项归属，并按此修改了控制面：
+
+- **Agent 接入进程由 Runtime 启动**。控制面（用户）决定用哪个 Agent 产品、哪个版本，把命令、参数、工作目录和日志路径作为 `operate_environment` 的启动参数交给 Adapter；Adapter 在环境内启动它，并在自己的进程退出时回收。控制面不再 `Command::new("node")`，也不再持有 Agent 进程句柄。
+- **运行目录由调用方创建**。控制面原本自建临时目录，既放日志又当工作目录；这属于实验脚手架。现在第一个命令行参数就是调用方创建好的运行目录，控制面只使用它，不再删除或回收。
+- **事件记录归 Ledger**。新增 `src/ledger.rs`，控制面通过 `Ledger::open` / `record` 追加事实，不再自己 `writeln!` 到文件。Ledger 只记录，不参与决策。
+
+附带约束：当时 `ASCOUT_RUNTIME_CONFIG` 是必需的，因为环境和 Agent 都由 Runtime 建立；后来 Policy 的可选 `runtime` 字段可以提供同一路径，环境变量只用于覆盖。
+
+Agent 接入侧仍然是唯一控制 Agent 会话的地方：创建会话、克隆上下文、发送 prompt、中断、Promote/Discard、清理都在接入侧执行，控制面只发命令并接收事实。
+
+## 2026-11-02：控制面不再持有环境状态，结果判定交给 Policy
+
+已确认三项职责归属，并按此修改了 NLE 测试路径：
+
+- **控制面只发命令，不保存环境状态**。原先控制面里有一个包装结构，自己记着“哪个环境是权威”、每个环境的坐标和最后观测，并用坐标差算出 `moved`/`blocked`。这些职责归 Runtime Adapter：控制面按 Branch 名字发操作，Adapter 负责对应到环境；需要观测时向 Runtime 要一次 `observe`。控制面现在只持有 Adapter 进程句柄和协议会话，没有专门的包装名词。
+- **观测缓存只有一份，在环境自己那里**。`NleBackend` 原先自己存一份最后观测，绕过了 bridge 已经实现的 `observe`；控制面又存了第二份。两处都删了，`observe` 直接转发给 bridge。
+- **真实结果的判定属于 Policy**。Runtime 只交回动作前后的两份公开观测；`predict` 从观测产生预测，`match_proposal` 从 `blstats` 读出实际是 `moved` 还是 `blocked` 再与预测比较。控制面不再出现坐标、格子或移动这类词。
+
+工具通道现在由 Runtime 生成 `result` 文本（可读摘要）和 `evidence` 结构化事实；控制面只转发，不解释游戏字段。早期 `{"is_error", "observation"}` 的结果形态不再使用。
+
+仍未落实：Agent 产品的选择由控制面（用户）决定，但启动 Agent 进程属于 Runtime Adapter，路径和版本作为参数由控制面传入。当前仍由控制面直接启动 Pi。
+
+## 2026-11-01：一次 run 只提供一个工作目录，不再按 Branch 复制目录
+
+已确认：控制面不再为每个 Branch 创建和复制工作目录，一次 run 只有一个工作目录，所有 Branch 共用。Branch 是同一执行状态的别名，不各自持有目录。
+
+原因：Pi 把会话工作目录的绝对路径写进系统提示，而系统提示位于对话最前面。每个 Branch 一个目录时，该路径每开一个候选就变化一次，导致整段对话的前缀缓存在每次新建候选时全部失效。48 个动作的实测中 87% 的花费来自这类整段重读。
+
+影响与边界：
+
+- Candidate 在当前实现中不执行工具（工具调用暂存到 Promote 才放行），共享目录不扩大它的实际能力。
+- 目录级隔离属于 Runtime 职责，不能靠命名不同的 Branch 目录冒充。需要并行执行工具的候选时，由 Runtime 提供隔离。
+- 已废弃：按 Branch 复制工作目录（`copy_workspace`）、清理时删除 Branch 目录、`BranchRecord.workspace` 字段。控制面在收到 `CleanupCompleted` 时只更新 Branch 状态。
+
+## 2026-11-01：Branch 非干扰、环境形态与产品接入解耦
+
+已确认以下边界：
+
+- **Branch 的固定要求是非干扰**：一个 Branch 不得影响权威路径，也不得影响其他 Branch。独立执行环境只是实现非干扰的一种方式，不是 Branch 的定义，也不是所有 Runtime 的前提。
+- **`branch_environment` 只表示派生独立子环境**。不能派生独立环境的后端不得用共享别名伪装成功；该操作是可选能力，不是所有合格 Adapter 都必须具备的固定操作。
+- **共享环境 + 作用前阻止**是另一类非干扰实现。NLE 采用这种方式，但它属于 NLE 专用 Runtime／测试 workload 的描述，不属于 AScout 核心契约。AScout 只要求 Adapter 声明并兑现所选非干扰机制的范围与限制。
+- **NLE 只是测试用例，不属于 AScout 实现**。NLE 的 bridge、策略和运行环境作为外部 workload／适配保留，不进入核心 crate 的能力边界；核心契约不得出现 NLE 专用语义。
+- **AScout 不与 Pi 耦合**。Pi 是首个接入实现，不是架构组成；设计文档不得把 Pi 写成 AScout 的前提，控制面也不应把 Pi 的路径、工具或会话结构固化进核心协议。
+
+当前实现差距：`src/nle.rs` 仍在核心 crate 中。控制面已不再对 NLE 调用 `branch_environment`，也不再识别 `nle_action`；它按 Runtime 声明的共享环境和环境工具调用 `tool_context`／`invoke_tool`。Pi 接入的启动已按 2026-11-02 决策移入 Runtime Adapter。
+
+## 2026-10-31：NLE 投机改为动作边界暂存，废弃进程级 fork 分支
+
+已确认环境不可修改：不为适配 AScout 在 NLE 或任何外部 workload 侧增加克隆、分支或回放能力。先前在 `examples/nle-runtime-bridge.py` 中用 `os.fork()` 复制环境进程、用 socketpair 建私有通道、失败后反向移动回退的方案废弃。废弃原因：
+
+- fork 让 workload 脚本承担了分支语义，而隔离策略本应属于 Runtime；
+- 它只能从根环境分支，从已 Promote 的候选再分支会得到没有游戏对象的空壳；
+- 子进程异常退出时会掉回父进程主循环，产生重复响应；
+- 单世界下反向移动仍消耗回合，怪物会行动，“可逆”只是位置可逆。
+
+CRIU 一类进程快照同样不采用：需要特权、镜像 I/O 和 FD 重绑，每步一条分支不划算。
+
+现行实现：环境单实例；`branch` 只是同一世界的别名，控制面不再使用它；Candidate 只在预测结果下推演一步，工具调用暂存到 Promote；动作前固定延迟（`action_delay_seconds`，当前配置 1 秒）；预测由固定程序从公开观测枚举，模型不负责预测。旧内容不再出现在正式文档。这里的 `branch` 是 NLE 专用测试适配的逻辑视图，不是 AScout 的 `branch_environment`；边界见 2026-11-01 条。
+
 ## 2026-10-25：随机双 Candidate 与 Parent 不等待裁决
 
-用户确认 Workload 与 Policy 分离：Parent 真值随机取 example/true/false，Policy 用非固定随机抽取两个不同预测；候选执行 Predicted 命令，Parent 默认继续 spec fail。Parent 结果交付不等待比较，只有 Promote 才取消旧 Parent。等待点按 Parent 和 operation 归属，不因一条消息有多个工具而整组拒绝；其他工具结果需真实配对，不允许重复其效果。Promote 后取消旧 Parent 下其余候选，保持 single-winner。
+用户确认 Workload 与 Policy 分离：Parent 真值随机取 example/true/false，Policy 用非固定随机抽取两个不同预测；候选执行 Predicted 命令，Parent 默认继续 spec fail。Parent 结果交付不等待比较，只有 Promote 才取消旧 Parent。等待点按 Parent 和 operation 归属，不因一条消息有多个工具而整组拒绝；其他工具结果需真实配对，不允许重复其效果。Promote 后取消旧 Parent 下其余候选，保持 single-winner。工具准入不写入 Pi；由 Policy、AScout 和 Runtime 的能力边界共同决定。
 
-废弃先前 afterToolCall 等待 ResolvePending、单候选容量、固定 example 预测及以单工具数量作为准入条件的实现。等待点准入和结果匹配在示例 Policy；文本预测转换、未验证工具安全能力协商仍有实现差距，见 reference-workload.md。非标准上下文仅记录，暂缓处理。
+废弃先前 afterToolCall 等待 ResolvePending、单候选容量、固定 example 预测及以单工具数量作为准入条件的实现。等待点准入和结果匹配在示例 Policy；Pi 不按工具名或命令格式筛选 Candidate 工具。当前接入把布尔预测和字符串枚举预测转换为 Agent 工具所需的文本表示，复杂结果转换仍有实现差距，见 reference-workload.md。非标准上下文仅记录，暂缓处理。
 
 随机场景位于独立脚本模型接口，不是控制面业务逻辑，也不是大模型成功证据。已有脚本命中实测确认两个候选先执行、Parent 真值返回、单一 Promote 和 loser/Parent 清理；既有在飞输出验证与本次随机场景验证应分开描述。
 
@@ -20,7 +125,7 @@
 
 首步实现：现有 `ascout-control-plane` 开发入口改为 AScout 自有终端界面，保持 socket 接入、控制面 Tree 和连续 Pi AgentSession，加入流式输出与只读 Tree/Branch 观察。废弃该入口原先在 Branch 启动时直接发起无共同等待点的候选、把模型最终文本作为 ParentOutcome 的演示路径；接入侧不再产生该占位结果。退出保留运行目录和诊断文件，不声称已确认所有工具后代及环境清理。
 
-本轮连接真实投机：ToolPending 报告后让真实工具继续一次，仅在 afterToolCall 挂起结果交付；复用既定 ParentOutcome 名称表示真实工具结果，不另引入 ToolOutcome。Candidate 使用独立目录与独立内存 SessionManager，保存共同上下文和预测 toolResult 后 continue，不以新用户提示词伪造续跑。控制面求值 admit/select/predict/launch/match/dispose，在合法 Promote 后发布缓冲输出并保持活跃 Candidate，不命中回退 Parent。未验证候选下一次工具执行必须挂起，Pi 原有工具钩子保留。当前仅支持文档列出的受限读操作和字面量等待命令；一个在飞候选与 120 秒启动/结果等待上限是原型容量和超时限制，不是目标策略规则。默认示例不自动开启投机，新增可显式选择的 pi-tool.yaml。实测使用本地脚本模型接口加真实 Pi/bash，不能作为真实大模型效果证据。
+本轮连接真实投机：ToolPending 报告后让真实工具继续一次，复用既定 ParentOutcome 名称表示真实工具结果，不另引入 ToolOutcome。Candidate 使用独立目录与独立内存 SessionManager，保存共同上下文与预测 toolResult 后 continue，不以新用户提示词伪造续跑。控制面求值 admit/select/predict/launch/match/dispose，在合法 Promote 后发布缓冲输出并保持活跃 Candidate，不命中回退 Parent。未验证 Candidate 的工具调用由 AScout 的 Branch 处置控制：Pi 只等待控制命令，不按工具名或命令格式判断安全性；Runtime 能力与 Policy 决定仍需由控制面接入。默认示例不自动开启投机，新增可显式选择的 pi-tool.yaml。实测使用本地脚本模型接口加真实 Pi/bash，不能作为真实大模型效果证据。
 
 废弃 D-031-I 中“用户不可直接观察候选”的限制；保留主对话只属于权威路径、候选不建立用户对话、用户不直接裁决 Branch 的边界。只读观察明确标记候选内容未验证，不向其他 Branch 反馈这些内容。
 
@@ -150,3 +255,24 @@ Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义�
 ## D-025-I：项目名称统一为 AScout
 
 2026-08 决定：项目现行名称统一为 **AScout**（Agent Scout），相关现行复合名称使用 `AScoutAgent`。正式设计、架构、使用和开发文档不再使用 `ASCout` 作为现行名称；本条仅保留旧拼写用于历史追溯。该名称变更不改变既有生命周期、Policy、Runtime 或接口语义。
+## 2026-11-02：独立 Agent 接入核心的第一步
+
+已确认并开始落实四层边界：控制面继续拥有 Speculative Tree、全局 Policy 和 Branch 生命周期；TypeScript 接入包承载 Agent 无关的协议类型、命令传输、命令去重、能力声明和局部执行 Policy；具体 Agent 通过 Adapter 提供会话与工具切点能力；Runtime 继续负责任务环境和工具效果约束。
+
+第一步已加入 `pi-code/packages/ascout-agent-access`。公共协议只使用 `branch_id`、`operation_id`、`tool_call_id` 和不透明的 `CheckpointHandle`，不暴露 Pi transcript 或 session 类型。`CheckpointHandle` 只能由产生它的 Adapter 解释，公共层只保存和转发。
+
+本步保留现有 Pi 接入主循环以保持行为不变，并让它复用公共协议、传输函数和能力类型；尚未宣称完成全部 session 编排迁移。下一步应把 `agent-access.ts` 的会话表、pending operation 和工具前置拦截逐步移入 `AgentAdapter`，再移除控制面中的 NLE 特例。
+
+## 2026-11-02：Pi Adapter 与 Runtime 工具声明
+
+已完成第二步：
+
+- `AgentAccessCore` 真正驱动 Agent 连接和命令分发，并缓存重复命令的结果；同一 `command_id` 携带不同命令时返回 `rejected` 命令结果，而不是把协议冲突误报成 Branch 失败。
+- `agent-access.ts` 只保留入口连接与生命周期，Pi 的 session、transcript、checkpoint、工具拦截和候选续跑全部移入 `PiAdapter`。
+- Runtime Adapter 在 `Hello` 中声明 `RuntimeCapabilities`：可执行的 `RuntimeTool` 列表、是否共享底层环境、是否支持独立 `branch_environment`。
+- 控制面不再识别 `nle_action`。它按 Runtime 声明的工具名调用 `tool_context` 和 `invoke_tool`，用 Runtime 返回的 `result` 更新 Agent 工具通道，用 `evidence` 交给 Policy 匹配。
+- NLE Runtime 声明 `shared_environment: true`、`branch_environment: false` 和 `nle_action` 工具；Candidate 不再创建虚假的 `branch_environment` 视图，环境动作只发生在权威环境。
+- Pi Adapter 从 `ASCOUT_RUNTIME_TOOLS` 读取 Runtime 工具描述并动态注册；它不知道 NetHack、动作编号或 NLE 语义。
+- 控制面在 ToolPending 后立即发送一次 `resolve_pending`；候选处置阶段只决定 Candidate 生命周期，不再重复发送同一 `command_id` 的 resolve 命令。
+
+验证：`npm run check`、`cargo check`、`cargo test --lib --bins` 通过。本地脚本模型加真实 Pi 工具完成一次 Promote 和旧 Parent 清理，并在 Promote 后继续下一轮。真实模型 DeepSeek V4.1 Flash 加真实 NLE 完成 10 次动作：9 次 Promote、1 次 Discard、10 次 Discard／Cleanup 命令 applied、0 次 `branch_failed`，总花费约 $0.0060；候选 Promote 后继续执行，旧 Parent 被清理。

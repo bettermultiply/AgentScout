@@ -22,17 +22,23 @@
 
 **选择**：同一 parent 的一次裁决只接受一个 direct child subtree。Winner subtree 的内部结构和 descendants 保留；winner 的 sibling subtrees 丢弃。
 
+**范围**：本项描述 `Promote`；`Reuse` 只采用一个 candidate 的已验证结果，不保留其 subtree，但仍遵守同一裁决只有一个结果来源。
+
 **原因**：AScout 选择完整的计算延续，不定义跨文件、计算状态和全局服务的通用 merge 协议。
 
 ## D-008：允许提交包含活跃 descendants 的 subtree
 
 **选择**：Candidate Branch 即使仍有活跃 descendants，也可以向 parent 提交完整 Branch。接收方 Agent 决定是否接受。
 
+**范围**：本项描述 `Promote`；`Reuse` 不要求保留 candidate subtree。
+
 **原因**：是否等待 descendants 完成属于 Agent 的运行策略，不应成为底层机制的强制限制。接受后 winner subtree 整体保留，不要求先执行 bottom-up 压平。
 
 ## D-009：Accept 将树位置重定向到 winner
 
 **选择**：Accept 后 candidate 保留 Branch identity，并替换 direct parent 在 Speculative Tree 中的位置。Parent 是 root 时 root 指向 candidate；否则 grandparent 的 child 边由 parent 改指 candidate。旧 parent 与 candidate siblings 失效，candidate descendants 保持原有结构。
+
+**范围**：本项描述 `accept` 的 `Promote` 落实；`Reuse` 不重定向树位置，见 `branch-semantics.md` §4.5。
 
 **状态连续性**：Candidate 按各状态类别规则已经可见的 parent state、已验证 outcome 和已经实际生效的 external effect 必须成为 winner 延续状态的一部分。Backend 可以通过重定向、层复用或等价机制保持该状态，但不能因旧 parent 节点失效而丢失。Parent 在 Branch 创建后的任意进程内存、Agent context 和评测 scratch 不要求传播，不执行 parent/candidate state merge。
 
@@ -280,7 +286,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-041：authority 决策槽并入 launch
 
-**选择**：撤销独立的 `authority` 决策槽。当前决策面为 `S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)`；后来增加的 `select` 与 `rebalance` 均与 authority 无关。权威值来自谁是这条 Edge 的固有事实（`u` 是谁、真实结果就由谁产生），不是 Policy 可替换的决策；Policy 通过 `launch` 决定该权威值是否取得、何时取得（Eager / Lazy / Absent）。Absent 允许策略放弃天然存在的权威值（如用户输入）而只靠 validator 或可接受性判断，是否允许由 Fidelity 契约校验。validator 不是权威值来源，归属 `match` 的可接受性判断。
+**选择**：撤销独立的 `authority` 决策槽。当前决策面为 `S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)`；后来增加的 `select` 与 `rebalance` 均与 authority 无关。权威值来自谁是这条 Edge 的固有事实（`u` 是谁、真实结果就由谁产生），不是 Policy 可替换的决策；Policy 通过 `launch(input) -> bool` 决定该权威值当前是否取得。Eager、Absent 和 Lazy 只是系统提供的快捷定义。恒定返回 `false` 的函数允许策略放弃天然存在的权威值（如用户输入）而只靠 validator 或可接受性判断，是否允许由 Fidelity 契约校验。validator 不是权威值来源，归属 `match` 的可接受性判断。
 
 **废弃的旧表述**：`authority` 作为独立决策槽的语义（“验证依据的真实来源选择”）、以及将 validator 列为 authority 来源之一的做法。语义权威见 `design-model.md` §3.1 与 `policy-decisions.md` §2.4。
 
@@ -331,6 +337,16 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 **当前范围**：现阶段不尝试判断变更前后的 Branch 是否仍可兼容，也不提供保留、挂起、修复或重新对齐路径。相关 Proposal 按否定处理，控制面编排 discard，Runtime 经 Adapter 落实取消与清理。未依赖该前提的 Branch 不因无关用户输入而被全局丢弃。
 
 **原因**：前提变化后，既有投机进展不再对应当前 Proposal。现阶段缺少足以证明安全复用的兼容与修复语义，保守剪枝可以保持信息流和提交正确性。
+
+## D-047：Branch 非干扰优先于环境形态
+
+**选择**：Branch 的固定要求是**不影响权威路径和其他 Branch**。独立执行环境只是满足该要求的一种方式，不是 Branch 的定义，也不是所有 Runtime 的前提。Branch 可以在共享执行视图中推进，只要其可能改变环境或影响其他 Branch 的操作在作用前被阻止、暂存或以其他方式受控。
+
+`branch_environment` 只表示从父环境派生独立子环境，是可选能力。不能派生独立环境的后端必须返回 `Unsupported`，不得用共享别名伪装成功。共享环境下的非干扰机制、覆盖入口、scope 和 limitations 由 Runtime／Adapter 及 Agent 接入侧声明，并由 Registry 验证；控制面不得把未声明或未覆盖的共享执行当作已隔离。
+
+**原因**：把“独立环境”写成 Branch 的定义会把某一种 Runtime 实现固化成目标语义，排除只能通过作用前阻止实现非干扰的后端。把固定要求放在非干扰上，既保留正确性，又允许不同 Runtime 选择合适的环境形态。
+
+**范围**：本决策不放宽非干扰要求。任何共享环境投机都必须在声明的覆盖范围内得到验证；无法覆盖的内容必须改用独立环境或拒绝该投机。
 
 ## 相关文档
 

@@ -56,6 +56,8 @@ Branch 的 capabilities 规定控制面可以代表哪些主体执行相关生�
 
 Child 从 Branch barrier 上的 parent execution base 开始继续运行。Branch barrier 首先登记逻辑 Branch，不要求立即建立独立执行承载。当当前 Policy、Contract 或状态处理要求独立承载时，控制面通过可用的执行承载请求相应环境；承载结果决定该 Branch 能否沿该路径继续推进。环境建立和执行活动的具体承载方式见 [Runtime 语义整理](../development/default-runtime-semantics.md)。
 
+Branch 的固定要求是**不影响权威路径和其他 Branch**。独立执行环境只是满足该要求的一种方式；Branch 可以在共享执行视图中推进，只要其可能改变环境或影响其他 Branch 的操作在作用前被阻止、暂存或以其他方式受控。具体采用哪种方式、覆盖哪些状态类别和效果，由 Runtime／Adapter 的能力声明和验证结果决定，不由 Branch 结构本身固定。
+
 当 Branch 的执行承载从 execution base 分离后，Branch 按自身的状态和依赖继续演化；parent 后续状态变化是否对 child 可见，遵循相应状态类别的规则。需要同步的真实步骤结果通过显式 outcome event 交付。
 
 Branch barrier 建立期间，控制面必须阻止未登记的 Branch 活动越过边界；需要执行承载时，控制面只能依据承载机制返回的实际建立或失败结果更新 Branch 视图，不能把预期状态当作已对齐。逻辑 Branch 登记失败不得留下半创建 Branch。若 Policy 或资源条件允许少于请求数量的 candidates，控制面必须显式记录实际登记集合。不同接入形式必须进入同一 barrier/lifecycle 语义。
@@ -90,11 +92,15 @@ Proposal 必须声明与真实 outcome 的 compatibility 条件，可以是 exac
 
 ### 4.5 Accept 与 winner continuation
 
-Accept 后 candidate 保留自己的 Branch identity，并替换 parent 在 Speculative Tree 中的位置。若 parent 是 root，candidate 成为新的 root；否则 candidate 连接到原 parent 的 parent。旧 parent 和 candidate 的 sibling subtrees 失效，candidate 原有 descendants 及其内部关系保持不变。
+Accept 是 resolution 为 `accepted` 时的落实，不等于必然替换 parent。按处置意图分为 `Promote` 和 `Reuse`。
 
-Candidate 按各状态类别规则已经可见的 parent state、已提交生效的 external effect 和已验证 outcome 必须随 winner 延续。parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播，也不执行 parent/candidate state merge。
+`Promote` 后 candidate 保留自己的 Branch identity，并替换 parent 在 Speculative Tree 中的位置。若 parent 是 root，candidate 成为新的 root；否则 candidate 连接到原 parent 的 parent。旧 parent 和 candidate 的 sibling subtrees 失效，candidate 原有 descendants 及其内部关系保持不变。
 
 Promote 不以 candidate 会话或当前模型请求结束为前提；已满足提交、依赖和效果条件的在飞 candidate 可以在保留执行进展的情况下转为权威延续。用户端维持同一 AScoutAgent 视图，只更新该视图对应的权威执行及受控输入输出路由；不能因用户会话切换而取消或重启 winner。此保证不取消 resolution barrier，也不豁免旧 parent 和其他 loser 的停止、效果收敛与清理责任。
+
+`Reuse` 只把 candidate 已验证的 outcome 和按声明需要移交的受管状态交给现有权威延续；现有延续保留自己的 Branch identity、推理和上下文，candidate 自身在交接完成后清理。Reuse 不合并任意 Agent context，不转移未声明状态；未决 Proposal 必须先按既有规则确认或否定，带状态变更的复用还必须满足 D-031／Effect Management 的等价和移交条件。Reuse 不自动改变 descendant 的假设或挂载关系：只有现有权威延续能够提供 descendant 所需基础和依赖时，descendant 才按既有规则保留，否则取消或清理。其他 candidate 仍按 single-winner 失效，不能因为 Reuse 让多个互斥结果同时生效。
+
+在 `Promote` 中，candidate 按各状态类别规则已经可见的 parent state、已提交生效的 external effect 和已验证 outcome 必须随 winner 延续。parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播，也不执行 parent/candidate state merge。
 
 ### 4.6 Discard、失败与清理
 
@@ -121,7 +127,7 @@ Candidate 未被接受不表示其不可行。受控 metadata 应区分 Proposal
 - 按文件系统、输入、outcome event 等类别规则对 B 可见的 ancestor state；
 - root Branch 所在 Speculative Tree 之外的全局计算环境。
 
-不同状态类别不共享一条笼统的 ancestor visibility 规则。Branch 从 execution base 继续演化；在承载尚未分离前，Branch 可以使用受控的共享执行视图。文件系统可以动态解析 ancestor writes，输入可以继续 fan-out，真实步骤结果通过 outcome event 交付。Branch 状态的可见范围由相应状态类别规则决定。
+不同状态类别不共享一条笼统的 ancestor visibility 规则。Branch 从 execution base 继续演化；在承载尚未分离前，Branch 可以使用受控的共享执行视图。共享执行视图不表示可以自由修改：Branch 的写操作仍须满足不影响权威路径和其他 Branch 的要求，具体方式由承载能力决定。文件系统可以动态解析 ancestor writes，输入可以继续 fan-out，真实步骤结果通过 outcome event 交付。Branch 状态的可见范围由相应状态类别规则决定。
 
 对于具有覆盖语义的 branch-local state，同一对象在可见范围内按最新修改解析：
 

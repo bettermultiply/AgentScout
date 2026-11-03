@@ -12,6 +12,8 @@ Runtime 为 Branch 的 Instance 提供执行承载。承载可以从 Branch barr
 
 当某类 Branch-local state 要求独立承载时，Runtime 或其他执行承载机制需要从相应 execution base 建立独立环境，使该状态能够按 Branch 继续演化。环境边界的具体内容、保证范围和验证状态由 Runtime Adapter 契约描述。
 
+Branch 的非干扰不要求每个 Branch 都有独立环境。多个 Branch 可以共享同一个执行环境，只要可能影响权威路径或其他 Branch 的操作在作用前被阻止、暂存或以其他方式受控。共享环境下的非干扰机制、覆盖入口和限制由 Runtime／Adapter 和 Agent 接入侧如实声明，控制面不把未声明的共享执行当作已隔离。
+
 环境边界可以涉及：
 
 - 进程和进程关系；
@@ -28,6 +30,7 @@ Runtime 为 Branch 的 Instance 提供执行承载。承载可以从 Branch barr
 以下语义可以由特定 Runtime 或 Adapter 提供，但不作为所有 Runtime 必须具备的 Branch 前提：
 
 - sibling environment 的不可见与不可修改；
+- 共享执行环境下，在操作作用前阻止或暂存对权威路径和其他 Branch 的影响；
 - 完整进程树的 checkpoint、restore 或廉价 fork；
 - memory、workspace 和 I/O 的强隔离；
 - 环境间资源干扰限制；

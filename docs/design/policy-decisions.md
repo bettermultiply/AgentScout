@@ -22,6 +22,8 @@ S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)
 
 Policy 允许这些 decision 依赖任务、执行上下文、当前状态、资源条件、预期收益和 Runtime 能力。依赖关系应显式表达，不能通过隐含的 Runtime 行为改变 decision 的含义。
 
+Policy 作者可以在 YAML 中分别为各 Decision 函数指定算法参数，系统只将参数传给相应函数；不设置供多个函数共享或继承的全局算法参数。算法参数与系统提供的运行时事实及机制授权分开。
+
 ## 2. 九类 Decision
 
 ### 2.1 `admit` - 是否进入待选集合
@@ -108,7 +110,7 @@ predict(predict_input) -> ProposalSet
 | `process_context` | 是 | 当前 Agent 过程可见的状态，包括上下文、当前阶段、已有输入和已完成结果 |
 | `assumption_set` | 是 | 当前 Branch 已携带的未决 Proposal ID 集合；预测不能假装这些 Proposal 已经被确认 |
 | `history` | 否 | 当前 Agent 或同类过程已经产生的历史轨迹、观测和结果 |
-| `policy_config` | 是 | Policy 自己的模型、规则、阈值、候选数量限制等配置 |
+| `policy_config` | 是 | 只传给 `predict` 函数的模型、规则、阈值、候选数量限制等算法参数；其他函数只接收各自的参数 |
 | `capability_context` | 是 | Contract/Runtime 已声明的可用能力和约束，例如相关效果是否可处理、可用预算或最大候选数 |
 
 `edge_context` 确定要预测哪个边界结果；`process_context` 和 `history` 提供生成候选所需的事实；`assumption_set` 保持未验证前提的可见性；`capability_context` 说明候选是否具备安全执行和验证的条件。来源可以是模型、规则、历史轨迹、外部系统或其他 Policy 组件，但来源不改变 Proposal 的语义。
@@ -142,20 +144,20 @@ Proposal = {
 ### 2.4 `launch` - 是否取得权威值
 
 ```text
-launch: eager | lazy | absent
+launch(input) -> bool
 ```
 
-`launch` 决定这条 Edge 的权威值如何取得、是否取得、何时取得。权威值是该 Edge 真实结果 `i` 的可靠来源——真实执行、主生成流、用户输入、环境反馈或远程服务——只有拿到它，`match` 才能与 Proposal 对照；拿不到时只能依赖 validator 或其他可接受性判断。
+`launch` 决定这条 Edge 当前是否启动取得权威值的路径。返回 `true` 表示启动权威路径，返回 `false` 表示当前不启动。权威值是该 Edge 真实结果 `i` 的可靠来源——真实执行、主生成流、用户输入、环境反馈或远程服务——只有拿到它，`match` 才能与 Proposal 对照；拿不到时只能依赖 validator 或其他可接受性判断。
 
-“权威值来自谁”不是 Policy 可以替换的选项，而是这条 Edge 的固有事实：`u` 是谁，真实结果就由谁产生。例如 `u` 是一条命令时真值来自真实执行，`u` 在等待用户输入时真值来自用户。Policy 能决定的只有“是否取得、何时取得”，即 `launch` 的取值：
+“权威值来自谁”不是 Policy 可以替换的选项，而是这条 Edge 的固有事实：`u` 是谁，真实结果就由谁产生。例如 `u` 是一条命令时真值来自真实执行，`u` 在等待用户输入时真值来自用户。Policy 能决定的只有“是否取得、何时取得”，即 `launch` 函数在当前输入下的返回值。系统可以提供常用快捷定义：
 
-| 取值 | 语义 |
+| 快捷定义 | 等价的函数行为 |
 |---|---|
-| **Eager** | 尽早取得权威值：权威路径可并行启动就与投机工作并行启动；权威来自外部（用户、环境）则照常等待其真实到达 |
-| **Lazy** | 先只靠 validator 或其他可接受性判断裁决；投机结果不可接受时才补取权威值，包括在此刻询问用户 |
-| **Absent** | 从不取得权威值，即使它天然存在（例如来自用户输入）也可以放弃，只靠 validator 或其他可接受性判断裁决 |
+| **Eager** | 对规定输入恒定返回 `true` |
+| **Absent** | 对规定输入恒定返回 `false` |
+| **Lazy** | 根据当前运行事实决定返回 `true` 或 `false`，例如在候选不可接受后再启动权威路径 |
 
-Absent 允许策略放弃本应到来的用户输入，只按可接受性判断放行；这通常降低 Fidelity，一般不可取，但属于 Policy 的合法选择，能否采用由 Fidelity 契约校验。
+恒定返回 `false` 的函数允许策略放弃本应到来的用户输入，只按可接受性判断放行；这通常降低 Fidelity，一般不可取，但属于 Policy 的合法选择，能否采用由 Fidelity 契约校验。
 
 权威路径能否被“启动”取决于其来源形态。来源是系统内的可发起路径（更强的 target、主生成流、可重跑的真实执行）时，Eager 意味着并行启动、Lazy 意味着稍后补启；来源是系统外的天然输入（用户、环境）时没有可“启动”的路径，Eager/Lazy 只表达“照常等待”还是“必要时才等待”。
 
@@ -212,7 +214,7 @@ MatchResult = {
 匹配关系至少应明确以下内容：
 
 - 比较的是 Proposal 本身、其输出，还是对后续行为的影响；
-- 该关系需要权威值，还是只要 validator 的可接受性判断（权威值不可得或 launch=Absent 时）；
+- 该关系需要权威值，还是只要 validator 的可接受性判断（权威值不可得或 `launch` 始终返回 `false` 时）；
 - 判断失败、不确定或 validator 出错时如何处理；
 - 该关系允许的 Fidelity 上界。
 
@@ -317,7 +319,7 @@ AssumptionSet(B1) = {p1}
 AssumptionSet(B2) = {p1, p2}
 ```
 
-新 Edge 仍按照当前 task 已绑定的同一 Policy 及其 task-level 配置执行既有 decision；当前不因嵌套深度切换到另一套 Policy。新 Edge 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Edge 的 `extent` 和 step 计数独立于父 Edge。未来按嵌套深度或其他上下文切换 Policy，属于独立扩展。
+新 Edge 仍按照当前 task 已绑定的同一 Policy 执行既有 decision，并分别使用该 Policy 中对应函数的配置；当前不因嵌套深度切换到另一套 Policy。新 Edge 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Edge 的 `extent` 和 step 计数独立于父 Edge。未来按嵌套深度或其他上下文切换 Policy，属于独立扩展。
 
 每个候选 Branch 携带其路径上的未决 Proposal ID 集合：`AssumptionSet = frozenset[ProposalId]`
 
@@ -333,7 +335,7 @@ AssumptionSet(B2) = {p1, p2}
 
 Fidelity 不是独立的 Policy Decision，而是由决策组合、Runtime 能力和 Policy 声明共同形成的契约。它至少受到以下因素影响：
 
-- `launch` 是否取得权威值（Absent 意味着放弃真实依据，只能走可接受性裁决）；
+- `launch` 是否取得权威值（始终返回 `false` 意味着放弃真实依据，只能走可接受性裁决）；
 - Edge 的权威来源本身是否定义正确性（固有事实，Policy 不能改变）；
 - `match` 采用的等价或可接受关系；
 - `effect` 是否在验证前释放外部效果；
@@ -354,6 +356,8 @@ Fidelity 不是独立的 Policy Decision，而是由决策组合、Runtime 能�
 具体的 Fidelity 字段、Contract 校验和运行期校验见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
 
 ## 6. Policy 与 Mechanism 的边界
+
+每类 decision 只允许读取系统按该类输入约定提供的数据，并在明确授权范围内使用外部能力，不获得任意访问系统状态的入口。算法可以对允许的数据使用自定义计算逻辑，但不能通过共享算法、内部对象或可变引用扩大数据可见范围和权限。数据的提供、求值与结果检查见 [Policy Engine 设计](control-plane/policy-engine.md)。
 
 Policy 可以实现或组合九类 decision，但不能拥有待选集合、运行队列或后端 mutable state，也不能把策略意图伪造成已经完成的后端操作。以下内容必须由 Mechanism 或经 Adapter 验证的后端能力落实：
 

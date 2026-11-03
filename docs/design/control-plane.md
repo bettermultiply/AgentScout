@@ -6,7 +6,7 @@
 
 控制面是抽象责任模型中 Mechanism 的实现主体，也是 Speculation Contract 的实现方。其主要目的是协调整个投机执行过程，并为 Policy 与 Runtime Adapter 的接入和运行提供协调与验证，避免策略意图与后端能力之间因语义不匹配而无法正确执行。
 
-控制面为每个 task 维护一棵完整的 Speculative Tree 控制面视图。对外这棵树以单一 Agent 的形式呈现给用户，对内我们将这棵树视作整个投机执行生命周期中由多个子树组成的派生嵌套关系。这个单一 Agent 视图和控制域称为 `AScoutAgent`。用户请求首先进入控制面；控制面负责建立 Agent 控制上下文并启动对应的 Agent 与接入侧，不要求用户手工启动 Pi 或通信代理。
+控制面为每个 task 维护一棵完整的 Speculative Tree 控制面视图。对外这棵树以单一 Agent 的形式呈现给用户，对内我们将这棵树视作整个投机执行生命周期中由多个子树组成的派生嵌套关系。这个单一 Agent 视图和控制域称为 `AScoutAgent`。用户请求首先进入控制面；控制面负责建立 Agent 控制上下文并启动对应的 Agent 与接入侧，不要求用户手工启动具体 Agent 产品或接入组件。
 
 控制面的工作方式是一条贯穿 Policy、控制结构与外部 Runtime 的闭环，Policy 的表达与 Runtime Adapter 的接入都经由控制面获得一致的校验与编排。
 
