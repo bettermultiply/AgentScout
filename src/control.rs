@@ -60,6 +60,13 @@ pub struct ControlSession {
 }
 
 impl ControlSession {
+    /// Close both socket halves, including the reader thread's cloned handle.
+    pub fn shutdown(&self) -> io::Result<()> {
+        self.writer
+            .lock()
+            .unwrap()
+            .shutdown(std::net::Shutdown::Both)
+    }
     fn start(stream: UnixStream) -> Self {
         let mut reader = stream.try_clone().expect("clone control stream");
         let session = Self {
@@ -73,37 +80,35 @@ impl ControlSession {
         let hello = session.hello.clone();
         let results = session.results.clone();
         let events = session.events.clone();
-        thread::spawn(move || {
-            loop {
-                let message: Option<AdapterMessage> =
-                    transport::read_message(&mut reader).unwrap_or_default();
-                match message {
-                    Some(AdapterMessage::Hello {
+        thread::spawn(move || loop {
+            let message: Option<AdapterMessage> =
+                transport::read_message(&mut reader).unwrap_or_default();
+            match message {
+                Some(AdapterMessage::Hello {
+                    protocol_version,
+                    adapter_instance,
+                    capabilities,
+                }) => {
+                    *hello.0.lock().unwrap() = Some(HelloInfo {
                         protocol_version,
                         adapter_instance,
                         capabilities,
-                    }) => {
-                        *hello.0.lock().unwrap() = Some(HelloInfo {
-                            protocol_version,
-                            adapter_instance,
-                            capabilities,
-                        });
-                        hello.1.notify_all();
-                    }
-                    Some(AdapterMessage::Result(result)) => {
-                        results
-                            .0
-                            .lock()
-                            .unwrap()
-                            .insert(result.request_id.clone(), result);
-                        results.1.notify_all();
-                    }
-                    Some(AdapterMessage::Event(event)) => {
-                        events.0.lock().unwrap().push_back(event);
-                        events.1.notify_all();
-                    }
-                    None => break,
+                    });
+                    hello.1.notify_all();
                 }
+                Some(AdapterMessage::Result(result)) => {
+                    results
+                        .0
+                        .lock()
+                        .unwrap()
+                        .insert(result.request_id.clone(), result);
+                    results.1.notify_all();
+                }
+                Some(AdapterMessage::Event(event)) => {
+                    events.0.lock().unwrap().push_back(event);
+                    events.1.notify_all();
+                }
+                None => break,
             }
         });
 

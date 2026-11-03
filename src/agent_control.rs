@@ -3,7 +3,7 @@
 //! 这里的状态属于控制面。Pi 接入侧只能报告事实并执行返回的命令，不能以
 //! 自己的对象保存或裁决 Speculative Tree。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -52,6 +52,67 @@ pub enum CommandStatus {
     Timeout,
 }
 
+/// 控制面操作的种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    StartAgent,
+    StartCandidate,
+    ResolvePending,
+    Promote,
+    Discard,
+    Cleanup,
+}
+
+/// 控制面操作的落实状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationStatus {
+    Planned,
+    Requested,
+    Succeeded,
+    Failed,
+}
+
+/// Agent 接入侧报告的实际状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentExecutionState {
+    Unknown,
+    StartRequested,
+    Running,
+    Stopped,
+    Released,
+    Failed,
+}
+
+/// Runtime 报告的实际状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeExecutionState {
+    Unknown,
+    EnvironmentRequested,
+    Ready,
+    PromotionRequested,
+    Promoted,
+    TerminationRequested,
+    Terminated,
+    Cleaned,
+    Failed,
+}
+
+impl Default for AgentExecutionState {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl Default for RuntimeExecutionState {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 /// 控制面保存的一条 Branch 记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchRecord {
@@ -62,24 +123,140 @@ pub struct BranchRecord {
     pub status: BranchStatus,
     #[serde(default)]
     pub generation: u64,
+    #[serde(default)]
+    pub execution_position: ExecutionPosition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<ProposalRecord>,
+    #[serde(default)]
+    pub pending_operations: Vec<PendingOperation>,
+    #[serde(default)]
+    pub execution_state: BranchExecutionState,
+}
+
+/// Branch 在完整投机执行历史中的位置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionPosition {
+    pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default)]
+    pub transcript_index: usize,
+}
+
+impl Default for ExecutionPosition {
+    fn default() -> Self {
+        Self {
+            sequence: 0,
+            operation_id: None,
+            transcript_index: 0,
+        }
+    }
+}
+
+/// Candidate 携带的预测。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalRecord {
+    pub proposal_id: String,
+    pub operation_id: String,
+    pub payload: Value,
+}
+
+/// 控制面希望发生的操作，不代表外部操作已经完成。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOperation {
+    pub operation_id: String,
+    pub branch_id: String,
+    pub kind: OperationKind,
+    pub status: OperationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<u64>,
+}
+
+/// Branch 对应的 Agent 与 Runtime 实际事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BranchExecutionState {
+    pub agent: AgentExecutionState,
+    pub runtime: RuntimeExecutionState,
 }
 
 /// 一个 Agent 的完整投机树视图。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeculativeTree {
     pub agent_id: String,
+    #[serde(default)]
+    pub execution_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_root_branch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_branch_id: Option<String>,
     pub branches: BTreeMap<String, BranchRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_binding: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_binding: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_view: Option<Value>,
 }
 
 impl SpeculativeTree {
     fn new(agent_id: String) -> Self {
         Self {
             agent_id,
+            execution_id: String::new(),
+            history_root_branch_id: None,
             authority_branch_id: None,
             branches: BTreeMap::new(),
+            policy_binding: None,
+            runtime_binding: None,
+            capability_view: None,
         }
+    }
+
+    /// 绑定这次投机执行使用的 Policy、Runtime Adapter 和能力视图。
+    /// 这些值属于 Tree，不属于某个 Branch。
+    pub fn bind_execution(&mut self, policy: Value, runtime: Value, capabilities: Value) {
+        self.policy_binding = Some(policy);
+        self.runtime_binding = Some(runtime);
+        self.capability_view = Some(capabilities);
+    }
+
+    /// 根据完整历史中的父子关系计算当前执行树。
+    /// 当前执行树不是第二套事实，只是从活动根派生的 Branch 集合。
+    pub fn active_branch_ids(&self) -> BTreeSet<String> {
+        let Some(root) = self.authority_branch_id.as_deref() else {
+            return BTreeSet::new();
+        };
+        let mut ids = BTreeSet::from([root.to_string()]);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for branch in self.branches.values() {
+                if branch
+                    .parent_branch_id
+                    .as_deref()
+                    .is_some_and(|parent| ids.contains(parent))
+                    && ids.insert(branch.branch_id.clone())
+                {
+                    changed = true;
+                }
+            }
+        }
+        ids
+    }
+
+    /// 返回当前执行树中的 Branch，而不是完整历史中的全部 Branch。
+    pub fn active_branches(&self) -> Vec<&BranchRecord> {
+        let ids = self.active_branch_ids();
+        self.branches
+            .values()
+            .filter(|branch| ids.contains(&branch.branch_id))
+            .collect()
     }
 }
 
@@ -286,6 +463,194 @@ impl AgentController {
         &self.state
     }
 
+    /// 把 Candidate 的预测和执行位置写入 Tree；候选运行数据随后只从
+    /// BranchRecord 读取，不再需要控制循环维护第二份 Proposal 状态。
+    pub fn record_candidate_context(
+        &mut self,
+        branch_id: &str,
+        operation_id: impl Into<String>,
+        prediction: Value,
+        sequence: u64,
+        transcript_index: usize,
+    ) -> io::Result<()> {
+        let operation_id = operation_id.into();
+        let branch = self.branch_mut(branch_id)?;
+        if branch.role != BranchRole::Candidate {
+            return Err(invalid_input("only a candidate can have a proposal"));
+        }
+        branch.execution_position = ExecutionPosition {
+            sequence,
+            operation_id: Some(operation_id.clone()),
+            transcript_index,
+        };
+        branch.proposal = Some(ProposalRecord {
+            proposal_id: format!("proposal-{branch_id}"),
+            operation_id: operation_id.clone(),
+            payload: prediction,
+        });
+        branch.pending_operations.push(PendingOperation {
+            operation_id,
+            branch_id: branch_id.to_string(),
+            kind: OperationKind::StartCandidate,
+            status: OperationStatus::Planned,
+            outcome: None,
+            evidence: None,
+            requested_at: None,
+            deadline_at: None,
+        });
+        branch.execution_state.agent = AgentExecutionState::StartRequested;
+        Ok(())
+    }
+
+    pub fn mark_operation_requested(
+        &mut self,
+        branch_id: &str,
+        operation_id: &str,
+        kind: OperationKind,
+    ) -> io::Result<()> {
+        let branch = self.branch_mut(branch_id)?;
+        if let Some(operation) = branch
+            .pending_operations
+            .iter_mut()
+            .find(|operation| operation.operation_id == operation_id)
+        {
+            operation.status = OperationStatus::Requested;
+        } else {
+            branch.pending_operations.push(PendingOperation {
+                operation_id: operation_id.to_string(),
+                branch_id: branch_id.to_string(),
+                kind,
+                status: OperationStatus::Requested,
+                outcome: None,
+                evidence: None,
+                requested_at: None,
+                deadline_at: None,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn mark_agent_started(&mut self, branch_id: &str) -> io::Result<()> {
+        let branch = self.branch_mut(branch_id)?;
+        branch.execution_state.agent = AgentExecutionState::Running;
+        Ok(())
+    }
+
+    /// Runtime facts are independent of Agent session cleanup. In particular,
+    /// releasing a session does not clean a shared execution environment.
+    pub fn record_runtime_state(
+        &mut self,
+        branch_id: &str,
+        state: RuntimeExecutionState,
+    ) -> io::Result<()> {
+        self.branch_mut(branch_id)?.execution_state.runtime = state;
+        Ok(())
+    }
+
+    /// Orderly process exit also releases the current Authority's session.
+    /// Runtime environment cleanup remains a separate confirmed operation.
+    pub fn begin_cleanup(&mut self, branch_id: &str) -> io::Result<AgentCommand> {
+        self.branch(branch_id)?;
+        let command = self.make_cleanup_command(branch_id)?;
+        self.branch_mut(branch_id)?.status = BranchStatus::Cleaning;
+        Ok(command)
+    }
+
+    pub fn complete_operation(
+        &mut self,
+        branch_id: &str,
+        operation_id: Option<&str>,
+        status: OperationStatus,
+    ) -> io::Result<()> {
+        let branch = self.branch_mut(branch_id)?;
+        if let Some(operation) = branch
+            .pending_operations
+            .iter_mut()
+            .find(|operation| operation_id.is_none_or(|id| operation.operation_id == id))
+        {
+            operation.status = status;
+        }
+        Ok(())
+    }
+
+    /// 将外部结果写回拥有该 Proposal 的 Candidate。
+    /// 控制循环只提供事件，不在本地保存结果副本。
+    pub fn record_candidate_outcome(
+        &mut self,
+        parent_branch_id: &str,
+        operation_id: &str,
+        outcome: Value,
+        evidence: Option<Value>,
+    ) -> io::Result<()> {
+        let candidate_ids: Vec<String> = self
+            .state
+            .tree
+            .branches
+            .values()
+            .filter(|branch| {
+                branch.parent_branch_id.as_deref() == Some(parent_branch_id)
+                    && branch
+                        .proposal
+                        .as_ref()
+                        .is_some_and(|proposal| proposal.operation_id == operation_id)
+            })
+            .map(|branch| branch.branch_id.clone())
+            .collect();
+        for candidate_id in candidate_ids {
+            let branch = self.branch_mut(&candidate_id)?;
+            if let Some(operation) = branch.pending_operations.iter_mut().find(|operation| {
+                operation.operation_id == operation_id
+                    && operation.kind == OperationKind::StartCandidate
+            }) {
+                operation.outcome = Some(outcome.clone());
+                operation.evidence = evidence.clone();
+            }
+        }
+        Ok(())
+    }
+
+    /// Return terminal Branches that may be handed to the Ledger.
+    pub fn evictable_branches(&self) -> Vec<String> {
+        self.state
+            .tree
+            .branches
+            .values()
+            .filter(|branch| {
+                branch.branch_id
+                    != self
+                        .state
+                        .tree
+                        .authority_branch_id
+                        .as_deref()
+                        .unwrap_or_default()
+                    && matches!(branch.status, BranchStatus::Cleaned)
+                    && !self
+                        .pending_commands
+                        .values()
+                        .any(|command| command.branch_id == branch.branch_id)
+                    && !self.state.tree.branches.values().any(|child| {
+                        child.parent_branch_id.as_deref() == Some(branch.branch_id.as_str())
+                    })
+            })
+            .map(|branch| branch.branch_id.clone())
+            .collect()
+    }
+
+    /// 从活动 Tree 中取出终止 Branch，并把它的所有权交给调用方的 Ledger。
+    ///
+    /// 从这一步开始，核心数据结构已经不再拥有该 Branch；Ledger 决定
+    /// 记录对象何时释放。调用方应立即把返回值传给 Ledger。
+    pub fn take_archivable_branch(&mut self, branch_id: &str) -> io::Result<BranchRecord> {
+        if !self.evictable_branches().iter().any(|id| id == branch_id) {
+            return Err(invalid_input("branch is not safe to archive"));
+        }
+        self.state
+            .tree
+            .branches
+            .remove(branch_id)
+            .ok_or_else(|| invalid_input("branch does not exist"))
+    }
+
     /// Set only when the authority Branch itself can no longer continue.
     pub fn authority_failure(&self) -> Option<&str> {
         self.authority_failure.as_deref()
@@ -305,6 +670,7 @@ impl AgentController {
             BranchStatus::Created,
         )?;
         self.state.tree.authority_branch_id = Some(branch_id.clone());
+        self.state.tree.history_root_branch_id = Some(branch_id.clone());
         Ok(AgentCommand::StartBranch {
             role: BranchRole::Authority,
             workspace: self.state.workspace(),
@@ -359,6 +725,7 @@ impl AgentController {
                 // discarded Branch or abort Parent fallback.
                 if branch.status == BranchStatus::Created {
                     branch.status = BranchStatus::Running;
+                    branch.execution_state.agent = AgentExecutionState::Running;
                 }
                 Ok(vec![])
             }
@@ -387,7 +754,10 @@ impl AgentController {
                 self.branch(&branch_id)?;
                 Ok(vec![])
             }
-            AgentMessage::CleanupCompleted { .. } => Ok(vec![]),
+            AgentMessage::CleanupCompleted { branch_id } => {
+                self.branch_mut(&branch_id)?.execution_state.agent = AgentExecutionState::Released;
+                Ok(vec![])
+            }
             AgentMessage::BranchFailed { branch_id, reason } => {
                 let branch = self.branch(&branch_id)?.clone();
                 if matches!(
@@ -396,6 +766,7 @@ impl AgentController {
                 ) {
                     return Ok(vec![]);
                 }
+                self.branch_mut(&branch_id)?.execution_state.agent = AgentExecutionState::Failed;
                 // A failure of the current authority is not a candidate
                 // discard: there is no older authority to fall back to.
                 if self.state.tree.authority_branch_id.as_deref() == Some(branch_id.as_str()) {
@@ -432,6 +803,12 @@ impl AgentController {
                     return Ok(vec![]);
                 }
                 self.pending_commands.remove(&command_id);
+                let operation_status = if status == CommandStatus::Applied {
+                    OperationStatus::Succeeded
+                } else {
+                    OperationStatus::Failed
+                };
+                self.complete_operation(&branch_id, operation_id.as_deref(), operation_status)?;
                 let branch = self.branch(&branch_id)?.clone();
                 match (pending.operation, status) {
                     (CommandOperation::Promote, CommandStatus::Applied)
@@ -469,12 +846,16 @@ impl AgentController {
                     (CommandOperation::Discard, CommandStatus::Applied)
                         if branch.status == BranchStatus::Discarding =>
                     {
+                        self.branch_mut(&branch_id)?.execution_state.agent =
+                            AgentExecutionState::Stopped;
                         self.branch_mut(&branch_id)?.status = BranchStatus::Cleaning;
                         Ok(vec![self.make_cleanup_command(&branch_id)?])
                     }
                     (CommandOperation::Cleanup, CommandStatus::Applied)
                         if branch.status == BranchStatus::Cleaning =>
                     {
+                        self.branch_mut(&branch_id)?.execution_state.agent =
+                            AgentExecutionState::Released;
                         self.branch_mut(&branch_id)?.status = BranchStatus::Cleaned;
                         Ok(vec![])
                     }
@@ -573,6 +954,10 @@ impl AgentController {
                 role,
                 status,
                 generation,
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         Ok(())
@@ -701,6 +1086,10 @@ mod tests {
                 role: BranchRole::Authority,
                 status: BranchStatus::Running,
                 generation: 1,
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.branches.insert(
@@ -711,6 +1100,11 @@ mod tests {
                 role: BranchRole::Candidate,
                 status: BranchStatus::Running,
                 generation: 2,
+
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.authority_branch_id = Some("parent".into());
@@ -768,6 +1162,10 @@ mod tests {
                 role: BranchRole::Authority,
                 status: BranchStatus::Running,
                 generation: 1,
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.branches.insert(
@@ -778,6 +1176,11 @@ mod tests {
                 role: BranchRole::Candidate,
                 status: BranchStatus::Running,
                 generation: 2,
+
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.authority_branch_id = Some("parent".into());
@@ -846,6 +1249,10 @@ mod tests {
                 role: BranchRole::Authority,
                 status: BranchStatus::Running,
                 generation: 1,
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.branches.insert(
@@ -856,6 +1263,11 @@ mod tests {
                 role: BranchRole::Candidate,
                 status: BranchStatus::Running,
                 generation: 2,
+
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.authority_branch_id = Some("parent".into());
@@ -927,6 +1339,10 @@ mod tests {
                 role: BranchRole::Authority,
                 status: BranchStatus::Running,
                 generation: 1,
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.branches.insert(
@@ -937,6 +1353,11 @@ mod tests {
                 role: BranchRole::Candidate,
                 status: BranchStatus::Running,
                 generation: 2,
+
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.authority_branch_id = Some("parent".into());
@@ -987,6 +1408,10 @@ mod tests {
                 role: BranchRole::Authority,
                 status: BranchStatus::Running,
                 generation: 1,
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.branches.insert(
@@ -997,6 +1422,11 @@ mod tests {
                 role: BranchRole::Candidate,
                 status: BranchStatus::Running,
                 generation: 2,
+
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.authority_branch_id = Some("parent".into());
@@ -1069,6 +1499,10 @@ mod tests {
                 role: BranchRole::Authority,
                 status: BranchStatus::Running,
                 generation: 1,
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.branches.insert(
@@ -1079,6 +1513,11 @@ mod tests {
                 role: BranchRole::Candidate,
                 status: BranchStatus::Running,
                 generation: 2,
+
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.authority_branch_id = Some("parent".into());
@@ -1155,6 +1594,10 @@ mod tests {
                 role: BranchRole::Authority,
                 status: BranchStatus::Running,
                 generation: 1,
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller.state.tree.authority_branch_id = Some("authority".into());
@@ -1192,6 +1635,11 @@ mod tests {
                     role: BranchRole::Candidate,
                     status,
                     generation: 1,
+
+                    execution_position: Default::default(),
+                    proposal: None,
+                    pending_operations: Vec::new(),
+                    execution_state: Default::default(),
                 },
             );
             let commands = controller
@@ -1215,6 +1663,10 @@ mod tests {
                 role: BranchRole::Candidate,
                 status: BranchStatus::Running,
                 generation: 1,
+                execution_position: Default::default(),
+                proposal: None,
+                pending_operations: Vec::new(),
+                execution_state: Default::default(),
             },
         );
         controller
@@ -1258,6 +1710,50 @@ mod tests {
         assert_eq!(
             controller.state().tree.branches["candidate"].status,
             BranchStatus::Cleaning
+        );
+        let command = controller.begin_cleanup("candidate").unwrap();
+        let AgentCommand::Cleanup {
+            command_id,
+            generation,
+            ..
+        } = command
+        else {
+            unreachable!()
+        };
+        controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id,
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Cleanup,
+                status: CommandStatus::Applied,
+                generation,
+                reason: None,
+            })
+            .unwrap();
+        assert_eq!(
+            controller.state().tree.branches["candidate"]
+                .execution_state
+                .agent,
+            AgentExecutionState::Released
+        );
+        // A late start fact must not resurrect a released Agent session.
+        controller
+            .handle_message(AgentMessage::BranchStarted {
+                branch_id: "candidate".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            controller.state().tree.branches["candidate"]
+                .execution_state
+                .agent,
+            AgentExecutionState::Released
+        );
+        assert_eq!(
+            controller.state().tree.branches["candidate"]
+                .execution_state
+                .runtime,
+            RuntimeExecutionState::Unknown
         );
     }
 }

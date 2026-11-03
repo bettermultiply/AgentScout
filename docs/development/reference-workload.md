@@ -18,6 +18,21 @@
 
 ## 手动测试步骤
 
+### 退出验证（2026-11-03）
+
+Shutdown 请求以及操作系统 SIGINT／SIGTERM 进入有序退出：等待 Agent Cleanup 成功回执，半关闭写方向并读取到 EOF，再终止／清理 Runtime，显式关闭 Runtime 会话并回收 Adapter。超时需要强制终止时返回错误。Adapter 使用独立进程组，终端发给控制面前台进程组的信号不会绕过此顺序直接终止子进程。TUI 捕获的 Ctrl-C 仍表示中断当前轮，Ctrl-D 表示退出。
+
+Agent 会话释放和 Runtime 环境清理分开记录；共享环境清理成功时更新 Tree 中仍引用它的所有 Branch。退出后 `final-tree.json` 保存最终状态，已归档 Branch 的历史事实不回写。
+
+验证记录（均为真实 NLE，模型启动参数 `openai/gpt-6-luna`，未改默认配置）：
+
+- `/tmp/opencode/nle-graceful-bkm0dgpn`：5 次真实动作结果后 Shutdown，退出码 0、无失败命令、Agent 日志为空。
+- `/tmp/opencode/nle-sigterm-a3osqvyj`：活跃执行 2 次真实结果后 SIGTERM，3 个保留 Branch 均为 Agent Released／Runtime Cleaned，退出码 0。
+- `/tmp/opencode/nle-sigint-vkvamocm`：空闲 SIGINT，退出码 0，最终状态正确。
+- `/tmp/opencode/nle-process-group-pm8myr0l`：向控制面的整个前台进程组发送 SIGINT，正常完成清理，退出码 0、Agent 日志为空。
+
+模型服务过载是外部服务错误，不属于退出修复范围；预期取消的 Request aborted 不等于控制命令失败。仍未覆盖启动握手期间收到信号、Runtime 故障注入和独立环境后端的完整端到端退出。
+
 前提：在仓库根目录执行；`/usr/bin` 排在 `PATH` 最前（Node ≥ 22.19）；NLE 虚拟环境与 `nle-runtime.json` 已就绪。
 
 ```sh

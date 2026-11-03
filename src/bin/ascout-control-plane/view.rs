@@ -86,7 +86,6 @@ pub fn structured(value: &Value) -> String {
 mod tests {
     use super::*;
     use ascout::agent_control::{BranchRole, BranchStatus};
-
     #[test]
     fn invalid_selection_is_explicit_and_valid_selection_is_read_only() {
         let branch = BranchRecord {
@@ -95,11 +94,20 @@ mod tests {
             role: BranchRole::Authority,
             status: BranchStatus::Running,
             generation: 1,
+            execution_position: Default::default(),
+            proposal: None,
+            pending_operations: Vec::new(),
+            execution_state: Default::default(),
         };
         let tree = SpeculativeTree {
             agent_id: "agent".into(),
             authority_branch_id: Some("authority".into()),
             branches: [("authority".into(), branch)].into(),
+            execution_id: String::new(),
+            history_root_branch_id: Some("authority".into()),
+            policy_binding: None,
+            runtime_binding: None,
+            capability_view: None,
         };
         for input in ["0", "2", "abc", "", "-1"] {
             assert!(select_branch(&tree, input)

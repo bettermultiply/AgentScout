@@ -38,12 +38,18 @@ const sessions = new Map(), checkpoints = new Map(), results = new Map(), waiter
 const cancelled = new Set(), gates = new Map(), generations = new Map(), commands = new Map();
 const runtimeTools = JSON.parse(process.env.ASCOUT_RUNTIME_TOOLS ?? '[]');
 let authority = 'authority', closing = false, outgoing = Promise.resolve();
-const socket = connect(socketPath);
+const socket = connect({path:socketPath,allowHalfOpen:true});
 await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject)});
+let transportError;
+socket.on('error',error=>{transportError=error;socket.destroy()});
 const report = payload => {
+    if(socket.destroyed)return Promise.resolve();
     const bytes = Buffer.from(JSON.stringify({kind:'message',payload})), header=Buffer.alloc(4);
     header.writeUInt32BE(bytes.length);
-    outgoing=outgoing.then(()=>new Promise((resolve,reject)=>socket.write(Buffer.concat([header,bytes]),error=>error?reject(error):resolve())));
+    outgoing=outgoing.then(()=>new Promise((resolve,reject)=>{
+        if(socket.destroyed){resolve();return}
+        socket.write(Buffer.concat([header,bytes]),error=>error?reject(error):resolve());
+    })).catch(error=>{transportError=error;socket.destroy()});
     return outgoing;
 };
 const key = (branch, operation) => JSON.stringify([branch,operation]);
@@ -210,8 +216,14 @@ try{
             const task=result.then(reply=>reply?report(reply):undefined);tasks.add(task);void task.finally(()=>tasks.delete(task)).catch(()=>socket.destroy());
         }
     }
+}catch(error){
+    transportError??=error;
 }finally{
     closing=true;for(const gate of gates.values())gate.release();
+    await commandQueue.catch(()=>{});
     await Promise.allSettled([...sessions.values()].map(s=>s.abort()));
     await Promise.allSettled(tasks);for(const session of sessions.values())session.dispose();
+    await outgoing;
+    if(!socket.destroyed)await new Promise(resolve=>socket.end(resolve));
 }
+if(transportError){console.error('Agent control connection failed:',transportError);process.exitCode=1}
