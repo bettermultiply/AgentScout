@@ -99,16 +99,10 @@ mod tests {
             pending_operations: Vec::new(),
             execution_state: Default::default(),
         };
-        let tree = SpeculativeTree {
-            agent_id: "agent".into(),
-            authority_branch_id: Some("authority".into()),
-            branches: [("authority".into(), branch)].into(),
-            execution_id: String::new(),
-            history_root_branch_id: Some("authority".into()),
-            policy_binding: None,
-            runtime_binding: None,
-            capability_view: None,
-        };
+        let mut tree = SpeculativeTree::new("agent".into());
+        tree.authority_branch_id = Some("authority".into());
+        tree.history_root_branch_id = Some("authority".into());
+        tree.branches.insert("authority".into(), branch);
         for input in ["0", "2", "abc", "", "-1"] {
             assert!(select_branch(&tree, input)
                 .unwrap_err()

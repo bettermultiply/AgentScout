@@ -18,6 +18,16 @@
 
 ## 手动测试步骤
 
+### Coordinator 状态与操作收敛（2026-11-03）
+
+活动控制事实集中在 `SpeculativeTree`：Branch 保存回合是否仍在进行、失败原因、Proposal、操作请求与时限；Tree 保存命令回执身份与待执行用户输入。外围循环只转交事件、执行 Controller 发起的 Runtime 请求并发布界面／Ledger 记录，不再维护第二套候选集合、就绪和执行完成标记。
+
+Candidate 创建通过一次入口登记完整控制上下文。Policy 预测、结果比较和处置由 Controller 协调。Runtime 晋级确认与 Agent 权威切换确认分开记录；仅 Agent Promote Applied 后切换 Authority，并丢弃旧 Parent 与其他候选的依赖子树。晋级等待中不发送下一条用户输入；确认后按新 Authority 的回合事实决定是否续跑。Agent 清理确认后才回收独立环境；共享环境仍由整个 run 退出清理。
+
+本轮本地验证：`cargo check --all-targets`、`cargo test --lib --bins`（11 项）及 `/usr/bin/node --test tests/pi-access.mjs`（3 项）。新增回归针对实际发现的“请求晋级就提前清理旧 Parent／派发后续输入”问题，覆盖确认前不切换、确认后剪枝与已结束候选接收后续输入。没有执行真实 NLE 模型验收。一次未限定范围的 `cargo test` 启动 Firecracker 端到端测试，7 项失败，首个错误为 Unix socket 路径过长；不计作本轮通过证据，也未修改后端以绕过。
+
+尚未解决 Ledger 归档失败后的 Branch 所有权；不宣称已实现全部调度、预算、嵌套接入或独立环境端到端能力。
+
 ### 退出验证（2026-11-03）
 
 Shutdown 请求以及操作系统 SIGINT／SIGTERM 进入有序退出：等待 Agent Cleanup 成功回执，半关闭写方向并读取到 EOF，再终止／清理 Runtime，显式关闭 Runtime 会话并回收 Adapter。超时需要强制终止时返回错误。Adapter 使用独立进程组，终端发给控制面前台进程组的信号不会绕过此顺序直接终止子进程。TUI 捕获的 Ctrl-C 仍表示中断当前轮，Ctrl-D 表示退出。

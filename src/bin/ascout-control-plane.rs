@@ -1,6 +1,6 @@
 //! Execution and policy coordination. Presentations consume the UI interface.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -21,13 +21,11 @@ mod view;
 #[path = "ascout-control-plane/web.rs"]
 mod web;
 
-use ascout::agent_control::{
-    AgentCommand, AgentController, AgentMessage, AgentWireMessage, OperationKind,
-};
+use ascout::agent_control::{AgentCommand, AgentController, AgentMessage, AgentWireMessage};
 use ascout::contract::{AgentLaunch, Operation, RuntimeCapabilities};
 use ascout::control::{ControlServer, ControlSession};
 use ascout::ledger::Ledger;
-use ascout::policy::{CompiledPolicy, Decision, PolicyEngine};
+use ascout::policy::{CompiledPolicy, PolicyEngine};
 use ascout::transport;
 use serde_json::json;
 use serde_json::Value;
@@ -52,13 +50,6 @@ fn install_shutdown_handlers() -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-struct Pending {
-    operation_id: String,
-    candidate: String,
-    tool_name: String,
-    started: Instant,
 }
 
 /// 启动 Runtime Adapter 并完成握手。控制面只持有连接和进程句柄，
@@ -284,6 +275,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
     let (mut adapter, session, runtime_capabilities) = start_adapter(&config_path, &run_dir)?;
     let mut controller = AgentController::new("agent", &run_dir)?;
+    controller.bind_execution(
+        run_dir.display().to_string(),
+        json!({"source": args.get(2).map(String::as_str).unwrap_or("assets/policy/policy.yaml")}),
+        json!({"config_path": config_path}),
+        serde_json::to_value(&runtime_capabilities)?,
+    );
     let runtime_tools = serde_json::to_string(&runtime_capabilities.tools)?;
     // 用哪个 Agent 产品、哪个版本由控制面决定；启动它由 Runtime 完成。
     let mut agent_args = vec![
@@ -493,16 +490,7 @@ fn run(
         }
     });
     let mut details: BTreeMap<String, String> = BTreeMap::new();
-    let mut pending: BTreeMap<String, Pending> = BTreeMap::new();
-    // Per-branch count of transcript entries written, used to record where a
-    // candidate forked from its parent.
-    let mut transcripts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut finished = std::collections::BTreeSet::new();
-    let mut sequence = 0;
     let mut ledger = Ledger::open(&run_dir.join("events.jsonl"))?;
-    let mut ready = false;
-    let mut running = false;
-    let mut queued: VecDeque<String> = VecDeque::new();
     let mut notice = String::from("Starting Agent session…");
     let run_started = Instant::now();
     let execution_result: Result<(), Box<dyn std::error::Error>> = (|| {
@@ -510,45 +498,28 @@ fn run(
             if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
                 break 'execution;
             }
-            interface.publish(&controller.state().tree, &details, ready, running, &notice);
+            interface.publish(
+                &controller.state().tree,
+                &details,
+                controller.authority_ready(),
+                controller.authority_running(),
+                &notice,
+            );
             while let Ok(request) = requests.try_recv() {
                 match request {
                     ui::Request::Shutdown => break 'execution,
                     ui::Request::Prompt { prompt } => {
                         if !prompt.trim().is_empty() {
-                            queued.push_back(prompt);
+                            controller.queue_prompt(prompt);
                             notice = "Prompt queued for the current authority".into();
                         }
                     }
                     ui::Request::Interrupt => {
-                        queued.clear();
-                        for (_, work) in std::mem::take(&mut pending) {
-                            let parent = candidate_parent(controller, &work.candidate)?;
-                            send(
-                                stream,
-                                AgentCommand::ResolvePending {
-                                    branch_id: parent,
-                                    operation_id: work.operation_id,
-                                    accepted: false,
-                                    outcome: None,
-                                    command_id: "resolve-interrupt".into(),
-                                    generation: 0,
-                                },
-                            )?;
-                            for command in controller.resolve_candidate(&work.candidate, false)? {
-                                send(stream, command)?;
-                            }
+                        for command in controller.interrupt()? {
+                            send(stream, command)?;
                         }
-                        if let Some(id) = &controller.state().tree.authority_branch_id {
-                            send(
-                                stream,
-                                AgentCommand::Abort {
-                                    branch_id: id.clone(),
-                                },
-                            )?;
-                            notice =
-                                "Interrupt requested; waiting for Agent execution to settle".into();
-                        }
+                        notice =
+                            "Interrupt requested; waiting for Agent execution to settle".into();
                     }
                 }
             }
@@ -559,9 +530,6 @@ fn run(
                     // assistant transcript entry, so it is not logged twice.
                     let streaming = matches!(message, AgentMessage::Output { .. });
                     if !streaming {
-                        if let AgentMessage::Transcript { branch_id, .. } = &message {
-                            *transcripts.entry(branch_id.clone()).or_default() += 1;
-                        }
                         let mut record = serde_json::to_value(&message)?;
                         if let Some(object) = record.as_object_mut() {
                             object.insert(
@@ -584,12 +552,10 @@ fn run(
                             if controller.state().tree.authority_branch_id.as_ref()
                                 == Some(branch_id)
                             {
-                                ready = true;
                                 notice = "Ready | /ascout: Tree | /events: Events | Esc: conversation | ↑/↓: scroll | Ctrl-D: exit".into();
                             }
                         }
                         AgentMessage::TurnCompleted { branch_id } => {
-                            finished.insert(branch_id.clone());
                             details
                                 .entry(branch_id.clone())
                                 .or_default()
@@ -597,7 +563,6 @@ fn run(
                             if controller.state().tree.authority_branch_id.as_ref()
                                 == Some(branch_id)
                             {
-                                running = false;
                                 notice =
                                 "Ready | /ascout: Tree | /events: Events | Ctrl-C: interrupt | Ctrl-D: exit".into();
                             }
@@ -633,7 +598,7 @@ fn run(
                                 if controller.state().tree.authority_branch_id.as_ref()
                                     == Some(branch_id)
                                 {
-                                    match predict(
+                                    match controller.predict(
                                         policy,
                                         operation_id,
                                         tool_name,
@@ -655,91 +620,66 @@ fn run(
                                 };
                             if predictions.is_empty() {
                                 notice = format!(
-                                "ToolPending {tool_name}; Policy did not admit speculation; Parent continues"
-                            );
+                                    "ToolPending {tool_name}; Policy did not admit speculation; Parent continues"
+                                );
                             }
                             for prediction in predictions {
-                                sequence += 1;
-                                let candidate_id = format!("candidate-{sequence}");
+                                let command = controller.start_candidate(
+                                    branch_id,
+                                    operation_id,
+                                    tool_name,
+                                    prediction.clone(),
+                                    checkpoint.clone(),
+                                )?;
+                                let AgentCommand::StartCandidate {
+                                    branch_id: candidate_id,
+                                    ..
+                                } = &command
+                                else {
+                                    unreachable!()
+                                };
+                                let candidate_id = candidate_id.clone();
                                 ledger.record(json!({
                                     "message": "candidate_created",
                                     "branch_id": candidate_id,
                                     "parent": branch_id,
-                                    "fork_at": transcripts.get(branch_id).copied().unwrap_or(0),
+                                    "fork_at": controller.state().tree.branches[&candidate_id].execution_position.transcript_index,
                                     "t_ms": run_started.elapsed().as_millis() as u64,
                                 }))?;
-                                let _ =
-                                    controller.create_candidate(&branch_id, &candidate_id, "")?;
-                                controller.record_candidate_context(
-                                    &candidate_id,
-                                    operation_id.clone(),
-                                    prediction.clone(),
-                                    sequence,
-                                    transcripts.get(branch_id).copied().unwrap_or(0),
-                                )?;
-                                controller.mark_operation_requested(
-                                    &candidate_id,
-                                    &operation_id,
-                                    OperationKind::StartCandidate,
-                                )?;
                                 interface.fork(branch_id, &candidate_id);
-                                if runtime_capabilities.branch_environment
-                                    && !runtime_capabilities.shared_environment
-                                {
-                                    runtime_call(
-                                        runtime,
-                                        &branch_id,
-                                        Operation::BranchEnvironment {
-                                            child_environment_id: candidate_id.clone(),
-                                        },
-                                    )?;
+                                let failure_commands =
+                                    controller.establish_candidate(&candidate_id, || {
+                                        if runtime_capabilities.branch_environment
+                                            && !runtime_capabilities.shared_environment
+                                        {
+                                            runtime_call(
+                                                runtime,
+                                                branch_id,
+                                                Operation::BranchEnvironment {
+                                                    child_environment_id: candidate_id.clone(),
+                                                },
+                                            )
+                                            .map(|_| ())
+                                            .map_err(|error| error.to_string())
+                                        } else {
+                                            Ok(())
+                                        }
+                                    })?;
+                                if !failure_commands.is_empty() {
+                                    for command in failure_commands {
+                                        send(stream, command)?;
+                                    }
+                                    continue;
                                 }
-                                let workspace = controller.state().workspace();
-                                controller.record_runtime_state(
-                                    &candidate_id,
-                                    ascout::agent_control::RuntimeExecutionState::Ready,
-                                )?;
-                                let pending_id = format!("{operation_id}:{candidate_id}");
-                                pending.insert(
-                                    pending_id.clone(),
-                                    Pending {
-                                        operation_id: operation_id.clone(),
-                                        candidate: candidate_id.clone(),
-                                        tool_name: tool_name.clone(),
-                                        started: Instant::now(),
-                                    },
-                                );
-                                send(
-                                    stream,
-                                    AgentCommand::StartCandidate {
-                                        branch_id: candidate_id.clone(),
-                                        parent_branch_id: branch_id.clone(),
-                                        operation_id: operation_id.clone(),
-                                        tool_name: tool_name.clone(),
-                                        workspace,
-                                        prediction: prediction.clone(),
-                                        checkpoint: checkpoint.clone(),
-                                        command_id: format!("start-{candidate_id}"),
-                                        generation: controller.state().tree.branches[&candidate_id]
-                                            .generation,
-                                    },
-                                )?;
+                                send(stream, command)?;
                                 details.entry(candidate_id).or_default().push_str(&format!(
                                     "[Candidate requested for {operation_id}; hypothesis={}]\n",
                                     prediction
                                 ));
                                 notice = format!(
-                                "ToolPending {tool_name}; {} Candidates started; Parent continues",
-                                pending
-                                    .values()
-                                    .filter(|work| {
-                                        candidate_parent(controller, &work.candidate)
-                                            .ok()
-                                            .as_deref()
-                                            == Some(branch_id)
-                                    })
-                                    .count()
-                            );
+                                    "ToolPending {tool_name}; {} Candidates started; Parent continues",
+                                    controller.pending_candidates().len()
+                                );
                             }
                             if runtime_tool_declared {
                                 let authority = controller
@@ -763,15 +703,11 @@ fn run(
                                 )?;
                                 send(
                                     stream,
-                                    AgentCommand::ResolvePending {
-                                        branch_id: branch_id.clone(),
-                                        operation_id: operation_id.clone(),
-                                        accepted: false,
-                                        outcome: Some(tool_result),
-                                        command_id: format!("resolve-{operation_id}"),
-                                        generation: controller.state().tree.branches[branch_id]
-                                            .generation,
-                                    },
+                                    controller.resolve_pending(
+                                        branch_id,
+                                        operation_id,
+                                        tool_result,
+                                    )?,
                                 )?;
                             }
                         }
@@ -780,39 +716,26 @@ fn run(
                             operation_id,
                             outcome,
                         } => {
-                            let matching_candidates: Vec<String> = pending
-                                .values()
-                                .filter(|work| {
-                                    candidate_parent(controller, &work.candidate)
-                                        .ok()
-                                        .as_deref()
+                            let matching_candidates: Vec<String> = controller
+                                .pending_candidates()
+                                .into_iter()
+                                .filter(|candidate| {
+                                    candidate_parent(controller, candidate).ok().as_deref()
                                         == Some(branch_id)
-                                        && work.operation_id == *operation_id
+                                        && controller.state().tree.branches[candidate]
+                                            .proposal
+                                            .as_ref()
+                                            .is_some_and(|proposal| {
+                                                proposal.operation_id == *operation_id
+                                            })
                                 })
-                                .map(|work| work.candidate.clone())
                                 .collect();
                             for candidate_id in matching_candidates {
-                                // Runtime 工具的权威结果由 Runtime 生成；Pi 回报的文本
-                                // 只是该结果在工具通道里的表示，不覆盖可比较的证据。
-                                let tool_name = pending
-                                    .get(&format!("{operation_id}:{candidate_id}"))
-                                    .map(|work| work.tool_name.as_str());
-                                if tool_name.is_some_and(|tool| {
-                                    runtime_tool(runtime_capabilities, tool).is_none()
-                                }) {
-                                    controller.record_candidate_outcome(
-                                        branch_id,
-                                        operation_id,
-                                        outcome.clone(),
-                                        None,
-                                    )?;
-                                }
                                 details
                                     .entry(candidate_id)
                                     .or_default()
                                     .push_str(&format!("\nParent 真实结果\n{}\n", outcome));
                             }
-                            continue;
                         }
                         AgentMessage::BranchFailed { branch_id, reason } => {
                             if controller.state().tree.branches.get(branch_id).is_some_and(
@@ -826,63 +749,11 @@ fn run(
                             ) {
                                 continue;
                             }
-                            let keys: Vec<_> = pending
-                                .iter()
-                                .filter(|(_, work)| {
-                                    &work.candidate == branch_id
-                                        || candidate_parent(controller, &work.candidate)
-                                            .ok()
-                                            .as_deref()
-                                            == Some(branch_id)
-                                })
-                                .map(|(id, _)| id.clone())
-                                .collect();
-                            for key in keys {
-                                let work = pending.remove(&key).unwrap();
-                                let parent = candidate_parent(controller, &work.candidate)?;
-                                let outcome = candidate_outcome(
-                                    controller,
-                                    &work.candidate,
-                                    &work.operation_id,
-                                );
-                                send(
-                                    stream,
-                                    AgentCommand::ResolvePending {
-                                        branch_id: parent.clone(),
-                                        operation_id: work.operation_id.clone(),
-                                        accepted: false,
-                                        outcome,
-                                        command_id: format!("resolve-{}", work.operation_id),
-                                        generation: controller.state().tree.branches[&parent]
-                                            .generation,
-                                    },
-                                )?;
-                                if &work.candidate != branch_id {
-                                    for command in
-                                        controller.resolve_candidate(&work.candidate, false)?
-                                    {
-                                        send(stream, command)?;
-                                    }
-                                }
-                            }
                             details
                                 .entry(branch_id.clone())
                                 .or_default()
                                 .push_str(&format!("\n[Failed] {reason}\n"));
                             notice = format!("Branch {branch_id} failed: {reason}");
-                            if controller.state().tree.authority_branch_id.as_ref()
-                                == Some(branch_id)
-                            {
-                                ready = false;
-                                running = false;
-                                // Preserve queued input for a later authority or explicit interrupt.
-                            }
-                        }
-                        AgentMessage::CandidateCompleted { .. } => {
-                            return Err(
-                            "Unexpected speculative result: pending-result path is not connected"
-                                .into(),
-                        );
                         }
                         _ => {}
                     }
@@ -892,6 +763,7 @@ fn run(
                     if let Some(reason) = controller.authority_failure() {
                         return Err(reason.to_string().into());
                     }
+                    cleanup_released_environments(controller, runtime, runtime_capabilities)?;
                     evict_finished_branches(controller, &mut ledger)?;
                 }
                 Ok(Ok(Some(AgentWireMessage::Command(_)))) => {
@@ -902,215 +774,49 @@ fn run(
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => break,
             }
-            let keys: Vec<_> = pending
-                .iter()
-                .filter(|(_, work)| {
-                    (candidate_outcome(controller, &work.candidate, &work.operation_id).is_some()
-                        && controller.state().tree.branches[&work.candidate].status
-                            == ascout::agent_control::BranchStatus::Running)
-                        || work.started.elapsed() > Duration::from_secs(120)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            for key in keys {
-                let Some(work) = pending.remove(&key) else {
-                    continue;
-                };
-                let proposal = candidate_proposal(controller, &work.candidate)?;
-                let outcome = candidate_outcome(controller, &work.candidate, &work.operation_id);
-                let parent = candidate_parent(controller, &work.candidate)?;
-                let (compatible, verdict) = outcome
-                    .as_ref()
-                    .map(|outcome| matches_outcome(policy, &work.operation_id, &proposal, outcome))
-                    .transpose()
-                    .unwrap_or_else(|error| {
-                        details
-                            .entry(work.candidate.clone())
-                            .or_default()
-                            .push_str(&format!("\n[Policy error; Parent fallback] {error}\n"));
-                        None
-                    })
-                    .unwrap_or((false, "error".into()));
-                let mut accepted = compatible
-                    && controller.state().tree.authority_branch_id.as_ref() == Some(&parent)
-                    && controller.state().tree.branches[&work.candidate].status
-                        == ascout::agent_control::BranchStatus::Running;
-                // Runtime promotion is part of the same lifecycle event even when
-                // the current Runtime (NLE) has no environment-side work to do.
-                // Fail the promotion before the Agent switches authority if the
-                // Runtime cannot accept it.
-                let mut runtime_promote_error = None;
-                if accepted {
-                    controller.record_runtime_state(
-                        &work.candidate,
-                        ascout::agent_control::RuntimeExecutionState::PromotionRequested,
-                    )?;
-                    if let Err(error) = runtime_call(
-                        runtime,
-                        runtime_environment(runtime_capabilities, &work.candidate),
-                        Operation::PromoteEnvironment,
-                    ) {
-                        accepted = false;
-                        runtime_promote_error = Some(error.to_string());
-                        controller.record_runtime_state(
-                            &work.candidate,
-                            ascout::agent_control::RuntimeExecutionState::Failed,
-                        )?;
-                    } else {
-                        controller.record_runtime_state(
-                            &work.candidate,
-                            ascout::agent_control::RuntimeExecutionState::Promoted,
-                        )?;
-                    }
-                }
-                // Parent already received the actual tool result immediately after
-                // ToolPending. Disposition only decides Candidate lifecycle.
-                // Created sessions that failed to start are cancelled, not accepted.
-                let commands = if controller.state().tree.branches[&work.candidate].status
-                    == ascout::agent_control::BranchStatus::Running
-                {
-                    controller.resolve_candidate(&work.candidate, accepted)?
-                } else {
-                    controller.handle_message(AgentMessage::BranchFailed {
-                        branch_id: work.candidate.clone(),
-                        reason: "Candidate startup timed out".into(),
-                    })?
-                };
-                for command in commands {
-                    send(stream, command)?;
-                }
-                if let Some(error) = &runtime_promote_error {
-                    details
-                        .entry(work.candidate.clone())
-                        .or_default()
-                        .push_str(&format!(
-                            "\n[Runtime promote failed; Candidate discarded] {error}\n"
-                        ));
-                }
-                details
-                    .entry(work.candidate.clone())
-                    .or_default()
-                    .push_str(if accepted {
-                        "\n[Policy disposition: Promote]\n"
-                    } else {
-                        "\n[Policy disposition/fallback: Discard]\n"
-                    });
-                ledger.record(json!({"branch_id": work.candidate, "disposition": if accepted { "Promote" } else { "Discard" }, "hypothesis": proposal, "verdict": verdict, "runtime_promote_error": runtime_promote_error, "t_ms": run_started.elapsed().as_millis() as u64}))?;
-                interface.record(json!({"branch_id": work.candidate, "disposition": if accepted { "Promote" } else { "Discard" }, "hypothesis": proposal, "verdict": verdict, "runtime_promote_error": runtime_promote_error}));
-                if accepted {
-                    // The promoted Branch keeps its own environment; the replaced
-                    // authority's environment is the one that gets cleaned up.
-                    if runtime_capabilities.branch_environment
-                        && !runtime_capabilities.shared_environment
-                    {
-                        runtime_cleanup(runtime, runtime_capabilities, &parent, controller)?;
-                    }
-                    // Promote invalidates every other continuation of the old Parent,
-                    // including candidates for other concurrently pending operations.
-                    let obsolete: Vec<_> = pending
-                        .iter()
-                        .filter(|(_, sibling)| {
-                            candidate_parent(controller, &sibling.candidate)
-                                .ok()
-                                .as_deref()
-                                == Some(parent.as_str())
-                        })
-                        .map(|(id, _)| id.clone())
-                        .collect();
-                    for id in obsolete {
-                        let sibling = pending.remove(&id).unwrap();
-                        if runtime_capabilities.branch_environment
-                            && !runtime_capabilities.shared_environment
-                        {
-                            runtime_cleanup(
-                                runtime,
-                                runtime_capabilities,
-                                &sibling.candidate,
-                                controller,
-                            )?;
-                        }
-                        for command in controller.resolve_candidate(&sibling.candidate, false)? {
-                            send(stream, command)?;
-                        }
-                        details
-                            .entry(sibling.candidate.clone())
-                            .or_default()
-                            .push_str("\n[Discard: another Candidate replaced Parent]\n");
-                        ledger.record(json!({"branch_id": sibling.candidate, "operation_id": sibling.operation_id, "disposition": "Discard", "reason": "Parent replaced", "t_ms": run_started.elapsed().as_millis() as u64}))?;
-                    }
-                    running = !finished.contains(&work.candidate);
-                    ready = true;
-                } else if runtime_capabilities.branch_environment
-                    && !runtime_capabilities.shared_environment
-                {
-                    runtime_cleanup(runtime, runtime_capabilities, &work.candidate, controller)?;
-                }
-                notice = if accepted {
-                    "Candidate promoted; same live session now serves the main conversation".into()
-                } else {
-                    "Candidate discarded; Parent continues with the actual tool result".into()
-                };
-                evict_finished_branches(controller, &mut ledger)?;
+            let (commands, records) = controller.advance_candidates(policy, |candidate| {
+                runtime_call(
+                    runtime,
+                    runtime_environment(runtime_capabilities, candidate),
+                    Operation::PromoteEnvironment,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            })?;
+            for command in commands {
+                send(stream, command)?;
             }
-            if !queued.is_empty() && ready && !running {
-                if let Some(id) = controller.state().tree.authority_branch_id.clone() {
-                    let line = queued.pop_front().unwrap();
-                    finished.remove(&id);
-                    send(
-                        stream,
-                        AgentCommand::Prompt {
-                            branch_id: id,
-                            prompt: line,
-                        },
-                    )?;
-                    running = true;
-                    notice = "Agent running".into();
-                }
+            for mut record in records {
+                let candidate = record["branch_id"].as_str().unwrap().to_string();
+                details
+                    .entry(candidate)
+                    .or_default()
+                    .push_str(&format!("\n[Disposition requested] {record}\n"));
+                record["t_ms"] = json!(run_started.elapsed().as_millis() as u64);
+                ledger.record(record.clone())?;
+                interface.record(record);
+                notice = "Disposition requested; waiting for Agent confirmation".into();
+            }
+            if let Some(command) = controller.next_prompt()? {
+                send(stream, command)?;
+                notice = "Agent running".into();
             }
         }
         Ok(())
     })();
-    let branch_ids: Vec<_> = controller
-        .state()
-        .tree
-        .branches
-        .values()
-        .filter(|branch| {
-            branch.execution_state.agent != ascout::agent_control::AgentExecutionState::Released
-        })
-        .map(|branch| branch.branch_id.clone())
-        .collect();
-    let mut cleanup = BTreeMap::new();
-    for branch_id in branch_ids {
-        let command = controller.begin_cleanup(&branch_id)?;
-        if let AgentCommand::Cleanup { command_id, .. } = &command {
-            cleanup.insert(branch_id, command_id.clone());
-        }
+    for command in controller.begin_shutdown()? {
         send(stream, command)?;
     }
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !cleanup.is_empty() {
+    while controller.cleanup_pending()? {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(remaining) {
             Ok(Ok(Some(AgentWireMessage::Message(message)))) => {
                 ledger.record(serde_json::to_value(&message)?)?;
-                if let AgentMessage::CommandResult {
-                    branch_id,
-                    command_id,
-                    status,
-                    ..
-                } = &message
-                {
-                    if cleanup.get(branch_id) == Some(command_id) {
-                        if *status != ascout::agent_control::CommandStatus::Applied {
-                            return Err(format!("Agent cleanup failed for {branch_id}").into());
-                        }
-                        cleanup.remove(branch_id);
-                    }
-                }
                 for command in controller.handle_message(message)? {
                     send(stream, command)?;
                 }
+                cleanup_released_environments(controller, runtime, runtime_capabilities)?;
             }
             _ => return Err("Agent shutdown incomplete: cleanup was not confirmed".into()),
         }
@@ -1155,119 +861,25 @@ fn candidate_parent(controller: &AgentController, candidate_id: &str) -> io::Res
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "candidate parent missing"))
 }
 
-fn candidate_proposal(controller: &AgentController, candidate_id: &str) -> io::Result<Value> {
-    controller
-        .state()
-        .tree
-        .branches
-        .get(candidate_id)
-        .and_then(|branch| branch.proposal.as_ref())
-        .map(|proposal| proposal.payload.clone())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "candidate proposal missing"))
-}
-
-fn candidate_outcome(
-    controller: &AgentController,
-    candidate_id: &str,
-    operation_id: &str,
-) -> Option<Value> {
-    controller
-        .state()
-        .tree
-        .branches
-        .get(candidate_id)
-        .and_then(|branch| {
-            branch
-                .pending_operations
-                .iter()
-                .find(|operation| operation.operation_id == operation_id)
-        })
-        .and_then(|operation| operation.outcome.clone())
-}
-
-fn predict(
-    policy: &CompiledPolicy,
-    operation_id: &str,
-    tool_name: &str,
-    arguments: &serde_json::Value,
-    observation: Option<&serde_json::Value>,
-) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    let engine = PolicyEngine::default();
-    let op = json!({"kind": tool_name, "produces_result": true, "result_pending": true, "has_predictor": true});
-    let opportunity = engine.evaluate(policy, Decision::OpportunityPass, &json!({"op": op}))?;
-    let feasibility = engine.evaluate(policy, Decision::FeasibilityPass, &json!({"op": op, "state": {}, "contract_context": {"arguments": arguments, "runtime_capabilities": {"candidate_execution": true}}}))?;
-    if opportunity != true || feasibility != true {
-        return Ok(Vec::new());
+fn cleanup_released_environments(
+    controller: &mut AgentController,
+    runtime: &ControlSession,
+    capabilities: &RuntimeCapabilities,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !capabilities.branch_environment || capabilities.shared_environment {
+        return Ok(());
     }
-    let edge = json!({"edge_id": operation_id, "tool_name": tool_name, "arguments": arguments});
-    let selected = engine.evaluate(
-        policy,
-        Decision::Select,
-        &json!({"frontier_view": [edge], "scheduling_context": {"capacity": 1}}),
-    )?;
-    if !selected
-        .as_array()
-        .is_some_and(|ids| ids.contains(&json!(operation_id)))
-    {
-        return Ok(Vec::new());
-    }
-    let data = json!({
-        "edge_context": edge,
-        "process_context": {
-            "operation_id": operation_id,
-            "observation": observation,
-            "action": arguments.get("action")
-        },
-        "assumption_set": [],
-        "capability_context": {"tool": tool_name, "runtime_capabilities": {"candidate_execution": true}, "prediction_types": ["string", "boolean", "enum"]}
-    });
-    let result = engine.evaluate(policy, Decision::Predict, &data)?;
-    if engine.evaluate(
-        policy,
-        Decision::Launch,
-        &json!({"edge_context": edge, "authority_state": {}, "candidate_view": []}),
-    )? != true
-    {
-        return Ok(Vec::new());
-    }
-    Ok(result["proposals"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("payload").cloned())
-        .collect())
-}
-
-fn matches_outcome(
-    policy: &CompiledPolicy,
-    operation_id: &str,
-    proposal: &serde_json::Value,
-    outcome: &serde_json::Value,
-) -> Result<(bool, String), Box<dyn std::error::Error>> {
-    let result = PolicyEngine::default().evaluate(
-        policy,
-        Decision::Match,
-        &json!({
-            "proposal": {"payload": proposal},
-            "evidence": outcome,
-            "match_context": {"operation_id": operation_id}
-        }),
-    )?;
-    let verdict = result["verdict"].as_str().unwrap_or("error").to_string();
-    let compatible = verdict == "compatible";
-    let disposition = PolicyEngine::default().evaluate(
-        policy,
-        Decision::Dispose,
-        &json!({
-            "branch": {"operation_id": operation_id},
-            "resolution": if compatible { "accepted" } else { "rejected" },
-            "context": {"match": result}
-        }),
-    )?;
-    Ok((
-        compatible && disposition["actions"][0]["intent"] == "Promote",
-        verdict,
-    ))
+    controller.cleanup_environments(|id, state| {
+        let operation = if state == ascout::agent_control::RuntimeExecutionState::Terminated {
+            Operation::TerminateEnvironment
+        } else {
+            Operation::CleanupEnvironment
+        };
+        runtime_call(runtime, id, operation)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })?;
+    Ok(())
 }
 
 fn send(stream: &mut UnixStream, command: AgentCommand) -> io::Result<()> {
