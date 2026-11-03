@@ -109,6 +109,14 @@ async function run(session,branch,operation) {
     if(last?.stopReason==='error')await report({message:'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
     await report({message:'turn_completed',branch_id:branch});
 }
+// A turn may wait for a later control command (runtime result, Promote or
+// Abort). Keep setup ordered, but never hold the command queue for the turn.
+function executeTurn(session,branch,operation) {
+    const task=run(session,branch,operation)
+        .catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error instanceof Error?error.message:error)}));
+    tasks.add(task);
+    void task.finally(()=>tasks.delete(task)).catch(()=>socket.destroy());
+}
 async function handle(command) {
     const branch=command.branch_id;
     switch(command.command){
@@ -117,17 +125,17 @@ async function handle(command) {
             if(closing||cancelled.has(branch)){session.dispose();return}
             sessions.set(branch,session);install(session,branch);
             await report({message:'branch_started',branch_id:branch});
-            if(command.prompt)await run(session,branch,()=>session.prompt(command.prompt));
+            if(command.prompt)executeTurn(session,branch,()=>session.prompt(command.prompt));
             return;
         }
         case 'prompt': {
             if(branch!==authority)throw Error('Only the authority accepts user input');
             const session=sessions.get(branch);if(!session)throw Error('Session missing');
-            return run(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));
+            executeTurn(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));return;
         }
         case 'start_candidate': {
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
-            if(!parent||!checkpoint||JSON.stringify(checkpoint.checkpoint)!==JSON.stringify(command.checkpoint))throw Error('Candidate requires its registered checkpoint');
+            if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
             const messages=structuredClone(checkpoint.saved),last=messages.at(-1);
             if(last?.role!=='assistant'||!last.content.some(p=>p.type==='toolCall'&&p.id===command.operation_id&&p.name===command.tool_name))throw Error('Invalid pending checkpoint');
             const paired: any[]=[];
@@ -149,13 +157,13 @@ async function handle(command) {
             const manager=SessionManager.inMemory(command.workspace);
             for(const message of [...messages,...paired])manager.appendMessage(message);
             let release;const promise=new Promise(resolve=>release=resolve);gates.set(branch,{promise,release});
-            const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,noTools:'all',customTools:[]});
+            const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch)});
             if(closing||cancelled.has(branch)){session.dispose();return}
             sessions.set(branch,session);install(session,branch);
             // Injected result is new candidate content, not copied from the Parent.
             for(const entry of paired)await report({message:'transcript',branch_id:branch,branch_role:'candidate',entry});
             await report({message:'branch_started',branch_id:branch});
-            return run(session,branch,()=>session.continue());
+            executeTurn(session,branch,()=>session.continue());return;
         }
         case 'resolve_pending': {
             if(command.outcome!==undefined){const id=key(branch,command.operation_id),waiter=waiters.get(id);if(waiter){waiters.delete(id);waiter(command.outcome)}else results.set(id,command.outcome)}
