@@ -70,6 +70,8 @@ Effect Coordinator 负责控制面内共享、外部及 Policy 要求纳管的�
 
 Ledger 以异步旁路记录控制面需要保留的运行事实，包括 Policy 决策、Branch 与 Proposal 状态变化、验证依据、效果与 obligation 处理结果、资源使用、取消与清理结果、Adapter 映射结果与 Runtime 失败。它用于状态对齐、问题定位、shadow/replay 和契约校验；它不从记录中重新决定生命周期，也不代替 Runtime 持有执行状态。
 
+已经退出活动控制范围、移交 Ledger 的 Branch 由 Ledger 承担保存责任。写入失败时 Ledger 继续持有该记录，并报告这次运行的历史不完整；不得在返回错误的同时静默释放它，也不因此把 Branch 重新放回活动 Tree。记录成功写出的判定不包含强制 `flush`，Ledger 不对已失败的文件内容作回滚或去重承诺。
+
 ## 3. 失败处理：回到"Branch 从未创建"
 
 对尚未被接受的投机 Branch，控制面在失败时把它视作在 Speculative Tree 中从未被创建：不重放该操作，不保留它的部分结果作为成功。被接受的 Branch 已完成使命，不适用这一语义。

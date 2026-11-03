@@ -834,12 +834,28 @@ fn run(
         }
     }
     interface.publish(&controller.state().tree, &details, false, false, "Stopped");
-    execution_result
+    // A Branch already handed to the Ledger is no longer part of the active
+    // Tree, so the caller cannot recover it. If the Ledger could not write it,
+    // say that the run's history is incomplete instead of reporting a generic
+    // I/O failure or letting the record disappear silently.
+    let unarchived: Vec<_> = ledger.unarchived().map(str::to_string).collect();
+    if unarchived.is_empty() {
+        return execution_result;
+    }
+    let message = format!(
+        "Ledger history incomplete: Branch(es) taken over but not archived: {}",
+        unarchived.join(", ")
+    );
+    match execution_result {
+        Ok(()) => Err(message.into()),
+        Err(error) => Err(format!("{error}; {message}").into()),
+    }
 }
 
-/// Keep only state needed by the active control loop in memory.  The event
-/// stream remains the complete history and is written before a Branch is
-/// removed from the active view.
+/// Keep only state needed by the active control loop in memory. Ownership of a
+/// Branch moves to the Ledger before it leaves the active view; if the Ledger
+/// cannot write the record it keeps the Branch and reports the run's history as
+/// incomplete.
 fn evict_finished_branches(
     controller: &mut AgentController,
     ledger: &mut Ledger,
