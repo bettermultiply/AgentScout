@@ -34,7 +34,14 @@ Candidate 创建通过一次入口登记完整控制上下文。Policy 预测、
 - `/tmp/opencode/nle-coordinator-83xt0z35`：要求连续向西 5 次，第 5 次确实撞墙，Policy 正确预测 `blocked`，仍为 5 次成功晋级。后续输入和 Shutdown 同样通过，退出码 0。
 - 两轮均无 BranchFailed、失败命令、Policy 处置错误或 Runtime 晋级错误；`agent.log` 为空。`final-tree.json` 中 6 个保留 Branch 均为 Cleaned／Agent Released／Runtime Cleaned，`turn_active=false`，命令和输入队列均为空。证据目录包含 `acceptance.json`、动作结束与后续输入结束的运行视图、事件及最终 Tree。
 
-覆盖边界：本次没有出现预测不匹配导致的 Candidate Discard，不能把旧 Authority 的 Discard 当作该路径的真实验收。未注入 Runtime 错误、超时或覆盖独立环境后端。
+覆盖边界：上述两轮没有出现预测不匹配导致的 Candidate Discard，不能把旧 Authority 的 Discard 当作该路径的真实验收。未注入 Runtime 错误、超时或覆盖独立环境后端。
+
+补充 DeepSeek 十步试运行（用户要求，代码版本 `a3c9a17`）：`deepseek/deepseek-flash --thinking low`，其余 NLE 配置与 Policy 不变，证据在 `/tmp/opencode/nle-deepseek-12mobqwy`。
+
+- 模型实际执行 11 次动作（提示要求 10 次，未强约束成功）：8 次 Promote Applied、2 次预测不匹配 Discard，旧 Authority 的 10 次 Discard 与全部 11 次 Cleanup 均 Applied。
+- 这次真实验证了不匹配丢弃路径：`candidate-7`、`candidate-9` 预测 `moved`、实际 `incompatible`，被丢弃、清理并从活动 Tree 归档到 Ledger；两者不再出现在 `final-tree.json`。
+- 无 BranchFailed、失败命令、Policy 处置错误或 Runtime 晋级错误，`agent.log` 为空；Shutdown 退出码 0。最终 9 个保留 Branch 均为 Cleaned／Agent Released／Runtime Cleaned，`turn_active=false`，命令与输入队列为空。
+- 该次未验证候选在 Agent 确认前被取消、Runtime 故障或独立环境后端。
 
 ### 退出验证（2026-11-03）
 
