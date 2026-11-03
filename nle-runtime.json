@@ -1,0 +1,11 @@
+{
+  "backend": "nle",
+  "control_socket": "/tmp/ascout-nle.sock",
+  "adapter_instance": "nle",
+  "python": "../.venv-nle/bin/python",
+  "bridge": "examples/nle-runtime-bridge.py",
+  "guidebook": "examples/nle/Guidebook.txt",
+  "seed": 7,
+  "action_delay_seconds": 1.0,
+  "env_id": "NetHackScore-v0"
+}

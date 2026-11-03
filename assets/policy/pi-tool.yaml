@@ -3,6 +3,7 @@ language: python
 files:
   - decisions.py
 fidelity: Best-effort
+runtime: nle-runtime.json
 decisions:
   admit:
     opportunity_pass:
@@ -31,6 +32,8 @@ decisions:
     function: predict
     policy_config:
       candidates: ["example", "true", "false"]
+      value_type: enum
+      enum_values: ["example", "true", "false"]
       sample_count: 2
   launch:
     file: decisions.py
@@ -41,6 +44,9 @@ decisions:
   match:
     file: decisions.py
     function: match_proposal
+    policy_config:
+      value_type: enum
+      enum_values: ["example", "true", "false"]
   dispose:
     file: decisions.py
     function: dispose

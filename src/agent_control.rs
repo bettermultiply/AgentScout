@@ -25,9 +25,31 @@ pub enum BranchRole {
 pub enum BranchStatus {
     Created,
     Running,
+    AwaitingValidation,
+    Promoting,
     Promoted,
+    Discarding,
     Discarded,
+    Cleaning,
     Cleaned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandOperation {
+    Promote,
+    ResolvePending,
+    Discard,
+    Cleanup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandStatus {
+    Applied,
+    Rejected,
+    Failed,
+    Timeout,
 }
 
 /// 控制面保存的一条 Branch 记录。
@@ -38,7 +60,8 @@ pub struct BranchRecord {
     pub parent_branch_id: Option<String>,
     pub role: BranchRole,
     pub status: BranchStatus,
-    pub workspace: PathBuf,
+    #[serde(default)]
+    pub generation: u64,
 }
 
 /// 一个 Agent 的完整投机树视图。
@@ -78,12 +101,23 @@ pub enum AgentCommand {
         tool_name: String,
         workspace: PathBuf,
         prediction: Value,
-        context: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint: Option<Value>,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
     },
     ResolvePending {
         branch_id: String,
         operation_id: String,
         accepted: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<Value>,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
     },
     StartBranch {
         branch_id: String,
@@ -93,13 +127,25 @@ pub enum AgentCommand {
     },
     Promote {
         branch_id: String,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
     },
     Discard {
         branch_id: String,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
     },
     Cleanup {
         branch_id: String,
         workspace: PathBuf,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
     },
 }
 
@@ -119,7 +165,13 @@ pub enum AgentMessage {
         operation_id: String,
         tool_name: String,
         arguments: Value,
-        context: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint: Option<Value>,
+    },
+    Transcript {
+        branch_id: String,
+        branch_role: String,
+        entry: Value,
     },
     CleanupCompleted {
         branch_id: String,
@@ -140,9 +192,27 @@ pub enum AgentMessage {
         completed: bool,
         output_characters: usize,
     },
+    Usage {
+        branch_id: String,
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_level: Option<String>,
+        usage: Value,
+    },
     BranchFailed {
         branch_id: String,
         reason: String,
+    },
+    CommandResult {
+        command_id: String,
+        branch_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
+        operation: CommandOperation,
+        status: CommandStatus,
+        generation: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 
@@ -161,9 +231,32 @@ pub struct ControlState {
     pub workspace_root: PathBuf,
 }
 
-/// 控制面管理一个 Agent、其 Tree 和 Branch 工作目录。
+impl ControlState {
+    /// 一个 run 只有一个工作目录：Branch 是同一执行状态的别名，不各自持有目录。
+    pub fn workspace(&self) -> PathBuf {
+        self.workspace_root.join("workspace")
+    }
+}
+
+/// 控制面管理一个 Agent、其 Tree 和本次 run 的工作目录。
 pub struct AgentController {
     state: ControlState,
+    next_generation: u64,
+    next_command_id: u64,
+    pending_commands: BTreeMap<String, PendingCommand>,
+    /// A model failure arrived while a Candidate was already being promoted.
+    /// The promotion result decides whether the failure is a candidate failure
+    /// or an authority failure.
+    pending_failures: BTreeMap<String, String>,
+    authority_failure: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingCommand {
+    branch_id: String,
+    operation: CommandOperation,
+    operation_id: Option<String>,
+    generation: u64,
 }
 
 impl AgentController {
@@ -174,16 +267,28 @@ impl AgentController {
     ) -> io::Result<Self> {
         let workspace_root = workspace_root.into();
         fs::create_dir_all(&workspace_root)?;
+        let state = ControlState {
+            tree: SpeculativeTree::new(agent_id.into()),
+            workspace_root,
+        };
+        fs::create_dir_all(state.workspace())?;
         Ok(Self {
-            state: ControlState {
-                tree: SpeculativeTree::new(agent_id.into()),
-                workspace_root,
-            },
+            state,
+            next_generation: 1,
+            next_command_id: 1,
+            pending_commands: BTreeMap::new(),
+            pending_failures: BTreeMap::new(),
+            authority_failure: None,
         })
     }
 
     pub fn state(&self) -> &ControlState {
         &self.state
+    }
+
+    /// Set only when the authority Branch itself can no longer continue.
+    pub fn authority_failure(&self) -> Option<&str> {
+        self.authority_failure.as_deref()
     }
 
     /// 由控制面登记初始权威 Branch，并要求 Pi 启动它。
@@ -202,7 +307,7 @@ impl AgentController {
         self.state.tree.authority_branch_id = Some(branch_id.clone());
         Ok(AgentCommand::StartBranch {
             role: BranchRole::Authority,
-            workspace: self.workspace_for(&branch_id),
+            workspace: self.state.workspace(),
             branch_id,
             prompt: prompt.into(),
         })
@@ -236,7 +341,7 @@ impl AgentController {
         )?;
         Ok(AgentCommand::StartBranch {
             role: BranchRole::Candidate,
-            workspace: self.workspace_for(&branch_id),
+            workspace: self.state.workspace(),
             branch_id,
             prompt: prompt.into(),
         })
@@ -249,26 +354,32 @@ impl AgentController {
             AgentMessage::Hello { .. } => Err(invalid_input("agent id does not match controller")),
             AgentMessage::BranchStarted { branch_id } => {
                 let branch = self.branch_mut(&branch_id)?;
-                // A start fact already in transit may arrive after cancellation.
-                // It must not resurrect a discarded Branch or abort Parent fallback.
-                if matches!(
-                    branch.status,
-                    BranchStatus::Discarded | BranchStatus::Cleaned
-                ) {
-                    return Ok(vec![]);
+                // A start fact already in transit may arrive after cancellation
+                // or after a duplicate start report. It must not resurrect a
+                // discarded Branch or abort Parent fallback.
+                if branch.status == BranchStatus::Created {
+                    branch.status = BranchStatus::Running;
                 }
-                if branch.status != BranchStatus::Created {
-                    return Err(invalid_input("branch was not awaiting start"));
-                }
-                branch.status = BranchStatus::Running;
                 Ok(vec![])
             }
-            AgentMessage::ParentOutcome { .. } | AgentMessage::CandidateCompleted { .. } => {
-                Err(invalid_input(
-                    "outcomes are resolved only after the control-plane Policy evaluation",
-                ))
+            AgentMessage::ParentOutcome { .. } => Err(invalid_input(
+                "outcomes are resolved only after the control-plane Policy evaluation",
+            )),
+            AgentMessage::CandidateCompleted {
+                branch_id,
+                completed,
+                ..
+            } => {
+                let branch = self.branch_mut(&branch_id)?;
+                if completed && branch.status == BranchStatus::Running {
+                    branch.status = BranchStatus::AwaitingValidation;
+                }
+                Ok(vec![])
             }
-            AgentMessage::Output { branch_id, .. } | AgentMessage::TurnCompleted { branch_id } => {
+            AgentMessage::Output { branch_id, .. }
+            | AgentMessage::Usage { branch_id, .. }
+            | AgentMessage::Transcript { branch_id, .. }
+            | AgentMessage::TurnCompleted { branch_id } => {
                 self.branch(&branch_id)?;
                 Ok(vec![])
             }
@@ -276,17 +387,99 @@ impl AgentController {
                 self.branch(&branch_id)?;
                 Ok(vec![])
             }
-            AgentMessage::CleanupCompleted { branch_id } => {
-                self.cleanup_completed(&branch_id)?;
-                Ok(vec![])
+            AgentMessage::CleanupCompleted { .. } => Ok(vec![]),
+            AgentMessage::BranchFailed { branch_id, reason } => {
+                let branch = self.branch(&branch_id)?.clone();
+                if matches!(
+                    branch.status,
+                    BranchStatus::Discarded | BranchStatus::Cleaned
+                ) {
+                    return Ok(vec![]);
+                }
+                // A failure of the current authority is not a candidate
+                // discard: there is no older authority to fall back to.
+                if self.state.tree.authority_branch_id.as_deref() == Some(branch_id.as_str()) {
+                    self.authority_failure =
+                        Some(format!("authority branch {branch_id} failed: {reason}"));
+                    return Ok(vec![]);
+                }
+                // Promote may already be in flight. Do not discard until the
+                // Agent has answered whether the authority switch happened.
+                if branch.status == BranchStatus::Promoting {
+                    self.pending_failures.insert(branch_id, reason);
+                    return Ok(vec![]);
+                }
+                self.branch_mut(&branch_id)?.status = BranchStatus::Discarding;
+                Ok(vec![self.make_discard_command(&branch_id)?])
             }
-            AgentMessage::BranchFailed { branch_id, .. } => {
-                let branch = self.branch_mut(&branch_id)?;
-                branch.status = BranchStatus::Discarded;
-                Ok(vec![AgentCommand::Cleanup {
-                    branch_id: branch.branch_id.clone(),
-                    workspace: branch.workspace.clone(),
-                }])
+            AgentMessage::CommandResult {
+                command_id,
+                branch_id,
+                operation_id,
+                operation,
+                status,
+                generation,
+                ..
+            } => {
+                let Some(pending) = self.pending_commands.get(&command_id).cloned() else {
+                    return Ok(vec![]);
+                };
+                if pending.branch_id != branch_id
+                    || pending.operation != operation
+                    || pending.operation_id != operation_id
+                    || pending.generation != generation
+                {
+                    return Ok(vec![]);
+                }
+                self.pending_commands.remove(&command_id);
+                let branch = self.branch(&branch_id)?.clone();
+                match (pending.operation, status) {
+                    (CommandOperation::Promote, CommandStatus::Applied)
+                        if branch.status == BranchStatus::Promoting =>
+                    {
+                        let old_authority = self
+                            .state
+                            .tree
+                            .authority_branch_id
+                            .clone()
+                            .ok_or_else(|| invalid_input("tree has no authority branch"))?;
+                        if old_authority == branch_id {
+                            return Ok(vec![]);
+                        }
+                        self.branch_mut(&branch_id)?.role = BranchRole::Authority;
+                        self.branch_mut(&branch_id)?.status = BranchStatus::Promoted;
+                        self.state.tree.authority_branch_id = Some(branch_id.clone());
+                        // A model failure that arrived while Promote was in
+                        // flight is now a failure of the new authority, not
+                        // a reason to discard the candidate.
+                        if let Some(reason) = self.pending_failures.remove(&branch_id) {
+                            self.authority_failure =
+                                Some(format!("authority branch {branch_id} failed: {reason}"));
+                        }
+                        let old = self.branch_mut(&old_authority)?;
+                        old.role = BranchRole::Candidate;
+                        old.status = BranchStatus::Discarding;
+                        Ok(vec![self.make_discard_command(&old_authority)?])
+                    }
+                    (CommandOperation::Promote, _) if branch.status == BranchStatus::Promoting => {
+                        self.pending_failures.remove(&branch_id);
+                        self.branch_mut(&branch_id)?.status = BranchStatus::Discarding;
+                        Ok(vec![self.make_discard_command(&branch_id)?])
+                    }
+                    (CommandOperation::Discard, CommandStatus::Applied)
+                        if branch.status == BranchStatus::Discarding =>
+                    {
+                        self.branch_mut(&branch_id)?.status = BranchStatus::Cleaning;
+                        Ok(vec![self.make_cleanup_command(&branch_id)?])
+                    }
+                    (CommandOperation::Cleanup, CommandStatus::Applied)
+                        if branch.status == BranchStatus::Cleaning =>
+                    {
+                        self.branch_mut(&branch_id)?.status = BranchStatus::Cleaned;
+                        Ok(vec![])
+                    }
+                    _ => Ok(vec![]),
+                }
             }
         }
     }
@@ -306,22 +499,15 @@ impl AgentController {
             .clone();
         if candidate.role != BranchRole::Candidate
             || !(candidate.status == BranchStatus::Running
+                || candidate.status == BranchStatus::AwaitingValidation
                 || (!compatible && candidate.status == BranchStatus::Created))
         {
             return Err(invalid_input("branch is not a running candidate"));
         }
 
         if !compatible {
-            self.branch_mut(branch_id)?.status = BranchStatus::Discarded;
-            return Ok(vec![
-                AgentCommand::Discard {
-                    branch_id: branch_id.to_string(),
-                },
-                AgentCommand::Cleanup {
-                    branch_id: branch_id.to_string(),
-                    workspace: candidate.workspace,
-                },
-            ]);
+            self.branch_mut(branch_id)?.status = BranchStatus::Discarding;
+            return Ok(vec![self.make_discard_command(branch_id)?]);
         }
 
         let old_authority = self
@@ -335,32 +521,31 @@ impl AgentController {
                 "candidate is not a child of current authority",
             ));
         }
-        self.branch_mut(&old_authority)?.status = BranchStatus::Discarded;
+        if self
+            .state
+            .tree
+            .branches
+            .values()
+            .any(|branch| branch.status == BranchStatus::Promoting)
+        {
+            return Err(invalid_input("a promotion is already in progress"));
+        }
+        if !matches!(
+            self.branch(&old_authority)?.status,
+            BranchStatus::Running | BranchStatus::Promoted
+        ) {
+            return Err(invalid_input("current authority is not live"));
+        }
         let promoted = self.branch_mut(branch_id)?;
-        promoted.role = BranchRole::Authority;
-        promoted.status = BranchStatus::Promoted;
-        self.state.tree.authority_branch_id = Some(branch_id.to_string());
-        Ok(vec![
-            AgentCommand::Promote {
-                branch_id: branch_id.to_string(),
-            },
-            AgentCommand::Cleanup {
-                branch_id: old_authority.clone(),
-                workspace: self.workspace_for(&old_authority),
-            },
-        ])
+        promoted.status = BranchStatus::Promoting;
+        Ok(vec![self.make_promote_command(branch_id)?])
     }
 
-    /// 清理命令完成后由控制面删除目录并收束状态。
+    /// 清理命令完成后由控制面收束状态；run 的工作目录由整个 run 共享，不随 Branch 删除。
     pub fn cleanup_completed(&mut self, branch_id: &str) -> io::Result<()> {
-        if self.branch(branch_id)?.status != BranchStatus::Discarded {
+        if self.branch(branch_id)?.status != BranchStatus::Cleaning {
             return Err(invalid_input("branch is not awaiting cleanup"));
         }
-        let workspace = self.branch(branch_id)?.workspace.clone();
-        if workspace.exists() {
-            fs::remove_dir_all(&workspace)?;
-        }
-        self.branch_mut(branch_id)?.status = BranchStatus::Cleaned;
         Ok(())
     }
 
@@ -374,8 +559,12 @@ impl AgentController {
         if self.state.tree.branches.contains_key(branch_id) {
             return Err(invalid_input("branch id already exists"));
         }
-        let workspace = self.workspace_for(branch_id);
-        fs::create_dir_all(&workspace)?;
+        fs::create_dir_all(self.state.workspace())?;
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| invalid_input("generation counter exhausted"))?;
         self.state.tree.branches.insert(
             branch_id.to_string(),
             BranchRecord {
@@ -383,14 +572,10 @@ impl AgentController {
                 parent_branch_id,
                 role,
                 status,
-                workspace,
+                generation,
             },
         );
         Ok(())
-    }
-
-    fn workspace_for(&self, branch_id: &str) -> PathBuf {
-        self.state.workspace_root.join(branch_id)
     }
 
     fn branch(&self, branch_id: &str) -> io::Result<&BranchRecord> {
@@ -408,6 +593,79 @@ impl AgentController {
             .get_mut(branch_id)
             .ok_or_else(|| invalid_input("branch does not exist"))
     }
+
+    fn command_id(&mut self, operation: CommandOperation) -> io::Result<String> {
+        let id = format!(
+            "command-{}-{}",
+            self.next_command_id,
+            operation_name(operation)
+        );
+        self.next_command_id = self
+            .next_command_id
+            .checked_add(1)
+            .ok_or_else(|| invalid_input("command counter exhausted"))?;
+        Ok(id)
+    }
+
+    fn register(
+        &mut self,
+        branch_id: &str,
+        operation: CommandOperation,
+        operation_id: Option<String>,
+        generation: u64,
+    ) -> io::Result<String> {
+        let id = self.command_id(operation)?;
+        self.pending_commands.insert(
+            id.clone(),
+            PendingCommand {
+                branch_id: branch_id.to_string(),
+                operation,
+                operation_id,
+                generation,
+            },
+        );
+        Ok(id)
+    }
+
+    fn make_promote_command(&mut self, branch_id: &str) -> io::Result<AgentCommand> {
+        let generation = self.branch(branch_id)?.generation;
+        let command_id = self.register(branch_id, CommandOperation::Promote, None, generation)?;
+        Ok(AgentCommand::Promote {
+            branch_id: branch_id.to_string(),
+            command_id,
+            generation,
+        })
+    }
+
+    fn make_discard_command(&mut self, branch_id: &str) -> io::Result<AgentCommand> {
+        let generation = self.branch(branch_id)?.generation;
+        let command_id = self.register(branch_id, CommandOperation::Discard, None, generation)?;
+        Ok(AgentCommand::Discard {
+            branch_id: branch_id.to_string(),
+            command_id,
+            generation,
+        })
+    }
+
+    fn make_cleanup_command(&mut self, branch_id: &str) -> io::Result<AgentCommand> {
+        let generation = self.branch(branch_id)?.generation;
+        let command_id = self.register(branch_id, CommandOperation::Cleanup, None, generation)?;
+        Ok(AgentCommand::Cleanup {
+            branch_id: branch_id.to_string(),
+            workspace: self.state.workspace(),
+            command_id,
+            generation,
+        })
+    }
+}
+
+fn operation_name(operation: CommandOperation) -> &'static str {
+    match operation {
+        CommandOperation::Promote => "promote",
+        CommandOperation::ResolvePending => "resolve",
+        CommandOperation::Discard => "discard",
+        CommandOperation::Cleanup => "cleanup",
+    }
 }
 
 fn invalid_input(message: &str) -> io::Error {
@@ -418,75 +676,588 @@ fn invalid_input(message: &str) -> io::Error {
 mod tests {
     use super::*;
 
+    fn controller() -> AgentController {
+        AgentController {
+            state: ControlState {
+                tree: SpeculativeTree::new("agent-1".into()),
+                workspace_root: PathBuf::from("/memory"),
+            },
+            next_generation: 1,
+            next_command_id: 1,
+            pending_commands: BTreeMap::new(),
+            pending_failures: BTreeMap::new(),
+            authority_failure: None,
+        }
+    }
+
     #[test]
-    fn control_plane_owns_candidate_workspace_and_promotes_it() {
-        let root = tempfile::tempdir().unwrap();
-        let mut controller = AgentController::new("agent-1", root.path()).unwrap();
-        let start = controller.create_authority("parent", "test").unwrap();
-        assert!(matches!(start, AgentCommand::StartBranch { .. }));
-        controller
-            .handle_message(AgentMessage::BranchStarted {
+    fn candidate_shares_run_workspace_and_promotes() {
+        let mut controller = controller();
+        controller.state.tree.branches.insert(
+            "parent".into(),
+            BranchRecord {
                 branch_id: "parent".into(),
+                parent_branch_id: None,
+                role: BranchRole::Authority,
+                status: BranchStatus::Running,
+                generation: 1,
+            },
+        );
+        controller.state.tree.branches.insert(
+            "candidate".into(),
+            BranchRecord {
+                branch_id: "candidate".into(),
+                parent_branch_id: Some("parent".into()),
+                role: BranchRole::Candidate,
+                status: BranchStatus::Running,
+                generation: 2,
+            },
+        );
+        controller.state.tree.authority_branch_id = Some("parent".into());
+        let commands = controller.resolve_candidate("candidate", true).unwrap();
+        assert!(commands
+            .iter()
+            .any(|command| matches!(command, AgentCommand::Promote { .. })));
+        assert_eq!(
+            controller.state().tree.authority_branch_id.as_deref(),
+            Some("parent")
+        );
+        assert_eq!(
+            controller.state().tree.branches["parent"].status,
+            BranchStatus::Running
+        );
+        let promote = commands
+            .into_iter()
+            .find_map(|command| match command {
+                AgentCommand::Promote {
+                    command_id,
+                    generation,
+                    ..
+                } => Some((command_id, generation)),
+                _ => None,
             })
             .unwrap();
-        let candidate_start = controller
-            .create_candidate("parent", "candidate", "test")
+        let commands = controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id: promote.0,
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Promote,
+                status: CommandStatus::Applied,
+                generation: promote.1,
+                reason: None,
+            })
             .unwrap();
-        let candidate_workspace = match candidate_start {
-            AgentCommand::StartBranch { workspace, .. } => workspace,
+        assert!(commands
+            .iter()
+            .any(|command| matches!(command, AgentCommand::Discard { .. })));
+        assert_eq!(
+            controller.state().tree.authority_branch_id.as_deref(),
+            Some("candidate")
+        );
+    }
+
+    #[test]
+    fn mismatch_discards_and_cleans_candidate() {
+        let mut controller = controller();
+        controller.state.tree.branches.insert(
+            "parent".into(),
+            BranchRecord {
+                branch_id: "parent".into(),
+                parent_branch_id: None,
+                role: BranchRole::Authority,
+                status: BranchStatus::Running,
+                generation: 1,
+            },
+        );
+        controller.state.tree.branches.insert(
+            "candidate".into(),
+            BranchRecord {
+                branch_id: "candidate".into(),
+                parent_branch_id: Some("parent".into()),
+                role: BranchRole::Candidate,
+                status: BranchStatus::Running,
+                generation: 2,
+            },
+        );
+        controller.state.tree.authority_branch_id = Some("parent".into());
+        let commands = controller.resolve_candidate("candidate", false).unwrap();
+        assert!(commands
+            .iter()
+            .any(|command| matches!(command, AgentCommand::Discard { .. })));
+        let discard = commands
+            .into_iter()
+            .find_map(|command| match command {
+                AgentCommand::Discard {
+                    command_id,
+                    generation,
+                    ..
+                } => Some((command_id, generation)),
+                _ => None,
+            })
+            .unwrap();
+        let commands = controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id: discard.0,
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Discard,
+                status: CommandStatus::Applied,
+                generation: discard.1,
+                reason: None,
+            })
+            .unwrap();
+        let cleanup = commands
+            .into_iter()
+            .find_map(|command| match command {
+                AgentCommand::Cleanup {
+                    command_id,
+                    generation,
+                    ..
+                } => Some((command_id, generation)),
+                _ => None,
+            })
+            .unwrap();
+        controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id: cleanup.0,
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Cleanup,
+                status: CommandStatus::Applied,
+                generation: cleanup.1,
+                reason: None,
+            })
+            .unwrap();
+        assert_eq!(
+            controller.state().tree.branches["candidate"].status,
+            BranchStatus::Cleaned
+        );
+    }
+
+    #[test]
+    fn command_results_require_exact_pending_identity_and_are_consumed() {
+        let mut controller = controller();
+        controller.state.tree.branches.insert(
+            "parent".into(),
+            BranchRecord {
+                branch_id: "parent".into(),
+                parent_branch_id: None,
+                role: BranchRole::Authority,
+                status: BranchStatus::Running,
+                generation: 1,
+            },
+        );
+        controller.state.tree.branches.insert(
+            "candidate".into(),
+            BranchRecord {
+                branch_id: "candidate".into(),
+                parent_branch_id: Some("parent".into()),
+                role: BranchRole::Candidate,
+                status: BranchStatus::Running,
+                generation: 2,
+            },
+        );
+        controller.state.tree.authority_branch_id = Some("parent".into());
+        let command = controller
+            .resolve_candidate("candidate", true)
+            .unwrap()
+            .remove(0);
+        let (command_id, generation) = match command {
+            AgentCommand::Promote {
+                command_id,
+                generation,
+                ..
+            } => (command_id, generation),
             _ => unreachable!(),
         };
-        assert!(candidate_workspace.is_dir());
-        controller
-            .handle_message(AgentMessage::BranchStarted {
+        let stale = controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id: command_id.clone(),
                 branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Promote,
+                status: CommandStatus::Applied,
+                generation: generation + 1,
+                reason: None,
             })
             .unwrap();
-        let commands = controller.resolve_candidate("candidate", true).unwrap();
-        assert!(
-            commands
-                .iter()
-                .any(|command| matches!(command, AgentCommand::Promote { .. }))
+        assert!(stale.is_empty());
+        assert_eq!(
+            controller.state().tree.authority_branch_id.as_deref(),
+            Some("parent")
         );
+        controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id: command_id.clone(),
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Promote,
+                status: CommandStatus::Applied,
+                generation,
+                reason: None,
+            })
+            .unwrap();
+        let duplicate = controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id,
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Promote,
+                status: CommandStatus::Applied,
+                generation,
+                reason: None,
+            })
+            .unwrap();
+        assert!(duplicate.is_empty());
+        assert_eq!(
+            controller.state().tree.authority_branch_id.as_deref(),
+            Some("candidate")
+        );
+    }
+
+    #[test]
+    fn failed_promotion_discards_without_switching_authority() {
+        let mut controller = controller();
+        controller.state.tree.branches.insert(
+            "parent".into(),
+            BranchRecord {
+                branch_id: "parent".into(),
+                parent_branch_id: None,
+                role: BranchRole::Authority,
+                status: BranchStatus::Running,
+                generation: 1,
+            },
+        );
+        controller.state.tree.branches.insert(
+            "candidate".into(),
+            BranchRecord {
+                branch_id: "candidate".into(),
+                parent_branch_id: Some("parent".into()),
+                role: BranchRole::Candidate,
+                status: BranchStatus::Running,
+                generation: 2,
+            },
+        );
+        controller.state.tree.authority_branch_id = Some("parent".into());
+        let command = controller
+            .resolve_candidate("candidate", true)
+            .unwrap()
+            .remove(0);
+        let (command_id, generation) = match command {
+            AgentCommand::Promote {
+                command_id,
+                generation,
+                ..
+            } => (command_id, generation),
+            _ => unreachable!(),
+        };
+        let commands = controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id,
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Promote,
+                status: CommandStatus::Failed,
+                generation,
+                reason: Some("failed".into()),
+            })
+            .unwrap();
+        assert!(commands
+            .iter()
+            .any(|command| matches!(command, AgentCommand::Discard { .. })));
+        assert_eq!(
+            controller.state().tree.authority_branch_id.as_deref(),
+            Some("parent")
+        );
+        assert_eq!(
+            controller.state().tree.branches["candidate"].status,
+            BranchStatus::Discarding
+        );
+    }
+
+    #[test]
+    fn branch_failure_during_promotion_waits_for_promote_result() {
+        let mut controller = controller();
+        controller.state.tree.branches.insert(
+            "parent".into(),
+            BranchRecord {
+                branch_id: "parent".into(),
+                parent_branch_id: None,
+                role: BranchRole::Authority,
+                status: BranchStatus::Running,
+                generation: 1,
+            },
+        );
+        controller.state.tree.branches.insert(
+            "candidate".into(),
+            BranchRecord {
+                branch_id: "candidate".into(),
+                parent_branch_id: Some("parent".into()),
+                role: BranchRole::Candidate,
+                status: BranchStatus::Running,
+                generation: 2,
+            },
+        );
+        controller.state.tree.authority_branch_id = Some("parent".into());
+        let command = controller
+            .resolve_candidate("candidate", true)
+            .unwrap()
+            .remove(0);
+        let (command_id, generation) = match command {
+            AgentCommand::Promote {
+                command_id,
+                generation,
+                ..
+            } => (command_id, generation),
+            _ => unreachable!(),
+        };
+
+        let commands = controller
+            .handle_message(AgentMessage::BranchFailed {
+                branch_id: "candidate".into(),
+                reason: "429".into(),
+            })
+            .unwrap();
+
+        assert!(commands.is_empty());
+        assert_eq!(
+            controller.state().tree.branches["candidate"].status,
+            BranchStatus::Promoting
+        );
+        assert_eq!(
+            controller.state().tree.authority_branch_id.as_deref(),
+            Some("parent")
+        );
+        assert!(controller.authority_failure().is_none());
+
+        let commands = controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id,
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Promote,
+                status: CommandStatus::Applied,
+                generation,
+                reason: None,
+            })
+            .unwrap();
+
         assert_eq!(
             controller.state().tree.authority_branch_id.as_deref(),
             Some("candidate")
         );
         assert_eq!(
-            controller.state().tree.branches["parent"].status,
-            BranchStatus::Discarded
+            controller.state().tree.branches["candidate"].status,
+            BranchStatus::Promoted
         );
+        assert!(controller.authority_failure().is_some());
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            AgentCommand::Discard { branch_id, .. } if branch_id == "parent"
+        )));
     }
 
     #[test]
-    fn mismatch_discards_and_cleans_candidate_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let mut controller = AgentController::new("agent-1", root.path()).unwrap();
-        controller.create_authority("parent", "test").unwrap();
-        controller
-            .handle_message(AgentMessage::BranchStarted {
+    fn late_promote_result_after_failed_promotion_is_ignored() {
+        let mut controller = controller();
+        controller.state.tree.branches.insert(
+            "parent".into(),
+            BranchRecord {
                 branch_id: "parent".into(),
-            })
-            .unwrap();
-        controller
-            .create_candidate("parent", "candidate", "test")
-            .unwrap();
-        controller
-            .handle_message(AgentMessage::BranchStarted {
-                branch_id: "candidate".into(),
-            })
-            .unwrap();
-        let commands = controller.resolve_candidate("candidate", false).unwrap();
-        assert!(
-            commands
-                .iter()
-                .any(|command| matches!(command, AgentCommand::Discard { .. }))
+                parent_branch_id: None,
+                role: BranchRole::Authority,
+                status: BranchStatus::Running,
+                generation: 1,
+            },
         );
-        controller.cleanup_completed("candidate").unwrap();
-        assert!(!root.path().join("candidate").exists());
+        controller.state.tree.branches.insert(
+            "candidate".into(),
+            BranchRecord {
+                branch_id: "candidate".into(),
+                parent_branch_id: Some("parent".into()),
+                role: BranchRole::Candidate,
+                status: BranchStatus::Running,
+                generation: 2,
+            },
+        );
+        controller.state.tree.authority_branch_id = Some("parent".into());
+        let command = controller
+            .resolve_candidate("candidate", true)
+            .unwrap()
+            .remove(0);
+        let (command_id, generation) = match command {
+            AgentCommand::Promote {
+                command_id,
+                generation,
+                ..
+            } => (command_id, generation),
+            _ => unreachable!(),
+        };
+        controller
+            .handle_message(AgentMessage::BranchFailed {
+                branch_id: "candidate".into(),
+                reason: "429".into(),
+            })
+            .unwrap();
+        controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id: command_id.clone(),
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Promote,
+                status: CommandStatus::Failed,
+                generation,
+                reason: Some("promote rejected".into()),
+            })
+            .unwrap();
         assert_eq!(
             controller.state().tree.branches["candidate"].status,
-            BranchStatus::Cleaned
+            BranchStatus::Discarding
+        );
+        assert_eq!(
+            controller.state().tree.authority_branch_id.as_deref(),
+            Some("parent")
+        );
+
+        let commands = controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id,
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Promote,
+                status: CommandStatus::Applied,
+                generation,
+                reason: None,
+            })
+            .unwrap();
+
+        assert!(commands.is_empty());
+        assert_eq!(
+            controller.state().tree.branches["candidate"].status,
+            BranchStatus::Discarding
+        );
+        assert_eq!(
+            controller.state().tree.authority_branch_id.as_deref(),
+            Some("parent")
+        );
+        assert!(controller.authority_failure().is_none());
+    }
+
+    #[test]
+    fn authority_branch_failure_fails_the_run_without_discard() {
+        let mut controller = controller();
+        controller.state.tree.branches.insert(
+            "authority".into(),
+            BranchRecord {
+                branch_id: "authority".into(),
+                parent_branch_id: None,
+                role: BranchRole::Authority,
+                status: BranchStatus::Running,
+                generation: 1,
+            },
+        );
+        controller.state.tree.authority_branch_id = Some("authority".into());
+
+        let commands = controller
+            .handle_message(AgentMessage::BranchFailed {
+                branch_id: "authority".into(),
+                reason: "429".into(),
+            })
+            .unwrap();
+
+        assert!(commands.is_empty());
+        assert_eq!(
+            controller.state().tree.branches["authority"].status,
+            BranchStatus::Running
+        );
+        assert!(controller.authority_failure().is_some());
+    }
+
+    #[test]
+    fn late_or_duplicate_branch_started_is_ignored() {
+        let mut controller = controller();
+        for status in [
+            BranchStatus::Running,
+            BranchStatus::Discarding,
+            BranchStatus::Discarded,
+            BranchStatus::Cleaning,
+            BranchStatus::Cleaned,
+        ] {
+            controller.state.tree.branches.insert(
+                "candidate".into(),
+                BranchRecord {
+                    branch_id: "candidate".into(),
+                    parent_branch_id: None,
+                    role: BranchRole::Candidate,
+                    status,
+                    generation: 1,
+                },
+            );
+            let commands = controller
+                .handle_message(AgentMessage::BranchStarted {
+                    branch_id: "candidate".into(),
+                })
+                .unwrap();
+            assert!(commands.is_empty());
+            assert_eq!(controller.state().tree.branches["candidate"].status, status);
+        }
+    }
+
+    #[test]
+    fn candidate_completion_only_marks_readiness_and_cleanup_failure_is_not_cleaned() {
+        let mut controller = controller();
+        controller.state.tree.branches.insert(
+            "candidate".into(),
+            BranchRecord {
+                branch_id: "candidate".into(),
+                parent_branch_id: None,
+                role: BranchRole::Candidate,
+                status: BranchStatus::Running,
+                generation: 1,
+            },
+        );
+        controller
+            .handle_message(AgentMessage::CandidateCompleted {
+                branch_id: "candidate".into(),
+                completed: true,
+                output_characters: 4,
+            })
+            .unwrap();
+        assert_eq!(
+            controller.state().tree.branches["candidate"].status,
+            BranchStatus::AwaitingValidation
+        );
+        controller
+            .state
+            .tree
+            .branches
+            .get_mut("candidate")
+            .unwrap()
+            .status = BranchStatus::Cleaning;
+        let command = controller.make_cleanup_command("candidate").unwrap();
+        let (command_id, generation) = match command {
+            AgentCommand::Cleanup {
+                command_id,
+                generation,
+                ..
+            } => (command_id, generation),
+            _ => unreachable!(),
+        };
+        controller
+            .handle_message(AgentMessage::CommandResult {
+                command_id,
+                branch_id: "candidate".into(),
+                operation_id: None,
+                operation: CommandOperation::Cleanup,
+                status: CommandStatus::Failed,
+                generation,
+                reason: Some("busy".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            controller.state().tree.branches["candidate"].status,
+            BranchStatus::Cleaning
         );
     }
 }

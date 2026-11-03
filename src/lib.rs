@@ -5,5 +5,7 @@ pub mod contract;
 pub mod control;
 pub mod firecracker;
 pub mod guest_access;
+pub mod ledger;
+pub mod nle;
 pub mod policy;
 pub mod transport;
