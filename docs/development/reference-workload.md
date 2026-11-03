@@ -28,6 +28,14 @@ Candidate 创建通过一次入口登记完整控制上下文。Policy 预测、
 
 尚未解决 Ledger 归档失败后的 Branch 所有权；不宣称已实现全部调度、预算、嵌套接入或独立环境端到端能力。
 
+补充真实模型验收（用户明确要求后执行，代码版本 `e9694c4`）：两轮均使用 `openai/gpt-6-luna --thinking low`、现有 seed 7／1 秒延迟 NLE 配置，没有修改默认模型或 Policy。
+
+- `/tmp/opencode/nle-coordinator-ugfou9lr`：5 次真实动作结果、5 次 Promote Applied；旧 Authority 的 5 次 Discard 和全部 6 次 Cleanup 均 Applied。最终 Authority `candidate-6` 接收后续无工具用户输入并准确回复“续跑确认”。Shutdown 退出码 0。
+- `/tmp/opencode/nle-coordinator-83xt0z35`：要求连续向西 5 次，第 5 次确实撞墙，Policy 正确预测 `blocked`，仍为 5 次成功晋级。后续输入和 Shutdown 同样通过，退出码 0。
+- 两轮均无 BranchFailed、失败命令、Policy 处置错误或 Runtime 晋级错误；`agent.log` 为空。`final-tree.json` 中 6 个保留 Branch 均为 Cleaned／Agent Released／Runtime Cleaned，`turn_active=false`，命令和输入队列均为空。证据目录包含 `acceptance.json`、动作结束与后续输入结束的运行视图、事件及最终 Tree。
+
+覆盖边界：本次没有出现预测不匹配导致的 Candidate Discard，不能把旧 Authority 的 Discard 当作该路径的真实验收。未注入 Runtime 错误、超时或覆盖独立环境后端。
+
 ### 退出验证（2026-11-03）
 
 Shutdown 请求以及操作系统 SIGINT／SIGTERM 进入有序退出：等待 Agent Cleanup 成功回执，半关闭写方向并读取到 EOF，再终止／清理 Runtime，显式关闭 Runtime 会话并回收 Adapter。超时需要强制终止时返回错误。Adapter 使用独立进程组，终端发给控制面前台进程组的信号不会绕过此顺序直接终止子进程。TUI 捕获的 Ctrl-C 仍表示中断当前轮，Ctrl-D 表示退出。
