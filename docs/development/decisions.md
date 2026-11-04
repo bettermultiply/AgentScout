@@ -2,6 +2,16 @@
 
 本文记录已接受的实现架构与验证决策。目标语义归 `docs/design/` 所有。
 
+## 2026-11-04：Runtime 整体边界与首阶段范围
+
+已收敛：AScout 自身支持一套完整 Runtime，承载 Agent 一步动作，使其正常、正确运行，并把对真实世界或 Authority 的影响限制在容忍范围内。Runtime Adapter 与 Effect Coordinator 是这个整体中的接入和效果管理职责，不是平级的独立运行系统。Agent Session 内部管理仍归接入侧，Runtime 负责动作承载和外部效果边界；状态可以复制、共享、写时复制、重建或恢复，优先低成本方式。
+
+能力可插拔、组合或缺失，但必要保证不能缺失。第一阶段先实现覆盖 Agent 及其派生进程文件操作的 Overlay 文件系统，不要求 VM；Overlay 本身不是 Runtime 的固定必需项。后续才展开 Runtime 与 Policy 的协调、协商和运行时检测。本轮只更新文档，不表示这些能力已实现。
+
+**废弃记录**：不再采用“Runtime 仅是 AScout 不拥有的外部后端”“Runtime Adapter 是独立一级侧面”“外部效果执行只属于控制面而不属于 Runtime”的架构定义。此前四侧路径中的 Adapter 现在作为 Runtime 的接入边界；效果协调归入 Runtime 整体责任。这里改变的是职责定义，不预定 crate、进程、transport 或部署方式。既有 Branch、状态可见性、commit/discard 和 single-winner 规则保持不变。
+
+目标说明见 `docs/design/runtime.md`；首阶段与未实现能力见 `docs/development/runtime-adapter.md`。本节取代本文其他历史记录中关于上述架构边界的表述。
+
 ## 2026-11-02：Candidate 最终失败不再等同于立即丢弃
 
 问题：Candidate 已进入 `Promoting` 时，模型返回 429，Pi 立即报告 `branch_failed`；控制面把它当作普通 Candidate 失败并丢弃，而 Pi 已先切换 authority，造成两侧权威分叉。
@@ -225,9 +235,9 @@ Adapter Registry 的主动环境验证延后实现，初期先检查接入接口
 
 ## D-016-I：默认 Runtime 优先高效隔离
 
-默认 Runtime 面向可信 Child Agent 与工具，优先低开销环境隔离，不提供 adversarial containment。它必须强制维护隔离环境、环境级资源边界、环境内受控操作、停止和 cleanup。Agent 执行实体、Branch context、operation 归属和 capability 路由由 Agent 接入侧管理；受管 external effect 由控制面内的 Effect Coordinator 负责实际处理。
+默认 Runtime 面向可信 Child Agent 与工具，优先低开销环境隔离，不提供 adversarial containment。它必须强制维护声明的环境、资源和效果边界，以及停止和 cleanup。Agent Session、执行实体的本地上下文、operation 归属和 capability 路由由 Agent 接入侧管理。
 
-旧的“Runtime 直接维护 Branch identity/capability、完整 Agent 执行实体和所有 effect obligation”划分已废弃；它把投机执行职责固化进通用 Runtime，违背 Runtime 只提供环境能力的边界。
+**废弃记录（2026-11-04）**：此前曾以“Runtime 只提供环境能力”为由，把外部效果实际处理移到控制面。此边界已被本文顶部的 Runtime 整体边界取代；Session 仍由接入侧管理，环境与效果执行归 Runtime，Tree 与全局裁决归控制面。
 
 需要 adversarial containment 时，用户选择另行适配的 sandbox/hardened Runtime。AScout 不协商 security guarantee，默认 backend 技术尚未选择。
 
@@ -237,20 +247,13 @@ Adapter Registry 的主动环境验证延后实现，初期先检查接入接口
 
 ## D-024-I：实现组织服从 AScout 可控边界
 
-完整调用路径仍为：
-
-1. Agent 接入侧；
-2. 控制面；
-3. Runtime Adapter；
-4. Runtime。
-
-这四侧不再直接作为 AScout 源码或子文档的一一对应拓扑。Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger 位于控制面内部；Interposer、ASC-Proxy 及 Product Integration 位于 Agent 接入职责。控制面定义 Runtime Adapter 的接入边界，但 Adapter 作者自行负责目标 Runtime 的能力映射、transport 与事件规范化。Runtime 是外部后端，不属于 AScout 可定义的实现模块。
+当前实现组织遵循 Agent 接入侧、控制面与 Runtime 的责任边界。Runtime Adapter 是 Runtime 的接入边界，Effect Coordinator 属于 Runtime 的效果协调职责；这些职责不直接推出 crate、进程或部署数量。
 
 Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义不绑定具体 crate、模块、进程或服务边界。
 
 后续 crate、模块、进程和服务边界必须依据责任、依赖方向、权限、替换频率与部署需求决定，不能由“一侧一模块”或“一组件一 crate”直接推出。具体 Adapter transport、discovery、连接生命周期和 Runtime backend 属于 Adapter/部署实现选择。
 
-**废弃记录**：原决定要求“实现组织服从四侧一级架构”，并把 Runtime backend 视为 AScout 待设计的实现部分。该解释已废弃；四侧现在只表示完整调用路径中的逻辑位置。
+**废弃记录**：此前先要求“实现组织服从四侧一级架构”，随后又把 Runtime 定义为 AScout 不拥有的外部后端、把 Effect Coordinator 放在控制面。两种解释均已由 2026-11-04 的 Runtime 整体边界取代；不再以“四侧”推导源码或文档拓扑。
 
 ## D-025-I：项目名称统一为 AScout
 

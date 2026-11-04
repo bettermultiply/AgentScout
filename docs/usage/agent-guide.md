@@ -5,7 +5,7 @@ AScout 当前没有任何实现，当前仓库只有设计文档。Agent-facing 
 ## 当前可用内容
 
 - `docs/design/` 中已经确认的目标语义；
-- 已确认的四侧一级架构与 `docs/development/` 中的开发决策；
+- 已确认的 Agent 接入侧、控制面与 Runtime 责任边界，以及 `docs/development/` 中的开发决策；
 - 计划首先支持具备足够产品拦截点或 Hook 的特定 Agent product。
 
 当前没有可构建代码。临时命令、HTTP control protocol、稳定 Rust API、C API、Runtime lifecycle 和正式 Agent-facing 命令语法均不存在。

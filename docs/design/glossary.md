@@ -31,18 +31,18 @@
 - **task**：session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。（`../mental-model.md` §4.2）
 - **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；主对话操作当前有效的权威执行主线，另可只读观察该 Tree 的 Branch 状态与明确标记为未验证的候选内容，不改变主对话路由或生命周期权限。（`../mental-model.md` §4.2；`agent-integration.md` §3）
 - **`/ascout`**：AScout TUI 内打开当前 AScoutAgent 整棵 Speculative Tree 的只读观察操作，可从 Branch 关系与投机状态选择具体 Branch 深入查看；选择仅改变观察对象，不切换主对话、不向候选发送对话，也不接受或丢弃 Branch。它不是 Agent 产品自身的命令，不查询其他 Tree。（用户确认：2026-10-25；`../../Discussion.md`；`../development/decisions.md`）
-- **Agent 接入侧**：四侧调用路径的入口侧，负责 Agent 执行实体、执行活动、Branch context、operation 归属、Interposer、ASC-Proxy 和 Product Integration 等接入职责；其中 Interposer 统一承担 Agent 拦截与 operation integration。（`../architecture.md` §1；`agent-integration.md`）
-- **控制面**：四侧一级架构的控制侧；包含 Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释；是 AScout 自身实现的 Mechanism 主体，组件与实现见 `control-plane.md`。（`../architecture.md` §1；`control-plane.md`）
+- **Agent 接入侧**：负责 Agent 执行实体、Session、执行活动、Branch context、operation 归属、Interposer、ASC-Proxy 和 Product Integration 等接入职责；其中 Interposer 统一承担 Agent 拦截与 operation integration。（`../architecture.md` §1；`agent-integration.md`）
+- **控制面**：负责 AScoutAgent、Speculative Tree 控制状态、Policy、请求校验、操作编排和 Runtime event 解释；包含 Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator 与 Ledger。效果协调属于 Runtime 的整体责任。（`../architecture.md` §1；`control-plane.md`）
 
-- **Runtime Adapter**：四侧调用路径的适配侧；按控制面的接入约定声明并呈现能力、operation result 与 event，并自行负责目标 Runtime 的能力映射、transport 和内部实现。（`../architecture.md` §1；`../development/runtime-adapter.md`）
+- **Runtime Adapter**：Runtime 与控制面之间的接入边界；按控制面的接入约定声明并呈现能力、operation result 与 event，并负责能力映射、transport 和事件规范化。（`../architecture.md` §1；`../development/runtime-adapter.md`）
 - **Adapter Registry**：控制面内 Runtime Adapter 的固定接入入口；负责登记、契约兼容性检查、能力声明校验和接入时基本语义测试，并发布已校验的能力信息；不拥有 Runtime 或 Speculative Tree 的执行状态。（`control-plane.md` §2.3；`runtime-adapter-contract.md`）
-- **Runtime**：四侧调用路径中的外部运行侧；提供 Agent 执行所需的环境、资源和隔离能力，其内部架构不由 AScout 定义；外部效果由控制面内的 Effect Coordinator 负责。（`../architecture.md` §1）
+- **Runtime**：AScout 支持的完整执行与效果承载系统；承载 Agent 一步动作，提供环境、资源、状态派生、隔离和外部效果边界。其内部架构不由 AScout 预先固定，具体能力可以通过进程、Overlay、容器或虚拟机组合。（`../architecture.md` §1；`runtime.md`）
 
 ## 实体
 
 - **Branch**：Speculative Tree 中的一个子树，是树中的计算延续和投机世界的结构实体。（`../mental-model.md` §4.2）
 - **Branch Root**：Branch 对应的根节点，具有稳定 identity 并直接拥有该根的 local state；表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
-- **Instance**：由 Runtime 承载 Branch Root 执行活动的执行单元；多个 Branch 可以在共享执行环境中由不同 Instance／本地上下文承载，也可以在独立环境中承载。逻辑 Branch 可以在建立 Instance 前先存在并推进。（`../mental-model.md` §4.2）
+- **Instance**：由 Runtime 承载 Branch Root 执行活动的执行单元；多个 Branch 可以共享、复制或独立承载所需状态，也可以在恢复或重建后继续。逻辑 Branch 可以在建立 Instance 前先存在并推进。（`../mental-model.md` §4.2）
 - **Proposal** `î`：具有全局唯一 `ProposalId` 的投机候选输入；候选 Branch 基于其 payload 提前执行后续步骤。（`../design-model.md` §3.1；`policy-decisions.md` §2.3）
 - **AssumptionSet**：Instance/SpecTask 携带的未决 Proposal ID 集合（`frozenset[ProposalId]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`../design-model.md` §3.1；`policy-decisions.md` §4.2）
 - **Edge**：一个投机机会，是投机执行的抽象模型与 Policy 的作用对象；同一条 Edge 上可以有多个 Proposal。可投机性由 `effect`、`admit` 及相应能力校验共同决定，不另设 admissibility 元数据。（`../design-model.md` §3.1；`policy-decisions.md`）
@@ -83,8 +83,8 @@
 - **PolicyDefinition**：Policy 作者使用 Policy DSL 编写的具体 Policy，由声明部分及其引用的独立算法源码共同组成；展开并编译后，九类 Policy Decision 均具有明确的决策行为。（`control-plane/policy-engine.md` §2）
 - **Policy DSL**：PolicyDefinition 的唯一入口，规定其结构、九类 Decision 各自的输入与输出、可读取事实、可使用能力及组合约束。（`control-plane/policy-engine.md` §2）
 - **Policy Engine**：Policy 进入 AScout 的固定入口，只有两项职责：编译 Policy，以及根据规定输入对已编译的 Policy Decision 求值、作出本次 Policy Decision。作出 Policy Decision 不等于落实 Policy Decision；它不负责把 Policy Decision 应用到 Branch、Speculative Tree、外部效果或 Runtime，也不负责选择运行位置或向 Agent 接入侧交付编译结果。（`control-plane/policy-engine.md`）
-- **Speculation Coordinator**：控制面内全局投机视图与控制循环的协调核心；维护 Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系，激活受影响的 Policy Decision，协调 semantic operation，经 Runtime Adapter 执行并根据结果和事件更新视图。（`control-plane.md` §2.4）
-- **Effect Coordinator**：控制面内共享、外部及 Policy 要求纳管外部效果的统一实际执行者；重点处理由 Agent 造成且可能影响全局的效果，例如调用外部 API。它通过控制面内注册的服务效果插件处理命令或 URL，可生成明确标记并记录来源的模拟响应，也可拒绝、阻塞、暂存、转换、提交、取消、清理或补偿效果。它不负责普通 Branch-local 操作；Runtime 不承担外部效果的实际执行责任。（`control-plane.md` §2.5；`effect-management.md`）
+- **Speculation Coordinator**：控制面内全局投机视图与控制循环的协调核心；维护 Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系，激活受影响的 Policy Decision，协调 semantic operation，经 Runtime 接入边界执行并根据结果和事件更新视图。（`control-plane.md` §2.4）
+- **Effect Coordinator**：Runtime 内部可采用的效果协调机制；处理由 Agent 造成且可能影响全局的效果，例如调用外部 API。它可通过服务效果插件生成模拟响应，也可拒绝、阻塞、暂存、转换、提交、取消、清理或补偿效果。控制面负责全局 Tree 和最终裁决，Runtime 负责实际效果边界。（`effect-management.md`）
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §2.6；`speculation-contract.md` §3）
 - **ASC-Proxy**：Agent 接入侧与控制面之间的受管通信代理，负责会话、身份确认以及 request、fact、result 和 event 的双向传递；不拥有全局控制状态。（`agent-integration.md` §2.2）
 - **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 求值和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）
@@ -107,7 +107,7 @@
 - **Shadow / Replay**：投机与串行同跑、只提交串行结果；同一套基础设施服务 fidelity 审计、predictor 数据管道、cost 校准与上线灰度（offline replay → shadow → canary → online → drift kill-switch）。（`spec-exec-abstraction.md` §7；`speculation-decisions.md` D-014）
 - **透明嵌套**：投机实例与权威实例二进制同构，实例不知道自己是投机的；底座追踪 provenance、闸门设在效果层。（`spec-exec-abstraction.md` §9.3）
 - **反射 gating**：Policy 可以读取祖先依赖与成本等客观事实，自行估计实例存活概率并用于 `admit` 或 `select`；AScout 不固定 `survival` 字段，也不强制 Policy 使用该模型。（`spec-exec-abstraction.md` §9.3；`policy-decisions.md` §2.8）
-- **Speculation Contract**：AScout 约束 Policy 表达和 Runtime Adapter 控制面接入行为、保证语义正确与对齐的契约。它规定 Policy 如何表达与校验决策取值、Adapter 如何声明并通过校验兑现后端能力，以及失败时如何收敛；控制面是它的实现方，Runtime 内部实现不在直接约束范围内。（`speculation-contract.md`）
+- **Speculation Contract**：AScout 约束 Policy、控制面与 Runtime 之间语义对齐的契约。它规定 Policy 如何表达与校验决策取值、Runtime 如何通过接入边界声明并兑现能力，以及失败时如何收敛；不固定 Runtime 内部实现。（`speculation-contract.md`）
 
 ## 范围决策
 

@@ -2,6 +2,10 @@
 
 本文承载 AScout 对 Branch 运行中状态变化和外部影响的管理语义。Effect Management 管理投机执行过程中需要保护的状态变化；其中以共享、可观察的业务变化为描述中心，Branch-local state、Outcome 和 operational footprint 按各自的规则处理。
 
+## 当前 Runtime 边界
+
+Runtime 负责动作承载、环境边界和动作产生的效果处理；控制面负责 Speculative Tree 的全局状态、Policy 和最终接受或丢弃决定。Agent 接入侧负责 Agent Session 的内部管理。Overlay、容器和虚拟机是 Runtime 可组合的能力实现。具体实现阶段见 [Runtime 开发说明](../development/runtime-adapter.md)。
+
 ## 1. 管理范围与保证边界
 
 投机分支对分支外部、共享或最终执行状态产生的影响，以及这些影响在投机期间的暂存、限制、提交、取消和清理，均属于 Effect Management 的管理范围。单个动作、命令或工具调用只是投机执行过程中的一个环节，不把它称为一次投机执行。
@@ -54,11 +58,11 @@ Effect Management 处理的是投机执行过程中的某个 operation 环节所
     -> 根据验证或裁决结果提交、继续、取消、清理或补偿
 ```
 
-首先，系统识别该 operation 环节可能产生的 Branch-local state、shared observable business change、Outcome 和 operational footprint，并确定它们是否落入相应 Adapter 的保证范围。纯 Branch-local 且未被 Policy 或 Contract 要求保护的可逆变化，可以继续使用共享执行视图，不要求立即建立独立 Runtime 环境；接入侧识别到需要独立 Branch-local 状态的变化时，必须在变化发生前请求 lazy 创建独立环境。随后，控制面结合 Policy、Speculation Contract、EffectClass、StateDomain、资源条件和可用执行能力形成处理计划。处理计划除了允许、暂存、转换和补偿，也可以规定在某个效果边界阻塞当前投机执行：分支保留阻塞前的进展，等待后续裁决。只有当 Effect Coordinator 无法安全表示该阻塞、无法在接受后继续，或无法在淘汰后清理相关责任时，才必须拒绝相关环节的投机或明确降低整个投机执行过程的保证等级。
+首先，系统识别该 operation 环节可能产生的 Branch-local state、shared observable business change、Outcome 和 operational footprint，并确定它们是否落入 Runtime 的保证范围。纯 Branch-local 且未被 Policy 或 Contract 要求保护的可逆变化，可以继续使用共享执行视图，不要求立即建立独立 Runtime 环境；接入侧识别到需要独立 Branch-local 状态的变化时，必须在变化发生前请求 lazy 创建满足要求的承载。随后，控制面结合 Policy、Speculation Contract、EffectClass、StateDomain、资源条件和可用执行能力形成处理计划。处理计划除了允许、暂存、转换和补偿，也可以规定在某个效果边界阻塞当前投机执行：分支保留阻塞前的进展，等待后续裁决。只有当 Runtime 无法安全表示该阻塞、无法在接受后继续，或无法在淘汰后清理相关责任时，才必须拒绝相关环节的投机或明确降低整个投机执行过程的保证等级。
 
-伪装执行（`simulate`）是对某个已注册服务效果插件的外部服务采用的一种处理方式。当真实请求一旦发出就会产生不可逆或难以管理的外部影响，且该服务不能安全地暂存、转换或补偿时，Agent 接入侧拦截请求而不把它转发给真实服务，将受管请求交给控制面内的插件；插件在控制面构造一个明确标记为模拟结果并记录生成来源的响应，再经 Agent Control Gateway 返回接入侧，使该环节在本地表现为已经完成。这样投机阶段完全不触碰外部世界，把不可逆影响推迟到 Branch 被接受之后。伪装执行不能泛化到任意服务：只有已注册插件明确声明哪些命令或 URL 可以模拟、模拟响应如何生成，Policy 才能选择它。模拟响应不是真实 Authority，也不是真实的观测结果，而是一个未经确认的假设；它必须作为该环节的未验证值参与 AssumptionSet 的确认与否定流程，仍需通过 Authority、validator 或其他明确规则验证后才能被 winner 依赖。若把模拟值静默当作真值使用，后续 step 就会建立在编造的 observation 上，即使 L0 全等匹配也无法掩盖，破坏点发生在验证机制不可见的位置。因此伪装执行只推进 Branch-local 的继续执行；凡由模拟值推导出的共享业务变化仍受 obligation 与 commit barrier 约束，确认前不得释放。Policy 通过 `effect` 决策的 `simulate` 模式选择该方式，选择与合法性检查见 [Policy Decisions](policy-decisions.md) §2.5。
+伪装执行（`simulate`）是对某个已注册服务效果插件的外部服务采用的一种处理方式。当真实请求一旦发出就会产生不可逆或难以管理的外部影响，且该服务不能安全地暂存、转换或补偿时，Agent 接入侧拦截请求而不把它转发给真实服务，通过控制面将受管请求交给 Runtime 内的插件；插件构造一个明确标记为模拟结果并记录生成来源的响应，再经 Agent Control Gateway 返回接入侧，使该环节在本地表现为已经完成。这样投机阶段完全不触碰外部世界，把不可逆影响推迟到 Branch 被接受之后。伪装执行不能泛化到任意服务：只有已注册插件明确声明哪些命令或 URL 可以模拟、模拟响应如何生成，Policy 才能选择它。模拟响应不是真实 Authority，也不是真实的观测结果，而是一个未经确认的假设；它必须作为该环节的未验证值参与 AssumptionSet 的确认与否定流程，仍需通过 Authority、validator 或其他明确规则验证后才能被 winner 依赖。若把模拟值静默当作真值使用，后续 step 就会建立在编造的 observation 上，即使 L0 全等匹配也无法掩盖，破坏点发生在验证机制不可见的位置。因此伪装执行只推进 Branch-local 的继续执行；凡由模拟值推导出的共享业务变化仍受 obligation 与 commit barrier 约束，确认前不得释放。Policy 通过 `effect` 决策的 `simulate` 模式选择该方式，选择与合法性检查见 [Policy Decisions](policy-decisions.md) §2.5。
 
-在执行期间，Branch-local state 按 Policy、Contract 和实际环境建立状态进入由 Runtime 提供的隔离环境，并由 Agent 接入侧维持本地管理上下文；未被要求保护且不影响保证范围的完全可逆变化可以继续使用共享执行视图。共享业务变化由 Effect Coordinator 直接执行或纳入其管理的暂存、代理、转换或延迟路径；需要受控的 Outcome 进入相应的结果槽或通信路径；纳入 Policy 约束的 operational footprint 进入资源预算和取消判断。Effect Coordinator 必须实际约束效果的 obligation、执行归属和清理责任，不能只在控制面记录一个计划。
+在执行期间，Branch-local state 按 Policy、Contract 和实际 Runtime 能力进入满足要求的承载环境，并由 Agent 接入侧维持 Session 等本地管理上下文；状态可以隔离，也可以在保证允许时共享或采用其他低成本方式。共享业务变化、外部效果和需要纳管的效果由 Runtime 内部的效果协调机制按 Policy、Contract 和运行时条件处理；需要受控的 Outcome 进入相应的结果槽或通信路径；纳入 Policy 约束的 operational footprint 进入资源预算和取消判断。效果处理必须实际约束 obligation、执行归属和清理责任，不能只在控制面记录一个计划。
 
 当 Authority 或 validator 提供验证依据后，控制面根据既定决策形成后续处理。满足条件的状态和效果可以随 winner 继续，满足提交条件的暂存效果可以提交；不满足条件、被取消或属于淘汰 Branch 的状态和效果必须取消、清理或按声明的补偿方式处理。结果复用和交付必须通过受控通信完成，不能借此暴露 sibling 的私有状态。Branch 的创建、commit、accept 和 discard 语义由 Branch 语义文档定义；本节只说明这些操作触发的效果处理责任。
 
@@ -66,21 +70,21 @@ Effect Management 处理的是投机执行过程中的某个 operation 环节所
 
 对于一个投机执行过程中的 operation 环节，Effect Management 需要同时描述它作用于哪一类状态，以及该状态变化可以采用什么处理纪律。`StateDomain` 描述作用范围，`EffectClass` 描述处理方式；二者共同约束处理计划，但不要求一个 operation 环节只能有一个类别，也不把某个 Runtime 实现写死为唯一方案。
 
-`PURE` 表示在声明的保证范围内没有需要提交、取消、补偿或隔离的语义效果；`IDEMPOTENT` 表示按声明条件重放可以收敛到相同状态；`STAGEABLE` 表示效果可以先暂存，在提交条件满足后再使其生效；`TRANSFORMABLE` 表示存在不产生原始变异的等价执行，例如 dry-run 或 staging 变体；`COMPENSABLE` 表示效果发生后可以执行声明的补偿；`OVERWRITABLE` 表示效果按约定的顺序或覆盖规则收敛；`IRREVERSIBLE` 表示没有可接受的提前释放、暂存、转换或补偿方式。遇到这类效果时，Effect Management 可以让当前投机执行阻塞在效果边界，等待该 Branch 被接受或淘汰；对于已接入专门 Adapter、能够生成并明确标记模拟结果的服务，也可以采用伪装执行，用合成的 Branch 内响应代替真实请求，从而根本不触碰外部世界（见第 2 节）；如果既无法阻塞又无法伪装，才必须拒绝相关环节的投机或明确降级。一个环节可以同时具备多种处理纪律，Policy 可以指定优先级或 fallback，Runtime Adapter 则声明具体能力、限制和成本。
+`PURE` 表示在声明的保证范围内没有需要提交、取消、补偿或隔离的语义效果；`IDEMPOTENT` 表示按声明条件重放可以收敛到相同状态；`STAGEABLE` 表示效果可以先暂存，在提交条件满足后再使其生效；`TRANSFORMABLE` 表示存在不产生原始变异的等价执行，例如 dry-run 或 staging 变体；`COMPENSABLE` 表示效果发生后可以执行声明的补偿；`OVERWRITABLE` 表示效果按约定的顺序或覆盖规则收敛；`IRREVERSIBLE` 表示没有可接受的提前释放、暂存、转换或补偿方式。遇到这类效果时，Effect Management 可以让当前投机执行阻塞在效果边界，等待该 Branch 被接受或淘汰；对于已接入专门 Adapter、能够生成并明确标记模拟结果的服务，也可以采用伪装执行，用合成的 Branch 内响应代替真实请求，从而根本不触碰外部世界（见第 2 节）；如果既无法阻塞又无法伪装，才必须拒绝相关环节的投机或明确降级。一个环节可以同时具备多种处理纪律，Policy 可以指定优先级或 fallback，Runtime 则声明具体能力、限制和成本。Overlay、容器、虚拟机等只是这些能力的不同实现，可以组合、替换或省略。
 
 常见的状态域包括 filesystem、process、memory、GUI、network、database、email 和 payment。不同状态域可以采用不同的处理纪律和 Runtime 机制：filesystem 通常使用 Branch-local workspace 或 overlay 进行暂存；process 和 memory 可以使用 namespace、COW fork 或 VM 快照；GUI 可以使用影子渲染或离屏合成；network read 可以在保证范围内直通；network write 可以通过代理、录制回放或延迟发送处理；database 可以使用未提交事务、savepoint 或确定性 key；email 和 payment 通常需要 outbox、补偿或硬闸。
 
-这些组合是语义约束和能力协商的输入，不是静态白名单的替代品，也不代表每个组合只有一种实现。Policy 对效果处理的选择必须经过 Contract、资源条件和 Effect Coordinator/服务插件能力校验；Runtime Adapter 只报告环境隔离、资源、暂停、恢复、终止和清理等环境能力。能力不足时，系统优先在实际到达相关效果边界时阻塞当前投机执行并保留前置进展；如果 Effect Coordinator 连阻塞、接受后的继续或淘汰后的清理都无法保证，才拒绝为相关环节启动投机执行，或明确降低整个投机执行过程的保证等级。资源或额度被 Policy 纳入准入、预算或取消约束，也不因此自动改变基础 EffectClass。
+这些组合是语义约束和能力协商的输入，不是静态白名单的替代品，也不代表每个组合只有一种实现。Policy 对效果处理的选择必须经过 Contract、资源条件和 Runtime 内部效果协调机制及服务插件能力校验；Runtime 报告环境隔离、资源、暂停、恢复、终止、清理和效果处理等能力。能力不足时，系统优先在实际到达相关效果边界时阻塞当前投机执行并保留前置进展；如果 Runtime 连阻塞、接受后的继续或淘汰后的清理都无法保证，才拒绝为相关环节启动投机执行，或明确降低整个投机执行过程的保证等级。资源或额度被 Policy 纳入准入、预算或取消约束，也不因此自动改变基础 EffectClass。
 
 ## 4. 责任边界
 
 Policy 决定是否对特定 Outcome 或 operational footprint 增加约束，选择效果处理纪律、优先级、预算、取消条件和 fallback。Policy 可以扩大纳管要求，但不能排除 AScout 为保证正确性规定的最低范围，也不能把控制计划当成 Runtime 已完成的操作。
 
-Effect Coordinator 位于控制面，持有效果分类、相关规则、服务效果插件、效果执行状态和协调计划，是外部效果的统一实际执行者。重点纳管由 Agent 造成且可能影响全局的外部效果，例如调用外部 API。Agent 接入侧在效果发生前识别受管命令或 URL，并将请求交给 Effect Coordinator；插件可以在控制面直接生成模拟响应、拒绝或阻塞请求，也可以根据 Task、Branch 和全局效果状态执行去重及跨 Branch 协调。它结合 Policy、Speculation Contract 与服务插件能力，直接形成并执行暂存、转换、延迟、阻塞、补偿、拒绝、提交或清理等效果处理。插件在控制面启动或 Policy 加载阶段注册，Task 使用的 Policy 生效后不热替换。Effect Coordinator 不负责普通 Branch-local 操作；Runtime 只负责隔离环境、环境级执行状态和资源清理。
+Runtime 内部的效果协调机制持有效果分类、相关规则、服务效果插件、效果执行状态和协调计划，是 Runtime 效果边界的实际执行者。重点纳管由 Agent 造成且可能影响全局的外部效果，例如调用外部 API。Agent 接入侧在效果发生前识别受管命令或 URL，并通过 Runtime 接入边界提交；Runtime 可以生成模拟响应、拒绝或阻塞请求，也可以根据 Task、Branch 和全局效果状态执行去重及跨 Branch 协调。它结合 Policy、Speculation Contract 与服务插件能力，形成并执行暂存、转换、延迟、阻塞、补偿、拒绝、提交或清理等效果处理。Runtime 不负责 Speculative Tree 的全局裁决；控制面仍负责全局状态与最终接受或丢弃决定。
 
-Effect Coordinator 负责受管效果的实际执行和强制处理，并持有效果 obligation 与执行归属。通用 Runtime 负责环境边界及环境级资源，不负责理解或执行 AScout 的效果语义；Agent 接入侧负责 Agent 执行实体的本地管理。Effect Management 不替代 Execution、Workspace 或其他状态域的状态责任。
+Runtime 负责受管效果的实际执行和强制处理，并持有效果 obligation 与执行归属；Agent 接入侧负责 Agent 执行实体和 Session 的本地管理。Effect Management 不替代 Execution、Workspace 或其他状态域的状态责任。
 
-Outcome 负责结果的产生、规范化和交付，Resource 负责资源压力、预算和准入，Ledger 负责记录、回放和审计。Policy 要求这些对象受到额外效果约束时，它们通过 Contract 和 Effect Coordinator 协作，但不因此互相取代，也不改变 Runtime 的最终强制责任。
+Outcome 负责结果的产生、规范化和交付，Resource 负责资源压力、预算和准入，Ledger 负责记录、回放和审计。Policy 要求这些对象受到额外效果约束时，它们通过 Contract 和 Runtime 内部的效果协调机制协作，但不因此互相取代，也不改变 Runtime 的最终强制责任。
 
 ## 5. 固定保证与明确边界
 
@@ -92,7 +96,7 @@ AScout 固定提供以下保证：
 - 在效果边界阻塞的投机执行会保留阻塞前的进展；该效果在 Branch 被接受前不会发生，Branch 被淘汰时也不会残留。
 - 被淘汰 Branch 的受管状态和效果会被清理、取消或按声明的方式补偿。
 - winner 需要延续的状态和已提交生效的效果不会因 Branch 切换而丢失。
-- 控制面形成的效果计划必须由 Effect Coordinator 实际执行和强制，不能只有 metadata 对齐；涉及环境、进程或资源的动作由 Runtime 按其环境契约执行并返回结果。
+- 控制面形成的效果计划必须由 Runtime 实际执行和强制，不能只有 metadata 对齐；涉及环境、进程或资源的动作由 Runtime 按其能力契约执行并返回结果。
 
 AScout 不作以下保证：
 

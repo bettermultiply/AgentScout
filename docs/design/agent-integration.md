@@ -62,13 +62,13 @@ Parent 获得真实结果后沿原路径继续，不以候选比较完成为结�
 
 ## 4. 部署与生命周期
 
-Agent 接入侧可以在执行环境中按需要建立其本地承载，并由 ASC-Proxy 与控制面建立会话。环境内的每个 Agent 在启动时通过 Product Integration 接入 Agent 接入侧，并持有独立的 Agent 执行上下文。多个 Agent 及其 Branch 可以暂时共享同一个执行环境和接入侧承载；当某个 Branch 需要独立的 Branch-local 状态时，控制面通过 Runtime Adapter 建立相应的独立执行环境，并使该 Branch 的执行活动和管理上下文进入该环境。具体承载方式由实现决定，但必须保持各 Agent 和 Branch 上下文的独立性。
+Agent 接入侧可以在执行环境中按需要建立其本地承载，并由 ASC-Proxy 与控制面建立会话。环境内的每个 Agent 在启动时通过 Product Integration 接入 Agent 接入侧，并持有独立的 Agent 执行上下文。多个 Agent 及其 Branch 可以暂时共享同一个执行环境和接入侧承载；当某个 Branch 需要独立的 Branch-local 状态时，控制面通过 Runtime 接入边界请求相应的承载能力，并使该 Branch 的执行活动进入满足要求的环境。具体承载方式由实现决定，但必须保持各 Agent 和 Branch 上下文的独立性。状态可以复制、共享、写时复制、重建或恢复，优先采用满足要求的低成本方式。Agent Session 的内部管理、复制、共享、恢复和继续运行由 Agent 接入侧负责；Runtime 负责提供其所需的动作承载和环境约束。
 
 Task 绑定 Policy 并建立受管上下文时，控制面可以从 Policy Engine 查询已经编译的本地 Decision，并经 Agent Control Gateway 交付给对应的 Agent 接入侧。接入侧反序列化后对这些 Decision 求值，不需要为每次 Decision 重新获取或解析 Policy；结果和 decision log 仍通过 ASC-Proxy 与 Agent Control Gateway 返回控制面。接入侧不能自行加载、编译或修改 Policy。
 
 ## 相关文档
 
-- [AScout 架构](../architecture.md)：四侧调用路径与责任边界
+- [AScout 架构](../architecture.md)：调用路径与责任边界
 - [Branch 语义设计](branch-semantics.md)：Agent-facing operation 所受的 lifecycle 约束
 - [控制面设计](control-plane.md)：Agent Control Gateway 后的控制路径
 - [Agent 接入状态](../usage/agent-guide.md)：当前实现与可用性

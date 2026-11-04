@@ -221,9 +221,9 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **问题**：投机执行底座的控制面如何管理运行中的 Instance？
 
-**选择**：部署视角采用 k8s / Ray 式的 **一个 控制面 对应 N 个 Instance**；Instance 结构同构、数量不定、各自携带状态。这只是四侧一级架构之下的运行对象部署视角：控制面 属于控制面，Instance 是 Runtime 管理的运行对象；Runtime Adapter 位于二者之间。Instance 不构成独立一级架构侧面。
+**选择**：部署视角采用 k8s / Ray 式的 **一个控制面对应 N 个 Instance**；Instance 结构同构、数量不定、各自携带状态。这只是控制面与运行对象的部署视角：控制面管理全局控制状态，Runtime 承载 Instance 的动作、环境和资源；Runtime Adapter 是 Runtime 的接入边界。Instance 不构成独立一级架构侧面。
 
-**架构权威**：完整一级架构统一为 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime`（`decisions.md` D-039）。Mechanism/Policy 分离仍是职责论证，控制面 / N Instance 图只说明控制面与受管运行对象的数量关系，不能省略 Adapter 侧或替代一级架构图。
+**架构权威**：完整责任边界统一为 Agent 接入侧、控制面和 Runtime；Runtime Adapter 只是 Runtime 与控制面之间的接入边界（`decisions.md` D-039）。Mechanism/Policy 分离仍是职责论证，控制面 / N Instance 图只说明控制面与受管运行对象的数量关系。
 
 **实例的状态维度**：**role** = `Authority` \| `Speculative(d)` —— 不是静态标签，是 `A == ∅` 的函数（promote 就是这个谓词翻转，实例结构必须同构的原因）；**grain** = `own-env` \| `shared-env`（shared-env 仅对 PURE 开放，**隔离粒度由 EffectClass 决定**）；**lifecycle** = Forked → Running → Resolving → {Reused, Promoted, Discarded, Preempted, Salvaged}。
 
@@ -257,11 +257,11 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **问题**：resolve 逻辑、调度决策、效果协调是独立组件还是合并？
 
-**选择**：三处独立，各有一个理由：
+**选择**：控制面负责全局投机视图和裁决，Runtime 负责动作承载及效果边界，各有一个理由：
 
 - **resolve 不独立成组件，住在 Speculation Coordinator 里** —— 它的状态（待决 Edge/Proposal 依赖）就是全局控制视图的一部分；`resolve()` 是对该视图执行确认、否定和处置推进的控制流程，不是独立的数据结构。体系结构对应：`Speculation Coordinator + resolve` 统一持有投机状态并负责 retire/squash，同时在同一视图上承载 issue/dispatch 所需的调度事实。
 - **不再设置独立 Scheduler** —— `select` 和 `rebalance` 仍由 Policy 决定，待选机会、运行状态和预算事实由 Speculation Coordinator 维护并在硬约束内执行。这样调度与依赖传播使用同一份全局视图，避免两个状态中心之间产生不一致。
-- **Effect Coordinator 独立** —— 它在控制面持有 Effect Catalog、效果分类、效果执行状态与协调计划，是外部效果的统一实际执行者；服务级 `simulate` 通过可注册插件扩展。独立环境建立状态属于 Runtime，但不属于效果执行责任。效果状态不属于 Assumption DAG，且失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。安全闸必须能被单独审计。
+- **Effect Coordinator 属于 Runtime 整体** —— Runtime 内部可以持有 Effect Catalog、效果分类、效果执行状态与协调计划，并负责外部效果的实际处理；服务级 `simulate` 通过可注册插件扩展。控制面仍拥有全局 Tree 和裁决状态，不能用控制面记录代替 Runtime 的实际效果处理。效果状态不属于 Assumption DAG，且失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。效果边界仍必须能够单独审计。
 
 ---
 
@@ -337,7 +337,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 | database | STAGEABLE | 未提交事务 / savepoint |
 | email, payment | COMPENSABLE / IRREVERSIBLE | outbox 模式延迟投递 / 硬闸 |
 
-**这个矩阵定义 Effect Coordinator 的效果处理空间；Runtime 只提供其自身环境边界和环境级资源能力。**
+**这个矩阵定义 Runtime 内部效果协调机制的效果处理空间；Runtime 同时提供动作所需的环境、资源和效果边界。**
 
 ---
 

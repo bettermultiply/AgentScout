@@ -13,18 +13,18 @@ Policy（抽象接口：作者只需面对决策点）
    ↓
 Mechanism（实现层：拦截、执行、隔离、资源、效果、调度）
    ↓
-Runtime（具体后端原语）
+Runtime（动作承载、状态和效果边界）
 ```
 
 图中的箭头表示抽象关系从策略意图向运行能力落实，不表示系统调用方向或能力提供方向。
 
 **Policy：作者只需面对抽象。** Policy 作者面对的是一组抽象的决策点——在哪些环节投机（推理、工具执行等）、预测什么、如何判定命中、用什么公式判断是否值得投机、如何展开与处置投机工作。作者只需要给出这些决策的实现或选择，不需要知道系统是怎么落实的：命令如何被拦截、隔离环境如何创建、资源如何管理、失败分支如何清理，都由 Mechanism 负责。分层把"作者可以灵活定制"的部分与"必须可靠执行"的部分分开：作者在算法层面自由选择，正确性、隔离与资源约束由 Mechanism 兜底。
 
-**Mechanism：把抽象落实为执行。** Mechanism 不是四侧中的独立一侧，而是横跨 Agent 接入侧和控制面的实现责任：Agent 接入侧通过 Interposer 拦截命令与推理调用等环节，控制面组织执行、验证与调度，并通过 Runtime Adapter 使用外部后端能力。它不一定只是组合 Runtime 原语；拦截、编排、校验和调度等能力本身就是 Mechanism 的一部分。Adapter 无法证明后端具备所需能力时，Mechanism 必须拒绝或明确降级，不让策略悄悄跑偏。
+**Mechanism：把抽象落实为执行。** Mechanism 不是额外的一侧，而是横跨 Agent 接入侧、控制面与 Runtime 的实现责任：Agent 接入侧通过 Interposer 拦截命令与推理调用等环节，控制面组织执行、验证与调度，Runtime 承载动作并落实环境、资源和效果边界。它不一定只是组合 Runtime 原语；拦截、编排、校验、调度和实际边界执行都是 Mechanism 的一部分。Runtime 无法提供所需能力时，Mechanism 必须拒绝或明确降级，不让策略悄悄跑偏。
 
-**Runtime：外部能力来源。** Runtime 是具体执行后端，例如容器、虚拟机或进程管理能力。AScout 不定义其内部结构，也不要求不同 Runtime 原生提供同一组 AScout 原语。Runtime Adapter 负责判断并说明目标 Runtime 的原生能力能否组合出控制面所需语义。
+**Runtime：动作的受约束承载系统。** Runtime 承载 Agent 的一步动作，使其能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 可以组合进程、容器、虚拟机、Overlay 和效果协调等能力；这些是可插拔的能力，不是 Runtime 的固定形态。Runtime Adapter 是 Runtime 与控制面之间的接入边界。Agent Session 的内部复制、共享、恢复和继续运行由 Agent 接入侧负责，Runtime 只承载其所需的执行状态和外部效果边界。
 
-**Speculation Contract：策略表达与后端接入的语义对齐约束。** Contract 约束 Policy 的表达以及 Runtime Adapter 在控制面边界上的可观察行为：Policy 如何表达与校验决策取值、Adapter 需要声明并兑现哪些基本运行语义。控制面是这份约束的实现方（Mechanism）：它把 Policy 决策编排为受管操作、经 Adapter 映射到后端，并在运行期以结果和事件确认约束是否被兑现。Contract 不直接规定 Runtime 内部实现。
+**Speculation Contract：策略、控制面与 Runtime 的语义对齐约束。** Contract 约束 Policy 的表达以及 Runtime 通过 Adapter 呈现的可观察行为：Policy 如何表达与校验决策取值、Runtime 需要声明并兑现哪些基本运行语义。控制面与 Runtime 共同落实这份约束（Mechanism）：控制面编排受管操作，Runtime 实际承载动作并返回结果和事件。Contract 不直接规定 Runtime 内部实现。
 
 ## 2. 工作模型
 
@@ -74,15 +74,15 @@ Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根�
 
 投机产物在验证、提交和必要的状态转换完成前不能进入最终语义状态。效果处理能力不足时，Effect Management 可以让投机执行阻塞在相关效果边界并保留前置进展；只有无法安全阻塞、接受后继续或淘汰后清理时，才拒绝相关环节的投机或明确降级。具体的 `EffectClass × StateDomain` 分类、交叉规则和后端能力要求见 [效果管理设计](design/effect-management.md)。
 
-控制面中的 Effect Coordinator 负责外部效果的分类、计划、实际处理与协调；它是外部效果的统一实际执行者，并通过可注册的服务效果插件扩展特定服务的 `simulate` 等处理方式。这里重点纳管由 Agent 造成且可能影响全局的外部效果，例如调用外部 API。Effect Coordinator 持有效果处理所需的控制状态，Agent 接入侧负责 Agent 执行实体和本地投机上下文，Runtime 负责隔离执行环境及其环境级状态。AScout 不引入独立的 Effect backend，也不把外部效果的实际执行责任转移给 Runtime。
+Runtime 整体负责动作的执行承载、环境边界以及动作产生的效果处理；内部可以包含效果协调机制和服务效果插件。它需要限制 Agent 动作对真实世界或 authority 的影响，并在接受、丢弃、阻塞、清理或降级时返回可观察结果。Agent 接入侧负责 Agent 执行实体和 Session 的本地管理。具体哪些效果需要什么处理方式，由 Policy、Runtime 能力和运行时条件共同决定。具体实现阶段见 [Runtime 开发说明](development/runtime-adapter.md)。
 
 ### 3.3 Speculation Contract
 
-Speculation Contract 约束 Policy 的表达以及 Runtime Adapter 在控制面边界上的可观察行为，把策略表达、后端接入与实际运行之间必须保持的语义对齐固定为可检查、可执行的契约。它使 Policy 能在统一决策面内表达需求，也使不同 Adapter 以统一操作和事件接入，而不让策略语义隐藏在特定后端或算法实现中。控制面是这份契约的实现方，属于 Mechanism；它把 Policy 决策编排为受管操作、经 Runtime Adapter 落向后端并解释事件。
+Speculation Contract 约束 Policy 的表达以及 Runtime 通过接入边界呈现的可观察行为，把策略表达、Runtime 能力与实际运行之间必须保持的语义对齐固定为可检查、可执行的契约。它使 Policy 能在统一决策面内表达需求，也使不同 Runtime 以统一操作和事件接入，而不让策略语义隐藏在特定实现中。控制面与 Runtime 共同落实这份契约：控制面编排受管操作，Runtime 实际执行并返回结果和事件。
 
 Policy Engine 在加载或任务准入时检查 Policy 的决策取值能否由当前接入的后端能力承载；无法满足时必须拒绝，或明确报告降级。运行期间，控制面通过 Authority、validator、效果处理和 Runtime 返回的实际结果检查声明是否被兑现。
 
-Contract 不拥有 Branch 或 Runtime 的运行状态，也不直接约束 Runtime 内部实现。总体关系见 [Speculation Contract 设计](design/speculation-contract.md)，Runtime Adapter 的具体契约、校验路径、降级结果和运行期证据见 [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)，控制面如何落实见 [控制面设计](design/control-plane.md)。
+Contract 不拥有 Branch 或 Runtime 的运行状态，也不直接规定 Runtime 内部实现。总体关系见 [Speculation Contract 设计](design/speculation-contract.md)，Runtime Adapter 的具体接入契约、校验路径、降级结果和运行期证据见 [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)，控制面如何落实见 [控制面设计](design/control-plane.md)。
 
 ## 4. 跨领域设计约束
 
@@ -96,7 +96,7 @@ Contract 不拥有 Branch 或 Runtime 的运行状态，也不直接约束 Runti
 
 ## 相关文档
 
-- [架构](architecture.md)：系统结构（四侧、所有权、调用方向）
+- [架构](architecture.md)：系统结构（责任边界、所有权、调用方向）
 - [Policy Decisions 设计](design/policy-decisions.md)：Policy 决策面
 - [效果管理设计](design/effect-management.md)：状态与效果
 - [Speculation Contract 设计](design/speculation-contract.md)：策略与运行时的语义对齐契约

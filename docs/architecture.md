@@ -1,6 +1,6 @@
 # AScout 架构
 
-本文只定义 AScout 的一级分层、各侧责任与跨侧调用方向。四侧是一次完整调用中的逻辑位置，不表示四侧都由 AScout 实现或拥有。Mechanism 不是第五侧，而是横跨 Agent 接入侧与控制面的抽象实现责任。
+本文只定义 AScout 的一级分层、各侧责任与跨侧调用方向。Runtime 是 AScout 支持的一套完整执行与效果承载系统；Runtime Adapter 是它与控制面之间的接入边界，不是与 Runtime 平级的另一侧。Mechanism 不是额外的一侧，而是横跨 Agent 接入侧、控制面与 Runtime 的抽象实现责任。
 
 ## 1. 架构总览
 
@@ -12,21 +12,21 @@ Parent 取得真实 operation 结果后可以立即继续，候选验证并行�
 
 AScout 的用户界面接收并呈现 Agent 输出与运行事件，不依赖某个 Agent 产品的原生界面；产品差异由对应 Agent 接入实现处理。观察覆盖当前 AScoutAgent 的完整 Tree，支持从 Branch 关系与状态进入具体 Branch 的只读详情，不提供跨 Tree 查询或生命周期裁决权限。
 
-AScout 的完整调用路径涉及四侧。控制面居于中间，两端分别通过 Adapter 类边界连接：一侧是 Agent 接入侧，其内部 Interposer 承担 Agent 侧的拦截与操作集成，ASC-Proxy 承担受管控制通信；另一侧是外部执行 Runtime，通过 Runtime Adapter 接入。Agent 接入侧与控制面是 AScout 自身可以定义和实现的系统部分；Runtime Adapter 是面向控制面的接入实现；Runtime 是 AScout 依赖但不拥有的外部能力来源。
+AScout 的完整调用路径涉及 Agent 接入侧、控制面和 Runtime。控制面一侧通过 Agent 接入边界接收 Agent 行为，另一侧通过 Runtime Adapter 使用 Runtime。Agent 接入侧与控制面是 AScout 自身可以定义和实现的系统部分；Runtime 是 AScout 支持的完整承载系统；Runtime Adapter 负责把 Runtime 接入控制面。
 
 Agent 接入侧围绕一组 Agent 进程及其执行活动提供本地管理。Branch 为执行活动提供逻辑归属，Agent 接入侧为每个 Branch 承载独立的本地管理上下文；控制面通过接入侧获取 Agent 行为事实、发出控制命令，并协调 Branch 与 Instance 的全局状态。多个 Branch 可以在共享执行环境和接入侧承载中共存，Branch 建立独立环境后，其管理上下文随执行活动进入相应环境。
 
 控制面负责维护投机执行过程当中 Agent 的控制状态，特别是由多次投机执行组合嵌套形成的拓扑结构。同时还负责执行过程中的决策和检查，Policy 和 Adapter 都以可插拔的形式与该结构连接。这也意味着控制面还负责根据 Adapter 接入契约校验其是否符合 AScout 所要求的基本语义，并解析回传事件；加载与校验 Policy，并检查 Adapter 所声明和呈现的后端能力是否满足 Policy 需求。逻辑 Branch 可以先进入控制面视图，独立 Runtime 环境按需建立，不要求每次投机执行都立即 fork。
 
-控制面定义自己接受的稳定 operation/event 边界和接入条件。Runtime Adapter 的作者依据该边界，把目标 Runtime 的原生能力映射成控制面可以使用的能力，并规范化结果与事件。AScout 不规定 Adapter 内部如何调用 Runtime、如何组织模块或选择 transport；这些属于 Adapter 实现。AScout 只能通过接入校验与运行期结果判断 Adapter 是否兑现其声明，不能直接控制 Adapter 的内部行为。
+控制面定义自己接受的稳定 operation/event 边界和接入条件。Runtime Adapter 依据该边界，把 Runtime 的能力映射成控制面可以使用的能力，并规范化结果与事件。Runtime 内部可以组合 Overlay、进程、容器、Firecracker、效果协调等能力；AScout 不规定这些内部模块如何组织或选择 transport，但要求接入边界如实呈现能力和限制。
 
-Runtime 是外部执行后端，例如容器、虚拟机或进程管理能力。AScout 不定义其内部架构，也不要求它提供 AScout 专用接口。Runtime 负责执行环境、隔离、资源和环境级生命周期；由 Agent 造成且可能影响全局的外部效果由控制面内的 Effect Coordinator 实际处理，不属于 Runtime 的效果执行责任。Agent-facing integration 组件可以部署在 Runtime 提供的 Branch 隔离环境内，其运行生命周期随该环境管理，但不因此成为 AScout 可以定义的 Runtime 内部组件。
+Runtime 承载 Agent 的一步动作，使动作能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 负责动作所需的环境、状态派生、隔离、资源、进程和效果边界；这些能力可以按任务需要共享、复制、写时复制、重建或恢复。Agent Session 的内部管理由 Agent 接入侧负责。Agent-facing integration 组件可以部署在 Runtime 提供的环境内，其运行生命周期随该环境管理。
 
 ### 1.1 架构边界
 
 - 所有跨边界的操作都必须遵守路径。跨侧可以传输受契约约束的请求、命令、结果和事件，但不能越过相邻边界直接控制其他侧，也不共享跨侧可变状态；调用方不能仅凭发送请求或更新自身状态伪造目标侧已完成的状态。
 - 控制面不接受会放宽 AScout 基本语义的 Adapter 结果；策略需求与 Adapter 声明或实际兑现的能力不匹配时，由控制面拒绝或明确降级。
-- 所需 OS privilege 留在外部执行后端一侧，Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权。Runtime 的 OS 特权只用于环境、进程、资源和隔离边界；外部效果由 Effect Coordinator 负责处理，不转化为 Runtime 的效果执行责任。
+- 所需 OS privilege 留在 Runtime 实现一侧，Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权。Runtime 的特权只用于其声明的环境、进程、资源、隔离和效果边界；接入侧不能绕过 Runtime 或控制面直接扩大动作影响范围。
 
 ## 2. 控制闭环
 
@@ -36,31 +36,27 @@ Runtime 是外部执行后端，例如容器、虚拟机或进程管理能力。
 sequenceDiagram
     participant A as Agent 接入侧
     participant C as 控制面
-    participant D as Runtime Adapter
     participant R as Runtime
 
     A->>C: captured Agent step
     C->>C: 校验控制状态并形成语义操作
-    C->>D: policy-based operation
-    D->>R: Runtime-specific ability call
-    R-->>D: result / event
-    D-->>C: normalized result / event
+    C->>R: policy-based operation through Adapter boundary
+    R-->>C: result / event through Adapter boundary
     C->>C: 根据结果更新控制状态
     C-->>A: Agent-facing result / event
 ```
 
-控制面是整体 Speculative Tree、控制语义和外部效果状态的权威来源。Runtime 内部的执行、资源和环境状态实际存在于外部 Runtime；控制面只接受 Runtime Adapter 按接入约定返回的环境能力、结果与事件，不直接定义或读取 Runtime 内部状态。
+控制面是整体 Speculative Tree 和控制语义的权威来源。Runtime 内部的执行、资源、环境和效果状态由 Runtime 管理；控制面通过 Runtime Adapter 接收能力、结果与事件，不直接读取 Runtime 内部状态。
 
 ## 3. 责任与状态边界
 
-四侧在调用路径中的责任如下（控制面各组件的职责与协作见 [控制面设计](design/control-plane.md)）：
+各责任边界如下（控制面各组件的职责与协作见 [控制面设计](design/control-plane.md)）：
 
 | 侧面 | 组件 | 状态 |
 |---|---|---|
 | Agent 接入侧 | Interposer（拦截与操作集成）、ASC-Proxy（受管控制通信）、Product Integration（产品接入） | 当前 Agent 与 Branch 的本地执行上下文 |
-| 控制面 | Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator、Effect Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、Adapter 接入状态 |
-| Runtime Adapter | 实现控制面接入边界、能力映射、通信与事件规范化；内部实现由 Adapter 作者决定 | 不向控制面呈现第二份长期权威状态 |
-| Runtime | 内部组件由外部 Runtime 自行决定 | 隔离执行环境及其环境级执行、进程、资源和边界状态；仅经 Adapter 暴露控制面所需的可观察结果 |
+| 控制面 | Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、Adapter 接入状态 |
+| Runtime | 包含 Runtime Adapter 接入边界及所需的执行、状态派生、进程、资源、隔离和效果管理能力 | 管理实际承载和效果状态；不决定 Speculative Tree 的全局裁决，不呈现第二份 Tree 权威状态 |
 
 特别的，ASC-Proxy、Interposer 等 Agent 接入侧组件可以运行在 Agent 执行实体当前使用的执行环境内；该环境可以是多个逻辑 Branch 暂时共享的执行环境，也可以是 Runtime 为某个 Branch 建立的独立环境。
 
@@ -70,7 +66,7 @@ sequenceDiagram
 - [控制面设计](design/control-plane.md)：直接子文档，展开控制面内部职责
 - [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)：Adapter 面向控制面的具体接入契约
 - [Runtime Adapter 接入指南](development/runtime-adapter.md)：Adapter 作者的实现建议与控制面接入方法
-- Runtime 不建立通用设计子文档
+- [Runtime 设计](design/runtime.md)：动作承载、状态与可插拔能力；首阶段范围见开发文档。
 - [设计决策](design/decisions.md)：核心 Speculative Tree 语义选择速查
 - [投机执行底座设计决策](design/speculation-decisions.md) 与 [抽象设计札记](development/spec-exec-abstraction.md)：内部组件的研究推导
 - [设计模型](design-model.md)：抽象概念层

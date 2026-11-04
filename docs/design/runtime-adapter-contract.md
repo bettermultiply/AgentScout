@@ -1,10 +1,10 @@
 # Runtime Adapter 契约设计
 
-本文定义 Runtime Adapter 面向 AScout 控制面的正式接入契约，说明 Adapter 提供的环境语义、操作身份与顺序、能力声明、Registry 校验以及环境操作的结果和事件。
+本文定义 Runtime 与 AScout 控制面之间的正式接入契约。Runtime Adapter 是这条接入边界的实现，负责呈现 Runtime 的环境语义、操作身份与顺序、能力声明、Registry 校验以及环境操作的结果和事件。本文不把 Adapter 视作独立于 Runtime 的另一套运行系统。
 
 ## 1. 契约边界
 
-Runtime Adapter 连接控制面与外部 Runtime。控制面向 Adapter 发出环境操作，Adapter 将其映射到目标 Runtime，并把环境结果和事件规范化返回。契约的核心是 Runtime 提供的环境能力：环境建立、环境内操作、静止、恢复、终止和清理，以及这些操作对不同环境内容形成的隔离保证；环境派生是可选能力，不是所有 Runtime 的前提。
+Runtime Adapter 连接控制面与 Runtime。控制面通过 Adapter 发出环境操作，Adapter 将其映射到 Runtime，并把结果和事件规范化返回。契约的核心是 Runtime 提供的承载能力：环境建立、环境内操作、静止、恢复、终止和清理，以及这些操作对不同环境内容形成的隔离和效果保证；环境派生是可选能力，不是所有任务或 Runtime 的前提。
 
 Adapter 可以使用 Runtime 原生隔离、权限控制、代理、拦截或拒绝来兑现声明。Registry 检查的是 Adapter 在边界上呈现的最终环境保证，不检查某一种内部实现。
 

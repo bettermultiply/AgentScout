@@ -136,13 +136,13 @@
 
 ## D-027：控制面、Runtime Adapter 与 Runtime 解耦
 
-**状态边界**：控制面拥有 speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图。Agent 接入侧拥有 Agent 执行实体的本地管理上下文、operation 归属、Branch context 和本地 Decision；Runtime 只拥有隔离环境及其环境级执行、资源和边界状态。AScout 不定义 Runtime 内部如何组织或传播这些状态；Runtime Adapter 只向控制面呈现所需的环境能力、结果与事件，不能把后端状态冒充为整体 Speculative Tree 视图。
+**状态边界**：控制面拥有 speculation planning、Proposal 业务含义、调度、预算、evaluator policy、AScoutAgent 和 Speculative Tree 视图。Agent 接入侧管理 Agent Session、执行实体的本地上下文、operation 归属、Branch context 和本地 Decision；Runtime 管理动作承载、环境、进程、资源与效果边界。Runtime Adapter 只向控制面呈现所需的能力、结果与事件，不能把执行状态冒充为整体 Speculative Tree 视图。
 
-**接口**：控制面与 Runtime 经 Runtime Adapter 交换 typed、可版本化的粗粒度 command/event。Runtime Adapter 定义稳定 contract，并把它映射到目标 Runtime 的能力、原语、transport 与事件。控制面不得直接修改 Runtime mutable state；Runtime 不解释 Agent prompt、模型格式、candidate 质量或整体 Speculative Tree 视图。复杂 Proposal 验证可以由持有 validator capability 的控制面计算；obligation 与 Accept 相关的状态转换必须经 Runtime Adapter 交给 Runtime 执行。
+**接口**：控制面通过 Runtime Adapter 与 Runtime 交换 typed、可版本化的粗粒度 command/event。Adapter 定义稳定接入边界，并把 Runtime 的能力、结果与事件规范化。控制面不得直接修改 Runtime mutable state；Runtime 不解释 Agent prompt、模型格式、candidate 质量或整体 Speculative Tree 视图。复杂 Proposal 验证可以由持有 validator capability 的控制面计算；obligation 与 Accept 相关的环境、进程、资源和效果转换必须由 Runtime 实际执行并返回结果。
 
-**部署**：具体 Runtime 可以作为独立 Runtime Service 运行。控制面根据自身 policy/config 决定目标 Runtime；Runtime Adapter 负责解析目标、连接和协议适配。CLI、Agent integration 和 launcher 不负责选择、创建或连接 Runtime。各侧不能共享跨边界可变内部状态。AScout 不选择统一 transport；具体通信方式由 Runtime Adapter 按本地 daemon、独立进程、故障隔离或远程部署需求决定。
+**部署**：Runtime 可以采用进程、容器、虚拟机或其他组合方式部署，也可以由多个实现共同提供能力。控制面根据 Policy 和配置使用 Runtime；Runtime Adapter 负责接入和协议适配。CLI、Agent integration 和 launcher 不绕过控制面直接改变 Runtime 状态。各侧不能共享跨边界可变内部状态，具体通信方式由实现决定。
 
-**原因**：控制面 policy 会随 Agent 和 workload 快速变化，Runtime 则承担正确性与资源强制边界。独立的 Adapter 侧使稳定语义 contract 与具体 Runtime 变化分离；粗粒度原子接口避免半完成的 barrier、Branch、Accept 或 cleanup，连接协议的变化不能泄漏为控制面 policy 或改变 lifecycle 语义。
+**原因**：控制面 Policy 会随 Agent 和 workload 变化，Runtime 则承担动作正确运行及资源、隔离和效果边界。Adapter 作为接入边界使稳定语义与具体实现分离；粗粒度原子接口避免半完成的 barrier、Branch、Accept 或 cleanup，连接协议的变化不能泄漏为控制面 Policy 或改变 lifecycle 语义。
 
 ## D-028：Speculative Tree 关系与 Agent execution activity 正交
 
@@ -208,9 +208,9 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **原因**：跨 tree 控制不属于 speculative subtree selection，会引入额外的 identity、授权、故障恢复与状态组合语义。需要在多个 execution 之间协调的上层系统应使用 AScout 之外的接口，而不是扩展 Branch lifecycle。
 
-## D-034：OS privilege 留在外部执行后端一侧
+## D-034：OS privilege 留在 Runtime 执行实现一侧
 
-**选择**：建立节点执行、进程与资源所有权、隔离边界所需的 OS privilege 留在外部执行后端一侧。Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权，也不能用控制状态更新代替后端的特权操作。外部效果的实际执行由控制面内的 Effect Coordinator 负责，不把外部效果执行边界归入 Runtime。
+**选择**：建立节点执行、进程与资源所有权、隔离边界所需的 OS privilege 留在 Runtime 执行实现一侧。Agent 接入侧、控制面与 Runtime Adapter 不因接入职责获得这些特权，也不能用控制状态更新代替实际操作。Runtime 同时负责其声明的外部效果边界。
 
 **外部实现**：具体 Runtime 可以使用 privileged helper、daemon、sandbox monitor、hypervisor 或其他方式管理特权，但其内部拆分不由 AScout 定义。Runtime Adapter 可以连接相应接口，但不因负责协议适配而获得 OS privilege 或后端 mutable state 所有权。
 
@@ -256,23 +256,23 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **原因**：把上下文隐藏和本地调用入口收敛到 ASC-Proxy，可以让 CLI/library 使用稳定的无身份请求，同时保持 Agent Control Gateway 的统一通信边界，并将控制面与 Runtime 的状态责任分开。
 
-## D-039：四侧一级架构
+## D-039：接入侧、控制面与 Runtime
 
-**选择**：AScout 的完整调用路径按 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 组织。AScout control 请求通常沿该方向下行，结果与事件沿相反方向返回。四侧是逻辑责任与 API 边界，不直接等同于四个由 AScout 拥有的子系统，也不直接等同于 crate、进程、服务或部署单元。
+**选择**：Agent 接入侧管理 Agent 内部会话与执行切点；控制面管理全局 Speculative Tree、Policy 和裁决；Runtime 承载动作并落实环境、资源和效果边界。AScout 自身支持一套完整 Runtime，不把 Runtime 等同于外部容器或虚拟机。
 
-**Agent 接入侧**：包含 Agent/product，以及 Interposer、ASC-Proxy 和 Product Integration 等接入职责。它绑定或承载调用上下文并形成 Agent/product intent；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态或 Runtime 机制状态。
+**Agent 接入侧**：包含 Agent/product，以及 Interposer、ASC-Proxy 和 Product Integration 等接入职责。它绑定或承载调用上下文，管理 Session、执行实体和本地操作归属；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态，也不绕过 Runtime 的环境和效果边界。
 
-**控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator、Effect Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、policy、请求校验、操作编排和 Runtime event 解释。这些内部组件不构成额外一级侧面。Effect Coordinator 拥有效果分类、计划、效果执行状态与协调视图，是外部效果的统一实际执行者；服务级 `simulate` 通过可注册插件扩展。Runtime 只负责环境边界及环境级执行状态。
+**控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、Policy、请求校验、操作编排和 Runtime event 解释。效果处理由 Runtime 内部的 Effect Coordinator 等机制落实，控制面保存全局裁决和对齐所需的事实。
 
-**Runtime Adapter**：位于控制面与 Runtime 之间，按控制面定义的稳定、typed、可版本化 operation/event 接入边界声明并呈现能力、结果和事件。其作者自行决定如何映射目标 Runtime 的能力、原语与 transport；AScout 不控制其内部实现，只通过接入校验与运行期结果判断它是否兑现声明。Runtime Adapter 不向控制面呈现第二份长期权威状态。
+**Runtime Adapter**：位于控制面与 Runtime 之间，是 Runtime 的接入边界。它按稳定、typed、可版本化的 operation/event 契约呈现能力、结果和事件；具体映射、原语和 transport 由实现决定。它不向控制面呈现第二份长期权威状态，也不能改变 Runtime 的语义。
 
-**Runtime**：AScout 依赖但不拥有的外部执行后端。实际节点执行、进程、资源和隔离环境状态位于这一侧；外部效果状态与效果处理责任位于控制面内的 Effect Coordinator。Runtime 的内部架构、组件和原生接口由具体 Runtime 自行决定；AScout 不直接约束或读取 Runtime 内部状态，只判断 Adapter 在控制面边界上呈现的能力、结果和事件。
+**Runtime**：AScout 支持的完整执行与效果承载系统。它承载 Agent 一步动作，管理所需的环境、进程、资源、状态派生、隔离和外部效果边界；能力可以通过进程、Overlay、容器、虚拟机等方式组合。Runtime 的内部架构不预先固定，但必须通过接入边界如实呈现能力、结果和事件。
 
-**约束**：Agent 接入侧不能绕过控制面发起 AScout lifecycle/control operation。控制面不能绕过 Runtime Adapter 依赖具体 Runtime，也不接受会放宽 lifecycle、single-winner、capability、obligation 或 cleanup 语义的 Adapter 声明或结果。跨侧只交换显式 contract data，不共享可变内部状态。
+**约束**：Agent 接入侧不能绕过控制面发起 AScout lifecycle/control operation。控制面不能绕过 Runtime Adapter 修改 Runtime，也不接受会放宽 lifecycle、single-winner、capability、obligation 或 cleanup 语义的能力声明或结果。跨侧只交换显式 contract data，不共享可变内部状态。
 
-**文档展开**：四侧路径不推出一侧一份架构子文档。控制面可以有内部设计文档；Agent 接入侧可在目标语义收敛后展开；Adapter 的内部实现与 Runtime 接入方法属于开发/接入指南；Runtime 不建立由 AScout 定义的通用设计文档。
+**文档展开**：控制面、Agent 接入侧与 Runtime 的目标语义分别在对应设计文档展开；Runtime 的实现限制、首阶段 Overlay 方案和接入方法属于开发文档。Adapter 只作为 Runtime 的接入边界说明，不单独定义一套运行系统。
 
-**原因**：此前的 控制面 / Instance 部署图、控制面 / Runtime 状态位置和 Runtime Adapter 组件图描述的是不同观察角度，却被当成同一层级使用。四侧模型保留完整调用路径，同时避免把外部 Runtime 和第三方 Adapter 误写成 AScout 可以控制的内部实现。
+**原因**：调用路径、部署对象和内部实现是不同层级。接入边界使 Runtime 的具体实现保持开放，同时明确其作为完整执行系统的责任。
 
 ## D-040：Policy 控制的 best-effort 投机
 

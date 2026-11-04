@@ -171,7 +171,7 @@ Agent 接入侧负责从产品执行接缝中识别并规范化 operation 及其
 
 ## 相关文档
 
-- [架构](../architecture.md)：系统结构（四侧、所有权、调用方向）
+- [架构](../architecture.md)：系统结构（责任边界、所有权、调用方向）
 - [设计模型](../design-model.md)：抽象分层与跨领域约束
 - [效果管理设计](effect-management.md)：shared/external operation 与 obligation
 - [Agent 接入侧设计](agent-integration.md)：operation 识别、规范化和 Agent 接入组件

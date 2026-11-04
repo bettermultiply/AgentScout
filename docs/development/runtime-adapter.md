@@ -1,8 +1,16 @@
 # Runtime Adapter 接入指南
 
-本文面向 Runtime Adapter 作者，说明如何准备能力声明、实现环境操作、参加 Registry 验证、完成注册并处理运行期偏差。正式语义和接入条件见 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)。
+本文面向 Runtime 接入实现作者，说明如何准备能力声明、实现环境操作、参加 Registry 验证、完成注册并处理运行期偏差。Runtime Adapter 是 Runtime 与控制面之间的接入边界；正式语义和接入条件见 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)。
 
 ## 1. 接入边界
+
+### 当前实现目标
+
+本轮先更新设计，不实现 Runtime 代码。目标语义见 [Runtime 设计](../design/runtime.md)。首阶段优先实现进程级或更轻量的文件系统 Overlay，而不是继续以 VM 为默认承载。Overlay 覆盖的对象是 Agent 及其派生进程的文件系统视图，不只是某个工具函数或工作目录；绝对路径、临时文件以及后代进程的文件操作也必须纳入边界，不能以改变 cwd 或复制目录冒充完整覆盖。
+
+Overlay 是第一项实现工作，不是所有 Runtime 的必需结构。文件系统视图应让相关进程正常运行，文件修改不得越过声明边界直接污染 Parent 或 Authority；接受和丢弃时按既有状态、效果语义处理，具体挂载、快照、提交及冲突处理方案尚未展开。不在这里预先固定必须复制回 Parent 或必须进行通用合并。
+
+尚待实现：通用的低成本动作承载；Session 与环境状态的一致关联；覆盖 Agent 及其后代进程的文件系统 Overlay；受管文件效果的清理和合法生效路径。完整能力组合、Runtime 与 Policy 的协调协商和运行时检测属于后续目标，不是首阶段前置条件。下文的 Registry 与验证流程描述目标接入方式，不表示当前原型已实现，也不能把现有 Firecracker 或 NLE 路径当作上述通用能力已完成的证据。
 
 Adapter 接入工作的对象是 Runtime 环境。所有合格 Adapter 都必须支持 `establish_environment`、`operate_environment`、`promote_environment`、`suspend_environment`、`resume_environment`、`terminate_environment` 和 `cleanup_environment`；`branch_environment` 是可选能力，只表示派生独立子环境。`promote_environment` 没有环境侧语义时也必须接受并成功返回，不能把 no-op 当作不支持。Runtime 也可以声明需要在真实环境中执行的环境工具；控制面通过 `tool_context` 和 `invoke_tool` 调用，不解释工具的业务语义。能力声明描述这些操作对不同环境内容形成的实际隔离保证，以及 Branch 之间的非干扰保证。
 
@@ -87,7 +95,7 @@ Adapter 配置注册后不得在运行期变化。若发现 Runtime 实际行为
 
 2026-10-23 确定：后续优先采用进程级方案，在投机点启动新的 Agent 进程，交付显式续跑状态；不以透明复制任意运行中 Agent 为首版目标。首个真实 Agent 选择 [Pi](https://github.com/earendil-works/pi)，保留其原有推理循环，通过工具接入、显式会话状态和独立进程续跑连接 AScout，本轮不同时适配其他产品。具体会话截取和预测工具结果注入方式尚待实现验证，不把 Pi 的命令级 fork 当作工具等待点分支的现成能力。首要目标是在已有设计约束下跑通真实投机执行，不为更换后端改变上层语义，也不把 Registry 主动验证作为原型启动前置条件；未验证保证仍不得标记为已验证。
 
-进程级实现尚未落地。续跑状态如何交付由 Agent 接入侧配合，Runtime Adapter 负责新环境的实际建立、操作及回收；复制 session 不自动提供 workspace 隔离或外部效果治理。以下说明当前代码已经存在的 Firecracker 实现，不表示进程级方案已经可用。
+进程级实现尚未落地。续跑状态如何交付由 Agent 接入侧配合，Runtime 负责新承载环境的实际建立、操作及回收；复制、共享或恢复 Session 不自动提供 workspace 隔离或外部效果治理。以下说明当前代码已经存在的 Firecracker 实现，不表示进程级方案已经可用。
 
 首轮 Pi 接入允许暂不经过独立 Runtime Adapter，先在受信接入代码中把候选操作限制为无本地业务副作用的范围，拒绝任意 shell、文件修改及未经授权的外部业务效果；系统管理的独立 session、日志及已授权模型请求另行管理。不以切换 cwd 证明 filesystem 隔离，不宣称该路径已经支持会写入仓库的 coding workload。此为实现范围缩减，不改变正式 Runtime 契约或效果治理语义。
 
@@ -112,4 +120,4 @@ Adapter 配置注册后不得在运行期变化。若发现 Runtime 实际行为
 - [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)：正式接入契约
 - [控制面设计](../design/control-plane.md)：Adapter Registry 与控制面协作
 - [Agent 接入侧设计](../design/agent-integration.md)：环境内 Agent 接入侧的责任
-- [效果管理设计](../design/effect-management.md)：Effect Coordinator 的效果处理责任，以及 Runtime 的环境能力边界
+- [效果管理设计](../design/effect-management.md)：Runtime 的环境与效果处理责任

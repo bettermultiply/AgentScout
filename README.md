@@ -55,10 +55,10 @@ cargo run --example policy -- evaluate /tmp/opencode/policy.json extent assets/p
 
 需要 Linux、Python 3、bubblewrap 和 libseccomp。当前接口、支持范围及未完成能力见 [Policy Engine 原型](docs/development/policy-engine.md)；这条路径不等同于完整 Branch 生命周期接入。
 
-- 新实现使用 Rust。具体 crate、模块、进程和部署边界按四侧 ownership 重新决定（D-024-I）。
+- 新实现使用 Rust。具体 crate、模块、进程和部署边界按 Agent 接入侧、控制面与 Runtime 的责任和所有权决定（D-024-I）。
 - 扩展点的职责语义已确认：Execution、Workspace、Input、Effect 和 Outcome 属于 Runtime；Interposer 属于 Agent 接入侧，统一负责识别 pending-result boundary、保证真实 operation 只执行一次并自动发布 outcome。
 - 默认 Runtime 面向可信 Child Agent，优先高效 sibling isolation；对抗恶意 workload 的 containment 由另行选择的 Runtime 提供。
-- Runtime 必须强制维护隔离环境、环境级资源边界、环境内受控操作、停止和 cleanup；Agent 接入侧负责 Agent 执行实体、Branch context、operation 归属和 capability 路由，Agent 造成且可能影响全局的外部效果（例如调用外部 API）由控制面内的 Effect Coordinator 负责实际处理。
+- Runtime 承载 Agent 动作，并落实声明的环境、资源和效果边界，以及停止和 cleanup；Agent 接入侧负责 Session、Agent 执行实体的本地上下文、Branch context、operation 归属和 capability 路由。控制面管理全局 Tree 与裁决，Runtime 内部的效果协调机制落实外部效果处理。目标语义见 [Runtime 设计](docs/design/runtime.md)，首阶段 Overlay 范围见 [Runtime 开发说明](docs/development/runtime-adapter.md)。
 
 ## 文档
 
