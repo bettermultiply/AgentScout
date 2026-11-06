@@ -48,11 +48,11 @@ _FLOOR = set(".#<>")
 
 
 def predict(data, *, policy_config, capabilities):
-    """Enumerate the possible outcomes of one plain move.
+    """Return the configured example proposals for the pending boundary.
 
-    Only movement actions are considered.  A tile the agent has already seen
-    is decided exactly; an unseen tile yields every declared outcome, which is
-    where speculation actually happens.
+    Workload-specific interpretation belongs in this sample Policy. The
+    control plane passes a generic process context and never extracts an NLE
+    action field itself.
     """
     values = policy_config["enum_values"]
     if "candidates" in policy_config:
@@ -62,9 +62,11 @@ def predict(data, *, policy_config, capabilities):
         selected = secrets.SystemRandom().sample(candidates, count)
         return {"proposals": [{"payload": value} for value in selected], "generation": "batch"}
     context = data.get("process_context") or {}
+    if "observation" not in context:
+        return {"proposals": [], "generation": "batch"}
     observation = context.get("observation") or {}
     try:
-        action = int(context.get("action"))
+        action = int((context.get("arguments") or {}).get("action"))
     except (TypeError, ValueError):
         return {"proposals": [], "generation": "batch"}
     move = _MOVES.get(action)

@@ -17,7 +17,7 @@ fn policy_compilation_uses_supported_bubblewrap_pipe_setup() {
                 &policy,
                 Decision::Extent,
                 &json!({
-                    "process_state": {"steps_completed": 5, "phase": "reasoning"}
+                    "process_state": {"steps_completed": 5, "hook_count": 5, "phase": "reasoning"}
                 })
             )
             .unwrap(),

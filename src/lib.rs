@@ -9,3 +9,5 @@ pub mod ledger;
 pub mod nle;
 pub mod policy;
 pub mod transport;
+
+pub mod coordination;

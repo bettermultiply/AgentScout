@@ -4,19 +4,20 @@
 // compile-time contract for this small launcher.
 // @ts-nocheck
 import { connect } from 'node:net';
-import { pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
+import { evaluatePolicyArtifact } from '../../../pi/packages/ascout-agent-access/src/local-policy.ts';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
-// Public package entry. The source resolver supports the local Pi checkout.
-const { createAgentSession, SessionManager, ModelRuntime, resolveCliModel } = await import(pathToFileURL(resolve(root, 'packages/coding-agent/src/index.ts')).href);
-const { createRequire } = await import('node:module');
 const require = createRequire(resolve(root, 'package.json'));
+const { createAgentSession, SessionManager, ModelRuntime, resolveCliModel } = require(resolve(root, 'packages/coding-agent/src/index.ts'));
 const { Type } = require('typebox');
 const args = process.argv.slice(2);
 const socketPath = args.shift();
 const agentId = args.shift() ?? 'agent';
+const taskId = process.env.ASCOUT_TASK_ID ?? '';
+let nextAction = 1;
 if (!socketPath) throw Error('usage: main.ts <socket> <agent> [--model provider/model] [--thinking level]');
 let modelPattern, thinkingLevel = 'low';
 while (args.length) {
@@ -36,13 +37,32 @@ if (modelPattern) {
 }
 const sessions = new Map(), checkpoints = new Map(), results = new Map(), waiters = new Map(), resultWaiters = new Map();
 const cancelled = new Set(), gates = new Map(), generations = new Map(), commands = new Map();
+const activeActions = new Map(), reportedActions = new Set();
+const aborting = new Set();
+const policies = new Map(), hookCounts = new Map(), countedHooks = new Set(), stopGates = new Map();
 const runtimeTools = JSON.parse(process.env.ASCOUT_RUNTIME_TOOLS ?? '[]');
+async function evaluatePolicy(artifact, decision, data, signal) {
+    return evaluatePolicyArtifact(artifact, decision, data, signal);
+}
+const capabilities = {
+    preExecutionInterception:true,
+    localDecisionEvaluation:true,
+    modelInferencePreExecutionInterception:true,
+    subagentPreExecutionInterception:false,
+    checkpointContinuation:true,
+    independentCandidateSession:true,
+    cancelCompletion:true,
+    toolResultInjection:true,
+};
 let authority = 'authority', closing = false, outgoing = Promise.resolve();
 const socket = connect({path:socketPath,allowHalfOpen:true});
 await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject)});
 let transportError;
 socket.on('error',error=>{transportError=error;socket.destroy()});
 const report = payload => {
+    if(payload.message==='action_started'){activeActions.set(key(payload.branch_id,payload.action_id),payload);reportedActions.add(key(payload.branch_id,payload.action_id));}
+    if(payload.message==='action_finished')activeActions.delete(key(payload.branch_id,payload.action_id));
+    payload={source:'agent_adapter',...payload};
     if(socket.destroyed)return Promise.resolve();
     const bytes = Buffer.from(JSON.stringify({kind:'message',payload})), header=Buffer.alloc(4);
     header.writeUInt32BE(bytes.length);
@@ -54,6 +74,10 @@ const report = payload => {
 };
 const key = (branch, operation) => JSON.stringify([branch,operation]);
 const text = value => typeof value==='string'?value:JSON.stringify(value);
+async function finishActions(branch,status) {
+    for(const action of [...activeActions.values()])if(action.branch_id===branch)
+        await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:action.action_kind,status,result:null});
+}
 function tools(branch) {
     return runtimeTools.map(spec=>({name:spec.name,label:spec.name,description:spec.description,parameters:Type.Unsafe(spec.parameters),execute:async(operation,_args,signal)=>{
         if (branch!==authority) throw Error('Candidate action is unavailable before acceptance');
@@ -68,6 +92,46 @@ function tools(branch) {
         });
         return {content:[{type:'text',text:text(value)}],details:undefined};
     }}));
+}
+async function localDecision(branch, operationId, toolCallId, toolName, args, checkpoint, signal) {
+    const artifact = policies.get(branch);
+    if (!artifact) return {kind:'allow'};
+    const input={op:{kind:toolName,produces_result:true,result_pending:true,has_predictor:true},state:{},contract_context:{arguments:args,runtime_capabilities:runtimeTools}};
+    const opportunity=await evaluatePolicy(artifact,'admit.opportunity_pass',{op:input.op},signal);
+    if (opportunity !== true) return {kind:'allow'};
+    const feasibility=await evaluatePolicy(artifact,'admit.feasibility_pass',input,signal);
+    return feasibility === true ? {kind:'admit_speculation'} : {kind:'allow'};
+}
+async function beforeModelInference(branch, modelValue, context, signal) {
+    const gate=gates.get(branch);
+    if(gate)await new Promise((resolve,reject)=>{
+        const abort=()=>reject(Error('Candidate cancelled before model inference'));
+        gate.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
+        signal?.addEventListener('abort',abort,{once:true});
+        if(signal?.aborted)abort();
+    });
+    if(closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
+    const artifact=policies.get(branch);
+    if(artifact){
+        const op={kind:'model_inference',produces_result:true,result_pending:true,has_predictor:false};
+        const opportunity=await evaluatePolicy(artifact,'admit.opportunity_pass',{op},signal);
+        if(opportunity===true)await evaluatePolicy(artifact,'admit.feasibility_pass',{op,state:{},contract_context:{model:`${modelValue.provider}/${modelValue.id}`,message_count:context.messages.length,runtime_capabilities:runtimeTools}},signal);
+    }
+    const actionId=`model-${nextAction++}`;
+    await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',result_pending:true,name:'model',arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length}});
+    return async status=>{
+        await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',status:status??(signal?.aborted?'cancelled':'succeeded'),result:null});
+    };
+}
+async function waitStop(branch, signal) {
+    const gate=stopGates.get(branch);
+    if (!gate) return;
+    await new Promise((resolve,reject)=>{
+        const abort=()=>reject(Error('Extent stop cancelled'));
+        gate.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
+        signal?.addEventListener('abort',abort,{once:true});
+        if(signal?.aborted)abort();
+    });
 }
 function install(session,branch) {
     const before=session.agent.beforeToolCall, after=session.agent.afterToolCall;
@@ -84,7 +148,24 @@ function install(session,branch) {
         const saved=structuredClone(session.messages.filter(m=>m.role!=='custom'));
         const checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${context.toolCall.id}:${saved.length}`};
         checkpoints.set(key(branch,context.toolCall.id),{saved,checkpoint});
-        await report({message:'tool_pending',branch_id:branch,operation_id:context.toolCall.id,tool_name:context.toolCall.name,arguments:context.args,checkpoint});
+        const eventKey=key(branch,context.toolCall.id);
+        if(!countedHooks.has(eventKey)){
+            countedHooks.add(eventKey);
+            hookCounts.set(branch,(hookCounts.get(branch)??0)+1);
+        }
+        const decision=await localDecision(branch,context.toolCall.id,context.toolCall.id,context.toolCall.name,context.args,checkpoint,signal);
+        const admitted=decision.kind==='admit_speculation';
+        if(admitted)await report({message:'speculative_admission_request',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint});
+        const policy=policies.get(branch);
+        if(admitted&&policy){
+            const extent=await evaluatePolicy(policy,'extent',{process_state:{steps_completed:hookCounts.get(branch)??0,hook_count:hookCounts.get(branch)??0,phase:'tool_execution'}},signal);
+            if(extent==='stop'){
+                let release;const promise=new Promise(resolve=>release=resolve);stopGates.set(branch,{promise,release});
+                await report({message:'branch_suspended',branch_id:branch});
+                await waitStop(branch,signal);
+            }
+        }
+        await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',result_pending:true,name:context.toolCall.name,arguments:context.args,checkpoint});
         return previous;
     };
     session.agent.afterToolCall=async(context,signal)=>{
@@ -97,20 +178,21 @@ function install(session,branch) {
             const resultKey=key(branch,context.toolCall.id);
             for(const resolve of resultWaiters.get(resultKey)??[])resolve(result);
             resultWaiters.delete(resultKey);
-            await report({message:'parent_outcome',branch_id:branch,operation_id:context.toolCall.id,outcome:{payload:content.length===1&&content[0].type==='text'?content[0].text:null,content,is_error:isError}})
+            if(reportedActions.delete(key(branch,context.toolCall.id)))await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',status:signal?.aborted?'cancelled':isError?'failed':'succeeded',result:{payload:content.length===1&&content[0].type==='text'?content[0].text:null,content,is_error:isError}})
         }
         return previous;
     };
     session.subscribe(event=>{
         if(event.type==='message_update'&&event.assistantMessageEvent.type==='text_delta')void report({message:'output',branch_id:branch,text:event.assistantMessageEvent.delta});
         if(event.type==='message_end'){
-            void report({message:'transcript',branch_id:branch,branch_role:branch===authority?'authority':'candidate',entry:event.message});
+            void report({message:'transcript',branch_id:branch,entry:event.message});
             if(event.message.role==='assistant')void report({message:'usage',branch_id:branch,model:event.message.model,thinking_level:event.message.thinkingLevel,usage:event.message.usage});
         }
     });
 }
 async function run(session,branch,operation) {
-    await operation();
+    try { await operation(); }
+    finally { await finishActions(branch,cancelled.has(branch)||aborting.has(branch)?'cancelled':'failed'); }
     const last=[...session.messages].reverse().find(m=>m.role==='assistant');
     if(last?.stopReason==='error')await report({message:'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
     await report({message:'turn_completed',branch_id:branch});
@@ -126,11 +208,17 @@ function executeTurn(session,branch,operation) {
 async function handle(command) {
     const branch=command.branch_id;
     switch(command.command){
+        case 'local_policy':
+            if(typeof command.policy_digest!=='string'||!command.decisions||typeof command.decisions!=='object')throw Error('Invalid local Policy artifact');
+            policies.set(branch,{digest:command.policy_digest,decisions:command.decisions});
+            return;
         case 'start_branch': {
-            const {session}=await createAgentSession({cwd:command.workspace,model,modelRuntime,thinkingLevel,customTools:tools(branch)});
+            const {session}=await createAgentSession({cwd:command.workspace,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){session.dispose();return}
             sessions.set(branch,session);install(session,branch);
+            await report({message:'branch_created',branch_id:branch});
             await report({message:'branch_started',branch_id:branch});
+            await report({message:'branch_ready',branch_id:branch});
             if(command.prompt)executeTurn(session,branch,()=>session.prompt(command.prompt));
             return;
         }
@@ -140,6 +228,8 @@ async function handle(command) {
             executeTurn(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));return;
         }
         case 'start_candidate': {
+            const parentPolicy=policies.get(command.parent_branch_id);
+            if(parentPolicy)policies.set(branch,parentPolicy);
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
             const messages=structuredClone(checkpoint.saved),last=messages.at(-1);
@@ -163,43 +253,56 @@ async function handle(command) {
             const manager=SessionManager.inMemory(command.workspace);
             for(const message of [...messages,...paired])manager.appendMessage(message);
             let release;const promise=new Promise(resolve=>release=resolve);gates.set(branch,{promise,release});
-            const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch)});
+            const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){session.dispose();return}
             sessions.set(branch,session);install(session,branch);
+            await report({message:'branch_created',branch_id:branch});
             // Injected result is new candidate content, not copied from the Parent.
-            for(const entry of paired)await report({message:'transcript',branch_id:branch,branch_role:'candidate',entry});
+            for(const entry of paired)await report({message:'transcript',branch_id:branch,entry});
             await report({message:'branch_started',branch_id:branch});
+            await report({message:'branch_ready',branch_id:branch});
             executeTurn(session,branch,()=>session.continue());return;
         }
         case 'resolve_pending': {
+            stopGates.get(branch)?.release();stopGates.delete(branch);
+            if(command.outcome===undefined){await report({message:'branch_resumed',branch_id:branch});return;}
             if(command.outcome!==undefined){const id=key(branch,command.operation_id),waiter=waiters.get(id);if(waiter){waiters.delete(id);waiter(command.outcome)}else results.set(id,command.outcome)}
             return;
         }
         case 'promote':
             if(cancelled.has(branch)||!sessions.has(branch))throw Error('Branch unavailable');
-            authority=branch;gates.get(branch)?.release();gates.delete(branch);return;
-        case 'abort': return sessions.get(branch)?.abort();
-        case 'discard': cancelled.add(branch);return sessions.get(branch)?.abort();
+            authority=branch;gates.get(branch)?.release();gates.delete(branch);stopGates.get(branch)?.release();stopGates.delete(branch);return;
+        case 'abort':
+            aborting.add(branch);
+            try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled'); }
+            finally { aborting.delete(branch); }
+            return;
+        case 'discard': cancelled.add(branch);stopGates.get(branch)?.release();stopGates.delete(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');return;
         case 'cleanup':
-            cancelled.add(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);gates.delete(branch);
+            cancelled.add(branch);stopGates.get(branch)?.release();stopGates.delete(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);gates.delete(branch);policies.delete(branch);hookCounts.delete(branch);
+            await finishActions(branch,'cancelled');
             for(const id of checkpoints.keys())if(JSON.parse(id)[0]===branch)checkpoints.delete(id);
-            await report({message:'cleanup_completed',branch_id:branch});return;
+            await report({message:'agent_session_released',branch_id:branch});
+            await report({message:'branch_released',branch_id:branch});return;
         default:throw Error(`Unknown command ${command.command}`);
     }
 }
 async function dispatch(command){
     const operation=['promote','resolve_pending','discard','cleanup'].includes(command.command)?command.command:undefined;
     let reason;
+    const acknowledgement=status=>({message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status,generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{})});
     try{
         const generation=generations.get(command.branch_id);
         if(generation!==undefined&&command.generation!==undefined&&generation!==command.generation)throw Error('Stale command generation');
         if(command.generation!==undefined)generations.set(command.branch_id,command.generation);
+        if(operation&&command.command_id){await report(acknowledgement('accepted'));await report(acknowledgement('started'))}
         await handle(command);
     }catch(error){reason=String(error instanceof Error?error.message:error)}
     if(operation&&command.command_id)return {message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status:reason?'failed':'applied',generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{}),...(reason?{reason}:{})};
     if(reason)return {message:'branch_failed',branch_id:command.branch_id,reason};
 }
-await report({message:'hello',agent_id:agentId});
+await report({message:'agent_connected',agent_id:agentId,capabilities});
+await report({message:'agent_ready',agent_id:agentId});
 let buffer=Buffer.alloc(0);const tasks=new Set();
 let commandQueue: Promise<unknown>=Promise.resolve();
 try{
@@ -219,10 +322,12 @@ try{
 }catch(error){
     transportError??=error;
 }finally{
-    closing=true;for(const gate of gates.values())gate.release();
+    closing=true;for(const gate of gates.values())gate.release();for(const gate of stopGates.values())gate.release();
     await commandQueue.catch(()=>{});
     await Promise.allSettled([...sessions.values()].map(s=>s.abort()));
     await Promise.allSettled(tasks);for(const session of sessions.values())session.dispose();
+    for(const branch of sessions.keys())await finishActions(branch,'cancelled');
+    await report({message:'agent_released',agent_id:agentId});
     await outgoing;
     if(!socket.destroyed)await new Promise(resolve=>socket.end(resolve));
 }

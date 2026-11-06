@@ -88,36 +88,36 @@ fn run(interface: &Interface) -> io::Result<()> {
                 ));
             }
             content.push_str("\n输入编号；Esc 返回主对话。查看不代表接受。\n");
-        } else if let Some(id) = id {
-            if let Some(branch) = state.tree.branches.get(id) {
-                if observing {
-                    content.push_str(&view::branch_details(
-                        branch,
-                        &state.tree,
-                        state
-                            .facts
-                            .get(id)
-                            .map(String::as_str)
-                            .unwrap_or("尚无运行事实"),
-                    ));
+        } else if let Some(id) = id
+            && let Some(branch) = state.tree.branches.get(id)
+        {
+            if observing {
+                content.push_str(&view::branch_details(
+                    branch,
+                    &state.tree,
+                    state
+                        .facts
+                        .get(id)
+                        .map(String::as_str)
+                        .unwrap_or("尚无运行事实"),
+                ));
+            }
+            if facts {
+                for event in state.events.iter().filter(|e| e["branch_id"] == *id) {
+                    content.push_str(&view::structured(event));
                 }
-                if facts {
-                    for event in state.events.iter().filter(|e| e["branch_id"] == *id) {
-                        content.push_str(&view::structured(event));
-                    }
-                } else if let Some(conversation) = state.conversations.get(id) {
-                    if !conversation.inherited.is_empty() {
-                        content.push_str("\n── 继承上下文 ──\n");
-                    }
-                    for message in &conversation.inherited {
-                        content.push_str(&message_text(message));
-                    }
-                    content.push_str("\n━━ 本 Branch 独有内容 ━━\n");
-                    for message in &conversation.messages {
-                        content.push_str(&message_text(message));
-                    }
-                    content.push_str(&conversation.streaming);
+            } else if let Some(conversation) = state.conversations.get(id) {
+                if !conversation.inherited.is_empty() {
+                    content.push_str("\n── 继承上下文 ──\n");
                 }
+                for message in &conversation.inherited {
+                    content.push_str(&message_text(message));
+                }
+                content.push_str("\n━━ 本 Branch 独有内容 ━━\n");
+                for message in &conversation.messages {
+                    content.push_str(&message_text(message));
+                }
+                content.push_str(&conversation.streaming);
             }
         }
         draw(

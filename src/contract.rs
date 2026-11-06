@@ -174,6 +174,12 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventPayload {
+    OperationStarted {
+        operation: Operation,
+    },
+    OperationFinished {
+        result: OperationResult,
+    },
     EnvironmentStateChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         previous: Option<EnvironmentState>,

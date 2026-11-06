@@ -20,12 +20,22 @@ export const SessionManager = {inMemory:()=>({messages:[],appendMessage(m){this.
 export async function createAgentSession(options) {
     const tool = options.customTools[0];
     const controller = new AbortController();
+    let subscriber = () => {};
     const session = {
-        agent: {}, messages: options.sessionManager?.messages ?? [], subscribe() {}, dispose() {}, async abort() {controller.abort()},
+        agent: {}, messages: options.sessionManager?.messages ?? [], subscribe(fn) {subscriber=fn}, dispose() {}, async abort() {controller.abort()},
         async continue() { return session.prompt('candidate'); },
         async prompt() {
             const toolCall = {id:options.sessionManager?'operation-2':'operation-1',name:'runtime_tool'};
-            session.messages.push({role:'assistant',content:[{type:'toolCall',...toolCall}]});
+            const finishModelInference = await options.beforeModelInference?.(
+                {provider:'test',id:'test'},
+                {messages:session.messages},
+                controller.signal,
+            );
+            const message={role:'assistant',content:[{type:'toolCall',...toolCall}],stopReason:'toolUse',model:'test',usage:{}};
+            subscriber({type:'message_start',message});
+            session.messages.push(message);
+            subscriber({type:'message_end',message});
+            await finishModelInference?.('succeeded');
             await session.agent.beforeToolCall({toolCall,args:{}}, controller.signal);
             const result = await tool.execute(toolCall.id, {}, controller.signal);
             await session.agent.afterToolCall({toolCall,result,isError:false});
@@ -49,7 +59,7 @@ export async function createAgentSession(options) {
         });
     });
     await new Promise(resolve => server.listen(socketPath, resolve));
-    const child = spawn(process.execPath, [resolve('agent-access/pi/main.ts'), socketPath, 'agent'], {
+    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', resolve('agent-access/pi/main.ts'), socketPath, 'agent'], {
         env: { ...process.env, ASCOUT_PI_ROOT: root, ASCOUT_RUNTIME_TOOLS: JSON.stringify([
             {name:'runtime_tool',description:'test',parameters:{type:'object'}}
         ]) }, stdio: ['ignore', 'pipe', 'pipe']
@@ -85,8 +95,10 @@ export async function createAgentSession(options) {
         for (const branch_id of branches) {
             send({command:'cleanup',branch_id,workspace:root,command_id:`cleanup-${branch_id}`,
                 generation:branch_id==='authority'?1:2});
-            await expectMessage(m => m.message === 'cleanup_completed' && m.branch_id === branch_id);
+            await expectMessage(m => m.message === 'branch_released' && m.branch_id === branch_id);
+            await expectMessage(m => m.message === 'agent_session_released' && m.branch_id === branch_id);
             await expectMessage(m => m.message === 'command_result' && m.command_id === `cleanup-${branch_id}` && m.status === 'applied');
+            assert.deepEqual(messages.filter(m => m.message === 'command_result' && m.command_id === `cleanup-${branch_id}`).map(m => m.status), ['accepted','started','applied']);
         }
         const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({code,signal})));
         client.end();
@@ -97,11 +109,26 @@ export async function createAgentSession(options) {
         assert.deepEqual(exit,{code:0,signal:null},stderr);
         assert.equal(stderr,'');
     }
-    await expectMessage(m => m.message === 'hello');
+    const connected = await expectMessage(m => m.message === 'agent_connected');
+    assert.deepEqual(connected.capabilities, {
+        preExecutionInterception: true,
+        localDecisionEvaluation: true,
+        modelInferencePreExecutionInterception: true,
+        subagentPreExecutionInterception: false,
+        checkpointContinuation: true,
+        independentCandidateSession: true,
+        cancelCompletion: true,
+        toolResultInjection: true,
+    });
     send({command:'start_branch',branch_id:'authority',workspace:root,prompt:''});
     await expectMessage(m => m.message === 'branch_started');
     send({command:'prompt',branch_id:'authority',prompt:'one tool call'});
-    const pending = await expectMessage(m => m.message === 'tool_pending');
+    const inference = await expectMessage(m => m.message === 'action_started' && m.action_kind === 'model_inference' && m.branch_id === 'authority');
+    const inferred = await expectMessage(m => m.message === 'action_finished' && m.action_id === inference.action_id);
+    assert.equal(inferred.status, 'succeeded');
+    const pending = await expectMessage(m => m.message === 'action_started' && m.action_kind === 'tool_execution');
+    assert.equal(pending.action_id, 'operation-1');
+    assert.equal(pending.result_pending, true);
     if (shutdownAt === 'tool_wait') return finish(['authority']);
     // Rust's JSON encoder sorts object keys; checkpoint identity must not depend
     // on insertion order. Candidate setup also must not hold the command queue.
@@ -113,15 +140,17 @@ export async function createAgentSession(options) {
     if (shutdownAt === 'candidate_gate') return finish(['candidate','authority']);
     send({command:'resolve_pending',branch_id:'authority',operation_id:'operation-1',
         command_id:'resolve-1',generation:1,outcome:{payload:'real-result'}});
-    const outcome = await expectMessage(m => m.message === 'parent_outcome');
-    assert.match(outcome.outcome.payload, /real-result/);
+    const outcome = await expectMessage(m => m.message === 'action_finished' && m.action_kind === 'tool_execution');
+    assert.match(outcome.result.payload, /real-result/);
+    assert.equal(outcome.status, 'succeeded');
+    assert.equal(outcome.action_id, pending.action_id);
     await expectMessage(m => m.message === 'turn_completed');
     await expectMessage(m => m.message === 'command_result' && m.status === 'applied');
     send({command:'promote',branch_id:'candidate',command_id:'promote-1',generation:2});
-    await expectMessage(m => m.message === 'tool_pending' && m.branch_id === 'candidate');
+    await expectMessage(m => m.message === 'action_started' && m.action_kind === 'tool_execution' && m.branch_id === 'candidate');
     send({command:'resolve_pending',branch_id:'candidate',operation_id:'operation-2',
         command_id:'resolve-2',generation:2,outcome:{payload:'candidate-real-result'}});
-    await expectMessage(m => m.message === 'parent_outcome' && m.branch_id === 'candidate');
+    await expectMessage(m => m.message === 'action_finished' && m.action_kind === 'tool_execution' && m.branch_id === 'candidate');
     await expectMessage(m => m.message === 'turn_completed' && m.branch_id === 'candidate');
     // Closing the controller's write half must let the integration drain its
     // output and exit without an unhandled rejected write.

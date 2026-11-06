@@ -692,8 +692,9 @@ fn validate_binding(
     for input in &binding.inputs {
         require(
             (optional.contains(&input.as_str())
-                || (decision == Decision::Extent
+                    || (decision == Decision::Extent
                     && [
+                        "process_state.hook_count",
                         "process_state.active_time",
                         "process_state.resource_counters",
                         "process_state.result_facts",
@@ -929,11 +930,17 @@ fn validate_result(decision: Decision, data: &Value, result: &Value) -> io::Resu
                             ["indeterminate", "error", "extent_reached"].contains(&r)
                         });
                     }
-                    actions.len() == 1
-                        && actions[0].as_object().is_some_and(|m| m.len() == 1)
-                        && (actions[0]["intent"] == "Discard"
-                            || (actions[0]["intent"] == "Promote"
-                                && data["resolution"] == "accepted"))
+                    actions.iter().all(|action| {
+                        action.as_object().is_some_and(|m| m.len() == 1)
+                            && (action["intent"] == "Reuse"
+                                || action["intent"] == "Salvage"
+                                || action["intent"] == "Re-execute"
+                                || action["intent"] == "Discard"
+                                || action["intent"] == "Compensate"
+                                || action["intent"] == "Overwrite"
+                                || (action["intent"] == "Promote"
+                                    && data["resolution"] == "accepted"))
+                    })
                 })
         }
     };

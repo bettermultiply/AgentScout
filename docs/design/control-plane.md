@@ -4,6 +4,8 @@
 
 ## 1. 总体设计
 
+执行事实分为 Agent action、Agent/Branch 元事件、Agent Adapter 命令回执和 Runtime 事实。控制面只据对应来源更新状态；Runtime 失败不能伪装成 Agent 已报告失败，Agent 清理回执也不代表环境清理。action 关联 task、Branch 和 action identity，结果必须与开始配对；Authority/Candidate 角色由 Tree 判定。完整定义见 [Agent 接入](agent-integration.md)。
+
 控制面是抽象责任模型中 Mechanism 的实现主体，也是 Speculation Contract 的实现方。其主要目的是协调整个投机执行过程，并为 Policy 与 Runtime Adapter 的接入和运行提供协调与验证，避免策略意图与后端能力之间因语义不匹配而无法正确执行。
 
 控制面为每个 task 维护一棵完整的 Speculative Tree 控制面视图。对外这棵树以单一 Agent 的形式呈现给用户，对内我们将这棵树视作整个投机执行生命周期中由多个子树组成的派生嵌套关系。这个单一 Agent 视图和控制域称为 `AScoutAgent`。用户请求首先进入控制面；控制面负责建立 Agent 控制上下文并启动对应的 Agent 与接入侧，不要求用户手工启动具体 Agent 产品或接入组件。
@@ -52,13 +54,17 @@ Adapter Registry 不直接编排 Branch 生命周期，也不替代 Speculation 
 
 ### 2.4 Speculation Coordinator
 
-Speculation Coordinator 是控制面的全局投机控制器，持有全局投机视图并驱动控制循环。它维护每个 Task 的 Speculative Tree 视图，以及 Edge、Branch、Proposal、`AssumptionSet`、待选机会、调度状态和逻辑视图与 Runtime 实际状态之间的对应关系。它接收 Agent 接入侧的事件，以及 Runtime 经 Runtime Adapter 规范化后返回的结果和事件，据此更新全局视图，识别受影响的 Edge/Branch，并判断当前被激活的 Policy Decision。
+控制面围绕 Speculative Tree 组织。创建 task 时立即建立对应的树，树持有该 task 的 Edge、Branch、Proposal、`AssumptionSet`、待选机会、调度状态和未完成操作，以及逻辑状态与 Runtime 实际事实之间的对应关系。树的方法检查转换是否合法，更新状态并产生后续操作要求；策略选择由 Policy 函数计算。
+
+    Speculation Coordinator 协调树、Policy 和外部操作，可以服务多棵树。它不持有某个 task 的第二份投机状态；共享服务、连接与全局配置可以由协调侧持有。Policy 是一组决策函数，按处理点提供事实并求值，返回策略选择；其返回值须经树的当前状态检查后应用。
 
 Speculation Coordinator 通过 Policy Engine 对需要全局视图的 Decision 求值，并接收 Agent 接入侧已经完成的、不依赖或不改变全局状态的本地 Decision 结果；对已经满足本地范围条件的 Decision 不重复求值。它根据 Policy Decision 和当前全局视图形成操作意图，通过统一出口交给 Runtime，并根据实际结果或事件更新全局视图；需要交付 Agent 的结果经 Agent Control Gateway 返回。
 
-它同时负责维护通过 `admit` 但尚未启动的待选机会及其有效性，向 Policy 提供同一 task 内的待选、运行和暂停工作，以及预算、资源压力、等待时间、依赖和成本等事实；接收 `select` 对当前启动机会的选择和 `rebalance` 对已启动工作的暂停、恢复或抢占意图，并在 Contract、资源与正确性硬约束内执行。逻辑 Branch 可以先推进而不立即创建独立 Runtime 环境；当接入侧识别出即将发生需要独立 Branch-local 状态的变化时，Coordinator 经 Adapter 请求 Runtime 建立独立环境，并在收到实际完成事件后把逻辑状态标记为已对齐。独立环境尚未建立完成时，Coordinator 不把预期状态当作 Runtime 已确认的事实。未被选择的有效机会继续保留；pending result 到达、任务结束、祖先依赖被否定或其他必要前提失效时，Coordinator 将其移出集合。预算计数也由 Coordinator 维护，因为选择与执行都需要同步读取预算余量。
+每棵树维护通过 `admit` 但尚未启动的待选机会及其有效性，向 Policy 提供同一 task 内的待选、运行和暂停工作，以及预算、资源压力、等待时间、依赖和成本等事实；接收 `select` 对当前启动机会的选择和 `rebalance` 对已启动工作的暂停、恢复或抢占意图，并在 Contract、资源与正确性硬约束内执行。逻辑 Branch 可以先推进而不立即创建独立 Runtime 环境；当接入侧识别出即将发生需要独立 Branch-local 状态的变化时，Coordinator 经 Adapter 请求 Runtime 建立独立环境，并在收到实际完成事件后把逻辑状态标记为已对齐。独立环境尚未建立完成时，Coordinator 不把预期状态当作 Runtime 已确认的事实。未被选择的有效机会继续保留；pending result 到达、任务结束、祖先依赖被否定或其他必要前提失效时，Coordinator 将其移出集合。task 的预算计数归对应树，协调侧读取这些事实进行求值和操作协调。
 
 Coordinator 不使用固定价值公式替代 Policy 的跨 Edge 权衡，也不在 `select` 前重复 `admit` 精判。启动或调整运行状态前的有效性、后端能力与硬约束复核属于机制校验；条件暂时不满足时可以延后执行 Policy 的意图。`rebalance` 的抢占结果以 `preempted` 原因进入 `dispose`，而不是由 Coordinator 自行决定清理方式。
+
+消息到达或定时器到期触发处理，同一 task 的控制事件按顺序更新树。耗时的 Runtime 操作和 Policy 求值异步完成，结果再次作为事件交给对应树；在返回期间已失效的结果不得恢复已取消的工作。事件等待和连接管理属于运行设施，不承担策略选择，也不以定期轮询驱动业务。Agent 普通执行仍由接入侧负责。
 
 ### 2.5 效果处理的衔接
 

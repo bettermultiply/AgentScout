@@ -1,6 +1,6 @@
 # Policy Decisions
 
-Policy Decision 是 Policy 针对投机执行作出的可替换选择。单条 Edge 上的局部决策、跨 Edge 的启动选择与运行调整共同构成以下九类 decision：
+Policy Decision 是 Policy 针对投机执行作出的可替换选择。Edge 表示投机如何进行的一套过程/阶段，Branch 承载某次具体执行；单条 Edge 上的局部决策、跨 Edge 的启动选择与运行调整共同构成以下九类 decision：
 
 ```text
 S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)
@@ -251,7 +251,7 @@ dispose(branch, resolution, context) -> DispositionPlan
 select(frontier_view, scheduling_context) -> ordered subset[EdgeId]
 ```
 
-`frontier_view` 是 AScout 当前维护的、同一 task / AScoutAgent 中已经通过 `admit` 且仍然有效的全部待选机会快照。`scheduling_context` 提供可观察的预算、资源压力、机会等待时间、依赖与成本事实。该 task 绑定的 Policy 直接返回现在希望启动的有序机会子集；可以选择一个、多个或暂时一个都不选。排序公式、best-first、浅层优先、深层优先以及 breadth/depth 分配都属于具体 Policy，不是 AScout 的固定规则。
+`frontier_view` 是 AScout 当前维护的、同一 task / AScoutAgent 中已经通过 `admit` 且仍然有效的全部待选 Edge 快照，而不是单个机会或固定容量窗口。`scheduling_context` 提供可观察的预算、资源压力、机会等待时间、依赖与成本事实。该 task 绑定的 Policy 直接返回现在希望启动的有序 Edge 子集；可以选择一个、多个或暂时一个都不选。排序公式、best-first、浅层优先、深层优先以及 breadth/depth 分配都属于具体 Policy，不是 AScout 的固定规则。
 
 未被选择的机会继续留在待选集合，之后可以随新的资源和执行事实再次参与选择。AScout 拥有并维护该集合，而 Policy 不拥有可变队列状态。等待期间，如果 pending result 已到达、所属任务结束、祖先依赖被否定或其他必要前提失效，AScout 将机会移出集合；启动前 Speculation Coordinator 还必须复核机会有效性、Contract 与资源硬约束。
 

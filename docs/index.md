@@ -37,6 +37,8 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 
 ## 开发文档
 
+- [版本规划](development/roadmap.md)：各阶段统一名称、目标与验收重点，覆盖 v0.1.0 至 v1.0.0。
+
 1. [开发决策](development/decisions.md)：已经接受的实现架构选择与当前实现差距。
 2. [首要验证 Workload](development/reference-workload.md)：delayed-choice coding 场景与指标。
 3. [投机执行底座：抽象设计札记](development/spec-exec-abstraction.md)：投机执行底座的论文调研与研究札记。已确定的设计以正式设计文档为准。
@@ -47,5 +49,5 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 
 - **目标语义**：不依赖具体实现、系统必须满足的行为。
 - **开发决策**：已经接受的实现架构或验证选择。
-- **计划中**：当前树中没有实现证据。
+- **原型状态**：当前树包含 Pi/NLE 原型闭环，但尚不是经过完整能力验证的通用实现。
 - **已实现**：当前树中同时存在代码和验证证据；当前没有任何 AScout lifecycle、隔离和真实 backend 处于该状态。

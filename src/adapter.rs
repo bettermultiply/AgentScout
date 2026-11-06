@@ -605,6 +605,13 @@ impl Queue {
                 }
             };
             self.cancel.reset();
+            let _ = shared.out.send(AdapterMessage::Event(Event {
+                environment_id: request.environment_id.clone(),
+                request_id: Some(request.request_id.clone()),
+                payload: EventPayload::OperationStarted {
+                    operation: request.operation.clone(),
+                },
+            }));
             let result = shared.execute(&environment_id, &request, &self.cancel);
             if let Some(state) = result.environment_state {
                 shared.set_known(&request.environment_id, state);
@@ -616,6 +623,13 @@ impl Queue {
                     shared.set_known(child_environment_id, EnvironmentState::Available);
                 }
             }
+            let _ = shared.out.send(AdapterMessage::Event(Event {
+                environment_id: request.environment_id.clone(),
+                request_id: Some(request.request_id.clone()),
+                payload: EventPayload::OperationFinished {
+                    result: result.clone(),
+                },
+            }));
             let _ = shared.out.send(AdapterMessage::Result(result));
         }
     }

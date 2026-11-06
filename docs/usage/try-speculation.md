@@ -20,7 +20,7 @@ mkdir -p /tmp/ascout-demo
 
 ./target/debug/ascout-control-plane \
   /tmp/ascout-demo \
-  ../pi-code \
+  ../pi \
   assets/policy/nle.yaml \
   --model deepseek/deepseek-flash \
   --thinking low

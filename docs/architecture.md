@@ -4,6 +4,8 @@
 
 ## 1. 架构总览
 
+Agent 接入侧上报通用 action 生命周期及 Agent/Branch 元事件，控制命令回执只确认接入侧落实；Runtime 独立报告操作、环境及资源结果。Authority/Candidate 是 Tree 的角色，不是两种 Agent 事件协议。具体边界见 [Agent 接入](design/agent-integration.md)。
+
 用户端呈现稳定的 AScoutAgent 视图，与具体 Agent 执行实体分离。控制面确认合法 Promote 后，接入实现更新该视图对应的权威执行及输入、输出和中断路由；不通过切换或重建用户会话完成接替。用户端不新增一级架构侧面，也不拥有 Branch 接受裁决权。
 
 Parent 取得真实 operation 结果后可以立即继续，候选验证并行进行，不以验证结束阻塞真实结果交付；合法 Promote 才使旧 Parent 失去权威并受管停止。工具准入与结果兼容性由 Policy 结合接入能力判断，operation 归属与结果配对由 Mechanism 保证。
@@ -21,6 +23,8 @@ Agent 接入侧围绕一组 Agent 进程及其执行活动提供本地管理。B
 控制面定义自己接受的稳定 operation/event 边界和接入条件。Runtime Adapter 依据该边界，把 Runtime 的能力映射成控制面可以使用的能力，并规范化结果与事件。Runtime 内部可以组合 Overlay、进程、容器、Firecracker、效果协调等能力；AScout 不规定这些内部模块如何组织或选择 transport，但要求接入边界如实呈现能力和限制。
 
 Runtime 承载 Agent 的一步动作，使动作能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 负责动作所需的环境、状态派生、隔离、资源、进程和效果边界；这些能力可以按任务需要共享、复制、写时复制、重建或恢复。Agent Session 的内部管理由 Agent 接入侧负责。Agent-facing integration 组件可以部署在 Runtime 提供的环境内，其运行生命周期随该环境管理。
+
+控制面的具体投机状态集中在各 task 的 Speculative Tree。Controller 负责树、Policy 函数和外部操作之间的协调，不持有 task 的投机状态，可以供多棵树使用。消息与到期检查按 task 顺序处理；Runtime 操作和 Policy 求值异步返回，由树校验并应用。事件等待和通信入口不承担投机策略或状态转换职责。
 
 ### 1.1 架构边界
 

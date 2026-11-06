@@ -4,6 +4,8 @@
 
 ## 1. 契约边界
 
+Runtime 的操作开始、操作结果和环境状态变化是 Runtime 自身的事实，按 request/environment identity 关联；资源、剩余资源与后续清理要求随结果报告。接收请求不等于开始，开始不等于完成，控制面等待超时也不等于 Runtime 已取消。Agent action 结果或 Agent Adapter 命令回执不能代替这些事实，Runtime 结果同样不能代替 Agent session 已释放或 Tree 已完成权威切换。
+
 Runtime Adapter 连接控制面与 Runtime。控制面通过 Adapter 发出环境操作，Adapter 将其映射到 Runtime，并把结果和事件规范化返回。契约的核心是 Runtime 提供的承载能力：环境建立、环境内操作、静止、恢复、终止和清理，以及这些操作对不同环境内容形成的隔离和效果保证；环境派生是可选能力，不是所有任务或 Runtime 的前提。
 
 Adapter 可以使用 Runtime 原生隔离、权限控制、代理、拦截或拒绝来兑现声明。Registry 检查的是 Adapter 在边界上呈现的最终环境保证，不检查某一种内部实现。

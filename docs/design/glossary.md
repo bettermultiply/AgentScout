@@ -45,7 +45,7 @@
 - **Instance**：由 Runtime 承载 Branch Root 执行活动的执行单元；多个 Branch 可以共享、复制或独立承载所需状态，也可以在恢复或重建后继续。逻辑 Branch 可以在建立 Instance 前先存在并推进。（`../mental-model.md` §4.2）
 - **Proposal** `î`：具有全局唯一 `ProposalId` 的投机候选输入；候选 Branch 基于其 payload 提前执行后续步骤。（`../design-model.md` §3.1；`policy-decisions.md` §2.3）
 - **AssumptionSet**：Instance/SpecTask 携带的未决 Proposal ID 集合（`frozenset[ProposalId]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`../design-model.md` §3.1；`policy-decisions.md` §4.2）
-- **Edge**：一个投机机会，是投机执行的抽象模型与 Policy 的作用对象；同一条 Edge 上可以有多个 Proposal。可投机性由 `effect`、`admit` 及相应能力校验共同决定，不另设 admissibility 元数据。（`../design-model.md` §3.1；`policy-decisions.md`）
+- **Edge**：描述投机如何进行的一套过程或阶段，是 Policy 的作用对象；某次具体执行由 Branch 承载，Candidate 只是 Branch 的角色。同一条 Edge 上可以有多个 Proposal。（`../design-model.md` §3.1；`policy-decisions.md`）
 - **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；控制面在此从共同 execution base 登记多个逻辑 Branch，Runtime 按需建立其执行承载（共享或独立环境）。（`branch-semantics.md`；`decisions.md` D-024；术语收敛）
 - **SpecTask**：基于 Proposal 启动的投机工作单元，运行在隔离域中，携带 AssumptionSet。对应 candidate Branch。（`../design-model.md` §3.1；`policy-decisions.md` §4）
 - **Authority** `A_u`：提供真实输入、结果或外部权威判断的可选来源（主生成流、真实环境、用户/人或远程服务）；`Authority` 可以为空。它对应 parent（producer lane）与真实 operation，不等同于 validator。权威值来自谁是 Edge 的固有事实，不是可替换的决策槽；是否取得、何时取得由 `launch(input) -> bool` 决定，Eager、Absent 和 Lazy 只是系统提供的快捷定义。（`../design-model.md` §3.1；`policy-decisions.md` §2.4）
@@ -65,8 +65,8 @@
 - **Abort**：控制面要求接入侧中断指定 Branch 的当前执行，不表示外部操作已撤销。（用户确认：2026-10-25；`../../Discussion.md`）
 - **Output**：接入侧报告指定 Branch 的实际文本输出或工具活动；显示不赋予候选权威身份。（用户确认：2026-10-25；`../../Discussion.md`）
 - **TurnCompleted**：接入侧报告本轮执行结束，不表示预测已确认或候选可以 Promote。（用户确认：2026-10-25；`../../Discussion.md`）
-- **CleanupCompleted**：接入侧确认指定 Branch 已停止并释放会话，不代表环境目录或任意外部资源已清理。（用户确认：2026-10-25；`../../Discussion.md`）
-- **ToolPending**：接入侧报告 Parent 已产生真实工具调用但工具尚未执行，并携带操作标识、工具名、参数和可继续上下文。（用户确认：2026-10-25；`../../Discussion.md`）
+- **ActionStarted / ActionFinished**：Agent action 的开始登记及结果事实；action 包括模型推理、工具执行、启动 sub-agent 等。`result_pending=true` 表示仍停在执行前的等待边界，不表示真实操作已发生。结果区分成功、失败、取消、超时，并明确 task、Branch 和 action 身份。（用户确认：2026-11-06；`../../Discussion.md`）
+- **AgentSessionReleased / BranchReleased**：接入侧分别确认 Agent session 已释放、Branch 执行活动已释放；两者都不能代替 Runtime 环境清理事实。（用户确认：2026-11-06；`../../Discussion.md`）
 - **StartCandidate**：控制面要求接入侧根据共同上下文和预测工具结果启动 Candidate 续跑；预测不是 Parent 的真实证据。（用户确认：2026-10-25；`../../Discussion.md`）
 - **ResolvePending**：控制面报告真实等待点的裁决，不阻塞 Parent 取得真实结果并继续；接替主路径由 Promote 命令落实，它本身不改变 Policy 裁决。（用户确认：2026-10-25；`../../Discussion.md`）
 

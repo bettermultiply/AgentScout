@@ -3,7 +3,7 @@ use ascout::agent_control::{AgentMessage, SpeculativeTree};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default, Serialize)]
 pub struct Conversation {
@@ -36,28 +36,27 @@ pub enum Request {
 #[derive(Clone)]
 pub struct Interface {
     run_view: Arc<Mutex<AScoutRunView>>,
-    requests: mpsc::Sender<Request>,
+    requests: Arc<dyn Fn(Request) -> Result<(), String> + Send + Sync>,
 }
 
 impl Interface {
-    pub fn new(tree: SpeculativeTree) -> (Self, mpsc::Receiver<Request>) {
-        let (requests, receiver) = mpsc::channel();
-        (
-            Self {
-                run_view: Arc::new(Mutex::new(AScoutRunView {
-                    tree,
-                    conversations: BTreeMap::new(),
-                    facts: BTreeMap::new(),
-                    events: Vec::new(),
-                    ready: false,
-                    running: false,
-                    notice: "Starting Agent session…".into(),
-                    connected: true,
-                })),
-                requests,
-            },
-            receiver,
-        )
+    pub fn new(
+        tree: SpeculativeTree,
+        requests: impl Fn(Request) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            run_view: Arc::new(Mutex::new(AScoutRunView {
+                tree,
+                conversations: BTreeMap::new(),
+                facts: BTreeMap::new(),
+                events: Vec::new(),
+                ready: false,
+                running: false,
+                notice: "Starting Agent session…".into(),
+                connected: true,
+            })),
+            requests: Arc::new(requests),
+        }
     }
 
     pub fn run_view(&self) -> AScoutRunView {
@@ -67,9 +66,7 @@ impl Interface {
         if !self.run_view.lock().unwrap().connected {
             return Err("Control plane disconnected".into());
         }
-        self.requests
-            .send(request)
-            .map_err(|_| "Control plane disconnected".into())
+        (self.requests)(request)
     }
     pub fn publish(
         &self,
@@ -108,7 +105,7 @@ impl Interface {
     pub fn message(&self, message: &AgentMessage) {
         let mut state = self.run_view.lock().unwrap();
         match message {
-            AgentMessage::Output { branch_id, text } => {
+            AgentMessage::Output { branch_id, text, .. } => {
                 state
                     .conversations
                     .entry(branch_id.clone())

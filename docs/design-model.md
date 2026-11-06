@@ -2,7 +2,7 @@
 
 本文指导 AScout 的**抽象概念层**：它描述策略如何被表达、机制如何落实、运行能力如何支撑，不描述具体系统如何部署与连线。本文与架构是 mental-model 的两个平级展开，分别对应心智模型中的工作模型与支撑模型（§2、§3）。
 
-本文只记录已确定的抽象语义。仓库当前没有实现；开发决策、路线图与验收状态记录在开发文档中。
+本文只记录已确定的抽象语义。仓库包含 Pi/NLE 原型实现；实现覆盖范围、限制与验收状态记录在开发文档中，不能把原型等同于完整通用实现。
 
 ## 1. 抽象分层：Policy / Mechanism / Runtime
 
@@ -62,7 +62,7 @@ Agent 默认无需感知背后的投机分支，仍可按原方式完成任务�
 
 我们对一次投机执行进行进一步抽象。令一个会产生结果的行为 `u`，`u` 的真实结果为 `i`，依赖该结果才能继续的后续行为 `v`。将 `i` 视作 `u` 和 `v` 之间的连线，我们就可以得到 `u --i--> v`。假设我们对这一过程进行投机执行，也就是使用虚拟的 `i^n`（或者称作 Proposal） 替代 `i` 来提前启动 `v^n` ，并最终将 `v` 和 `v^n` '合并' 成一个结果。我们将这一过程建模成 "投机边 Edge"。
 
-Edge 是一个全局概念，从一个投机机会开始，到这个机会失效或对应的投机执行过程结束为止。Edge 表示在哪个未决依赖上可能进行投机；通过 `admit` 后，它可以先处于待选状态而尚无 Proposal 或 Branch。被 `select` 选中并开始预测后，同一个 Edge 上可以并行存在多个 Proposal `i^n`，每个 Proposal 各自派生出候选 Branch。Proposal 表示对该依赖结果的一个预测，Branch 表示基于该预测实际展开的候选执行。
+Edge 表示一套描述投机如何进行的过程/阶段，覆盖从投机开始到该过程结束的完整执行。Edge 不是投机机会对象，也不因一次执行而新增独立运行实体；某次执行由 Branch 承载。Proposal 是 Edge 边界上的不可变候选输入，Branch 以 Candidate 角色承载基于 Proposal 的实际展开；一个 Edge 可以产生多个 Proposal 和候选 Branch。
 
 Edge 还是 Policy 作用的基本对象。Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策，通过对不同 Policy Decision 的组合可以生成不同的执行策略。单条 Edge 上的局部决策、跨 Edge 的全局选择和已启动工作的调整由九类 policy decision 刻画：`admit`、`select`、`rebalance`、`extent`、`predict`、`launch`、`effect`、`match`、`dispose`。对每个 decision 的详细描述见 [Policy Decisions 设计](design/policy-decisions.md)。
 

@@ -19,14 +19,14 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 ```sh
 mkdir -p /tmp/opencode/run-1
 ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
-cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi-code
+cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi
 ```
 
 如果更方便使用浏览器页面，可让控制面绑定本机地址：
 
 ```sh
 ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
-cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi-code --web 127.0.0.1:8080
+cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi --web 127.0.0.1:8080
 ```
 
 浏览器 UI 只绑定 loopback；打开控制面输出的地址即可。TUI 与浏览器 UI 不共享绘制代码，只通过控制面提供的 AScoutRunView 和操作请求接口工作。
@@ -37,7 +37,7 @@ cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi-code --web 127
 
 ```sh
 ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
-cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi-code assets/policy/pi-tool.yaml
+cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi assets/policy/pi-tool.yaml
 ```
 
 该示例 Policy 从 `example`、`true`、`false` 中无固定种子地抽取两个不同预测。具体随机场景、脚本模型接口及启动方式见 [验证 Workload](docs/development/reference-workload.md)。`/ascout` 查看预测、实际结果、处置和清理，`/events` 查看原始事件；运行目录的 `events.jsonl` 保留原始事实。已有脚本模型接口加真实 Pi/bash 的验证，不冒充真实大模型验证，不宣称预测质量或加速收益。

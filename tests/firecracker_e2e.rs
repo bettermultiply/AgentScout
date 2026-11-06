@@ -403,10 +403,16 @@ fn killing_firecracker_emits_an_environment_state_event() {
         .unwrap();
 
     kill(harness.firecracker_process(environment).pid);
-    let event = harness
-        .session
-        .wait_event(Duration::from_secs(5))
-        .expect("no state event after killing Firecracker");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let event = loop {
+        let event = harness
+            .session
+            .wait_event(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("no state event after killing Firecracker");
+        if matches!(event.payload, EventPayload::EnvironmentStateChanged { .. }) {
+            break event;
+        }
+    };
     assert_eq!(event.environment_id, environment);
     match event.payload {
         EventPayload::EnvironmentStateChanged {
@@ -415,6 +421,7 @@ fn killing_firecracker_emits_an_environment_state_event() {
             assert_eq!(previous, Some(EnvironmentState::Available));
             assert_eq!(current, EnvironmentState::Terminated);
         }
+        _ => unreachable!("filtered to environment state events"),
     }
 
     let cleaned = harness

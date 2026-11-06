@@ -26,7 +26,7 @@ Product Integration 是面向具体 Agent product 的产品适配组件，负责
 
 当 Agent 即将执行可管理步骤时，Product Integration 将该步骤交给 Agent 接入侧，并等待 Agent 接入侧返回处置结果。返回继续时，Product Integration 允许产品按原有路径执行该步骤；返回跳过时，Product Integration 不执行原步骤，并在需要时让当前调用沿产品原有的完成路径使用 Agent 接入侧提供的结果结束。暂停通过等待处置结果体现，不需要额外的暂停机制。
 
-Product Integration 从被拦截步骤的原调用返回路径自动取得成功、失败或取消结果，并将其交给 Agent 接入侧形成 outcome。它不修改 Agent 的业务逻辑，也不要求 Agent 主动调用 AScout API；具体产品适配可以了解其内部执行结构，但应将改造限制在观察和控制所需的接入范围内。
+Product Integration 从被拦截步骤的原调用返回路径自动取得成功、失败或取消结果，并将其交给 Agent 接入侧形成 outcome。它不修改 Agent 的业务逻辑，也不要求 Agent 主动调用 AScout API；具体产品适配可以了解其内部执行结构，但应将改造限制在观察和控制所需的接入范围内。只有产品确实提供真实的执行前接缝时才能声明支持该类 action；SDK 的输出观察事件（例如 `message_start`）不是推理前 Hook，不能冒称为此能力。
 
 ### 2.2 ASC-Proxy
 
@@ -35,6 +35,18 @@ ASC-Proxy 是 Agent 接入侧与控制面之间的受管通信代理。它可以
 通信会话建立后，Agent 接入侧通过 ASC-Proxy 向控制面提交 Agent 执行事实、控制请求、本地 Decision 结果和 outcome；控制面通过同一会话向 Agent 接入侧返回命令、结果和事件。ASC-Proxy 负责消息的发送、接收和传递，不参与 Agent 步骤的执行、Decision 的判断或 Branch 生命周期的处理。正式用户流程中，控制面负责启动和回收该 Agent 及其接入会话，用户不直接管理 ASC-Proxy。
 
 ### 2.3 Interposer
+
+#### 执行事实与来源
+
+Agent 接入协议围绕 action，而非工具或 Branch 角色组织。action 可以是模型推理、工具执行、启动 sub-agent、发送消息、等待或结束；每个 action 关联 `task_id`、`branch_id`、`action_id`、`action_kind`，可用 `parent_action_id` 说明因果归属。Authority/Candidate 由 Tree 查询，不由事件名称声明。
+
+`ActionStarted` 登记 action 生命周期；`result_pending=true` 明确表示接入侧停在真实执行之前的等待边界，不能据此断言真实 action 已经执行。普通 action 事实与投机准入请求分开；普通执行无需等待控制面投机决策。`ActionFinished` 报告成功、失败、取消或超时，并携带 result 和可选 evidence；取消请求不等于已取消，控制面等待期限届满也不等于 Agent 已停止。相同 action 的结果必须与开始事实配对。
+
+当前通用协议提供显式的 `SpeculativeAdmissionRequest` 路径，只有接入侧本地 Decision 产生该请求时，控制面才会进入投机准入和预测。Pi 的工具执行前 Hook 已接入下发的 Policy artifact，并按其 `admit` 结果区分普通 action 与投机准入请求；模型推理前和 sub-agent 启动前仍没有真实 Hook，不能宣称支持这两类 action。
+
+Agent 连接、就绪、断开、失败、释放，以及 Branch 创建、开始、就绪、暂停、恢复、失败、释放，属于各自主体的元事件。Agent session 释放、Branch 执行释放和 Runtime 环境清理分别表达。Agent 不能报告 Tree 已 Promote/Discard，也不能代替 Runtime 确认环境清理。
+
+`CommandResult` 是 Agent Adapter 对控制命令的接收、开始及终态回执；Applied 只确认接入侧已落实，不代表 Runtime 或整棵 Tree 的转换全部完成。控制面分别处理 Runtime 的操作结果、环境事件和 Agent 回执，再推进 Tree。输出、执行记录和使用量按 Branch 归属；未接受的 Candidate 输出只可作为诊断内容，不进入权威用户输出。
 
 Interposer 是 Agent 接入侧中介入 Agent 执行接缝并落实本地 AScout 语义的责任实体。Agent 即将执行可管理步骤时，Product Integration 将步骤交给 Interposer；Interposer 从拦截点提取步骤事实，识别 operation 的开始、`pending-result boundary` 以及可能产生的 Branch-local 状态和 Effect，并暂停当前步骤，等待本地 Decision 或控制面返回处置结果。普通步骤根据处置结果沿原有路径继续执行，不需要进入投机处理。
 
@@ -64,7 +76,7 @@ Parent 获得真实结果后沿原路径继续，不以候选比较完成为结�
 
 Agent 接入侧可以在执行环境中按需要建立其本地承载，并由 ASC-Proxy 与控制面建立会话。环境内的每个 Agent 在启动时通过 Product Integration 接入 Agent 接入侧，并持有独立的 Agent 执行上下文。多个 Agent 及其 Branch 可以暂时共享同一个执行环境和接入侧承载；当某个 Branch 需要独立的 Branch-local 状态时，控制面通过 Runtime 接入边界请求相应的承载能力，并使该 Branch 的执行活动进入满足要求的环境。具体承载方式由实现决定，但必须保持各 Agent 和 Branch 上下文的独立性。状态可以复制、共享、写时复制、重建或恢复，优先采用满足要求的低成本方式。Agent Session 的内部管理、复制、共享、恢复和继续运行由 Agent 接入侧负责；Runtime 负责提供其所需的动作承载和环境约束。
 
-Task 绑定 Policy 并建立受管上下文时，控制面可以从 Policy Engine 查询已经编译的本地 Decision，并经 Agent Control Gateway 交付给对应的 Agent 接入侧。接入侧反序列化后对这些 Decision 求值，不需要为每次 Decision 重新获取或解析 Policy；结果和 decision log 仍通过 ASC-Proxy 与 Agent Control Gateway 返回控制面。接入侧不能自行加载、编译或修改 Policy。
+目标协议中，Task 绑定 Policy 并建立受管上下文时，控制面从 Policy Engine 查询已经编译的本地 Decision，并经 Agent Control Gateway 交付给对应的 Agent 接入侧。Pi 接入侧不重新编译或修改 Policy，而是执行下发 artifact 中带有既有 runner、配置和依赖的脚本；工具 Hook 的本地 `admit` 结果决定是否提交 `speculative_admission_request`。普通工具事实不因控制面只处理准入而停止，Runtime 工具仍沿原有结果等待路径继续。需要全局事实或生命周期裁决时仍提交控制面。
 
 ## 相关文档
 

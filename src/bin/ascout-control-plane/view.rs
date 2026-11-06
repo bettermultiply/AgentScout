@@ -95,7 +95,8 @@ mod tests {
             status: BranchStatus::Running,
             generation: 1,
             execution_position: Default::default(),
-            proposal: None,
+            proposal_id: None,
+            assumption_set: Vec::new(),
             pending_operations: Vec::new(),
             execution_state: Default::default(),
         };

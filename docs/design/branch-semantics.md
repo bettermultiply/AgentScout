@@ -2,7 +2,7 @@
 
 本文定义 AScout 的 Branch 与 Speculative Tree 目标语义：Branch 结构、生命周期、依赖、状态可见性、信息传播与 resolution。
 
-本文只记录已确定的目标语义。仓库当前没有实现；开发决策、路线图与验收状态记录在开发文档中。
+本文只记录已确定的目标语义。仓库包含 Pi/NLE 原型实现；实现覆盖范围、限制与验收状态记录在开发文档中，不能据此把原型描述为完整通用实现。
 
 默认 Agent 完全不感知 Branch，不需要读取 Branch context、Proposal、children、capability 或 lifecycle state，也不需要主动参与 Branch 生命周期。当前不支持显式 Agent 感知，也不需要支持；Branch 的创建、推进、验证、接受、丢弃、重新挂载和清理不依赖 Agent 的主动配合。本文第 6 节单独保留显式 Agent 感知的未来设计，不改变当前边界。
 

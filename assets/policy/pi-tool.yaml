@@ -18,13 +18,14 @@ decisions:
     file: decisions.py
     function: select
     policy_config:
-      max_edges: 1
+       max_edges: 4
   rebalance:
     file: decisions.py
     function: rebalance
   extent:
     file: decisions.py
     function: extent
+    inputs: [process_state.hook_count]
     policy_config:
       max_steps: 5
   predict:

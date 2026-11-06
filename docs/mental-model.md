@@ -18,11 +18,17 @@ AScout 通过统一的投机执行机制连接策略与运行时，承接不同�
 
 AScout 不是某个固定算法，也不要求每个动作都建立完整、昂贵的独立环境。它也不承诺每个任务必然加速；是否投机、何时投机以及如何投机，由控制面根据所绑定的 Policy 决定。Runtime 可以按任务需要共享、复制、写时复制、重建或恢复状态，并优先使用满足要求的低成本方式。投机策略能否执行以及能够达到什么保证，则取决于 Runtime 能力、运行时条件和 Speculation Contract。
 
+当前发布路线聚焦 coding Agent：v1.0.0 交付开发者可以实际接入、编写策略并验证收益的通用底座；CUA 等更广泛 Agent 可作为 v2 方向。阶段目标见 [版本规划](development/roadmap.md)。
+
 ## 2. AScout 的工作模型
+
+Agent 以 action 及其结果报告执行事实，action 不限于工具调用。Agent 与 Branch 的生命周期、Agent 对控制命令的回执、Runtime 的操作与环境事实分别归属各自产生方；控制面据此更新 Tree，不以“发出命令”冒充“已完成”。
 
 投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 待选准入 -> 启动选择 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。AScout 可以暂存已经准入但尚未启动的机会；一个 task / AScoutAgent 绑定的 Policy 在该 task 内全部有效待选机会之间选择现在启动哪些，并可以调整已经运行或暂停的投机工作。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、Promote 或结束。Parent 得到真实结果后立即继续，候选验证可并行进行；合法 Promote 才停止旧 Parent。工具准入与结果兼容性由 Policy 结合实际能力判断，不由固定工具数量或结果类型代替策略决策。
 
 Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Agent 接入侧负责 Agent 内部会话和行为接入；Runtime 承载动作并提供隔离、资源和效果边界；控制面负责全局编排、校验和裁决。Runtime Adapter 是 Runtime 的接入边界，不是与 Runtime 平级的另一套 Runtime。Speculation Contract 约束 Policy、控制面和 Runtime 之间的可观察语义；Runtime 内部可以组合不同的执行和效果管理能力。
+
+创建 task 时即建立对应的 Speculative Tree。树拥有该 task 的投机控制状态，其方法检查合法转换；Policy 函数计算策略选择。Controller 可以协调多棵树，不保存具体 task 的投机状态。同一 task 由消息和定时器触发顺序处理，耗时操作异步返回；Agent 的普通执行由接入侧负责。
 
 工作模型的完整权威描述见 [设计模型](design-model.md) §2。
 
@@ -30,7 +36,7 @@ Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面
 
 AScout 用三个支撑模型承接不同投机执行策略在预测、验证、拓扑和处置等方面的差异：
 
-- **投机边与 Policy Decisions**：投机边 Edge 是 Policy 的作用对象；开发者可以根据任务、上下文、资源和 Runtime 能力，通过组合 Edge 上的 Policy Decision 设计可替换的决策 Policy，并处理多次投机的组合与嵌套。
+- **投机过程与 Policy Decisions**：Edge 表示描述投机如何进行的一套过程/阶段，是 Policy 的作用对象；Branch 承载某次具体执行，Candidate 只是 Branch 角色。开发者可以根据任务、上下文、资源和 Runtime 能力，通过组合 Edge 上的 Policy Decision 设计可替换的决策 Policy，并处理多次投机的组合与嵌套。
 - **状态与效果**：把投机执行过程中需要保护的文件、进程、输入、结果和外部服务交互放入统一的管理框架。Agent Session 内部状态由接入侧管理；Runtime 提供动作承载和效果边界，根据需要组合隔离、暂存、延迟、阻塞、补偿或清理能力。
 - **Speculation Contract**：约束 Policy、控制面与 Runtime 之间语义对齐的契约；Runtime Adapter 负责把 Runtime 的能力、结果和事件接入这条可检查、可执行的路径，并让拒绝或降级原因可见。
 

@@ -2,6 +2,16 @@
 
 本文记录已接受的实现架构与验证决策。目标语义归 `docs/design/` 所有。
 
+## 2026-11-06：通用 Agent 事实协议
+
+废弃 `ToolPending`、`ParentOutcome`、`CandidateCompleted` 和含义混合的 `CleanupCompleted` Agent 消息，以及 `Hello` Agent 握手命名。分别使用 `ActionStarted`（等待边界由 result_pending 表达）、`ActionFinished`（带 action kind 与终态）、`AgentSessionReleased` / `BranchReleased`、`AgentConnected`；Runtime 握手不受此命名变更影响。Transcript 不再由 Adapter 声明 Authority/Candidate 角色。线协议与 Pi 接入同步切换，不保留旧消息兼容分支。
+
+`CommandResult` 扩充 Accepted/Started，只有终态消费 pending command；Applied 仍只表示 Agent Adapter 已落实。Runtime Adapter 发出操作开始/完成事件，保留已有 OperationResult 请求配对；控制面记录实际 Runtime 事件。环境建立失败由 Runtime 结果驱动 Candidate 丢弃，不再构造 Agent BranchFailed。目标事实类型的完整定义见 `docs/design/agent-integration.md`；原型接入覆盖范围见 `reference-workload.md`。
+
+普通 `ActionStarted` 只登记 action 事实。只有接入侧本地 Decision 明确产生 `SpeculativeAdmissionRequest` 时，控制面才会登记投机操作并调度 Policy 预测。Pi 工具 Hook 已执行下发 artifact 中的 `admit`，普通工具不自动准入，Policy 允许时才产生投机准入请求；validator/evidence-only 路径与完整全局 rebalance 仍未实现，代码必须保留准确的未启动状态。
+
+本原型现已把 Proposal 独立保存在 `SpeculativeTree.proposals` 中；Branch 只保存 `proposal_id` 和 `assumption_set`。当前实现为每个候选建立一个直接 Proposal，AssumptionSet 仍按 Proposal ID 表达，但尚未实现任意多 Proposal 依赖的传播、确认和重挂载。控制面下发编译后的本地 Decision artifact，Pi 在真实工具 Hook 中求值；`extent` 由接入侧按 Branch 隔离的 Hook 次数求值，Hook 次数不是 `steps_completed` 的完成步骤数。`launch=false` 会保留 Proposal 并记录 validator/evidence-only unsupported，不启动 Authority Invoke。控制面 `BranchPhase` 只记录控制面实际推进的阶段：显式准入请求进入 `select`，随后按实际路径更新 `predict`、`launch`、`effect`、`match`、`dispose`；本地 `admit` 不单独占用控制面阶段。完整全局 `rebalance` 仍未实现；本地 extent stop 已可在 Hook 边界暂停，并支持取消、discard、cleanup 和合法恢复。
+
 ## 2026-11-04：Runtime 整体边界与首阶段范围
 
 已收敛：AScout 自身支持一套完整 Runtime，承载 Agent 一步动作，使其正常、正确运行，并把对真实世界或 Authority 的影响限制在容忍范围内。Runtime Adapter 与 Effect Coordinator 是这个整体中的接入和效果管理职责，不是平级的独立运行系统。Agent Session 内部管理仍归接入侧，Runtime 负责动作承载和外部效果边界；状态可以复制、共享、写时复制、重建或恢复，优先低成本方式。
@@ -262,7 +272,7 @@ Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义�
 
 已确认并开始落实四层边界：控制面继续拥有 Speculative Tree、全局 Policy 和 Branch 生命周期；TypeScript 接入包承载 Agent 无关的协议类型、命令传输、命令去重、能力声明和局部执行 Policy；具体 Agent 通过 Adapter 提供会话与工具切点能力；Runtime 继续负责任务环境和工具效果约束。
 
-第一步已加入 `pi-code/packages/ascout-agent-access`。公共协议只使用 `branch_id`、`operation_id`、`tool_call_id` 和不透明的 `CheckpointHandle`，不暴露 Pi transcript 或 session 类型。`CheckpointHandle` 只能由产生它的 Adapter 解释，公共层只保存和转发。
+第一步已加入 `pi/packages/ascout-agent-access`。公共协议只使用 `branch_id`、`operation_id`、`tool_call_id` 和不透明的 `CheckpointHandle`，不暴露 Pi transcript 或 session 类型。`CheckpointHandle` 只能由产生它的 Adapter 解释，公共层只保存和转发。
 
 本步保留现有 Pi 接入主循环以保持行为不变，并让它复用公共协议、传输函数和能力类型；尚未宣称完成全部 session 编排迁移。下一步应把 `agent-access.ts` 的会话表、pending operation 和工具前置拦截逐步移入 `AgentAdapter`，再移除控制面中的 NLE 特例。
 
@@ -287,3 +297,9 @@ Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义�
 现行规则：Branch 只有在 `Cleaned`、非当前 Authority、无未完成控制命令且无子 Branch 引用时才从活动 Tree 移交给 Ledger。Ledger 接管后，写入成功才按约定释放记录；写入失败时继续持有该 Branch，并由控制面报告这次运行的历史不完整。写入成功仍不包含强制 `flush`，失败后也不对已写入的部分内容作回滚或去重承诺，不引入自动重试或恢复队列，不把 Branch 放回活动 Tree。
 
 实现：`Ledger` 保留未写入的 Branch，`archive_branch` 失败时不再丢弃记录；控制面退出时列出未能归档的 Branch 并返回错误。
+
+### 2026-11-05：控制状态归树与消息触发
+
+用户确认：task 创建时建立树，具体投机状态归树；Controller 不持有 task 状态，可协调多棵树。Policy 为决策函数，树的方法负责合法转换和后续操作要求。消息／定时器触发同一 task 顺序处理，耗时操作异步返回。Gateway 的统一范围暂未决定。
+
+废弃实现：AgentController 持有 ControlState 和编号，及主循环每 100 毫秒扫描、同步调用 Policy／Runtime 的组织方式。此前 start_candidates、advance_candidates 与同步回调包装由树的事件处理和无状态协调替代。未经用户同意不提交。
