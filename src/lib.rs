@@ -8,6 +8,7 @@ pub mod guest_access;
 pub mod ledger;
 pub mod nle;
 pub mod policy;
+pub mod runtime;
 pub mod transport;
 
 pub mod coordination;

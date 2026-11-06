@@ -47,6 +47,7 @@ pub struct HelloInfo {
     pub protocol_version: u32,
     pub adapter_instance: String,
     pub capabilities: RuntimeCapabilities,
+    pub backend_ids: Vec<String>,
 }
 
 /// 一条 Adapter 会话。
@@ -80,35 +81,39 @@ impl ControlSession {
         let hello = session.hello.clone();
         let results = session.results.clone();
         let events = session.events.clone();
-        thread::spawn(move || loop {
-            let message: Option<AdapterMessage> =
-                transport::read_message(&mut reader).unwrap_or_default();
-            match message {
-                Some(AdapterMessage::Hello {
-                    protocol_version,
-                    adapter_instance,
-                    capabilities,
-                }) => {
-                    *hello.0.lock().unwrap() = Some(HelloInfo {
+        thread::spawn(move || {
+            loop {
+                let message: Option<AdapterMessage> =
+                    transport::read_message(&mut reader).unwrap_or_default();
+                match message {
+                    Some(AdapterMessage::Hello {
                         protocol_version,
                         adapter_instance,
                         capabilities,
-                    });
-                    hello.1.notify_all();
+                        backend_ids,
+                    }) => {
+                        *hello.0.lock().unwrap() = Some(HelloInfo {
+                            protocol_version,
+                            adapter_instance,
+                            capabilities,
+                            backend_ids,
+                        });
+                        hello.1.notify_all();
+                    }
+                    Some(AdapterMessage::Result(result)) => {
+                        results
+                            .0
+                            .lock()
+                            .unwrap()
+                            .insert(result.request_id.clone(), result);
+                        results.1.notify_all();
+                    }
+                    Some(AdapterMessage::Event(event)) => {
+                        events.0.lock().unwrap().push_back(event);
+                        events.1.notify_all();
+                    }
+                    None => break,
                 }
-                Some(AdapterMessage::Result(result)) => {
-                    results
-                        .0
-                        .lock()
-                        .unwrap()
-                        .insert(result.request_id.clone(), result);
-                    results.1.notify_all();
-                }
-                Some(AdapterMessage::Event(event)) => {
-                    events.0.lock().unwrap().push_back(event);
-                    events.1.notify_all();
-                }
-                None => break,
             }
         });
 
@@ -139,10 +144,31 @@ impl ControlSession {
         environment_id: &str,
         operation: Operation,
     ) -> io::Result<()> {
+        self.send_with_context(
+            request_id,
+            environment_id,
+            None,
+            Some(environment_id),
+            operation,
+        )
+    }
+
+    /// 发送带有任务和逻辑 Branch 上下文的请求。旧调用方继续使用
+    /// [`send`]，因此不会改变既有控制协议的最小用法。
+    pub fn send_with_context(
+        &self,
+        request_id: &str,
+        environment_id: &str,
+        task_id: Option<&str>,
+        branch_id: Option<&str>,
+        operation: Operation,
+    ) -> io::Result<()> {
         let message = ControlMessage::Request(OperationRequest {
             request_id: request_id.to_string(),
             environment_id: environment_id.to_string(),
             operation,
+            task_id: task_id.map(str::to_string),
+            branch_id: branch_id.map(str::to_string),
         });
         let mut writer = self.writer.lock().unwrap();
         transport::write_message(&mut *writer, &message)
@@ -155,7 +181,24 @@ impl ControlSession {
         environment_id: &str,
         operation: Operation,
     ) -> io::Result<OperationResult> {
-        self.send(request_id, environment_id, operation)?;
+        self.call_with_context(
+            request_id,
+            environment_id,
+            None,
+            Some(environment_id),
+            operation,
+        )
+    }
+
+    pub fn call_with_context(
+        &self,
+        request_id: &str,
+        environment_id: &str,
+        task_id: Option<&str>,
+        branch_id: Option<&str>,
+        operation: Operation,
+    ) -> io::Result<OperationResult> {
+        self.send_with_context(request_id, environment_id, task_id, branch_id, operation)?;
         self.wait_result(request_id, Duration::from_secs(30))
             .ok_or_else(|| {
                 io::Error::new(

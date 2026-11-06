@@ -261,6 +261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args: agent_args,
         cwd: tree.workspace(),
         log: run_dir.join("agent.log"),
+        instance_id: Some("agent".into()),
         env: std::collections::BTreeMap::from([
             ("ASCOUT_RUNTIME_TOOLS".into(), runtime_tools),
             ("ASCOUT_PI_ROOT".into(), pi_root.display().to_string()),

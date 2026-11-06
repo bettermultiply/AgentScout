@@ -44,6 +44,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 3. [投机执行底座：抽象设计札记](development/spec-exec-abstraction.md)：投机执行底座的论文调研与研究札记。已确定的设计以正式设计文档为准。
 4. [Runtime Adapter 接入指南](development/runtime-adapter.md)：Runtime 首阶段 Overlay 范围、接入责任、实现建议与尚待定义的接口事项。
 5. [Policy Engine 原型](development/policy-engine.md)：实际 YAML 编译、Python 求值接口、示例与当前限制。
+6. [Runtime 生命周期协议](development/runtime-discussion.md)：Runtime 生命周期操作、请求/环境身份、多 Backend 组合下的顺序、部分失败、状态聚合与清理责任。
 
 ## 状态术语
 

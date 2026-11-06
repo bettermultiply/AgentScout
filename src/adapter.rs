@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::backend::{Backend, CancelHandle};
+use crate::backend::{Backend, BackendContext, BackendError, BackendExecution, CancelHandle};
 use crate::contract::{
     AdapterMessage, AgentLaunch, Content, ControlMessage, EnvironmentState, Event, EventPayload,
     FollowUp, Operation, OperationRequest, OperationResult, PROTOCOL_VERSION, ResourceNote,
@@ -23,7 +23,7 @@ use crate::transport;
 
 pub struct Adapter {
     pub adapter_instance: String,
-    pub backend: Arc<dyn Backend>,
+    pub runtime: Arc<dyn Backend>,
 }
 
 impl Adapter {
@@ -44,11 +44,12 @@ impl Adapter {
         let _ = out.send(AdapterMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
             adapter_instance: self.adapter_instance,
-            capabilities: self.backend.capabilities(),
+            capabilities: self.runtime.capabilities(),
+            backend_ids: self.runtime.backend_ids(),
         });
 
         let shared = Arc::new(Shared {
-            backend: self.backend,
+            runtime: self.runtime,
             out,
             queues: Mutex::new(HashMap::new()),
             seen: Mutex::new(HashSet::new()),
@@ -70,13 +71,13 @@ impl Adapter {
                 }
             }
         }
-        shared.stop_agent();
+        shared.stop_agents();
         Ok(())
     }
 }
 
 struct Shared {
-    backend: Arc<dyn Backend>,
+    runtime: Arc<dyn Backend>,
     out: Sender<AdapterMessage>,
     queues: Mutex<HashMap<String, Arc<Queue>>>,
     /// 已经受理过的请求标识：重发同一标识按重试处理，不重复执行。
@@ -124,22 +125,26 @@ impl Shared {
         request: &OperationRequest,
         cancel: &CancelHandle,
     ) -> OperationResult {
-        let state = self.backend.state(environment_id);
+        let state = self.runtime.state(environment_id);
+        let context = BackendContext {
+            task_id: request.task_id.clone(),
+            branch_id: request
+                .branch_id
+                .clone()
+                .or_else(|| Some(request.environment_id.clone())),
+            environment_id: environment_id.to_string(),
+            parent_environment_id: None,
+        };
+
         match &request.operation {
-            Operation::EstablishEnvironment => match state {
-                Some(_) => {
-                    let mut result = result(request, ResultStatus::Failed, state, false);
-                    result.reason = Some("environment already exists".to_string());
-                    result
+            Operation::EstablishEnvironment => {
+                if state.is_some() {
+                    return self.reasoned_failure(request, state, "environment already exists");
                 }
-                None => match self.backend.establish(environment_id) {
+                match self.runtime.establish_with_context(&context) {
                     Ok(()) => {
-                        let mut result = result(
-                            request,
-                            ResultStatus::Completed,
-                            Some(EnvironmentState::Available),
-                            true,
-                        );
+                        let actual = self.runtime.state(environment_id);
+                        let mut result = self.success(request, actual, can_accept(actual));
                         result.resources = vec![
                             ResourceNote {
                                 content: Content::Process,
@@ -152,308 +157,343 @@ impl Shared {
                         ];
                         result
                     }
-                    Err(error) => {
-                        let mut result = result(request, ResultStatus::Failed, None, false);
-                        result.reason = Some(error.message);
-                        result
-                    }
-                },
-            },
-            Operation::OperateEnvironment { command, agent } => match state {
-                Some(EnvironmentState::Available) => {
-                    if let Some(agent) = agent {
-                        if let Err(error) = self.launch_agent(agent) {
-                            let mut result = result(request, ResultStatus::Failed, state, false);
-                            result.reason = Some(format!("agent launch failed: {error}"));
-                            return result;
-                        }
-                        return result(
+                    Err(error) => self.backend_error(request, environment_id, error),
+                }
+            }
+            Operation::OperateEnvironment { command, agent } => {
+                match state {
+                    Some(EnvironmentState::Available) => {}
+                    Some(other) => {
+                        return self.not_applicable(
                             request,
-                            ResultStatus::Completed,
-                            Some(EnvironmentState::Available),
-                            true,
+                            Some(other),
+                            "environment cannot accept operations",
                         );
                     }
-                    match self.backend.operate(environment_id, command, cancel) {
-                        Ok(output) => {
-                            let mut result = result(
-                                request,
-                                ResultStatus::Completed,
-                                Some(EnvironmentState::Available),
-                                true,
-                            );
-                            result.output = Some(output);
-                            result
+                    None => return self.unknown_environment(request),
+                }
+
+                if let Some(agent) = agent {
+                    let launch = if self.runtime.manages_agent_process() {
+                        self.runtime
+                            .launch_agent(&context, agent)
+                            .map_err(|error| error.to_string())
+                    } else {
+                        self.launch_agent(agent).map_err(|error| error.to_string())
+                    };
+                    return match launch {
+                        Ok(()) => {
+                            let actual = self.runtime.state(environment_id);
+                            self.success(request, actual, can_accept(actual))
                         }
-                        Err(error) if error.cancelled => {
-                            let mut result =
-                                result(request, ResultStatus::PartiallyCompleted, state, false);
-                            result.reason = Some(error.message);
-                            result
-                        }
-                        Err(error) => {
-                            let mut result = result(request, ResultStatus::Failed, state, true);
-                            result.reason = Some(error.message);
-                            result
-                        }
+                        Err(error) => self.reasoned_failure(
+                            request,
+                            state,
+                            format!("agent launch failed: {error}"),
+                        ),
+                    };
+                }
+
+                match self.runtime.operate_with_context(&context, command, cancel) {
+                    Ok(execution) => {
+                        self.execution_result(request, environment_id, execution, false)
                     }
+                    Err(error) => self.backend_error(request, environment_id, error),
                 }
-                Some(other) => {
-                    let mut result =
-                        result(request, ResultStatus::NotApplicable, Some(other), false);
-                    result.reason = Some("environment cannot accept operations".to_string());
-                    result
-                }
-                None => {
-                    let mut result = result(request, ResultStatus::Failed, None, false);
-                    result.reason = Some("unknown environment".to_string());
-                    result
-                }
-            },
+            }
             Operation::BranchEnvironment {
                 child_environment_id,
-            } => match state {
-                Some(EnvironmentState::Available) | Some(EnvironmentState::Suspended) => {
-                    if self.backend.state(child_environment_id).is_some() {
-                        let mut result = result(request, ResultStatus::Failed, state, true);
-                        result.reason = Some("child environment already exists".to_string());
-                        result
-                    } else {
-                        match self.backend.branch(environment_id, child_environment_id) {
-                            Ok(()) => {
-                                let mut result =
-                                    result(request, ResultStatus::Completed, state, true);
-                                result.resources = vec![ResourceNote {
-                                    content: Content::Process,
-                                    note: format!("environment {child_environment_id} created"),
-                                }];
-                                result
-                            }
-                            Err(error) => {
-                                let mut result = result(request, ResultStatus::Failed, state, true);
-                                result.reason = Some(error.message);
-                                result
-                            }
-                        }
-                    }
-                }
-                Some(other) => {
-                    let mut result =
-                        result(request, ResultStatus::NotApplicable, Some(other), false);
-                    result.reason = Some("environment cannot be branched".to_string());
-                    result
-                }
-                None => {
-                    let mut result = result(request, ResultStatus::Failed, None, false);
-                    result.reason = Some("unknown environment".to_string());
-                    result
-                }
-            },
-            Operation::PromoteEnvironment => match state {
-                Some(EnvironmentState::Available) | Some(EnvironmentState::Suspended) => {
-                    match self.backend.promote(environment_id) {
-                        Ok(()) => result(request, ResultStatus::Completed, state, true),
-                        Err(error) => {
-                            let mut result = result(request, ResultStatus::Failed, state, true);
-                            result.reason = Some(error.message);
-                            result
-                        }
-                    }
-                }
-                Some(other) => {
-                    let mut result =
-                        result(request, ResultStatus::NotApplicable, Some(other), false);
-                    result.reason = Some("environment cannot be promoted".to_string());
-                    result
-                }
-                None => {
-                    let mut result = result(request, ResultStatus::Failed, None, false);
-                    result.reason = Some("unknown environment".to_string());
-                    result
-                }
-            },
-            Operation::SuspendEnvironment => match state {
-                Some(EnvironmentState::Available) | Some(EnvironmentState::Suspended) => {
-                    match self.backend.suspend(environment_id) {
-                        Ok(()) => {
-                            let mut result = result(
-                                request,
-                                ResultStatus::Completed,
-                                Some(EnvironmentState::Suspended),
-                                true,
-                            );
-                            result.follow_up = vec![FollowUp::Resume];
-                            result
-                        }
-                        Err(error) => {
-                            let mut result = result(request, ResultStatus::Failed, state, true);
-                            result.reason = Some(error.message);
-                            result
-                        }
-                    }
-                }
-                Some(other) => {
-                    let mut result =
-                        result(request, ResultStatus::NotApplicable, Some(other), false);
-                    result.reason = Some("environment cannot be suspended".to_string());
-                    result
-                }
-                None => {
-                    let mut result = result(request, ResultStatus::Failed, None, false);
-                    result.reason = Some("unknown environment".to_string());
-                    result
-                }
-            },
-            Operation::ResumeEnvironment => match state {
-                Some(EnvironmentState::Suspended) | Some(EnvironmentState::Available) => {
-                    match self.backend.resume(environment_id) {
-                        Ok(()) => result(
+            } => {
+                match state {
+                    Some(EnvironmentState::Available) | Some(EnvironmentState::Suspended) => {}
+                    Some(other) => {
+                        return self.not_applicable(
                             request,
-                            ResultStatus::Completed,
-                            Some(EnvironmentState::Available),
-                            true,
-                        ),
-                        Err(error) => {
-                            let mut result = result(request, ResultStatus::Failed, state, true);
-                            result.reason = Some(error.message);
-                            result
-                        }
-                    }
-                }
-                Some(other) => {
-                    let mut result =
-                        result(request, ResultStatus::NotApplicable, Some(other), false);
-                    result.reason = Some("environment cannot be resumed".to_string());
-                    result
-                }
-                None => {
-                    let mut result = result(request, ResultStatus::Failed, None, false);
-                    result.reason = Some("unknown environment".to_string());
-                    result
-                }
-            },
-            Operation::TerminateEnvironment => match state {
-                Some(EnvironmentState::Terminated) => {
-                    let mut result = result(
-                        request,
-                        ResultStatus::Completed,
-                        Some(EnvironmentState::Terminated),
-                        false,
-                    );
-                    result.follow_up = vec![FollowUp::Cleanup];
-                    result
-                }
-                Some(_) => match self.backend.terminate(environment_id) {
-                    Ok(()) => {
-                        let mut result = result(
-                            request,
-                            ResultStatus::Completed,
-                            Some(EnvironmentState::Terminated),
-                            false,
+                            Some(other),
+                            "environment cannot be branched",
                         );
+                    }
+                    None => return self.unknown_environment(request),
+                }
+                if self.runtime.state(child_environment_id).is_some() {
+                    return self.reasoned_failure(
+                        request,
+                        state,
+                        "child environment already exists".to_string(),
+                    );
+                }
+                match self.runtime.branch_with_context(
+                    &BackendContext {
+                        environment_id: environment_id.to_string(),
+                        parent_environment_id: Some(environment_id.to_string()),
+                        ..context.clone()
+                    },
+                    environment_id,
+                    child_environment_id,
+                ) {
+                    Ok(()) => {
+                        let actual = self.runtime.state(environment_id);
+                        let mut result = self.success(request, actual, can_accept(actual));
+                        result.resources = vec![ResourceNote {
+                            content: Content::Process,
+                            note: format!("environment {child_environment_id} created"),
+                        }];
+                        result
+                    }
+                    Err(error) => self.backend_error(request, environment_id, error),
+                }
+            }
+            Operation::PromoteEnvironment => {
+                if !matches!(
+                    state,
+                    Some(EnvironmentState::Available | EnvironmentState::Suspended)
+                ) {
+                    return self.not_applicable(request, state, "environment cannot be promoted");
+                }
+                match self.runtime.promote_with_context(&context) {
+                    Ok(()) => {
+                        let actual = self.runtime.state(environment_id);
+                        self.success(request, actual, can_accept(actual))
+                    }
+                    Err(error) => self.backend_error(request, environment_id, error),
+                }
+            }
+            Operation::SuspendEnvironment => {
+                if !matches!(
+                    state,
+                    Some(EnvironmentState::Available | EnvironmentState::Suspended)
+                ) {
+                    return self.not_applicable(request, state, "environment cannot be suspended");
+                }
+                match self.runtime.suspend_with_context(&context) {
+                    Ok(()) => {
+                        let mut result =
+                            self.success(request, self.runtime.state(environment_id), true);
+                        result.follow_up = vec![FollowUp::Resume];
+                        result
+                    }
+                    Err(error) => self.backend_error(request, environment_id, error),
+                }
+            }
+            Operation::ResumeEnvironment => {
+                if !matches!(
+                    state,
+                    Some(EnvironmentState::Suspended | EnvironmentState::Available)
+                ) {
+                    return self.not_applicable(request, state, "environment cannot be resumed");
+                }
+                match self.runtime.resume_with_context(&context) {
+                    Ok(()) => self.success(request, self.runtime.state(environment_id), true),
+                    Err(error) => self.backend_error(request, environment_id, error),
+                }
+            }
+            Operation::TerminateEnvironment => {
+                if state == Some(EnvironmentState::Terminated) {
+                    let mut result = self.success(request, state, false);
+                    result.follow_up = vec![FollowUp::Cleanup];
+                    return result;
+                }
+                if state.is_none() {
+                    return self.unknown_environment(request);
+                }
+                match self.runtime.terminate_with_context(&context) {
+                    Ok(()) => {
+                        let mut result =
+                            self.success(request, self.runtime.state(environment_id), false);
                         result.follow_up = vec![FollowUp::Cleanup];
                         result
                     }
-                    Err(error) => {
-                        let mut result = result(request, ResultStatus::Failed, state, false);
-                        result.reason = Some(error.message);
-                        result
-                    }
-                },
-                None => {
-                    let mut result = result(request, ResultStatus::Failed, None, false);
-                    result.reason = Some("unknown environment".to_string());
-                    result
+                    Err(error) => self.backend_error(request, environment_id, error),
                 }
-            },
-            Operation::CleanupEnvironment => match state {
-                Some(_) => match self.backend.cleanup(environment_id) {
-                    Ok(()) => result(
-                        request,
-                        ResultStatus::Completed,
-                        Some(EnvironmentState::Cleaned),
-                        false,
-                    ),
-                    Err(error) => {
-                        let mut result =
-                            result(request, ResultStatus::PartiallyCompleted, state, false);
-                        result.reason = Some(error.message);
-                        result
-                    }
-                },
-                None => {
-                    let mut result = result(request, ResultStatus::NotApplicable, None, false);
-                    result.reason = Some("unknown environment".to_string());
-                    result
+            }
+            Operation::CleanupEnvironment => {
+                if state.is_none() {
+                    return self.not_applicable(request, None, "unknown environment");
                 }
-            },
+                match self.runtime.cleanup_with_context(&context) {
+                    Ok(()) => self.success(request, self.runtime.state(environment_id), false),
+                    Err(error) => self.backend_error(request, environment_id, error),
+                }
+            }
             Operation::ToolContext { tool_name } => {
-                if !self
-                    .backend
-                    .capabilities()
-                    .tools
-                    .iter()
-                    .any(|tool| tool.name == *tool_name)
-                {
-                    let mut result = result(request, ResultStatus::Unsupported, state, false);
-                    result.reason = Some(format!("runtime does not declare tool {tool_name}"));
-                    return result;
+                if !self.tool_declared(tool_name) {
+                    return self.unsupported(
+                        request,
+                        state,
+                        format!("runtime does not declare tool {tool_name}"),
+                    );
                 }
-                match self.backend.tool_context(environment_id, tool_name, cancel) {
-                    Ok(output) => {
-                        let mut result = result(
-                            request,
-                            ResultStatus::Completed,
-                            Some(EnvironmentState::Available),
-                            true,
-                        );
-                        result.output = Some(output);
-                        result
+                match self
+                    .runtime
+                    .tool_context_with_context(&context, tool_name, cancel)
+                {
+                    Ok(execution) => {
+                        self.execution_result(request, environment_id, execution, true)
                     }
-                    Err(error) => {
-                        let mut result = result(request, ResultStatus::Failed, state, true);
-                        result.reason = Some(error.message);
-                        result
-                    }
+                    Err(error) => self.backend_error(request, environment_id, error),
                 }
             }
             Operation::InvokeTool {
                 tool_name,
                 arguments,
             } => {
-                if !self
-                    .backend
-                    .capabilities()
-                    .tools
-                    .iter()
-                    .any(|tool| tool.name == *tool_name)
-                {
-                    let mut result = result(request, ResultStatus::Unsupported, state, false);
-                    result.reason = Some(format!("runtime does not declare tool {tool_name}"));
-                    return result;
+                if !self.tool_declared(tool_name) {
+                    return self.unsupported(
+                        request,
+                        state,
+                        format!("runtime does not declare tool {tool_name}"),
+                    );
                 }
                 match self
-                    .backend
-                    .invoke_tool(environment_id, tool_name, arguments, cancel)
+                    .runtime
+                    .invoke_tool_with_context(&context, tool_name, arguments, cancel)
                 {
-                    Ok(output) => {
-                        let mut result = result(
-                            request,
-                            ResultStatus::Completed,
-                            Some(EnvironmentState::Available),
-                            true,
-                        );
-                        result.output = Some(output);
-                        result
+                    Ok(execution) => {
+                        self.execution_result(request, environment_id, execution, true)
                     }
-                    Err(error) => {
-                        let mut result = result(request, ResultStatus::Failed, state, true);
-                        result.reason = Some(error.message);
-                        result
-                    }
+                    Err(error) => self.backend_error(request, environment_id, error),
                 }
             }
         }
+    }
+    fn tool_declared(&self, tool_name: &str) -> bool {
+        self.runtime
+            .capabilities()
+            .tools
+            .iter()
+            .any(|tool| tool.name == tool_name)
+    }
+
+    fn success(
+        &self,
+        request: &OperationRequest,
+        state: Option<EnvironmentState>,
+        can_accept_operations: bool,
+    ) -> OperationResult {
+        // 环境实际停留在 PartiallyAvailable 时不能报告 Completed：部分
+        // Backend 尚未就绪，控制面据此得到 PartiallyCompleted 与原因。
+        let status = if state == Some(EnvironmentState::PartiallyAvailable) {
+            ResultStatus::PartiallyCompleted
+        } else {
+            ResultStatus::Completed
+        };
+        // 收口：只要环境停留在 PartiallyAvailable，就不能接受后续普通
+        // 操作，无论调用方传入 true 还是 false。
+        let can_accept_operations =
+            can_accept_operations && state != Some(EnvironmentState::PartiallyAvailable);
+        let mut result = result(request, status, state, can_accept_operations);
+        if status == ResultStatus::PartiallyCompleted {
+            result.reason = Some(
+                "environment is partially available; not all Backends are consistently available"
+                    .to_string(),
+            );
+        }
+        result.backend_states = self.runtime.backend_states(&request.environment_id);
+        result
+    }
+
+    fn execution_result(
+        &self,
+        request: &OperationRequest,
+        environment_id: &str,
+        execution: BackendExecution,
+        require_single_output: bool,
+    ) -> OperationResult {
+        let state = self.runtime.state(environment_id);
+        let mut result = self.success(request, state, can_accept(state));
+        result.output = execution.single_output();
+        result.outputs = execution.outputs;
+        if require_single_output && result.output.is_none() {
+            result.status = ResultStatus::PartiallyCompleted;
+            result.reason = Some(
+                "multiple or missing Backend outputs; configure an explicit output_backend"
+                    .to_string(),
+            );
+        }
+        result
+    }
+
+    fn backend_error(
+        &self,
+        request: &OperationRequest,
+        environment_id: &str,
+        error: BackendError,
+    ) -> OperationResult {
+        let state = self.runtime.state(environment_id);
+        let status = if error.is_partial() {
+            ResultStatus::PartiallyCompleted
+        } else {
+            ResultStatus::Failed
+        };
+        let mut result = result(request, status, state, can_accept(state));
+        result.reason = Some(error.to_string());
+        result.backend_states = self.runtime.backend_states(environment_id);
+        result.outputs = error.outputs;
+        result
+            .resources
+            .extend(error.completed.into_iter().map(|backend_id| ResourceNote {
+                content: Content::Resource,
+                note: format!("Backend {backend_id} completed"),
+            }));
+        result
+            .remaining
+            .extend(error.remaining.into_iter().map(|backend_id| ResourceNote {
+                content: Content::Resource,
+                note: format!("Backend {backend_id} was not completed"),
+            }));
+        result.remaining.extend(
+            error
+                .cleanup_failures
+                .into_iter()
+                .map(|failure| ResourceNote {
+                    content: Content::Resource,
+                    note: format!("cleanup incomplete: {failure}"),
+                }),
+        );
+        result
+    }
+
+    fn reasoned_failure(
+        &self,
+        request: &OperationRequest,
+        state: Option<EnvironmentState>,
+        reason: impl Into<String>,
+    ) -> OperationResult {
+        let mut result = result(request, ResultStatus::Failed, state, can_accept(state));
+        result.reason = Some(reason.into());
+        result.backend_states = self.runtime.backend_states(&request.environment_id);
+        result
+    }
+
+    fn not_applicable(
+        &self,
+        request: &OperationRequest,
+        state: Option<EnvironmentState>,
+        reason: &str,
+    ) -> OperationResult {
+        let mut result = result(request, ResultStatus::NotApplicable, state, false);
+        result.reason = Some(reason.to_string());
+        result.backend_states = self.runtime.backend_states(&request.environment_id);
+        result
+    }
+
+    fn unsupported(
+        &self,
+        request: &OperationRequest,
+        state: Option<EnvironmentState>,
+        reason: String,
+    ) -> OperationResult {
+        let mut result = result(request, ResultStatus::Unsupported, state, false);
+        result.reason = Some(reason);
+        result.backend_states = self.runtime.backend_states(&request.environment_id);
+        result
+    }
+
+    fn unknown_environment(&self, request: &OperationRequest) -> OperationResult {
+        let mut result = result(request, ResultStatus::Failed, None, false);
+        result.reason = Some("unknown environment".to_string());
+        result.backend_states = self.runtime.backend_states(&request.environment_id);
+        result
     }
 
     /// 启动 Agent 接入侧。控制面决定用哪个产品，Runtime 负责启动。
@@ -488,12 +528,21 @@ impl Shared {
         }
     }
 
+    fn stop_agents(&self) {
+        if self.runtime.manages_agent_process() {
+            if let Err(error) = self.runtime.stop_agents() {
+                eprintln!("adapter: failed to stop Runtime Agent: {error}");
+            }
+        } else {
+            self.stop_agent();
+        }
+    }
     fn start_state_watcher(self: Arc<Self>) {
         thread::spawn(move || {
             loop {
                 thread::sleep(Duration::from_millis(100));
-                for environment_id in self.backend.environments() {
-                    let Some(current) = self.backend.state(&environment_id) else {
+                for environment_id in self.runtime.environments() {
+                    let Some(current) = self.runtime.state(&environment_id) else {
                         continue;
                     };
                     let previous = self.known.lock().unwrap().get(&environment_id).copied();
@@ -545,9 +594,18 @@ fn result(
         follow_up: Vec::new(),
         resources: Vec::new(),
         remaining: Vec::new(),
+        backend_states: Vec::new(),
+        outputs: Vec::new(),
         reason: None,
         output: None,
     }
+}
+
+fn can_accept(state: Option<EnvironmentState>) -> bool {
+    matches!(
+        state,
+        Some(EnvironmentState::Available | EnvironmentState::Suspended)
+    )
 }
 
 #[derive(Default)]

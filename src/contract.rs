@@ -33,6 +33,11 @@ pub enum EnvironmentState {
     Suspended,
     Terminated,
     Cleaned,
+    /// Backend 共同提供的环境中，Backend 的实际状态不一致。
+    ///
+    /// 这个状态只表示聚合层无法把环境归入一个单一生命周期状态；它
+    /// 不是一个可以继续执行普通操作的状态。
+    PartiallyAvailable,
 }
 
 /// 环境内容，用于归类资源处理和隔离声明。
@@ -82,6 +87,10 @@ pub struct AgentLaunch {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub log: PathBuf,
+    /// Agent 实际执行实例的稳定标识。旧配置省略时由 Adapter 使用环境
+    /// 标识作为兼容性的默认值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
 }
@@ -143,6 +152,32 @@ pub struct OperationRequest {
     pub request_id: String,
     pub environment_id: String,
     pub operation: Operation,
+    /// Policy 用于选择 Runtime 的任务上下文。旧控制面不发送时保持为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// 逻辑 Branch 标识。它和 environment_id 分开，允许一个逻辑 Branch
+    /// 在不同 Runtime 环境中继续执行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_id: Option<String>,
+}
+
+/// 一个 Backend 对一次操作产生的输出。
+///
+/// `OperationResult.output` 只保留明确选中的单一主输出；所有 Backend
+/// 输出都通过这个列表可见，避免组合多个 Backend 时后一个输出静默覆盖
+/// 前一个输出。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendOutput {
+    pub backend_id: String,
+    pub output: CommandOutput,
+}
+
+/// 一个环境由多个 Backend 共同提供时，各 Backend 的实际状态快照。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendState {
+    pub backend_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<EnvironmentState>,
 }
 
 /// 统一的操作结果信封。
@@ -157,6 +192,13 @@ pub struct OperationResult {
     pub follow_up: Vec<FollowUp>,
     pub resources: Vec<ResourceNote>,
     pub remaining: Vec<ResourceNote>,
+    /// 每个参与 Backend 的状态，供控制面处理部分失败和状态不一致。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backend_states: Vec<BackendState>,
+    /// 组合 Runtime 的全部可见输出。不会因为 `output` 只有一个字段而
+    /// 丢弃其他 Backend 的输出。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<BackendOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +239,9 @@ pub enum AdapterMessage {
         adapter_instance: String,
         #[serde(default)]
         capabilities: RuntimeCapabilities,
+        /// 本次 Runtime 实例由哪些 Backend 组成的有序标识。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        backend_ids: Vec<String>,
     },
     Result(OperationResult),
     Event(Event),
