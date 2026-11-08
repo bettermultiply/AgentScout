@@ -53,7 +53,7 @@ impl BaseRuntime {
     ) -> Result<(), BackendError> {
         let mut fragment = self.inner.launch_fragment(context, launch)?;
         if let Some(data_plane) = &self.data_plane {
-            merge_launch_fragment(&mut fragment, data_plane.launch_fragment(context, launch)?);
+            merge_launch_fragment(&mut fragment, data_plane.launch_fragment(context, launch)?)?;
         }
         self.process.launch(context, launch, &fragment)
     }
@@ -326,17 +326,21 @@ impl Backend for BaseRuntime {
             self.process.freeze(&context.environment_id)?;
         }
         let inner = self.inner.suspend_with_context(context);
-        if let Err(error) = inner {
-            if running {
-                let _ = self.process.thaw(&context.environment_id);
+        if let Err(mut error) = inner {
+            if running
+                && let Err(thaw) = self.process.thaw(&context.environment_id)
+            {
+                error.add_cleanup_failure("process", format!("thaw after suspend failure: {thaw}"));
             }
             return Err(error);
         }
         if let Some(data_plane) = &self.data_plane
-            && let Err(error) = data_plane.suspend_with_context(context)
+            && let Err(mut error) = data_plane.suspend_with_context(context)
         {
-            if running {
-                let _ = self.process.thaw(&context.environment_id);
+            if running
+                && let Err(thaw) = self.process.thaw(&context.environment_id)
+            {
+                error.add_cleanup_failure("process", format!("thaw after suspend failure: {thaw}"));
             }
             return Err(error);
         }
@@ -362,17 +366,21 @@ impl Backend for BaseRuntime {
             self.process.thaw(&context.environment_id)?;
         }
         let inner = self.inner.resume_with_context(context);
-        if let Err(error) = inner {
-            if thaw_needed {
-                let _ = self.process.freeze(&context.environment_id);
+        if let Err(mut error) = inner {
+            if thaw_needed
+                && let Err(freeze) = self.process.freeze(&context.environment_id)
+            {
+                error.add_cleanup_failure("process", format!("freeze after resume failure: {freeze}"));
             }
             return Err(error);
         }
         if let Some(data_plane) = &self.data_plane
-            && let Err(error) = data_plane.resume_with_context(context)
+            && let Err(mut error) = data_plane.resume_with_context(context)
         {
-            if thaw_needed {
-                let _ = self.process.freeze(&context.environment_id);
+            if thaw_needed
+                && let Err(freeze) = self.process.freeze(&context.environment_id)
+            {
+                error.add_cleanup_failure("process", format!("freeze after resume failure: {freeze}"));
             }
             return Err(error);
         }
@@ -548,7 +556,7 @@ impl Backend for BaseRuntime {
     ) -> Result<LaunchFragment, BackendError> {
         let mut fragment = self.inner.launch_fragment(context, launch)?;
         if let Some(data_plane) = &self.data_plane {
-            merge_launch_fragment(&mut fragment, data_plane.launch_fragment(context, launch)?);
+            merge_launch_fragment(&mut fragment, data_plane.launch_fragment(context, launch)?)?;
         }
         Ok(fragment)
     }

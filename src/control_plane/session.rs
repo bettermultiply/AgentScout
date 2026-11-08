@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +19,34 @@ use crate::protocol::contract::{
 };
 use crate::protocol::transport;
 
+/// 已完成结果的有界窗口；超出后淘汰最旧的结果。
+const RESULT_WINDOW: usize = 256;
+/// 未消费事件的有界窗口；事件是通知而不是历史记录。
+const EVENT_WINDOW: usize = 4096;
+
+#[derive(Default)]
+struct ResultStore {
+    entries: HashMap<String, OperationResult>,
+    order: VecDeque<String>,
+}
+
+impl ResultStore {
+    fn get(&self, request_id: &str) -> Option<OperationResult> {
+        self.entries.get(request_id).cloned()
+    }
+
+    fn insert(&mut self, request_id: String, result: OperationResult) {
+        if self.entries.insert(request_id.clone(), result).is_none() {
+            self.order.push_back(request_id);
+        }
+        while self.order.len() > RESULT_WINDOW {
+            if let Some(old) = self.order.pop_front() {
+                self.entries.remove(&old);
+            }
+        }
+    }
+}
+
 /// 监听 Adapter 连入的控制面入口。
 pub struct ControlServer {
     listener: UnixListener,
@@ -25,7 +54,22 @@ pub struct ControlServer {
 
 impl ControlServer {
     pub fn bind(path: &Path) -> io::Result<Self> {
-        let _ = std::fs::remove_file(path);
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_socket() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "refusing to remove non-socket path {}",
+                            path.display()
+                        ),
+                    ));
+                }
+                std::fs::remove_file(path)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         Ok(Self {
             listener: UnixListener::bind(path)?,
         })
@@ -33,7 +77,7 @@ impl ControlServer {
 
     pub fn accept(&self) -> io::Result<ControlSession> {
         let (stream, _) = self.listener.accept()?;
-        Ok(ControlSession::start(stream))
+        ControlSession::start(stream)
     }
 
     /// 允许启动阶段轮询 Adapter 是否已经退出，而不是无限等待连接。
@@ -56,7 +100,7 @@ pub struct ControlSession {
     next_request: AtomicU64,
     #[allow(clippy::type_complexity)]
     hello: Arc<(Mutex<Option<HelloInfo>>, Condvar)>,
-    results: Arc<(Mutex<HashMap<String, OperationResult>>, Condvar)>,
+    results: Arc<(Mutex<ResultStore>, Condvar)>,
     events: Arc<(Mutex<VecDeque<Event>>, Condvar)>,
 }
 
@@ -68,13 +112,13 @@ impl ControlSession {
             .unwrap()
             .shutdown(std::net::Shutdown::Both)
     }
-    fn start(stream: UnixStream) -> Self {
-        let mut reader = stream.try_clone().expect("clone control stream");
+    fn start(stream: UnixStream) -> io::Result<Self> {
+        let mut reader = stream.try_clone()?;
         let session = Self {
             writer: Mutex::new(stream),
             next_request: AtomicU64::new(1),
             hello: Arc::new((Mutex::new(None), Condvar::new())),
-            results: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
+            results: Arc::new((Mutex::new(ResultStore::default()), Condvar::new())),
             events: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
         };
 
@@ -83,8 +127,15 @@ impl ControlSession {
         let events = session.events.clone();
         thread::spawn(move || {
             loop {
-                let message: Option<AdapterMessage> =
-                    transport::read_message(&mut reader).unwrap_or_default();
+                let message = match transport::read_message::<_, AdapterMessage>(&mut reader) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        eprintln!(
+                            "control plane: failed to read Adapter message: {error}"
+                        );
+                        break;
+                    }
+                };
                 match message {
                     Some(AdapterMessage::Hello {
                         protocol_version,
@@ -109,7 +160,12 @@ impl ControlSession {
                         results.1.notify_all();
                     }
                     Some(AdapterMessage::Event(event)) => {
-                        events.0.lock().unwrap().push_back(event);
+                        let mut queue = events.0.lock().unwrap();
+                        queue.push_back(event);
+                        while queue.len() > EVENT_WINDOW {
+                            queue.pop_front();
+                        }
+                        drop(queue);
                         events.1.notify_all();
                     }
                     None => break,
@@ -117,7 +173,7 @@ impl ControlSession {
             }
         });
 
-        session
+        Ok(session)
     }
 
     /// 等待 Adapter 的接入登记。
@@ -256,5 +312,118 @@ impl ControlSession {
             let (guard, _) = self.events.1.wait_timeout(events, deadline - now).unwrap();
             events = guard;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::contract::{
+        AdapterMessage, EnvironmentState, EventPayload, Operation, OperationResult, ResultStatus,
+    };
+    use std::os::unix::net::UnixStream;
+
+    fn session_pair() -> (ControlSession, UnixStream) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let server = ControlServer::bind(&path).unwrap();
+        let client = UnixStream::connect(&path).unwrap();
+        let session = server.accept().unwrap();
+        (session, client)
+    }
+
+    fn result(request_id: &str) -> OperationResult {
+        OperationResult {
+            request_id: request_id.to_string(),
+            environment_id: "env".to_string(),
+            status: ResultStatus::Completed,
+            environment_state: Some(EnvironmentState::Available),
+            can_accept_operations: true,
+            follow_up: Vec::new(),
+            resources: Vec::new(),
+            remaining: Vec::new(),
+            backend_states: Vec::new(),
+            outputs: Vec::new(),
+            reason: None,
+            output: None,
+            filesystem: None,
+        }
+    }
+
+    #[test]
+    fn bind_refuses_to_remove_a_regular_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        std::fs::write(&path, b"do not remove").unwrap();
+        let error = match ControlServer::bind(&path) {
+            Ok(_) => panic!("bind accepted a regular file"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), b"do not remove");
+    }
+
+    #[test]
+    fn bind_replaces_a_stale_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        drop(UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        ControlServer::bind(&path).unwrap();
+    }
+
+    #[test]
+    fn results_are_bounded() {
+        let (session, mut client) = session_pair();
+        for index in 0..(RESULT_WINDOW + 8) {
+            let request_id = format!("request-{index}");
+            transport::write_message(
+                &mut client,
+                &AdapterMessage::Result(result(&request_id)),
+            )
+            .unwrap();
+        }
+        let last = format!("request-{}", RESULT_WINDOW + 7);
+        assert!(session.wait_result(&last, Duration::from_secs(5)).is_some());
+        let store = session.results.0.lock().unwrap();
+        assert_eq!(store.entries.len(), RESULT_WINDOW);
+        assert!(!store.entries.contains_key("request-0"));
+        assert!(store.entries.contains_key(&last));
+    }
+
+    #[test]
+    fn events_are_bounded() {
+        let (session, mut client) = session_pair();
+        let total = EVENT_WINDOW + 8;
+        for index in 0..total {
+            let event = Event {
+                environment_id: "env".to_string(),
+                request_id: Some(format!("event-{index}")),
+                payload: EventPayload::OperationStarted {
+                    operation: Operation::PromoteEnvironment,
+                },
+            };
+            transport::write_message(&mut client, &AdapterMessage::Event(event)).unwrap();
+        }
+        let last = format!("event-{}", total - 1);
+        for _ in 0..500 {
+            let ready = {
+                let events = session.events.0.lock().unwrap();
+                events
+                    .back()
+                    .and_then(|event| event.request_id.as_deref())
+                    == Some(last.as_str())
+            };
+            if ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let events = session.events.0.lock().unwrap();
+        assert_eq!(events.len(), EVENT_WINDOW);
+        assert_eq!(
+            events.front().and_then(|event| event.request_id.as_deref()),
+            Some("event-8")
+        );
     }
 }

@@ -1,5 +1,7 @@
 //! Firecracker 网络命名空间与受限网络命令。
 
+use std::collections::{BTreeSet, HashMap};
+
 use super::*;
 use super::guest_ops::error;
 
@@ -13,6 +15,8 @@ pub(super) struct EnvironmentNetwork {
     pub(super) veth_host: String,
     pub(super) veth_subnet: String,
     pub(super) upstream: String,
+    /// 仅供不触及真实网络权限的单元测试关闭 teardown。
+    pub(super) teardown_enabled: bool,
 }
 
 pub(super) const BRIDGE_NAME: &str = "br0";
@@ -23,23 +27,120 @@ pub(super) const BRIDGE_GATEWAY: &str = "172.16.0.1";
 pub(super) const TAP_SUBNET: &str = "172.16.0.0/30";
 pub(super) const GUEST_MAC: &str = "06:00:ac:10:00:02";
 
-/// 环境网络所在的 network namespace 名称，供诊断和运维定位环境网络。
-pub fn environment_network_namespace(environment_id: &str) -> String {
-    format!("fc-{}", short_identifier(environment_id))
+/// Linux 网络接口名上限（IFNAMSIZ - 1）。netns 名同样按这个上限约束。
+const MAX_NETWORK_NAME: usize = 15;
+
+/// 由进程内注册表分配的唯一网络资源。
+///
+/// 子网和接口名不再由环境 id 的哈希决定：哈希低位会在少量环境时就碰撞。
+/// 注册表按递增索引分配，释放后索引可以再次使用；进程退出后无需持久化，
+/// 因为环境的 netns、veth 和 iptables 规则都绑定在它自己的生命周期上。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct NetworkAllocation {
+    index: usize,
+    pub(super) namespace: String,
+    pub(super) veth_host: String,
+    pub(super) veth_subnet: String,
+}
+
+/// 10.213.0.0/16 内可用的 /30 子网数量：254 个第三段 × 每段 64 个 /30。
+pub(super) const NETWORK_CAPACITY: usize = 254 * 64;
+
+#[derive(Debug)]
+pub(super) struct NetworkRegistry {
+    allocations: HashMap<String, NetworkAllocation>,
+    free: BTreeSet<usize>,
+    capacity: usize,
+}
+
+impl Default for NetworkRegistry {
+    fn default() -> Self {
+        Self::with_capacity(NETWORK_CAPACITY)
+    }
+}
+
+impl NetworkRegistry {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            allocations: HashMap::new(),
+            free: (0..capacity).collect(),
+            capacity,
+        }
+    }
+
+    /// 为环境分配唯一子网和网络名。同一个 id 不能重复分配。
+    pub(super) fn allocate(&mut self, environment_id: &str) -> Result<NetworkAllocation, BackendError> {
+        if self.allocations.contains_key(environment_id) {
+            return Err(BackendError::new(format!(
+                "network already allocated for environment {environment_id}"
+            )));
+        }
+        let Some(index) = self.free.pop_first() else {
+            return Err(BackendError::new(format!(
+                "no free environment subnet remains (capacity {})",
+                self.capacity
+            )));
+        };
+        let allocation = match allocation_for_index(index) {
+            Ok(allocation) => allocation,
+            Err(failure) => {
+                self.free.insert(index);
+                return Err(failure);
+            }
+        };
+        self.allocations
+            .insert(environment_id.to_string(), allocation.clone());
+        Ok(allocation)
+    }
+
+    /// 回收环境占用的子网和名称。未分配时返回 None。
+    pub(super) fn release(&mut self, environment_id: &str) -> Option<NetworkAllocation> {
+        let allocation = self.allocations.remove(environment_id)?;
+        self.free.insert(allocation.index);
+        Some(allocation)
+    }
+
+    #[cfg(test)]
+    pub(super) fn allocation(&self, environment_id: &str) -> Option<&NetworkAllocation> {
+        self.allocations.get(environment_id)
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.allocations.len()
+    }
+}
+
+fn allocation_for_index(index: usize) -> Result<NetworkAllocation, BackendError> {
+    if index >= NETWORK_CAPACITY {
+        return Err(BackendError::new("environment subnet index is out of range"));
+    }
+    let third = 1 + (index / 64);
+    let last = (index % 64) * 4;
+    let namespace = format!("fc-{index:x}");
+    let veth_host = format!("vh-{index:x}");
+    if namespace.len() > MAX_NETWORK_NAME || veth_host.len() > MAX_NETWORK_NAME {
+        return Err(BackendError::new("environment network name is too long"));
+    }
+    Ok(NetworkAllocation {
+        index,
+        namespace,
+        veth_host,
+        veth_subnet: format!("10.213.{third}.{last}/30"),
+    })
 }
 
 impl EnvironmentNetwork {
-    pub(super) fn create(environment_id: &str) -> Result<Self, BackendError> {
-        let hash = fnv1a(environment_id.as_bytes());
+    pub(super) fn create(
+        _environment_id: &str,
+        allocation: &NetworkAllocation,
+    ) -> Result<Self, BackendError> {
         let network = Self {
-            namespace: environment_network_namespace(environment_id),
-            veth_host: format!("vh-{}", short_identifier(environment_id)),
-            veth_subnet: format!(
-                "10.213.{}.{}/30",
-                (hash >> 16) as u8,
-                ((hash >> 8) as u8) & 0xfc
-            ),
+            namespace: allocation.namespace.clone(),
+            veth_host: allocation.veth_host.clone(),
+            veth_subnet: allocation.veth_subnet.clone(),
             upstream: upstream_interface()?,
+            teardown_enabled: true,
         };
         if let Err(failure) = network.setup() {
             network.teardown();
@@ -165,6 +266,9 @@ impl EnvironmentNetwork {
     }
 
     pub(super) fn teardown(&self) {
+        if !self.teardown_enabled {
+            return;
+        }
         let _ = privileged(&[
             "iptables",
             "-D",
@@ -238,28 +342,6 @@ impl EnvironmentNetwork {
     }
 }
 
-pub(super) fn short_identifier(environment_id: &str) -> String {
-    let mut body: String = environment_id
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
-        .take(8)
-        .collect();
-    body.push_str(&format!(
-        "{:04x}",
-        fnv1a(environment_id.as_bytes()) & 0xffff
-    ));
-    body
-}
-
-pub(super) fn fnv1a(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811c_9dc5_u32;
-    for byte in bytes {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash
-}
-
 pub(super) fn current_user() -> String {
     unsafe {
         let entry = libc::getpwuid(libc::getuid());
@@ -321,5 +403,73 @@ pub(super) fn upstream_interface() -> Result<String, BackendError> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| BackendError::new("host has no default route for environment NAT"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn allocations_do_not_collide_for_many_environment_ids() {
+        let mut registry = NetworkRegistry::default();
+        let mut subnets = HashSet::new();
+        let mut namespaces = HashSet::new();
+        let mut veths = HashSet::new();
+        for index in 0..5000 {
+            let id = format!("candidate-{index}");
+            let allocation = registry.allocate(&id).unwrap();
+            assert!(
+                subnets.insert(allocation.veth_subnet.clone()),
+                "duplicate subnet {}",
+                allocation.veth_subnet
+            );
+            assert!(
+                namespaces.insert(allocation.namespace.clone()),
+                "duplicate namespace {}",
+                allocation.namespace
+            );
+            assert!(
+                veths.insert(allocation.veth_host.clone()),
+                "duplicate veth {}",
+                allocation.veth_host
+            );
+            assert!(allocation.namespace.len() <= MAX_NETWORK_NAME);
+            assert!(allocation.veth_host.len() <= MAX_NETWORK_NAME);
+        }
+        assert_eq!(registry.len(), 5000);
+    }
+
+    #[test]
+    fn released_allocation_is_reused() {
+        let mut registry = NetworkRegistry::default();
+        let first = registry.allocate("first").unwrap();
+        let second = registry.allocate("second").unwrap();
+        assert_ne!(first.veth_subnet, second.veth_subnet);
+        assert_eq!(registry.release("first"), Some(first.clone()));
+        let third = registry.allocate("third").unwrap();
+        assert_eq!(third, first);
+    }
+
+    #[test]
+    fn exhausted_registry_reports_a_clear_error() {
+        let mut registry = NetworkRegistry::with_capacity(2);
+        registry.allocate("a").unwrap();
+        registry.allocate("b").unwrap();
+        let error = registry.allocate("c").unwrap_err();
+        assert!(
+            error.message.contains("no free environment subnet"),
+            "{error}"
+        );
+        assert!(error.message.contains("capacity 2"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_allocation_is_rejected() {
+        let mut registry = NetworkRegistry::default();
+        registry.allocate("same").unwrap();
+        let error = registry.allocate("same").unwrap_err();
+        assert!(error.message.contains("already allocated"), "{error}");
+    }
 }
 

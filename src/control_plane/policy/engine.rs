@@ -1,6 +1,7 @@
 //! 隔离的 Python Policy 评估进程与有界结果读取。
 
 use std::collections::BTreeMap;
+use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -27,13 +28,51 @@ pub struct PolicyEngine {
     timeout: Duration,
 }
 
+/// Executable resolution order: explicit environment variable, PATH, then the
+/// historical absolute path. The last step keeps existing deployments working;
+/// execution later reports a clear error if none of them exist.
+fn resolve_executable(variable: &str, name: &str, fallback: &str) -> PathBuf {
+    if let Some(value) = env::var_os(variable) {
+        return PathBuf::from(value);
+    }
+    if let Some(path) = find_in_path(name) {
+        return path;
+    }
+    PathBuf::from(fallback)
+}
+
+fn find_in_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    find_in_path_value(&path, name)
+}
+
+fn find_in_path_value(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
+    env::split_paths(path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 impl Default for PolicyEngine {
     fn default() -> Self {
         Self {
-            python: "/usr/bin/python3".into(),
-            bubblewrap: "/usr/bin/bwrap".into(),
+            python: resolve_executable("ASCOUT_POLICY_PYTHON", "python3", "/usr/bin/python3"),
+            bubblewrap: resolve_executable("ASCOUT_POLICY_BWRAP", "bwrap", "/usr/bin/bwrap"),
             timeout: Duration::from_secs(5),
         }
+    }
+}
+
+fn require_executable(path: &Path, variable: &str, name: &str) -> io::Result<()> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "Policy executable {name} not found at {}; set {variable} or add it to PATH",
+                path.display()
+            ),
+        ))
     }
 }
 
@@ -167,6 +206,8 @@ impl PolicyEngine {
     }
 
     fn execute(&self, script: &str, request: &Value) -> io::Result<Value> {
+        require_executable(&self.python, "ASCOUT_POLICY_PYTHON", "python3")?;
+        require_executable(&self.bubblewrap, "ASCOUT_POLICY_BWRAP", "bwrap")?;
         // No author data in a shared directory: tempfile creates a private 0700 root.
         let directory = tempfile::tempdir()?;
         let script_path = directory.path().join("runner.py");
@@ -315,6 +356,33 @@ impl PolicyEngine {
         let response: Value = serde_json::from_slice(&bytes[4..]).map_err(invalid)?;
         check_json(&response, 0)?;
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executable_lookup_uses_path_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("policy-tool");
+        fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        let path = directory.path().as_os_str();
+        assert_eq!(find_in_path_value(path, "policy-tool"), Some(executable));
+        assert_eq!(find_in_path_value(path, "missing-tool"), None);
+    }
+
+    #[test]
+    fn missing_executable_reports_the_override_variable() {
+        let error = require_executable(
+            Path::new("/definitely/missing/bwrap"),
+            "ASCOUT_POLICY_BWRAP",
+            "bwrap",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("ASCOUT_POLICY_BWRAP"), "{error}");
     }
 }
 

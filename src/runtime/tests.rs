@@ -2,7 +2,7 @@
 
 use super::base::BaseRuntime;
 use super::composite::CompositeRuntime;
-use super::process::{FreezeMechanism, ProcessBackend};
+use super::process::{FreezeMechanism, LaunchFragment, MountEntry, ProcessBackend};
 use super::selection::{BackendConnection, BackendOperation, BackendPolicy, BackendRoute};
 use crate::protocol::contract::{
     AgentLaunch, CommandOutput, EnvironmentState, FilesystemConfirmation, FilesystemResult,
@@ -286,6 +286,125 @@ use std::sync::{Arc, Mutex};
             .filesystem_operation(&context, &operation, &CancelHandle::default())
             .unwrap();
         assert!(result.confirmation.snapshot_created);
+    }
+
+    struct FailLifecycle {
+        suspend: bool,
+        resume: bool,
+    }
+
+    impl Backend for FailLifecycle {
+        fn establish(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn operate(
+            &self,
+            _: &str,
+            _: &[String],
+            _: &CancelHandle,
+        ) -> Result<CommandOutput, BackendError> {
+            Err(BackendError::new("unused"))
+        }
+        fn branch(&self, _: &str, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn suspend(&self, _: &str) -> Result<(), BackendError> {
+            if self.suspend {
+                Err(BackendError::new("inner suspend failed"))
+            } else {
+                Ok(())
+            }
+        }
+        fn resume(&self, _: &str) -> Result<(), BackendError> {
+            if self.resume {
+                Err(BackendError::new("inner resume failed"))
+            } else {
+                Ok(())
+            }
+        }
+        fn terminate(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn cleanup(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn state(&self, _: &str) -> Option<EnvironmentState> {
+            Some(EnvironmentState::Available)
+        }
+        fn environments(&self) -> Vec<String> { vec!["env".into()] }
+    }
+
+    #[test]
+    fn suspend_rollback_thaw_failure_is_reported() {
+        let runtime = BaseRuntime::new("runtime", Arc::new(FailLifecycle { suspend: true, resume: false }));
+        if runtime.process.freeze_mechanism() == FreezeMechanism::None {
+            return;
+        }
+        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["30".into()]);
+        runtime.process.inject_thaw_failure(true);
+        let error = runtime.suspend(context.environment_id.as_str()).unwrap_err();
+        assert!(error.message.contains("inner suspend failed"), "{error}");
+        assert!(
+            error
+                .cleanup_failures
+                .iter()
+                .any(|failure| failure.contains("thaw")),
+            "{error:?}"
+        );
+        runtime.stop_agents().unwrap();
+    }
+
+    #[test]
+    fn resume_rollback_freeze_failure_is_reported() {
+        let runtime = BaseRuntime::new("runtime", Arc::new(FailLifecycle { suspend: false, resume: true }));
+        if runtime.process.freeze_mechanism() == FreezeMechanism::None {
+            return;
+        }
+        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["30".into()]);
+        runtime.process.inject_freeze_failure(true);
+        let error = runtime.resume(context.environment_id.as_str()).unwrap_err();
+        assert!(error.message.contains("inner resume failed"), "{error}");
+        assert!(
+            error
+                .cleanup_failures
+                .iter()
+                .any(|failure| failure.contains("freeze")),
+            "{error:?}"
+        );
+        runtime.stop_agents().unwrap();
+    }
+
+    #[test]
+    fn launch_fragment_merge_rejects_duplicate_mount_targets() {
+        let target_path = PathBuf::from("/workspace");
+        let mut target = LaunchFragment {
+            mounts: vec![MountEntry::Bind {
+                source: PathBuf::from("/one"),
+                target: target_path.clone(),
+            }],
+            ..LaunchFragment::default()
+        };
+        let source = LaunchFragment {
+            mounts: vec![MountEntry::RoBind {
+                source: PathBuf::from("/two"),
+                target: target_path,
+            }],
+            ..LaunchFragment::default()
+        };
+        let error = super::selection::merge_launch_fragment(&mut target, source).unwrap_err();
+        assert!(error.message.contains("multiple Backends"), "{error}");
+        assert_eq!(target.mounts.len(), 1);
+    }
+
+    #[test]
+    fn launch_fragment_merge_accepts_distinct_mount_targets() {
+        let mut target = LaunchFragment {
+            mounts: vec![MountEntry::Bind {
+                source: PathBuf::from("/one"),
+                target: PathBuf::from("/workspace"),
+            }],
+            ..LaunchFragment::default()
+        };
+        let source = LaunchFragment {
+            mounts: vec![MountEntry::Tmpfs {
+                target: PathBuf::from("/tmp"),
+            }],
+            ..LaunchFragment::default()
+        };
+        super::selection::merge_launch_fragment(&mut target, source).unwrap();
+        assert_eq!(target.mounts.len(), 2);
     }
 
     #[test]

@@ -133,13 +133,25 @@ impl ProcessBackend {
 
         let use_bwrap = !fragment.mounts.is_empty();
         let mut command = if use_bwrap {
-            let (read, write) = status_pipe()?;
+            let (read, write) = match status_pipe() {
+                Ok(pipe) => pipe,
+                Err(failure) => {
+                    self.discard_pending_status(&context.environment_id);
+                    remove_cgroup(&cgroup_path);
+                    return Err(failure);
+                }
+            };
             let status_fd = write.as_raw_fd();
             {
-                let mut pending = self
-                    .pending_status
-                    .lock()
-                    .map_err(|_| BackendError::new("ProcessBackend status lock poisoned"))?;
+                let mut pending = match self.pending_status.lock() {
+                    Ok(pending) => pending,
+                    Err(_) => {
+                        remove_cgroup(&cgroup_path);
+                        return Err(BackendError::new(
+                            "ProcessBackend status lock poisoned",
+                        ));
+                    }
+                };
                 pending.insert(
                     context.environment_id.clone(),
                     PendingStatus { read, write },
@@ -160,7 +172,7 @@ impl ProcessBackend {
             command
         };
 
-        let cgroup_procs_fd = cgroup_path
+        let cgroup_procs_fd = match cgroup_path
             .as_ref()
             .map(|path| {
                 OpenOptions::new()
@@ -169,7 +181,14 @@ impl ProcessBackend {
                     .map(|file| file.into_raw_fd())
             })
             .transpose()
-            .map_err(error)?;
+        {
+            Ok(fd) => fd,
+            Err(failure) => {
+                self.discard_pending_status(&context.environment_id);
+                remove_cgroup(&cgroup_path);
+                return Err(error(failure));
+            }
+        };
         unsafe {
             command.pre_exec(move || {
                 if libc::setpgid(0, 0) != 0 {
@@ -187,45 +206,85 @@ impl ProcessBackend {
                 Ok(())
             });
         }
+        let log_clone = match log.try_clone() {
+            Ok(log) => log,
+            Err(failure) => {
+                self.discard_pending_status(&context.environment_id);
+                remove_cgroup(&cgroup_path);
+                return Err(error(failure));
+            }
+        };
         let command = command
             .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone().map_err(error)?))
+            .stdout(Stdio::from(log_clone))
             .stderr(Stdio::from(log))
             .envs(&launch.env)
             .envs(&fragment.env);
-        let child = command.spawn().map_err(error)?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(failure) => {
+                self.discard_pending_status(&context.environment_id);
+                remove_cgroup(&cgroup_path);
+                return Err(error(failure));
+            }
+        };
         let process_group = child.id() as libc::pid_t;
         unsafe {
             if libc::setpgid(process_group, process_group) != 0
                 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EACCES)
             {
                 let value = std::io::Error::last_os_error();
-                let mut child = child;
-                let _ = child.kill();
-                let _ = child.wait();
+                abort_launch(
+                    &context.environment_id,
+                    &mut child,
+                    process_group,
+                    &cgroup_path,
+                    self,
+                );
                 return Err(error(value));
             }
         }
 
-        let (inner_pid, mount_namespace) = if use_bwrap {
-            let (child_pid, namespace) = self.read_status(&context.environment_id)?;
-            let overlay_targets: Vec<_> = fragment
-                .mounts
-                .iter()
-                .filter_map(|entry| match entry {
-                    MountEntry::Overlay { target, .. } => Some(target.clone()),
-                    _ => None,
-                })
-                .collect();
-            if !overlay_targets.is_empty() {
-                wait_for_mounts(child_pid, &overlay_targets)?;
+        let prepared = (|| -> Result<(u32, u64), BackendError> {
+            if use_bwrap {
+                let (child_pid, namespace) = self.read_status(&context.environment_id)?;
+                let overlay_targets: Vec<_> = fragment
+                    .mounts
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        MountEntry::Overlay { target, .. } => Some(target.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if !overlay_targets.is_empty() {
+                    #[cfg(test)]
+                    if self.fail_mount_wait.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(BackendError::new(
+                            "injected overlay mount readiness failure",
+                        ));
+                    }
+                    wait_for_mounts(child_pid, &overlay_targets)?;
+                }
+                Ok((child_pid, namespace))
+            } else {
+                let namespace = fs::metadata("/proc/self/ns/mnt").map_err(error)?.ino();
+                Ok((child.id(), namespace))
             }
-            (child_pid, namespace)
-        } else {
-            let namespace = fs::metadata("/proc/self/ns/mnt").map_err(error)?.ino();
-            (child.id(), namespace)
+        })();
+        let (inner_pid, mount_namespace) = match prepared {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                abort_launch(
+                    &context.environment_id,
+                    &mut child,
+                    process_group,
+                    &cgroup_path,
+                    self,
+                );
+                return Err(failure);
+            }
         };
-        let process = AgentProcess {
+        let mut process = AgentProcess {
             instance_id,
             child,
             process_group,
@@ -233,11 +292,27 @@ impl ProcessBackend {
             mount_namespace,
             cgroup_path,
         };
-        self.processes
-            .lock()
-            .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?
-            .insert(context.environment_id.clone(), process);
+        let mut processes = match self.processes.lock() {
+            Ok(processes) => processes,
+            Err(_) => {
+                abort_launch(
+                    &context.environment_id,
+                    &mut process.child,
+                    process.process_group,
+                    &process.cgroup_path,
+                    self,
+                );
+                return Err(BackendError::new("ProcessBackend lock poisoned"));
+            }
+        };
+        processes.insert(context.environment_id.clone(), process);
         Ok(())
+    }
+
+    fn discard_pending_status(&self, environment_id: &str) {
+        if let Ok(mut pending) = self.pending_status.lock() {
+            pending.remove(environment_id);
+        }
     }
 
     fn read_status(&self, environment_id: &str) -> Result<(u32, u64), BackendError> {
@@ -289,6 +364,44 @@ impl ProcessBackend {
         Ok((child_pid, namespace))
     }
 
+}
+
+/// spawn 之后任一准备步骤失败时的统一回收：杀掉整个进程组、等待回收、
+/// 删除 cgroup 目录并移除可能残留的 status pipe。
+fn abort_launch(
+    environment_id: &str,
+    child: &mut std::process::Child,
+    process_group: libc::pid_t,
+    cgroup_path: &Option<PathBuf>,
+    backend: &ProcessBackend,
+) {
+    if let Some(path) = cgroup_path {
+        let kill = path.join("cgroup.kill");
+        if kill.exists() {
+            let _ = fs::write(&kill, "1");
+        }
+    }
+    unsafe {
+        libc::kill(-process_group, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    backend.discard_pending_status(environment_id);
+    remove_cgroup(cgroup_path);
+}
+
+fn remove_cgroup(path: &Option<PathBuf>) {
+    let Some(path) = path else {
+        return;
+    };
+    for _ in 0..200 {
+        match fs::remove_dir(path) {
+            Ok(()) => return,
+            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
+    }
+    let _ = fs::remove_dir_all(path);
 }
 
 fn status_pipe() -> Result<(OwnedFd, OwnedFd), BackendError> {

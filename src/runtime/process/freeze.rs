@@ -118,18 +118,36 @@ impl ProcessBackend {
         let Some(mut process) = process else {
             return Ok(());
         };
+        let mut failures = Vec::new();
+        let mut killed = false;
         if let Some(path) = &process.cgroup_path {
             let kill = path.join("cgroup.kill");
             if kill.exists() {
-                let _ = fs::write(&kill, "1");
-            } else {
-                let _ = unsafe { libc::kill(-process.process_group, libc::SIGKILL) };
+                match fs::write(&kill, "1") {
+                    Ok(()) => killed = true,
+                    Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(failure) => failures.push(format!(
+                        "failed to write {}: {failure}",
+                        kill.display()
+                    )),
+                }
             }
-        } else {
-            let _ = unsafe { libc::kill(-process.process_group, libc::SIGKILL) };
         }
-        let _ = process.child.wait();
-        Ok(())
+        if !killed && unsafe { libc::kill(-process.process_group, libc::SIGKILL) } != 0 {
+            let failure = std::io::Error::last_os_error();
+            // 进程组已经不存在不是失败。
+            if failure.raw_os_error() != Some(libc::ESRCH) {
+                failures.push(format!("failed to kill process group: {failure}"));
+            }
+        }
+        if let Err(failure) = process.child.wait() {
+            failures.push(format!("failed to reap child process: {failure}"));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::new(failures.join("; ")))
+        }
     }
 
     pub fn cleanup(&self, environment_id: &str) -> Result<(), BackendError> {

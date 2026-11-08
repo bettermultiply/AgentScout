@@ -62,7 +62,7 @@ impl Adapter {
                 }
             }
         }
-        shared.stop_agents();
+        shared.shutdown();
         Ok(())
     }
 }

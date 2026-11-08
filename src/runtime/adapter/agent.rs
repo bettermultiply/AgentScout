@@ -51,6 +51,14 @@ impl Shared {
             self.stop_agent();
         }
     }
+
+    /// Adapter 退出路径：先停止 Agent，再让 Runtime 回收所有环境。
+    pub(super) fn shutdown(&self) {
+        self.stop_agents();
+        if let Err(error) = self.runtime.shutdown() {
+            eprintln!("adapter: Runtime shutdown incomplete: {error}");
+        }
+    }
     pub(super) fn start_state_watcher(self: Arc<Self>) {
         thread::spawn(move || {
             loop {

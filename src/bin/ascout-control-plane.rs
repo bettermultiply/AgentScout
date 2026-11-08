@@ -62,6 +62,47 @@ fn install_shutdown_handlers() -> io::Result<()> {
     Ok(())
 }
 
+fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn resolve_node() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    if let Some(value) = env::var_os("ASCOUT_NODE") {
+        let path = std::path::PathBuf::from(value);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(format!(
+            "ASCOUT_NODE points to a missing executable: {}",
+            path.display()
+        )
+        .into());
+    }
+    find_in_path("node").ok_or_else(|| {
+        "node executable not found in PATH; set ASCOUT_NODE to an absolute path".into()
+    })
+}
+
+fn resolve_agent_entry() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let path = env::var_os("ASCOUT_AGENT_ENTRY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("agent-access/pi/main.ts")
+        });
+    if !path.is_file() {
+        return Err(format!(
+            "Agent entry point not found at {}; set ASCOUT_AGENT_ENTRY",
+            path.display()
+        )
+        .into());
+    }
+    Ok(path)
+}
+
 fn validate_agent_capabilities(
     capabilities: &ascout::control_plane::agent_control::AdapterCapabilities,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -265,6 +306,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tree.bind_local_policy(policy.digest());
     let runtime_tools = serde_json::to_string(&runtime_capabilities.tools)?;
     // 用哪个 Agent 产品、哪个版本由控制面决定；启动它由 Runtime 完成。
+    let agent_entry = resolve_agent_entry()?;
     let mut agent_args = vec![
         "--import=".to_string()
             + &pi_root
@@ -272,10 +314,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .display()
                 .to_string(),
         "--experimental-strip-types".into(),
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("agent-access/pi/main.ts")
-            .display()
-            .to_string(),
+        agent_entry.display().to_string(),
         socket.display().to_string(),
         "agent".into(),
     ];
@@ -288,7 +327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_args.push(thinking);
     }
     let agent_launch = AgentLaunch {
-        command: "/usr/bin/node".into(),
+        command: resolve_node()?.display().to_string(),
         args: agent_args,
         cwd: tree.workspace(),
         log: run_dir.join("agent.log"),

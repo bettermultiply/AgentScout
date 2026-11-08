@@ -18,12 +18,17 @@ use serde_json::{Value, json};
 pub mod guest_access;
 
 use crate::runtime::backend::{Backend, BackendError, CancelHandle};
-use crate::protocol::contract::{CommandOutput, EnvironmentState};
+use crate::protocol::contract::{CommandOutput, EnvironmentState, RuntimeCapabilities};
 use crate::runtime::backends::firecracker::guest_access::{GuestRequest, GuestResponse, PORT};
 
 #[derive(Debug, Deserialize)]
 pub struct FirecrackerConfig {
+    /// Adapter 级配置：在共享 Runtime 配置的顶层已经提供。作为单 Backend
+    /// 配置反序列化时可以省略。
+    #[serde(default)]
     pub control_socket: PathBuf,
+    /// Adapter 级配置：同上，属于接入进程而不是 Firecracker Backend。
+    #[serde(default)]
     pub adapter_instance: String,
     pub firecracker_path: PathBuf,
     pub kernel_path: PathBuf,
@@ -35,6 +40,8 @@ pub struct FirecrackerConfig {
 pub struct FirecrackerBackend {
     config: FirecrackerConfig,
     environments: Mutex<HashMap<String, Arc<Mutex<Environment>>>>,
+    networks: Mutex<NetworkRegistry>,
+    api: Arc<dyn FirecrackerApi>,
 }
 
 mod backend_impl;
@@ -49,6 +56,8 @@ struct Environment {
 
 mod guest_ops;
 mod network;
-use network::EnvironmentNetwork;
+use network::{EnvironmentNetwork, NetworkRegistry};
+use guest_ops::FirecrackerApi;
 
-pub use network::environment_network_namespace;
+#[cfg(test)]
+mod tests;

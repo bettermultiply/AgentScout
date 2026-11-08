@@ -4,6 +4,14 @@ use super::*;
 
     
     use crate::control_plane::agent_control::{BranchRole, CommandOperation, CommandStatus};
+    use crate::control_plane::policy::CompiledPolicy;
+    use crate::control_plane::session::ControlServer;
+    use crate::protocol::contract::{
+        AdapterMessage, ControlMessage, EnvironmentState, OperationResult, ResultStatus,
+        RuntimeCapabilities,
+    };
+    use crate::protocol::transport;
+    use std::os::unix::net::UnixStream;
 
     fn task() -> (SpeculativeTree, tempfile::TempDir) {
         let root = tempfile::tempdir().unwrap();
@@ -140,6 +148,94 @@ use super::*;
         .unwrap();
         assert_eq!(tree.branches[&child].role, BranchRole::Candidate);
         assert!(!tree.evictable_branches().contains(&child));
+    }
+
+    #[test]
+    fn firecracker_style_capabilities_route_establish_through_branch_environment() {
+        let (mut tree, _root) = task();
+        let command = tree
+            .start_candidate("authority", "op", "tool", json!("guess"), None)
+            .unwrap();
+        let child = match &command {
+            AgentCommand::StartCandidate { branch_id, .. } => branch_id.clone(),
+            _ => unreachable!(),
+        };
+        let policy: CompiledPolicy = serde_json::from_value(json!({
+            "version": 1,
+            "python": "test",
+            "files": {},
+            "runtime": null,
+            "decisions": {},
+            "digest": "test"
+        }))
+        .unwrap();
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("control.sock");
+        let server = ControlServer::bind(&socket).unwrap();
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client_recorded = recorded.clone();
+        let client = std::thread::spawn(move || {
+            let mut stream = UnixStream::connect(&socket).unwrap();
+            loop {
+                match transport::read_message::<_, ControlMessage>(&mut stream).unwrap() {
+                    Some(ControlMessage::Request(request)) => {
+                        client_recorded.lock().unwrap().push((
+                            request.environment_id.clone(),
+                            request.operation.clone(),
+                        ));
+                        let result = OperationResult {
+                            request_id: request.request_id.clone(),
+                            environment_id: request.environment_id.clone(),
+                            status: ResultStatus::Completed,
+                            environment_state: Some(EnvironmentState::Available),
+                            can_accept_operations: true,
+                            follow_up: Vec::new(),
+                            resources: Vec::new(),
+                            remaining: Vec::new(),
+                            backend_states: Vec::new(),
+                            outputs: Vec::new(),
+                            reason: None,
+                            output: None,
+                            filesystem: None,
+                        };
+                        transport::write_message(
+                            &mut stream,
+                            &AdapterMessage::Result(result),
+                        )
+                        .unwrap();
+                    }
+                    None => break,
+                }
+            }
+        });
+        let session = server.accept().unwrap();
+        let capabilities = RuntimeCapabilities {
+            branch_environment: true,
+            shared_environment: false,
+            ..RuntimeCapabilities::default()
+        };
+        let result = AgentController
+            .perform(
+                &tree,
+                &policy,
+                &session,
+                &capabilities,
+                &ControlOperation::Establish(command),
+            )
+            .unwrap();
+        assert!(matches!(result, ControlResult::Completed));
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            vec![(
+                "authority".to_string(),
+                Operation::BranchEnvironment {
+                    child_environment_id: child
+                }
+            )]
+        );
+        session.shutdown().unwrap();
+        client.join().unwrap();
     }
 
     #[test]
