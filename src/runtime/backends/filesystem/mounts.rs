@@ -193,16 +193,9 @@ impl FilesystemBackend {
             chdir: Some(launch.cwd.clone()),
             ..LaunchFragment::default()
         };
-        fragment.mounts.push(MountEntry::RoBind {
-            source: PathBuf::from("/"),
-            target: PathBuf::from("/"),
-        });
-        fragment.mounts.push(MountEntry::Proc {
-            target: PathBuf::from("/proc"),
-        });
-        fragment.mounts.push(MountEntry::Dev {
-            target: PathBuf::from("/dev"),
-        });
+        fragment
+            .mounts
+            .extend(crate::runtime::launch_plan::base_mount_entries());
         let mut mounts = environment.selected_mounts(&environment.scopes)?;
         // Parents must be mounted before nested child mounts so a later
         // parent overlay cannot hide an already-mounted child overlay.

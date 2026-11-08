@@ -6,7 +6,7 @@
 
 ### 当前实现目标
 
-目标语义见 [Runtime 设计](../design/runtime.md)。首阶段实现了 Linux 文件系统 Backend：通过 bubblewrap 创建 mount/user namespace，并在其中把宿主根目录以只读方式挂载，再用 OverlayFS upper/work 层承载写入。Agent 启动入口在该 namespace 中执行，因此绝对路径、临时文件和全部后代进程继承同一文件系统视图；不是改变 cwd、复制目录或拦截 Agent API。
+目标语义见 [Runtime 设计](../design/runtime.md)。首阶段实现了 Linux 文件系统 Backend：通过 bubblewrap 创建 mount/user namespace，并在其中把宿主根目录以只读方式挂载，再用 OverlayFS upper/work 层承载写入。Agent 启动入口在该 namespace 中执行，因此绝对路径、临时文件和全部后代进程继承同一文件系统视图；不是改变 cwd、复制目录或拦截 Agent API。当前实现了 overlay 与 btrfs 两种数据面、逐挂载 overlay、进程 Backend（cgroup 冻结）与 live mount accept；实现范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
 
 Overlay 是第一项实现工作，不是所有 Runtime 的必需结构。当前 Backend 的 branch
 为父 upper 做独立副本（优先 reflink，失败时复制）或 btrfs 快照，子 lower 追加该
@@ -17,7 +17,7 @@ namespace 后以 `/proc/<pid>/root` dirfd 为根、通过 `openat2(RESOLVE_IN_RO
 安全重放。btrfs 只有在当前权限下 `incremental_diff=true` 时才会被选为数据面，
 否则降级 overlay 并在能力/日志中说明。
 
-尚待实现：受管文件效果的合法生效路径、Overlay 变更的 promote/冲突处理、主动 Registry 验证和运行时偏差检测。该 Backend 只负责文件系统，不负责进程终止、网络、内存、资源或 Agent Session；BaseRuntime 仍负责 Agent 进程句柄。它要求 Linux、可执行 bubblewrap、可创建 user/mount namespace 且宿主允许 OverlayFS；任一条件不满足时启动失败，不回退到未隔离启动。BaseRuntime 将 Agent 入口放入独立进程组并按进程组停止普通后代；若 Agent 主动创建新 session/cgroup 脱离进程组，则不在本版停止保证内。cleanup 会先停止 Agent，停止失败时保留进程句柄并禁止删除 upper/work；只有停止成功后才清理 inner 和 filesystem，任一清理失败都返回失败，不报告 cleanup 已收敛。无 context 的 Backend 方法统一转入 context 路径。establish/branch 的组合失败回滚同样先 terminate filesystem environment，再 cleanup；回滚错误追加到原始 BackendError 的 cleanup_failures。BaseRuntime 配置 filesystem 时，generic operate、tool_context 和 invoke_tool 仍只委托 inner Backend；filesystem 只检查环境状态，并在 Agent 启动时提供可继承的 namespace/Overlay 视图，不执行同一业务命令。
+尚待实现：受管文件效果的合法生效路径、主动 Registry 验证和运行时偏差检测；`diff(target=Some(_))` 明确返回未实现。Overlay 变更的 accept/冲突处理已实现：三方冲突检测后，无 live mount 时直接写目标 upper，有 live mount 时经 mount namespace 校验与 `openat2` 安全重放。该 Backend 只负责文件系统，不负责进程终止、网络、内存、资源或 Agent Session；进程启动、冻结、终止和句柄由 `runtime/process` 的 ProcessBackend 负责，FilesystemBackend 只产出 `LaunchFragment` 中的挂载条目。它要求 Linux、可执行 bubblewrap、可创建 user/mount namespace 且宿主允许 OverlayFS；任一条件不满足时启动失败，不回退到未隔离启动。ProcessBackend 将 Agent 入口放入独立进程组，cgroup v2 可用时用 `cgroup.freeze`，否则回退进程组 SIGSTOP/SIGCONT；若 Agent 主动创建新 session/cgroup 脱离控制，则不在本版停止保证内。cleanup 会先停止 Agent，停止失败时保留进程句柄并禁止删除 upper/work；只有停止成功后才清理 inner 和 filesystem，任一清理失败都返回失败，不报告 cleanup 已收敛。无 context 的 Backend 方法统一转入 context 路径。establish/branch 的组合失败回滚同样先 terminate filesystem environment，再 cleanup；回滚错误追加到原始 BackendError 的 cleanup_failures。BaseRuntime 配置 filesystem 时，generic operate、tool_context 和 invoke_tool 仍只委托 inner Backend；filesystem 只检查环境状态，并在 Agent 启动时提供可继承的 namespace/Overlay 视图，不执行同一业务命令。
 
 Adapter 中的生命周期状态门槛是所有 Runtime 共同遵守的契约，不是 filesystem
 Backend 的专属规则：operate 只接受 Available；branch 接受 Available 或
@@ -110,9 +110,9 @@ Adapter 配置注册后不得在运行期变化。若发现 Runtime 实际行为
 
 ## 6. 实现方向与当前代码
 
-2026-10-23 确定：后续优先采用进程级方案，在投机点启动新的 Agent 进程，交付显式续跑状态；不以透明复制任意运行中 Agent 为首版目标。首个真实 Agent 选择 [Pi](https://github.com/earendil-works/pi)，保留其原有推理循环，通过工具接入、显式会话状态和独立进程续跑连接 AScout，本轮不同时适配其他产品。具体会话截取和预测工具结果注入方式尚待实现验证，不把 Pi 的命令级 fork 当作工具等待点分支的现成能力。首要目标是在已有设计约束下跑通真实投机执行，不为更换后端改变上层语义，也不把 Registry 主动验证作为原型启动前置条件；未验证保证仍不得标记为已验证。
+2026-10-23 确定：后续优先采用进程级方案，在投机点启动新的 Agent 进程，交付显式续跑状态；不以透明复制任意运行中 Agent 为首版目标。首个真实 Agent 选择 [Pi](https://github.com/earendil-works/pi)，保留其原有推理循环，通过工具接入、显式会话状态和独立进程续跑连接 AScout，本轮不同时适配其他产品。具体会话截取和预测工具结果注入已在 Pi 接入中实现（`checkpointContinuation`、`toolResultInjection`，见 `pi/packages/coding-agent/src/core/pi-adapter.ts`），不把 Pi 的命令级 fork 当作工具等待点分支的现成能力。首要目标是在已有设计约束下跑通真实投机执行，不为更换后端改变上层语义，也不把 Registry 主动验证作为原型启动前置条件；未验证保证仍不得标记为已验证。
 
-进程级实现尚未落地。续跑状态如何交付由 Agent 接入侧配合，Runtime 负责新承载环境的实际建立、操作及回收；复制、共享或恢复 Session 不自动提供 workspace 隔离或外部效果治理。以下说明当前代码已经存在的 Firecracker 实现，不表示进程级方案已经可用。
+进程级实现已落地：`src/runtime/process/` 负责 bwrap 启动、进程组、`--json-status-fd`、cgroup 创建/加入/冻结/解冻/kill，以及内层 pid 与 mount namespace。续跑状态如何交付仍由 Agent 接入侧配合，Runtime 负责新承载环境的实际建立、操作及回收；复制、共享或恢复 Session 不自动提供 workspace 隔离或外部效果治理。进程 Backend 仍未覆盖逃出进程组的后代冻结，跨 Backend 的冻结/快照/解冻编排也待统一，详见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。以下说明当前代码已经存在的 Firecracker 实现。
 
 首轮 Pi 接入允许暂不经过独立 Runtime Adapter，先在受信接入代码中把候选操作限制为无本地业务副作用的范围，拒绝任意 shell、文件修改及未经授权的外部业务效果；系统管理的独立 session、日志及已授权模型请求另行管理。不以切换 cwd 证明 filesystem 隔离，不宣称该路径已经支持会写入仓库的 coding workload。此为实现范围缩减，不改变正式 Runtime 契约或效果治理语义。
 

@@ -22,25 +22,15 @@ impl FilesystemBackend {
         } else {
             "/bin/true"
         };
+        let mut entries = crate::runtime::launch_plan::base_mount_entries();
+        entries.push(MountEntry::Overlay {
+            lowers: vec![base.clone()],
+            upper: upper.clone(),
+            work: work.clone(),
+            target: base.clone(),
+        });
         let spec = MountSpec {
-            entries: vec![
-                MountEntry::RoBind {
-                    source: PathBuf::from("/"),
-                    target: PathBuf::from("/"),
-                },
-                MountEntry::Proc {
-                    target: PathBuf::from("/proc"),
-                },
-                MountEntry::Dev {
-                    target: PathBuf::from("/dev"),
-                },
-                MountEntry::Overlay {
-                    lowers: vec![base.clone()],
-                    upper: upper.clone(),
-                    work: work.clone(),
-                    target: base.clone(),
-                },
-            ],
+            entries,
             chdir: Some(PathBuf::from("/")),
             json_status_fd: None,
         };

@@ -1,6 +1,6 @@
 # Runtime 生命周期协议
 
-本文集中说明一个 Runtime 实例在运行期如何建立、操作、派生、提升、静止、恢复、终止和清理环境，以及多 Backend 组合下这些操作如何按固定顺序执行、如何暴露部分失败、如何聚合状态和如何划分清理责任。它是开发阶段的实现说明，对应代码 `src/runtime/`、`src/runtime/backend.rs`、`src/runtime/adapter/` 和 `src/bin/ascout-runtime-adapter.rs` 的当前语义；正式接入契约见 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)，Branch 的树结构与裁决语义见 [Branch 语义设计](../design/branch-semantics.md)。
+本文集中说明一个 Runtime 实例在运行期如何建立、操作、派生、提升、静止、恢复、终止和清理环境，以及多 Backend 组合下这些操作如何按固定顺序执行、如何暴露部分失败、如何聚合状态和如何划分清理责任。它是开发阶段的实现说明，对应代码 `src/runtime/`、`src/runtime/backend.rs`、`src/runtime/adapter/`、`src/runtime/process/` 和 `src/bin/ascout-runtime-adapter.rs` 的当前语义；正式接入契约见 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)，Branch 的树结构与裁决语义见 [Branch 语义设计](../design/branch-semantics.md)。
 
 ## 1. Runtime 的定义与三层边界
 

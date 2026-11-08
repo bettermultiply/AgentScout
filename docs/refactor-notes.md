@@ -74,10 +74,11 @@
 ## 第八轮补充
 
 - 新增 btrfs 快照副本模式：每个挂载 upper 位于一个 btrfs 子卷的 `upper`
-  子目录，fork/mark 用只读/可写快照，O(1)。本机普通用户 `btrfs subvolume
-  delete` 返回 EPERM，`fast_delete=false`，因此该模式在本机被禁用并 SKIP；
-  只有创建/快照/删除探测全部成功才启用。最终基准表中两个 btrfs-snapshot
-  case 均为 SKIP，非静默通过。
+  子目录，fork/mark 用只读/可写快照。启用探测包含创建、只读快照、overlay
+  lower 挂载和 btrfs-aware 递归删除；`fast_delete` 不再是启用门槛。本机
+  `fast_delete=false` 时仍启用，后台删除走递归 fallback。最终基准显示
+  btrfs-snapshot fork 比 reflink 快，但仍随 N 增长（100k 约 1.2–1.4s），
+  不是严格 O(1)。
 - btrfs 快照模式仍保留 staging + 原子 rename；失败/崩溃的 `.tmp-*` 在下次
   启动清理。
 - `clone_upper` 的并行克隆评估：未实现。当前 fork 的主要剩余成本是目录项遍历；
@@ -101,4 +102,51 @@
 - 损坏的 `operations.json` 改名为 `.corrupt-<pid>` 并告警。
 - 后台删除/递归删除把 NotFound 视为成功；最终 benchmark 未再出现该告警。
 - mark 的两个持久化错误不再压成 bool，原始错误进入返回消息。
+
+## 第九轮代码异味处理
+
+已处理：
+
+- `LaunchFragment/MountEntry/MountSpec` 移到中立模块 `runtime/launch_plan.rs`；
+  `runtime/backend.rs` 与 filesystem 不再依赖 `runtime::process` 的挂载计划类型。
+  `process` 保留公开 re-export 以避免破坏现有公开路径。
+- 删除恒为 true 的 `BTRFS_INCREMENTAL_DIFF_IMPLEMENTED` 及对应注释/不可达分支。
+- `ProcessBackend` 的三个构造器提取共享 `empty` 初始化；仅测试使用的
+  `with_mechanism/new_process_group/capabilities` 加 `#[cfg(test)]`，删除无用的
+  `id` 字段/方法。
+- `BaseRuntime` 的 operate/tool_context/invoke_tool 三个单输出包装提取
+  `single_output` helper。
+- filesystem probe/btrfs/mounts 的 base mount 条目复用
+  `launch_plan::base_mount_entries()`。
+- process cgroup/launch 与 adapter dispatch 的等待超时提取为命名常量。
+
+未处理（如实记录）：
+
+- `handle_message`、`complete_work`、`execute`、filesystem `fork` 的按职责拆分：
+  它们包含密集的状态机分支；本轮优先保证行为不变，未强行拆散 `match`。
+  `launch_fragment` 已复用 base mount helper，但未进一步拆成多个阶段函数。
+- firecracker 两个 `start_*` 函数的重复 prologue/rollback：需要同时改错误路径，
+  为降低与并行 firecracker 修复冲突的风险，未在本轮重构。
+- `ops/*.rs` 的 fork/mark/diff/accept 前置检查提取：各操作的合法性条件不同，
+  只在 accept 内保留现有语义，未抽出可能改变错误顺序的共享函数。
+- `FilesystemBackend::mechanism/fast_delete/fork_cost` 仍为 pub：examples 和测试
+  直接使用，收窄会改变公开 API。
+- `docs/development/decisions.md` 中“filesystem 不执行 generic operate”与代码
+  不一致。该文档由并行文档会话维护，本轮只记录：代码中 filesystem 保留
+  `Backend::operate` 供直接 Backend 调用；BaseRuntime 组合时仍只把 generic
+  operate 委托给 inner。需要文档会话或后续轮次二选一修正。
+- `ops/*.rs` 的 `pub fn` 是现有公开数据面 API，未收窄。
+- `FreezeMechanism::None` 保留：不是仅测试类型，BaseRuntime 的生产
+  suspend/resume/filesystem_operation 都会根据它选择跳过 freeze/thaw。
+
+## 第九轮补充发现
+
+- btrfs 快照副本已在本机启用（`fast_delete=false` 不再阻塞），但 100k 文件时
+  fork 实测约 1.2–1.4s，仍随 N 增长，不是严格 O(1)。裸
+  `btrfs subvolume snapshot -r` 对 100k 文件测到首次约 0.22s、后续接近 0，
+  说明剩余成本在完整 fork 的 per-mount snapshot/prepare 流程；本轮未继续优化。
+- `target/tmp` 中仍有少量空的只读 btrfs 子卷根，来自手工探测；普通用户
+  `btrfs subvolume delete` EPERM，无法完全删除，非测试失败残留。
+- 长函数拆分、firecracker 两个 start 的重复代码、ops 前置检查提取、firecracker
+  超时常量未处理，已在上一节列出原因。
 

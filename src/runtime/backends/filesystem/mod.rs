@@ -25,7 +25,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::runtime::backend::{Backend, BackendContext, BackendError, CancelHandle};
-use crate::runtime::process::{LaunchFragment, MountEntry, MountSpec};
+use crate::runtime::launch_plan::{LaunchFragment, MountEntry, MountSpec};
 use crate::protocol::contract::{
     EnvironmentState, FilesystemResult, Operation, PathScope,
     RuntimeCapabilities,
@@ -123,21 +123,10 @@ impl FilesystemBackend {
         } else {
             (false, false)
         };
-        // The kernel may expose find-new under some privileges, but this
-        // round has not implemented a btrfs incremental diff/accept path.
-        // Selecting btrfs while diff/accept are unavailable would make the
-        // default mechanism unusable, so the gate stays closed until that
-        // implementation exists.
-        const BTRFS_INCREMENTAL_DIFF_IMPLEMENTED: bool = true;
+        // btrfs is selected only when the real send/receive --dump probe
+        // succeeds; otherwise the portable overlay plane is used.
         let kernel_incremental = btrfs_ok && probe.probe_btrfs_incremental();
-        let btrfs_incremental_diff =
-            BTRFS_INCREMENTAL_DIFF_IMPLEMENTED && kernel_incremental;
-        if kernel_incremental && !btrfs_incremental_diff {
-            eprintln!(
-                "filesystem: btrfs find-new is available, but btrfs incremental diff/accept is not implemented; \
-                 staying on overlay"
-            );
-        }
+        let btrfs_incremental_diff = kernel_incremental;
         let mechanism = if btrfs_ok && btrfs_incremental_diff {
             FilesystemMechanism::Btrfs
         } else {
@@ -151,7 +140,6 @@ impl FilesystemBackend {
         let snapshot_copies = mechanism == FilesystemMechanism::Overlay
             && !config.force_overlay
             && btrfs_ok
-            && fast_delete
             && probe.probe_btrfs_snapshot_copies();
         let fork_cost = if mechanism == FilesystemMechanism::Btrfs {
             ForkCost::BtrfsSnapshot

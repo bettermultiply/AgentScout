@@ -17,6 +17,7 @@ pub mod backends;
 pub mod base;
 pub mod capabilities;
 pub mod composite;
+pub mod launch_plan;
 pub mod process;
 pub mod selection;
 

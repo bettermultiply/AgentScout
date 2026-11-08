@@ -7,87 +7,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use super::*;
+use crate::runtime::launch_plan::*;
 
-#[derive(Debug, Clone, Default)]
-pub struct LaunchFragment {
-    pub mounts: Vec<MountEntry>,
-    pub chdir: Option<PathBuf>,
-    pub env: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone)]
-pub enum MountEntry {
-    RoBind { source: PathBuf, target: PathBuf },
-    Bind { source: PathBuf, target: PathBuf },
-    Overlay {
-        /// Bottom to top.
-        lowers: Vec<PathBuf>,
-        upper: PathBuf,
-        work: PathBuf,
-        target: PathBuf,
-    },
-    Proc { target: PathBuf },
-    Dev { target: PathBuf },
-    Tmpfs { target: PathBuf },
-    RemountRo { target: PathBuf },
-    Dir { target: PathBuf },
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct MountSpec {
-    pub entries: Vec<MountEntry>,
-    pub chdir: Option<PathBuf>,
-    pub json_status_fd: Option<libc::c_int>,
-}
-
-impl MountSpec {
-    pub fn apply(&self, command: &mut Command) {
-        command.arg("--die-with-parent").arg("--unshare-user");
-        for entry in &self.entries {
-            match entry {
-                MountEntry::RoBind { source, target } => {
-                    command.arg("--ro-bind").arg(source).arg(target);
-                }
-                MountEntry::Bind { source, target } => {
-                    command.arg("--bind").arg(source).arg(target);
-                }
-                MountEntry::Overlay {
-                    lowers,
-                    upper,
-                    work,
-                    target,
-                } => {
-                    for lower in lowers {
-                        command.arg("--overlay-src").arg(lower);
-                    }
-                    command.arg("--overlay").arg(upper).arg(work).arg(target);
-                }
-                MountEntry::Proc { target } => {
-                    command.arg("--proc").arg(target);
-                }
-                MountEntry::Dev { target } => {
-                    command.arg("--dev").arg(target);
-                }
-                MountEntry::Tmpfs { target } => {
-                    command.arg("--tmpfs").arg(target);
-                }
-                MountEntry::RemountRo { target } => {
-                    command.arg("--remount-ro").arg(target);
-                }
-                MountEntry::Dir { target } => {
-                    command.arg("--dir").arg(target);
-                }
-            }
-        }
-        if let Some(chdir) = &self.chdir {
-            command.arg("--chdir").arg(chdir);
-        }
-        if let Some(fd) = self.json_status_fd {
-            command.arg("--json-status-fd").arg(fd.to_string());
-        }
-    }
-}
-
+const MOUNT_INFO_ATTEMPTS: usize = 400;
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
 impl ProcessBackend {
     pub fn launch(
@@ -440,7 +363,7 @@ fn read_status_line(fd: &OwnedFd) -> Result<String, BackendError> {
 
 fn wait_for_mounts(pid: u32, targets: &[PathBuf]) -> Result<(), BackendError> {
     let path = format!("/proc/{pid}/mountinfo");
-    for _ in 0..400 {
+    for _ in 0..MOUNT_INFO_ATTEMPTS {
         match fs::read_to_string(&path) {
             Ok(text) => {
                 let ready = text.lines().any(|line| {
@@ -464,7 +387,7 @@ fn wait_for_mounts(pid: u32, targets: &[PathBuf]) -> Result<(), BackendError> {
             }
             Err(_) => return Ok(()),
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::thread::sleep(POLL_INTERVAL);
     }
     Err(BackendError::new(
         "sandbox did not finish mounting overlays before the readiness timeout",

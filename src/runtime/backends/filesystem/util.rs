@@ -61,17 +61,31 @@ pub(super) fn remove_directory_force(path: &Path) -> Result<(), BackendError> {
     };
     if metadata.is_dir() {
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
-        for entry in fs::read_dir(path).map_err(error)? {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(value) if value.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(value) => return Err(error(value)),
-            };
-            remove_directory_force(&entry.path())?;
+        match fs::read_dir(path) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(value) if value.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(value) => return Err(error(value)),
+                    };
+                    remove_directory_force(&entry.path())?;
+                }
+            }
+            Err(value) if value.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(value) => return Err(error(value)),
         }
-        fs::remove_dir(path).map_err(error)?;
+        match fs::remove_dir(path) {
+            Ok(()) => Ok(()),
+            Err(value) if value.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(value) => Err(error(value)),
+        }?;
     } else {
-        fs::remove_file(path).map_err(error)?;
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(value) if value.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(value) => Err(error(value)),
+        }?;
     }
     Ok(())
 }
@@ -160,12 +174,8 @@ pub(super) fn remove_btrfs_tree(btrfs: &Path, path: &Path) -> Result<(), Backend
         Err(value) => return Err(error(value)),
     };
     if metadata.is_dir() {
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                remove_btrfs_tree(btrfs, &entry.path())?;
-            }
-        }
+        // Clear read-only before descending; otherwise removing children of a
+        // read-only snapshot fails with EROFS.
         let _ = Command::new(btrfs)
             .args([
                 std::ffi::OsStr::new("property"),
@@ -177,6 +187,12 @@ pub(super) fn remove_btrfs_tree(btrfs: &Path, path: &Path) -> Result<(), Backend
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                remove_btrfs_tree(btrfs, &entry.path())?;
+            }
+        }
         let _ = Command::new(btrfs)
             .args([
                 std::ffi::OsStr::new("subvolume"),

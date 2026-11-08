@@ -181,7 +181,7 @@ PI_CODING_AGENT_DIR=/tmp/opencode/ascout-check-config cargo run --bin ascout-con
 
 完整多行编辑、Markdown 和工具专门排版、宽字符排版、产品特有交互、断线恢复、资源硬限制与确认式退出清理尚未实现。当前是简单终端原型，不宣称已达到原 Agent 全部交互能力。
 
-环境管理暂不接通完整 Runtime Adapter 是已确认的开发顺序；目录不代表任意 shell 或外部效果已隔离，尤其不隔离扩展自身的代码及网络行为。接入进程退出只确认该进程退出，不证明任意工具后代均已停止或环境资源已清理。
+环境管理已由 Runtime Adapter 接通文件系统与进程 Backend；NLE 路径仍使用共享环境。目录不代表任意 shell 或外部效果已隔离，尤其不隔离扩展自身的代码及网络行为。接入进程退出只确认该进程退出，不证明任意工具后代均已停止或环境资源已清理。文件系统 Backend 的覆盖范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
 
 ## 真实游戏端到端验证方向（2026-10-28）
 
@@ -393,7 +393,7 @@ ASCOUT_RUNTIME_CONFIG=nle-runtime.json \
 
 `SpeculativeTree` 直接拥有 Branch 状态、编号、命令回执、等待点及未完成外部操作。`AgentController` 无 task 状态，通过显式传入的树只读事实调用 Policy 函数或 Runtime。树的方法检查并落实操作，Policy 求值器不修改树。
 
-`execution.rs` 接收 Agent 消息、UI 请求、操作返回及到期检查，同一 task 顺序处理。运行期间不再每 100 毫秒轮询；等待使用树给出的最近期限，期限到达才触发检查。Policy 与 Runtime 操作在工作线程完成，不阻塞控制事件处理。读取树的副本仅用于一次异步求值，不成为另一份可变控制状态。取消、结束或状态变化后，返回结果重新检查有效性；仍有环境操作在进行的 Branch 不得提前归档或清理。
+`src/bin/ascout-control-plane/execution.rs` 接收 Agent 消息、UI 请求、操作返回及到期检查，同一 task 顺序处理。运行期间不再每 100 毫秒轮询；等待使用树给出的最近期限，期限到达才触发检查。Policy 与 Runtime 操作在工作线程完成，不阻塞控制事件处理。读取树的副本仅用于一次异步求值，不成为另一份可变控制状态。取消、结束或状态变化后，返回结果重新检查有效性；仍有环境操作在进行的 Branch 不得提前归档或清理。
 
 Gateway 是否覆盖 UI 与 Runtime 尚未确定；当前保留各自的通信边界，UI 通过请求回调投递事件。
 

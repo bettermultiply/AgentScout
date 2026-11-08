@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::protocol::contract::{
     BackendOutput, BackendState, CommandOutput, EnvironmentState, FilesystemResult, Operation, RuntimeCapabilities,
 };
-use crate::runtime::process::LaunchFragment;
+use crate::runtime::launch_plan::LaunchFragment;
 
 /// 一次 Runtime 请求传给 Backend 的逻辑上下文。
 ///

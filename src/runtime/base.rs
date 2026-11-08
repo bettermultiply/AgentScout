@@ -10,7 +10,8 @@ use crate::protocol::contract::{
     RuntimeCapabilities,
 };
 use super::backend::{Backend, BackendContext, BackendError, BackendExecution, CancelHandle};
-use super::process::{FreezeMechanism, LaunchFragment, ProcessBackend, ProcessHandle};
+use super::launch_plan::LaunchFragment;
+use super::process::{FreezeMechanism, ProcessBackend, ProcessHandle};
 use super::selection::merge_launch_fragment;
 
 pub struct BaseRuntime {
@@ -94,6 +95,13 @@ impl BaseRuntime {
     }
 }
 
+fn single_output(execution: BackendExecution) -> Result<CommandOutput, BackendError> {
+    execution.single_output().ok_or_else(|| {
+        BackendError::new("multiple Backend outputs require an explicit output_backend selection")
+            .with_outputs(execution.outputs)
+    })
+}
+
 impl Drop for BaseRuntime {
     fn drop(&mut self) {
         let _ = self.stop_agent_process();
@@ -165,12 +173,7 @@ impl Backend for BaseRuntime {
     ) -> Result<CommandOutput, BackendError> {
         let execution =
             self.operate_with_context(&BackendContext::new(environment_id), command, cancel)?;
-        execution.single_output().ok_or_else(|| {
-            BackendError::new(
-                "multiple Backend outputs require an explicit output_backend selection",
-            )
-            .with_outputs(execution.outputs)
-        })
+        single_output(execution)
     }
 
     fn operate_with_context(
@@ -197,12 +200,7 @@ impl Backend for BaseRuntime {
             tool_name,
             cancel,
         )?;
-        execution.single_output().ok_or_else(|| {
-            BackendError::new(
-                "multiple Backend outputs require an explicit output_backend selection",
-            )
-            .with_outputs(execution.outputs)
-        })
+        single_output(execution)
     }
 
     fn tool_context_with_context(
@@ -229,12 +227,7 @@ impl Backend for BaseRuntime {
             arguments,
             cancel,
         )?;
-        execution.single_output().ok_or_else(|| {
-            BackendError::new(
-                "multiple Backend outputs require an explicit output_backend selection",
-            )
-            .with_outputs(execution.outputs)
-        })
+        single_output(execution)
     }
 
     fn invoke_tool_with_context(

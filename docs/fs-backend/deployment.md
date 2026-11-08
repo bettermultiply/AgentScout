@@ -34,15 +34,17 @@ replay journal）。当状态目录位于某个会被 Agent overlay 的挂载点
    会用 `--tmpfs` + `--remount-ro` 遮蔽。
 3. 状态目录所在文件系统应支持 reflink（btrfs/XFS）或 btrfs 快照副本，以获得
    O(1) 的 fork/备份；否则 fork 和 accept 回滚备份会退化为复制。
-4. btrfs 快照副本模式还要求当前用户能执行 `btrfs subvolume delete`（启动探测
-   的 `fast_delete=true`）。只能创建/快照但无法删除子卷时，模式会自动禁用，
-   否则 discard 无法回收副本。
+4. btrfs 快照副本模式要求创建子卷、只读快照、快照作为 overlay lower、以及
+   btrfs-aware 递归删除（先 `property set ro false`）探测成功。`fast_delete`
+   只影响后台删除成本，不再是启用门槛；`filesystem_fast_delete=false` 与
+   `fork_cost=btrfs_snapshot` 可以同时出现。
 
 ## 副本生产者选择顺序
 
 1. **方案 A**：btrfs upper 子卷 + 有特权的增量 send diff/accept（最高优先级）。
 2. **方案 2 + btrfs 快照**：状态目录在 btrfs，且创建/只读快照/overlay lower/
-   `subvolume delete` 探测全部成功。fork/mark 为 O(1) 子卷快照。
+   btrfs-aware 删除探测全部成功。fork/mark 为 O(1) 子卷快照；删除热路径是
+   rename，后台 fallback 为 O(文件数)。
 3. **方案 2 + reflink**：支持 FICLONE。fork 仍需遍历 N 个目录项，数据 O(1)。
 4. **方案 2 + copy**：逐文件复制。
 

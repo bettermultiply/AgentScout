@@ -140,25 +140,15 @@ impl FilesystemBackend {
             } else {
                 "/bin/true"
             };
+            let mut entries = crate::runtime::launch_plan::base_mount_entries();
+            entries.push(MountEntry::Overlay {
+                lowers: vec![snap.clone()],
+                upper: upper.clone(),
+                work: work.clone(),
+                target: target.clone(),
+            });
             let spec = MountSpec {
-                entries: vec![
-                    MountEntry::RoBind {
-                        source: PathBuf::from("/"),
-                        target: PathBuf::from("/"),
-                    },
-                    MountEntry::Proc {
-                        target: PathBuf::from("/proc"),
-                    },
-                    MountEntry::Dev {
-                        target: PathBuf::from("/dev"),
-                    },
-                    MountEntry::Overlay {
-                        lowers: vec![snap.clone()],
-                        upper: upper.clone(),
-                        work: work.clone(),
-                        target: target.clone(),
-                    },
-                ],
+                entries,
                 chdir: Some(PathBuf::from("/")),
                 json_status_fd: None,
             };
@@ -177,10 +167,24 @@ impl FilesystemBackend {
         } else {
             false
         };
-        let _ = self.btrfs_delete_strict(&snap);
-        let _ = self.btrfs_delete_strict(&sub);
+        let deleted = if mounted {
+            // Exercise the same btrfs-aware recursive removal used by the
+            // background trash path.  fast_delete is only a cost signal; this
+            // fallback must actually clean a read-only snapshot.
+            let _ = self.btrfs_delete_strict(&snap);
+            let _ = self.btrfs_delete_strict(&sub);
+            let _ = remove_path_with_mode(
+                &self.config.btrfs_path,
+                &root,
+                true,
+                false,
+            );
+            !path_exists(&root)
+        } else {
+            false
+        };
         let _ = remove_path(&self.config.btrfs_path, &root, true);
-        mounted
+        mounted && deleted
     }
 
     pub(super) fn btrfs_delta(

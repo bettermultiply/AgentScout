@@ -6,6 +6,9 @@ use std::sync::atomic::Ordering;
 
 use super::*;
 
+const FREEZE_WAIT_ATTEMPTS: usize = 200;
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
 pub(super) fn probe_cgroup_root() -> Option<PathBuf> {
     let text = fs::read_to_string("/proc/self/cgroup").ok()?;
     let path = text
@@ -27,13 +30,13 @@ pub(super) fn probe_cgroup_root() -> Option<PathBuf> {
 }
 
 pub(super) fn wait_frozen(path: &Path) -> Result<(), BackendError> {
-    for _ in 0..200 {
+    for _ in 0..FREEZE_WAIT_ATTEMPTS {
         if let Ok(events) = fs::read_to_string(path.join("cgroup.events"))
             && events.lines().any(|line| line.trim() == "frozen 1")
         {
             return Ok(());
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::thread::sleep(POLL_INTERVAL);
     }
     Err(BackendError::new("cgroup did not report frozen=1"))
 }

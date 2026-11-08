@@ -57,7 +57,7 @@ FilesystemBackend 和配置了 filesystem 的 BaseRuntime 中执行。
 
 已收敛：AScout 自身支持一套完整 Runtime，承载 Agent 一步动作，使其正常、正确运行，并把对真实世界或 Authority 的影响限制在容忍范围内。Runtime Adapter 与 Effect Coordinator 是这个整体中的接入和效果管理职责，不是平级的独立运行系统。Agent Session 内部管理仍归接入侧，Runtime 负责动作承载和外部效果边界；状态可以复制、共享、写时复制、重建或恢复，优先低成本方式。
 
-能力可插拔、组合或缺失，但必要保证不能缺失。第一阶段先实现覆盖 Agent 及其派生进程文件操作的 Overlay 文件系统，不要求 VM；Overlay 本身不是 Runtime 的固定必需项。后续才展开 Runtime 与 Policy 的协调、协商和运行时检测。本轮只更新文档，不表示这些能力已实现。
+能力可插拔、组合或缺失，但必要保证不能缺失。第一阶段先实现覆盖 Agent 及其派生进程文件操作的 Overlay 文件系统，不要求 VM；Overlay 本身不是 Runtime 的固定必需项。后续才展开 Runtime 与 Policy 的协调、协商和运行时检测。该决定最初只更新文档；文件系统 Backend 其后已实现 overlay/btrfs 数据面、逐挂载 overlay、live mount accept 与进程 Backend，当前覆盖范围和偏差见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
 
 **废弃记录**：不再采用“Runtime 仅是 AScout 不拥有的外部后端”“Runtime Adapter 是独立一级侧面”“外部效果执行只属于控制面而不属于 Runtime”的架构定义。此前四侧路径中的 Adapter 现在作为 Runtime 的接入边界；效果协调归入 Runtime 整体责任。这里改变的是职责定义，不预定 crate、进程、transport 或部署方式。既有 Branch、状态可见性、commit/discard 和 single-winner 规则保持不变。
 
@@ -129,7 +129,7 @@ Agent 接入侧仍然是唯一控制 Agent 会话的地方：创建会话、克�
 
 工具通道现在由 Runtime 生成 `result` 文本（可读摘要）和 `evidence` 结构化事实；控制面只转发，不解释游戏字段。早期 `{"is_error", "observation"}` 的结果形态不再使用。
 
-仍未落实：Agent 产品的选择由控制面（用户）决定，但启动 Agent 进程属于 Runtime Adapter，路径和版本作为参数由控制面传入。当前仍由控制面直接启动 Pi。
+仍未落实：Agent 产品的选择由控制面（用户）决定，但启动 Agent 进程属于 Runtime Adapter，路径和版本作为参数由控制面传入。Pi 接入的启动已按 2026-11-02 决策移入 Runtime Adapter（`src/runtime/adapter/agent.rs`），控制面只传入启动路径与版本。
 
 ## 2026-11-01：一次 run 只提供一个工作目录，不再按 Branch 复制目录
 
@@ -242,7 +242,7 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 
 **废弃记录（2026-10-23）**：不再采用“设计初期先定少量端到端测试、须经用户同意并在业务逻辑实现前定稿”的普遍门槛。早先等待 test 通过／失败的两个 Proposal、确定性 FollowUp 及两个控制面场景的首批测试安排不再作为实现前提。
 
-早期 `tests/test_outcome.rs` 及其确定性替代实现已经删除，不再作为当前正确性证据。当前 Runtime Adapter 端到端测试直接启动真实 Firecracker，验证 microVM 建立、guest 内操作、物理暂停与恢复、终止与清理、请求重试去重、在飞操作打断、意外停止事件，以及 snapshot/restore 分支和 sibling 隔离；SSH 诊断同样使用真实 virtio-net 与 guest sshd。尚未实现 task 身份校验、全局唯一 Proposal identity、九类完整决策、待选集合、fallback、嵌套树、效果处理和主动环境验证。当前 Rust 接口仍是实验接口，不是稳定对外契约。
+早期 `tests/test_outcome.rs` 及其确定性替代实现已经删除，不再作为当前正确性证据。当前 Runtime Adapter 端到端测试直接启动真实 Firecracker，验证 microVM 建立、guest 内操作、物理暂停与恢复、终止与清理、请求重试去重、在飞操作打断、意外停止事件，以及 snapshot/restore 分支和 sibling 隔离；SSH 诊断同样使用真实 virtio-net 与 guest sshd。当前已实现 task 身份校验、Proposal 独立存储和待选集合；仍未实现全局唯一 Proposal identity、九类 Decision 的完整接通、fallback、嵌套树、效果处理和主动环境验证。当前 Rust 接口仍是实验接口，不是稳定对外契约。
 
 Adapter Registry 的主动环境验证延后实现，初期先检查接入接口与契约的对应关系。这是原型限制，不改变目标契约：接口检查不构成隔离保证的实际验证，相关能力不得标记为已验证。尚未实现的差距是 Registry 自主建立环境、执行验证场景并形成验证证据。
 
@@ -288,7 +288,7 @@ Adapter Registry 的主动环境验证延后实现，初期先检查接入接口
 
 **废弃记录（2026-11-04）**：此前曾以“Runtime 只提供环境能力”为由，把外部效果实际处理移到控制面。此边界已被本文顶部的 Runtime 整体边界取代；Session 仍由接入侧管理，环境与效果执行归 Runtime，Tree 与全局裁决归控制面。
 
-需要 adversarial containment 时，用户选择另行适配的 sandbox/hardened Runtime。AScout 不协商 security guarantee，默认 backend 技术尚未选择。
+需要 adversarial containment 时，用户选择另行适配的 sandbox/hardened Runtime。AScout 不协商 security guarantee；当前首个实现为文件系统 Backend（overlay/btrfs）与进程 Backend，见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
 
 ## D-017-I：新 Rust 实现不继承旧代码
 

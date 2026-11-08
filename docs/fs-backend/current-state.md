@@ -18,8 +18,8 @@
   - 当状态目录在 btrfs 且 `probe_btrfs_snapshot_copies` 成功（创建/只读快照/
     overlay lower/子卷删除均可用）时，每个挂载的 upper 置于一个 btrfs 子卷的
     `upper` 目录中，fork/mark 用只读快照产生层，成本 O(1)；子 upper 是新的空
-    子卷，flatten 情形用可写快照。若子卷删除不可用（本机 `fast_delete=false`），
-    不启用该模式，避免 discard 无法回收。
+    子卷，flatten 情形用可写快照。启用探测要求创建/只读快照/overlay lower/
+    btrfs-aware 递归删除成功；`fast_delete` 只影响后台删除成本，不阻止启用。
   - FS Backend 自身不冻结写者。经 BaseRuntime 调用时，进程在 fork/mark/accept
     前由 ProcessBackend 冻结，成功后 `writers_quiesced=true`；直接调用 FS API 或
     冻结机制为 `none` 时仍为 false，并发写可能导致副本跨文件交错。
@@ -35,14 +35,18 @@
     btrfs 测试 SKIP；高权限验证见 `scripts/priv-check.sh`。
 - **btrfs 快照副本（overlay 方案 2）**
   - 探测 `probe_btrfs_snapshot_copies`：建子卷、写文件、只读快照、把快照作为
-    overlay lower 真实 bwrap 挂载、删除子卷。全部成功且 `fast_delete=true`
-    才启用。
+    overlay lower 真实 bwrap 挂载，再走 btrfs-aware 递归删除路径确认能删净。
+    创建/快照/挂载/删除探测全部成功才启用；`fast_delete` 不再作为门槛，只影响
+    后台删除成本，`filesystem_fast_delete=false` 与 `fork_cost=btrfs_snapshot`
+    可以同时出现。
   - 每个挂载 upper 位于一个 btrfs 子卷的 `upper` 子目录；fork 用只读快照作为
     lower 层，子 upper 为新空子卷；flatten 情形用可写快照。mark 用只读快照。
   - 选择顺序：方案 A → 方案 2 + btrfs 快照 → reflink → copy。
-  - 本机普通用户 `btrfs subvolume delete` EPERM，因此本机不启用，测试与基准
-    条目打印 SKIP；具备删除权限的环境应得到 O(1) fork/mark。
-  - 测试：`btrfs_snapshot_copy_fork_is_end_to_end`（本机 SKIP）。
+  - 本机普通用户 `btrfs subvolume delete` EPERM，但 `property set ro false`
+    + 递归删除可删净；因此本机现在也启用 btrfs 快照副本，`fast_delete=false`
+    只表示后台删除走 O(文件数) fallback。
+  - 测试：`btrfs_snapshot_copy_fork_is_end_to_end`（本机实际运行并通过，含
+    snapshot xattr、whiteout、后台删除清空断言）。
 
 - **mark**
   - overlay：逐选中挂载独立复制当前 upper，不改 live upper。
@@ -137,9 +141,8 @@
 - 当前挂载含状态目录时，fork 采用“upper 展平 + 快照仅作 diff 元数据”，不再把
   该快照层作为 lowerdir；这是为了避免 OverlayFS 的
   `Overlay directories may not overlap`。
-- 本机 btrfs 支持创建子卷/只读快照，但普通用户 `btrfs subvolume delete` 返回
-  EPERM（`fast_delete=false`），因此 btrfs 快照副本模式在本机被禁用，测试打印
-  SKIP；在具备子卷删除权限的环境应启用。
+- 本机普通用户 `btrfs subvolume delete` 返回 EPERM，`fast_delete=false`；快照
+  副本仍可启用，后台删除走 recursion fallback（已验证可删净），只是成本更高。
 
 ## 未验证 / 需高权限
 
@@ -233,8 +236,8 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
 
 | 操作 | 方案 A btrfs 增量 | 方案 2 + btrfs 快照 | 方案 2 + reflink | 方案 2 + copy |
 |---|---|---|---|---|
-| fork | O(1) 快照（推断） | O(1) 快照（推断；本机因删除权限 SKIP） | O(目录项数) | O(目录项数 + 数据) |
-| mark | O(1) 快照 | O(1) 快照 | O(upper 目录项数) | O(upper 数据) |
+| fork | O(1) 快照（推断） | 快照命令 O(1)，本机实测 100k 约 1.2–1.4s（仍随 N 增长） | O(目录项数) | O(目录项数 + 数据) |
+| mark | O(1) 快照 | 快照命令 O(1)，本机实测 100k 约 0.6–1.25s | O(upper 目录项数) | O(upper 数据) |
 | diff lower 链 | O(增量 + send) | O(增量) | O(增量) | O(增量) |
 | diff flatten | O(upper) | O(upper) | O(upper) | O(upper) |
 | accept lower 链 | O(增量) | O(增量) | O(增量) | O(增量) |
@@ -260,12 +263,36 @@ workspace 都在 `/tmp` tmpfs，flatten。
 
 | case | N | operation | p50_ms | p95_ms | fork_cost | mechanism | overlaps |
 |---|---|---|---|---|---|---|---|
-| btrfs-snapshot-flatten | 100 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
-| btrfs-snapshot-flatten | 10000 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
-| btrfs-snapshot-flatten | 100000 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
-| btrfs-snapshot-lower | 100 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
-| btrfs-snapshot-lower | 10000 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
-| btrfs-snapshot-lower | 100000 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
+| btrfs-snapshot-flatten | 100 | accept | 7.931 | 8.933 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 100 | diff | 6.702 | 8.922 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 100 | discard | 5.684 | 7.955 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 100 | fork | 161.881 | 200.599 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 100 | mark | 97.697 | 116.500 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 10000 | accept | 273.469 | 322.370 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 10000 | diff | 399.681 | 418.566 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 10000 | discard | 7.087 | 7.825 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 10000 | fork | 620.334 | 1260.640 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 10000 | mark | 727.592 | 893.439 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 100000 | accept | 2801.237 | 2833.775 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 100000 | diff | 4320.630 | 4448.689 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 100000 | discard | 7.319 | 10.330 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 100000 | fork | 1176.917 | 1338.662 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-flatten | 100000 | mark | 1245.006 | 1366.863 | btrfs_snapshot | overlay | /home |
+| btrfs-snapshot-lower | 100 | accept | 8.176 | 10.083 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 100 | diff | 6.435 | 8.208 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 100 | discard | 5.644 | 5.913 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 100 | fork | 215.267 | 257.893 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 100 | mark | 127.254 | 159.610 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 10000 | accept | 14.977 | 21.231 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 10000 | diff | 12.465 | 24.407 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 10000 | discard | 5.702 | 6.230 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 10000 | fork | 370.658 | 406.673 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 10000 | mark | 171.111 | 260.384 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 100000 | accept | 5.483 | 16.055 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 100000 | diff | 3.031 | 41.187 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 100000 | discard | 4.690 | 5.581 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 100000 | fork | 1379.413 | 1517.485 | btrfs_snapshot | overlay | /var/tmp |
+| btrfs-snapshot-lower | 100000 | mark | 583.268 | 932.236 | btrfs_snapshot | overlay | /var/tmp |
 | reflink-flatten | 100 | accept | 8.801 | 13.433 | reflink | overlay | /home |
 | reflink-flatten | 100 | diff | 6.143 | 8.564 | reflink | overlay | /home |
 | reflink-flatten | 100 | discard | 0.614 | 1.191 | reflink | overlay | /home |
@@ -320,17 +347,20 @@ workspace 都在 `/tmp` tmpfs，flatten。
 - **lower 链 diff 仍是 O(增量)**：约 3.1 / 3.2 / 4.4ms。
 - **lower 链 mark 接近 O(1)**：约 10.9 / 11.3 / 16.7ms。
 - **fork 仍随 N 增长**：reflink lower 16ms → 644ms → 6.82s。reflink 只省数据
-  拷贝，仍要遍历 N 个目录项；btrfs 快照副本在可用环境应提供 O(1) fork，但本机
-  `fast_delete=false`，基准显示 SKIP。
+  拷贝，仍要遍历 N 个目录项；btrfs 快照副本本机已启用，100k fork 约 1.2–1.4s，
+  明显优于 reflink，但仍非严格 O(1)。
 - **flatten 路径仍 O(upper)**：`reflink-flatten` fork 29.8ms → 1.73s → 21.3s，
   mark 19.4ms → 904ms → 7.22s，diff/accept 也随 N 增长。状态目录与 workspace
   同挂载时无法使用 lower 链增量。
 - **tmpfs 复制路径随 N 增长**：100k fork 6.17s、mark 3.15s、accept 1.67s。
 - **discard 热路径仍 O(1)**：所有 case 约 0.1–0.7ms。
 - 本轮基准未再出现 prior background removal 的 NotFound 告警。
-- `btrfs-snapshot-*` 两个 case 本机 SKIP：普通用户无法 `btrfs subvolume delete`
-  （`fast_delete=false`），快照副本模式按设计不启用；在具备子卷删除权限的
-  环境应产出实际数字。
+- **btrfs 快照副本已在本机启用**（`fast_delete=false` 仅表示后台 fallback
+  为 O(文件数)）。100/10k/100k 的 fork p50 约 162/620/1177ms（flatten）与
+  215/371/1379ms（lower），比 reflink 的 29.8ms/1.73s/21.3s（flatten）明显更好，
+  但仍随 N 增长，不是严格 O(1)：本机 btrfs 快照命令对 100k 文件仍有约 1s 级
+  首次元数据/提交成本，且每个 fork 对每个挂载发一次 snapshot 命令。mark 也有
+  类似成本。diff/accept flatten 仍 O(upper)。
 
 ### 结论与瓶颈（如实）
 
@@ -363,7 +393,7 @@ workspace 都在 `/tmp` tmpfs，flatten。
 | SafeRoot mkdir mode | `safe_root_mkdir_preserves_source_mode` |
 | btrfs send stderr drain | `send_dump_drains_large_send_stderr` |
 | 损坏 operations.json 隔离 | `corrupt_operations_metadata_is_isolated` |
-| btrfs 快照 fork | `btrfs_snapshot_copy_fork_is_end_to_end`（本机 SKIP） |
+| btrfs 快照 fork | `btrfs_snapshot_copy_fork_is_end_to_end`（本机通过） |
 
 ## P4 调研结论：btrfs 增量
 

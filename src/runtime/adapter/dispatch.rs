@@ -1,10 +1,11 @@
 //! 请求分发、执行与结果构造。
 
 use super::*;
+
+const RESULT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 use super::result::{can_accept, filesystem_failure_reason, result as make_result};
 use crate::protocol::contract::*;
 use crate::runtime::backend::*;
-use std::time::Duration;
 
 
 impl Shared {
@@ -16,7 +17,7 @@ impl Shared {
                 let results = self.results.lock().unwrap();
                 let (_results, timeout) = self
                     .result_signal
-                    .wait_timeout_while(results, Duration::from_secs(30), |cache| {
+                    .wait_timeout_while(results, RESULT_WAIT_TIMEOUT, |cache| {
                         cache.get(&request.request_id).is_none()
                     })
                     .unwrap();

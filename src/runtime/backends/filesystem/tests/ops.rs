@@ -4,6 +4,7 @@ use super::super::*;
 use super::support::*;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileTypeExt;
 
     #[test]
     fn filesystem_operation_replays_same_generation_and_rejects_stale_generation() {
@@ -106,7 +107,15 @@ use std::os::unix::ffi::OsStrExt;
         let base = root.path().join("base");
         fs::create_dir_all(&base).unwrap();
         write(&base, "fork.txt", "at-fork");
+        let parent_dir = upper_at(&backend, "root", &base.join("xattr-dir"));
+        fs::create_dir_all(&parent_dir).unwrap();
+        set_test_xattr(&parent_dir, "user.overlay.opaque", b"y");
         backend.fork("root", "child", &[]).unwrap();
+        let child_dir = upper_at(&backend, "child", &base.join("xattr-dir"));
+        assert!(
+            get_xattr(&child_dir, "user.overlay.opaque").is_some(),
+            "btrfs snapshot lost user.overlay.* xattr"
+        );
         let parent_upper = upper_at(&backend, "root", &base);
         write_upper(&backend, "root", &base.join("late.txt"), "late");
         assert!(
@@ -117,6 +126,13 @@ use std::os::unix::ffi::OsStrExt;
             run_in_environment(&backend, "child", &base, "rm -f fork.txt && test ! -e fork.txt"),
             "child whiteout failed"
         );
+        let whiteout = upper_at(&backend, "child", &base.join("fork.txt"));
+        assert!(
+            fs::symlink_metadata(&whiteout)
+                .map(|metadata| metadata.file_type().is_char_device())
+                .unwrap_or(false),
+            "child whiteout is not a character device"
+        );
         assert!(base.join("fork.txt").exists(), "child deleted host base");
         wait_until(|| parent_upper.join("late.txt").exists());
         let child_root = backend.paths("child");
@@ -124,6 +140,12 @@ use std::os::unix::ffi::OsStrExt;
         backend.discard("child", &[]).unwrap();
         wait_until(|| !child_root.exists());
         assert!(!child_root.exists(), "discard left btrfs child subvolumes");
+        let trash = root.path().join("state/trash");
+        wait_until(|| trash_is_empty(&trash));
+        assert!(
+            trash_is_empty(&trash),
+            "background removal left btrfs subvolumes in trash"
+        );
         backend.terminate("root").unwrap();
         backend.cleanup("root").unwrap();
     }
@@ -169,37 +191,41 @@ use std::os::unix::ffi::OsStrExt;
 
     #[test]
     fn accept_work_does_not_scale_with_unrelated_upper_size() {
-        let small = accept_read_layer_entries(20);
-        let large = accept_read_layer_entries(5000);
+        let Some(small) = accept_read_layer_entries(20) else {
+            return;
+        };
+        let Some(large) = accept_read_layer_entries(5000) else {
+            return;
+        };
         assert!(
             large <= small + 50,
             "accept scanned unrelated upper entries: small={small}, large={large}"
         );
     }
 
-    fn accept_read_layer_entries(unrelated: usize) -> usize {
-        let state = match tempfile::tempdir_in("/var/tmp") {
-            Ok(value) => value,
-            Err(error) => {
+    fn accept_read_layer_entries(unrelated: usize) -> Option<usize> {
+        let workspace_root = btrfs_temp();
+        let base = workspace_root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let state = match separate_state_tempdir(&base) {
+            Some(value) => value,
+            None => {
                 eprintln!(
-                    "SKIP accept_work_does_not_scale_with_unrelated_upper_size: /var/tmp unusable: {error}"
+                    "SKIP accept_work_does_not_scale_with_unrelated_upper_size: no writable mount separate from workspace"
                 );
-                return 0;
+                return None;
             }
         };
         let mut config = FilesystemConfig::new(state.path().join("state"));
         config.force_overlay = true;
         let backend = FilesystemBackend::new(config).unwrap();
         backend.establish("root").unwrap();
-        let workspace_root = btrfs_temp();
-        let base = workspace_root.path().join("base");
-        fs::create_dir_all(&base).unwrap();
         let workspace_mount = mount_for(&backend, "root", &base);
         if backend.mount_uses_flattening(&workspace_mount) {
             eprintln!(
                 "SKIP accept_work_does_not_scale_with_unrelated_upper_size: workspace mount is flattened"
             );
-            return 0;
+            return None;
         }
         for index in 0..unrelated {
             write_upper(
@@ -231,7 +257,7 @@ use std::os::unix::ffi::OsStrExt;
         backend.discard("child", &[]).unwrap();
         backend.terminate("root").unwrap();
         backend.cleanup("root").unwrap();
-        entries
+        Some(entries)
     }
 
     #[test]
@@ -593,11 +619,7 @@ use std::os::unix::ffi::OsStrExt;
             !path_exists(&root.path().join("snapshots").join(&base))
                 && !path_exists(&root.path().join("layers").join(&base))
         });
-        wait_until(|| {
-            fs::read_dir(root.path().join("trash"))
-                .map(|mut entries| entries.next().is_none())
-                .unwrap_or(true)
-        });
+        wait_until(|| trash_is_empty(&root.path().join("trash")));
     }
 
     /// Real bubblewrap end-to-end: a whiteout created by `rm` must not
@@ -655,11 +677,7 @@ use std::os::unix::ffi::OsStrExt;
         backend.discard("child", &[PathScope::Workspace]).unwrap();
         backend.terminate("root").unwrap();
         backend.cleanup("root").unwrap();
-        wait_until(|| {
-            fs::read_dir(root.path().join("trash"))
-                .map(|mut entries| entries.next().is_none())
-                .unwrap_or(true)
-        });
+        wait_until(|| trash_is_empty(&root.path().join("trash")));
     }
 
     #[test]
@@ -935,10 +953,6 @@ use std::os::unix::ffi::OsStrExt;
         backend.discard("child", &[PathScope::Workspace]).unwrap();
         backend.terminate("root").unwrap();
         backend.cleanup("root").unwrap();
-        wait_until(|| {
-            fs::read_dir(root.path().join("trash"))
-                .map(|mut entries| entries.next().is_none())
-                .unwrap_or(true)
-        });
+        wait_until(|| trash_is_empty(&root.path().join("trash")));
     }
 

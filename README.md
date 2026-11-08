@@ -4,7 +4,7 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 ## 仓库状态
 
-仓库现在有一个按控制面 ownership 实现的 Agent 管理原型：Rust 控制面拥有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入；Agent 接入进程由 Runtime Adapter 在环境内启动，控制面只决定用哪个产品并把路径交给它。Pi 是首个接入实现，不是 AScout 的架构组成；NLE 是当前验证 workload，不属于 AScout 实现。二者都不应把产品路径、工具或专用语义写进核心契约。它还不是正确完成的投机验证闭环、完整 Runtime、通用 Agent 产品或 coding workload。
+仓库现在有一个按控制面 ownership 实现的 Agent 管理原型：Rust 控制面拥有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入；Agent 接入进程由 Runtime Adapter 在环境内启动，控制面只决定用哪个产品并把路径交给它。Runtime 侧已提供文件系统 Backend（overlay 与 btrfs 两种数据面）和进程 Backend（bubblewrap、cgroup 冻结）；实现范围与已知偏差见 [文件系统 Backend 当前实现状态](docs/fs-backend/current-state.md)。Pi 是首个接入实现，不是 AScout 的架构组成；NLE 是当前验证 workload，不属于 AScout 实现。二者都不应把产品路径、工具或专用语义写进核心契约。它还不是正确完成的投机验证闭环、完整 Runtime、通用 Agent 产品或 coding workload。
 
 目标语义与一级架构已经形成。AScout 按 `Agent 接入侧 -> 控制面 -> Runtime Adapter -> Runtime` 组织。Runtime Adapter 对控制面提供稳定 typed contract，并负责目标 Runtime 的能力映射与协议适配。设计文档是语义权威；开发文档记录已接受的实现选择与剩余任务。
 
@@ -58,7 +58,7 @@ cargo run --example policy -- evaluate /tmp/opencode/policy.json extent assets/p
 - 新实现使用 Rust。具体 crate、模块、进程和部署边界按 Agent 接入侧、控制面与 Runtime 的责任和所有权决定（D-024-I）。
 - 扩展点的职责语义已确认：Execution、Workspace、Input、Effect 和 Outcome 属于 Runtime；Interposer 属于 Agent 接入侧，统一负责识别 pending-result boundary、保证真实 operation 只执行一次并自动发布 outcome。
 - 默认 Runtime 面向可信 Child Agent，优先高效 sibling isolation；对抗恶意 workload 的 containment 由另行选择的 Runtime 提供。
-- Runtime 承载 Agent 动作，并落实声明的环境、资源和效果边界，以及停止和 cleanup；Agent 接入侧负责 Session、Agent 执行实体的本地上下文、Branch context、operation 归属和 capability 路由。控制面管理全局 Tree 与裁决，Runtime 内部的效果协调机制落实外部效果处理。目标语义见 [Runtime 设计](docs/design/runtime.md)，首阶段 Overlay 范围见 [Runtime 开发说明](docs/development/runtime-adapter.md)。
+- Runtime 承载 Agent 动作，并落实声明的环境、资源和效果边界，以及停止和 cleanup；Agent 接入侧负责 Session、Agent 执行实体的本地上下文、Branch context、operation 归属和 capability 路由。控制面管理全局 Tree 与裁决，Runtime 内部的效果协调机制落实外部效果处理。目标语义见 [Runtime 设计](docs/design/runtime.md)，当前文件系统/进程 Backend 的接入现状见 [Runtime 开发说明](docs/development/runtime-adapter.md)，实现细节见 [文件系统 Backend 当前实现状态](docs/fs-backend/current-state.md)。
 
 ## 文档
 

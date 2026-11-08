@@ -2,7 +2,7 @@
 //! Agent processes.  It consumes `LaunchFragment`s produced by other Backends
 //! and translates the combined `MountSpec` to bubblewrap arguments.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::os::fd::{IntoRawFd, OwnedFd};
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ mod freeze;
 mod launch;
 
 pub use freeze::{FreezeMechanism, ProcessHandle};
-pub use launch::{LaunchFragment, MountEntry, MountSpec};
+pub use crate::runtime::launch_plan::{LaunchFragment, MountEntry, MountSpec};
 
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -22,7 +22,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use crate::runtime::backend::{BackendError, BackendContext};
-use crate::protocol::contract::{AgentLaunch, RuntimeCapabilities};
+use crate::protocol::contract::AgentLaunch;
+#[cfg(test)]
+use crate::protocol::contract::RuntimeCapabilities;
 
 struct AgentProcess {
     instance_id: String,
@@ -41,7 +43,6 @@ struct PendingStatus {
 }
 
 pub struct ProcessBackend {
-    id: String,
     bubblewrap_path: PathBuf,
     freeze: FreezeMechanism,
     cgroup_root: Option<PathBuf>,
@@ -58,7 +59,7 @@ pub struct ProcessBackend {
 
 
 impl ProcessBackend {
-    pub fn new(id: impl Into<String>, bubblewrap_path: impl Into<PathBuf>) -> Self {
+    pub fn new(_id: impl Into<String>, bubblewrap_path: impl Into<PathBuf>) -> Self {
         let bubblewrap_path = bubblewrap_path.into();
         let cgroup_root = cgroup::probe_cgroup_root();
         let freeze = if cgroup_root.is_some() {
@@ -71,8 +72,15 @@ impl ProcessBackend {
             freeze.as_str(),
             cgroup_root
         );
+        Self::empty(bubblewrap_path, freeze, cgroup_root)
+    }
+
+    fn empty(
+        bubblewrap_path: PathBuf,
+        freeze: FreezeMechanism,
+        cgroup_root: Option<PathBuf>,
+    ) -> Self {
         Self {
-            id: id.into(),
             bubblewrap_path,
             freeze,
             cgroup_root,
@@ -87,29 +95,21 @@ impl ProcessBackend {
         }
     }
 
+    #[cfg(test)]
     pub fn with_mechanism(
-        id: impl Into<String>,
+        _id: impl Into<String>,
         bubblewrap_path: impl Into<PathBuf>,
         freeze: FreezeMechanism,
     ) -> Self {
-        Self {
-            id: id.into(),
-            bubblewrap_path: bubblewrap_path.into(),
+        Self::empty(
+            bubblewrap_path.into(),
             freeze,
-            cgroup_root: if freeze == FreezeMechanism::Cgroup {
+            if freeze == FreezeMechanism::Cgroup {
                 cgroup::probe_cgroup_root()
             } else {
                 None
             },
-            processes: Mutex::new(HashMap::new()),
-            pending_status: Mutex::new(HashMap::new()),
-            #[cfg(test)]
-            fail_thaw: AtomicBool::new(false),
-            #[cfg(test)]
-            fail_freeze: AtomicBool::new(false),
-            #[cfg(test)]
-            fail_mount_wait: AtomicBool::new(false),
-        }
+        )
     }
 
     #[cfg(test)]
@@ -141,25 +141,13 @@ impl ProcessBackend {
         }
     }
 
-    pub fn new_process_group(id: impl Into<String>, bubblewrap_path: impl Into<PathBuf>) -> Self {
-        Self {
-            id: id.into(),
-            bubblewrap_path: bubblewrap_path.into(),
-            freeze: FreezeMechanism::ProcessGroup,
-            cgroup_root: None,
-            processes: Mutex::new(HashMap::new()),
-            pending_status: Mutex::new(HashMap::new()),
-            #[cfg(test)]
-            fail_thaw: AtomicBool::new(false),
-            #[cfg(test)]
-            fail_freeze: AtomicBool::new(false),
-            #[cfg(test)]
-            fail_mount_wait: AtomicBool::new(false),
-        }
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
+    #[cfg(test)]
+    pub fn new_process_group(_id: impl Into<String>, bubblewrap_path: impl Into<PathBuf>) -> Self {
+        Self::empty(
+            bubblewrap_path.into(),
+            FreezeMechanism::ProcessGroup,
+            None,
+        )
     }
 
     pub fn freeze_mechanism(&self) -> FreezeMechanism {
@@ -194,6 +182,7 @@ impl ProcessBackend {
         process.child.wait().map_err(error)
     }
 
+    #[cfg(test)]
     pub fn capabilities(&self) -> RuntimeCapabilities {
         RuntimeCapabilities {
             freeze_mechanism: Some(self.freeze.as_str().to_string()),
@@ -243,6 +232,7 @@ fn sanitize(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::path::Path;
     use crate::protocol::contract::AgentLaunch;
 

@@ -11,7 +11,7 @@ use crate::protocol::contract::{
 };
 use super::backend::{Backend, BackendContext, BackendError, BackendExecution, CancelHandle};
 use super::selection::{merge_launch_fragment, BackendConnection, BackendOperation, BackendPolicy};
-use super::process::LaunchFragment;
+use super::launch_plan::LaunchFragment;
 
 pub struct CompositeRuntime {
     id: String,

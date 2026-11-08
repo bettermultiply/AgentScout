@@ -6,7 +6,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::backend::{Backend, BackendContext, BackendError};
-use super::process::LaunchFragment;
+use super::launch_plan::LaunchFragment;
 use crate::protocol::contract::Operation;
 
 /// Runtime 的一个有序 Backend 选择。
@@ -235,8 +235,8 @@ impl BackendConnection {
     }
 }
 
-fn mount_target(entry: &super::process::MountEntry) -> &std::path::Path {
-    use super::process::MountEntry;
+fn mount_target(entry: &super::launch_plan::MountEntry) -> &std::path::Path {
+    use super::launch_plan::MountEntry;
     match entry {
         MountEntry::RoBind { target, .. }
         | MountEntry::Bind { target, .. }

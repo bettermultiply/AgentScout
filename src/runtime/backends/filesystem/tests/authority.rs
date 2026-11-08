@@ -310,10 +310,13 @@ print("ok" if data else "fail")
 
     #[test]
     fn non_overlapping_state_directory_uses_lower_chain() {
-        let state = match tempfile::tempdir_in("/tmp") {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("SKIP non_overlapping_state_directory_uses_lower_chain: /tmp is unusable: {error}");
+        let workspace_root = btrfs_temp();
+        let base = workspace_root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let state = match separate_state_tempdir(&base) {
+            Some(value) => value,
+            None => {
+                eprintln!("SKIP non_overlapping_state_directory_uses_lower_chain: no writable mount separate from workspace");
                 return;
             }
         };
@@ -329,9 +332,6 @@ print("ok" if data else "fail")
             return;
         }
         backend.establish("root").unwrap();
-        let root = btrfs_temp();
-        let base = root.path().join("base");
-        fs::create_dir_all(&base).unwrap();
         let workspace_mount = mount_for(&backend, "root", &base);
         assert!(
             !backend.mount_uses_flattening(&workspace_mount),

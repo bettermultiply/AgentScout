@@ -60,4 +60,4 @@ AScout 只接受能够通过 Adapter 证明其 Runtime 能提供隔离执行环�
 
 ## 当前有可运行实现吗？
 
-没有可用 AScout lifecycle 实现。当前仓库只有设计文档，不提供真实 Agent execution、Branch lifecycle、Runtime backend 或 sandbox。
+已有可运行的原型：Rust 控制面、Pi 接入、Runtime Adapter，以及文件系统/进程 Backend 已实现，并完成过 Pi/NLE 投机执行验证。它仍不是完整通用实现：完整 Runtime Registry 与能力验证、稳定对外 API、通用 Agent-facing 命令语法和对抗性 sandbox 仍未提供。当前实现状态见 [README](../../README.md)、[当前实现与验证边界](../development/reference-workload.md) 与 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。

@@ -11,7 +11,7 @@ use ascout::runtime::backend::{Backend, BackendContext};
 use ascout::runtime::backends::filesystem::{
     FilesystemBackend, FilesystemConfig,
 };
-use ascout::runtime::process::MountEntry;
+use ascout::runtime::launch_plan::MountEntry;
 
 const CHANGED_FILES: usize = 10;
 
@@ -96,7 +96,11 @@ fn main() {
     }
 
     println!("\ncase,N,operation,p50_ms,p95_ms,fork_cost,mechanism,overlaps");
+    let filter = std::env::var("ASCOUT_BENCH_CASES").unwrap_or_default();
     for case in &cases {
+        if !filter.is_empty() && !case.name.contains(&filter) {
+            continue;
+        }
         for &n in &sizes {
             if let Err(error) = run_case(case, n, iterations) {
                 println!(
@@ -115,7 +119,7 @@ fn main() {
 
 fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), String> {
     let mut config = FilesystemConfig::new(&case.state);
-    config.force_overlay = true;
+    config.force_overlay = !case.name.starts_with("btrfs-snapshot");
     let backend = FilesystemBackend::new(config).map_err(|e| e.to_string())?;
     let capabilities = backend.capabilities();
     if !capabilities.branch_environment {

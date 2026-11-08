@@ -2,6 +2,7 @@
 
 use super::super::*;
 use crate::protocol::contract::AgentLaunch;
+use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
 
     pub(super) fn temp() -> tempfile::TempDir {
         tempfile::tempdir().expect("tempdir")
@@ -14,6 +15,24 @@ use crate::protocol::contract::AgentLaunch;
             .prefix("fs-test-")
             .tempdir_in(root)
             .expect("tempdir under target/tmp")
+    }
+
+    /// Choose a state-directory tempdir on a different writable mount than
+    /// the workspace.  This keeps the lower-chain tests independent of where
+    /// the repository itself is located.
+    pub(super) fn separate_state_tempdir(workspace: &Path) -> Option<tempfile::TempDir> {
+        for target in real_writable_mounts() {
+            if workspace.starts_with(&target) {
+                continue;
+            }
+            if let Ok(directory) = tempfile::Builder::new()
+                .prefix("ascout-state-")
+                .tempdir_in(&target)
+            {
+                return Some(directory);
+            }
+        }
+        None
     }
 
     pub(super) fn write(root: &Path, relative: &str, content: &str) {
@@ -175,6 +194,14 @@ use crate::protocol::contract::AgentLaunch;
             .unwrap_or_else(|| PathBuf::from("/var/tmp/ascout-priv-check"));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    pub(super) fn trash_is_empty(path: &Path) -> bool {
+        match fs::read_dir(path) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        }
     }
 
     pub(super) fn wait_removed(path: &Path) {
