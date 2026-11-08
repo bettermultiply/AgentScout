@@ -37,7 +37,7 @@ impl Assets {
         let directory = workspace().join("assets/firecracker");
         let assets = Self {
             firecracker: directory.join("firecracker"),
-            kernel: directory.join("vmlinux-6.18.48"),
+            kernel: kernel_path(&directory),
             rootfs: directory.join("rootfs.ext4"),
         };
         assert_file(&assets.firecracker);
@@ -46,6 +46,60 @@ impl Assets {
         assert!(Path::new("/dev/kvm").exists(), "/dev/kvm is unavailable");
         assets
     }
+}
+
+fn kernel_path(directory: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("ASCOUT_FIRECRACKER_KERNEL") {
+        return PathBuf::from(path);
+    }
+    let mut kernels = fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("vmlinux-"))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    kernels.sort();
+    kernels
+        .pop()
+        .unwrap_or_else(|| directory.join("vmlinux"))
+}
+
+#[derive(Debug)]
+struct NetworkMetadata {
+    namespace: String,
+    veth_host: String,
+    veth_subnet: String,
+}
+
+fn environment_network(state_directory: &Path, environment_id: &str) -> Option<NetworkMetadata> {
+    let text = fs::read_to_string(state_directory.join(environment_id).join("network")).ok()?;
+    let mut lines = text.lines();
+    Some(NetworkMetadata {
+        namespace: lines.next()?.to_string(),
+        veth_host: lines.next()?.to_string(),
+        veth_subnet: lines.next()?.to_string(),
+    })
+}
+
+fn test_subnets(state_directory: &Path) -> Vec<String> {
+    fs::read_dir(state_directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| {
+                    environment_network(state_directory, &entry.file_name().to_string_lossy())
+                })
+                .map(|network| network.veth_subnet)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 struct AdapterHarness {
@@ -182,12 +236,16 @@ impl Drop for AdapterHarness {
             }
         }
         for environment in &environments {
-            let namespace = ascout::runtime::backends::firecracker::environment_network_namespace(environment);
-            let _ = Command::new("sudo")
-                .args(["-n", "ip", "netns", "delete", &namespace])
-                .status();
+            if let Some(network) = environment_network(&self.state_directory, environment) {
+                let _ = Command::new("sudo")
+                    .args(["-n", "ip", "link", "delete", &network.veth_host])
+                    .status();
+                let _ = Command::new("sudo")
+                    .args(["-n", "ip", "netns", "delete", &network.namespace])
+                    .status();
+            }
         }
-        cleanup_stale_host_rules();
+        cleanup_stale_host_rules(&self.state_directory);
         let _ = self.adapter.kill();
         let _ = self.adapter.wait();
         let _ = fs::remove_dir_all(&self.state_directory);
@@ -195,8 +253,14 @@ impl Drop for AdapterHarness {
     }
 }
 
-/// 删除测试网络遗留的宿主 iptables 规则（Adapter 异常退出时可能未回收）。
-fn cleanup_stale_host_rules() {
+/// 删除本测试 state directory 对应子网的宿主 iptables 规则。
+///
+/// 不能按 `10.213.` 前缀删除：同一宿主上可能有其他测试或环境。
+fn cleanup_stale_host_rules(state_directory: &Path) {
+    let subnets = test_subnets(state_directory);
+    if subnets.is_empty() {
+        return;
+    }
     for (table, chain) in [("filter", "FORWARD"), ("nat", "POSTROUTING")] {
         let output = Command::new("sudo")
             .args(["-n", "iptables", "-t", table, "-S", chain])
@@ -205,7 +269,11 @@ fn cleanup_stale_host_rules() {
             continue;
         };
         for line in String::from_utf8_lossy(&output.stdout).lines() {
-            if !line.starts_with("-A ") || !line.contains("10.213.") {
+            if !line.starts_with("-A ") {
+                continue;
+            }
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if !fields.iter().any(|field| subnets.iter().any(|subnet| subnet == field)) {
                 continue;
             }
             let specification = line[3..].to_string();
@@ -528,7 +596,9 @@ fn ssh_diagnostic_reaches_a_real_microvm() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o600);
     fs::set_permissions(&private_key, permissions).unwrap();
 
-    let namespace = ascout::runtime::backends::firecracker::environment_network_namespace(environment);
+    let namespace = environment_network(&harness.state_directory, environment)
+        .expect("environment network metadata is missing")
+        .namespace;
     let output = wait_until(Duration::from_secs(30), || {
         ssh_into_network(&namespace, &private_key, "printf ascout-ssh").ok()
     })
@@ -618,7 +688,7 @@ fn firecracker_vm_state(process: &ProcessInfo) -> String {
     let socket = argument_after(&process.arguments, "--api-sock")
         .expect("Firecracker process has no --api-sock argument");
     let output = Command::new("curl")
-        .args(["--silent", "--show-error", "--unix-socket", socket])
+        .args(["--silent", "--show-error", "--max-time", "5", "--unix-socket", socket])
         .arg("http://localhost/")
         .output()
         .unwrap();

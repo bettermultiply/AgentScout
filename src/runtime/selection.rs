@@ -235,10 +235,43 @@ impl BackendConnection {
     }
 }
 
-pub(super) fn merge_launch_fragment(target: &mut LaunchFragment, source: LaunchFragment) {
-    target.mounts.extend(source.mounts);
+fn mount_target(entry: &super::process::MountEntry) -> &std::path::Path {
+    use super::process::MountEntry;
+    match entry {
+        MountEntry::RoBind { target, .. }
+        | MountEntry::Bind { target, .. }
+        | MountEntry::Overlay { target, .. }
+        | MountEntry::Proc { target }
+        | MountEntry::Dev { target }
+        | MountEntry::Tmpfs { target }
+        | MountEntry::RemountRo { target }
+        | MountEntry::Dir { target } => target,
+    }
+}
+
+/// 合并多个 Backend 的启动片段。同一个挂载 target 只能由一个 Backend
+/// 提供，否则启动参数会出现两个互相覆盖的挂载，且控制面无法知道谁赢。
+pub(super) fn merge_launch_fragment(
+    target: &mut LaunchFragment,
+    source: LaunchFragment,
+) -> Result<(), BackendError> {
+    for entry in source.mounts {
+        let source_target = mount_target(&entry).to_path_buf();
+        if target
+            .mounts
+            .iter()
+            .any(|existing| mount_target(existing) == source_target)
+        {
+            return Err(BackendError::new(format!(
+                "multiple Backends provide a launch mount for target {}",
+                source_target.display()
+            )));
+        }
+        target.mounts.push(entry);
+    }
     if target.chdir.is_none() {
         target.chdir = source.chdir;
     }
     target.env.extend(source.env);
+    Ok(())
 }

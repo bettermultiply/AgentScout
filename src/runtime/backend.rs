@@ -331,6 +331,31 @@ pub trait Backend: Send + Sync {
 
     fn environments(&self) -> Vec<String>;
 
+    /// Adapter 退出时回收所有仍然存在的环境。
+    ///
+    /// 默认实现逐个 terminate + cleanup，并且单个失败不会跳过其余环境；
+    /// 失败汇总在返回错误中。具体 Backend 可以覆盖，但不应改变“尽力清理
+    /// 所有环境”的语义。
+    fn shutdown(&self) -> Result<(), BackendError> {
+        let mut failures = Vec::new();
+        for environment_id in self.environments() {
+            if let Err(error) = self.terminate(&environment_id) {
+                failures.push(format!("{environment_id}: terminate failed: {error}"));
+            }
+            if let Err(error) = self.cleanup(&environment_id) {
+                failures.push(format!("{environment_id}: cleanup failed: {error}"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::new(format!(
+                "Runtime shutdown partially failed: {}",
+                failures.join("; ")
+            )))
+        }
+    }
+
     /// 统一启动包装：各 Backend 只贡献挂载/环境片段，由 ProcessBackend 汇总。
     fn launch_fragment(
         &self,

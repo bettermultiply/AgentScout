@@ -51,6 +51,8 @@ pub struct ProcessBackend {
     fail_thaw: AtomicBool,
     #[cfg(test)]
     fail_freeze: AtomicBool,
+    #[cfg(test)]
+    fail_mount_wait: AtomicBool,
 }
 
 
@@ -80,6 +82,8 @@ impl ProcessBackend {
             fail_thaw: AtomicBool::new(false),
             #[cfg(test)]
             fail_freeze: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_mount_wait: AtomicBool::new(false),
         }
     }
 
@@ -103,6 +107,8 @@ impl ProcessBackend {
             fail_thaw: AtomicBool::new(false),
             #[cfg(test)]
             fail_freeze: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_mount_wait: AtomicBool::new(false),
         }
     }
 
@@ -114,6 +120,11 @@ impl ProcessBackend {
     #[cfg(test)]
     pub fn inject_freeze_failure(&self, value: bool) {
         self.fail_freeze.store(value, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub fn inject_mount_wait_failure(&self, value: bool) {
+        self.fail_mount_wait.store(value, Ordering::SeqCst);
     }
 
     pub fn is_running(&self, environment_id: &str) -> Result<bool, BackendError> {
@@ -142,6 +153,8 @@ impl ProcessBackend {
             fail_thaw: AtomicBool::new(false),
             #[cfg(test)]
             fail_freeze: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_mount_wait: AtomicBool::new(false),
         }
     }
 
@@ -267,6 +280,107 @@ mod tests {
         if let Some(path) = cgroup {
             assert!(!path.exists(), "cleanup left cgroup {}", path.display());
         }
+    }
+
+    #[test]
+    fn failed_launch_cleans_process_pending_status_and_cgroup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("fake-bwrap");
+        let pid_file = root.path().join("child.pid");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/bash\necho $$ > '{}'\nargs=(\"$@\")\nfd=\"\"\nfor ((i=0;i<${{#args[@]}};i++)); do\n  if [ \"${{args[i]}}\" = \"--json-status-fd\" ]; then fd=\"${{args[i+1]}}\"; fi\ndone\necho \"{{\\\"child-pid\\\":$$,\\\"mnt-namespace\\\":1}}\" >&\"$fd\"\nsleep 30\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let backend = ProcessBackend::new("process", &script);
+        let cgroup = backend
+            .cgroup_root
+            .as_ref()
+            .map(|root| root.join(sanitize("env")));
+        backend.inject_mount_wait_failure(true);
+        let context = BackendContext::new("env");
+        let launch = AgentLaunch {
+            command: "/bin/sleep".into(),
+            args: vec!["30".into()],
+            cwd: root.path().to_path_buf(),
+            log: root.path().join("process-test.log"),
+            instance_id: Some("test-instance".into()),
+            env: BTreeMap::new(),
+        };
+        let fragment = LaunchFragment {
+            mounts: vec![MountEntry::Overlay {
+                lowers: Vec::new(),
+                upper: root.path().join("upper"),
+                work: root.path().join("work"),
+                target: PathBuf::from("/workspace"),
+            }],
+            ..LaunchFragment::default()
+        };
+        let error = backend.launch(&context, &launch, &fragment).unwrap_err();
+        assert!(error.message.contains("injected overlay"), "{error}");
+        assert!(backend.processes.lock().unwrap().is_empty());
+        assert!(backend.pending_status.lock().unwrap().is_empty());
+        if let Some(path) = &cgroup {
+            assert!(!path.exists(), "cgroup {} was not removed", path.display());
+        }
+        let pid: u32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        for _ in 0..200 {
+            if !Path::new(&format!("/proc/{pid}")).exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "launched child {pid} was not killed"
+        );
+    }
+
+    #[test]
+    fn stop_reports_cgroup_kill_write_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = ProcessBackend::new("process", "bwrap");
+        let context = launch(&backend, "/bin/sleep", vec!["30".into()], root.path());
+        let fake_cgroup = tempfile::tempdir().unwrap();
+        // A directory named cgroup.kill makes fs::write fail instead of silently
+        // succeeding, which reproduces the old "always Ok" behavior.
+        fs::create_dir(fake_cgroup.path().join("cgroup.kill")).unwrap();
+        {
+            let mut processes = backend.processes.lock().unwrap();
+            processes
+                .get_mut(&context.environment_id)
+                .unwrap()
+                .cgroup_path = Some(fake_cgroup.path().to_path_buf());
+        }
+        let error = backend.stop(&context.environment_id).unwrap_err();
+        assert!(error.message.contains("cgroup.kill"), "{error}");
+    }
+
+    #[test]
+    fn stop_unknown_or_exited_process_is_not_an_error() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = ProcessBackend::new("process", "bwrap");
+        backend.stop("missing").unwrap();
+
+        let context = launch(&backend, "/bin/true", Vec::new(), root.path());
+        for _ in 0..200 {
+            if !backend.is_running(&context.environment_id).unwrap() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        backend.stop(&context.environment_id).unwrap();
     }
 
     #[test]

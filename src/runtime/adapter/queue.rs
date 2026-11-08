@@ -8,6 +8,7 @@ use crate::protocol::contract::{AdapterMessage, EnvironmentState, Event, EventPa
 use crate::runtime::backend::CancelHandle;
 
 use super::*;
+use super::result::result as make_result;
 
 
 #[derive(Default)]
@@ -65,14 +66,31 @@ impl Queue {
                 }
             };
             self.cancel.reset();
-            let _ = shared.out.send(AdapterMessage::Event(Event {
+            if let Err(error) = shared.out.send(AdapterMessage::Event(Event {
                 environment_id: request.environment_id.clone(),
                 request_id: Some(request.request_id.clone()),
                 payload: EventPayload::OperationStarted {
                     operation: request.operation.clone(),
                 },
-            }));
-            let result = shared.execute(&environment_id, &request, &self.cancel);
+            })) {
+                eprintln!("adapter: failed to send operation-started event: {error}");
+            }
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                shared.execute(&environment_id, &request, &self.cancel)
+            })) {
+                Ok(result) => result,
+                Err(_) => {
+                    eprintln!(
+                        "adapter: operation {} panicked; the queue continues with a failed result",
+                        request.request_id
+                    );
+                    let mut result =
+                        make_result(&request, ResultStatus::Failed, None, false);
+                    result.reason =
+                        Some("runtime operation panicked".to_string());
+                    result
+                }
+            };
             {
                 let evicted = shared
                     .results
@@ -97,14 +115,18 @@ impl Queue {
                     shared.set_known(child_environment_id, EnvironmentState::Available);
                 }
             }
-            let _ = shared.out.send(AdapterMessage::Event(Event {
+            if let Err(error) = shared.out.send(AdapterMessage::Event(Event {
                 environment_id: request.environment_id.clone(),
                 request_id: Some(request.request_id.clone()),
                 payload: EventPayload::OperationFinished {
                     result: result.clone(),
                 },
-            }));
-            let _ = shared.out.send(AdapterMessage::Result(result));
+            })) {
+                eprintln!("adapter: failed to send operation-finished event: {error}");
+            }
+            if let Err(error) = shared.out.send(AdapterMessage::Result(result)) {
+                eprintln!("adapter: failed to send operation result: {error}");
+            }
         }
     }
 }

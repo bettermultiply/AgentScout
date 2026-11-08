@@ -346,7 +346,7 @@ impl Backend for CompositeRuntime {
             merge_launch_fragment(
                 &mut fragment,
                 connection.backend.launch_fragment(context, launch)?,
-            );
+            )?;
         }
         Ok(fragment)
     }
