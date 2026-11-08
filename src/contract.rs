@@ -115,6 +115,23 @@ pub struct RuntimeCapabilities {
     /// 能从父环境派生出独立子环境。
     #[serde(default)]
     pub branch_environment: bool,
+    /// 文件系统 Backend 是否能用严格子卷删除 ioctl 快速回收。`Some(false)`
+    /// 表示 discard 仍可用，但后台物理删除是 O(文件数)；`None` 表示该
+    /// Runtime 不声明文件系统回收方式。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_fast_delete: Option<bool>,
+    /// 文件系统 fork 的成本类别：`reflink`、`copy` 或 `btrfs_snapshot`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_fork_cost: Option<String>,
+    /// btrfs 增量 diff 是否可在当前权限下使用。`false` 表示已降级到 overlay。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_btrfs_incremental_diff: Option<bool>,
+    /// 实际可用的写者冻结机制：`cgroup`、`process_group` 或 `none`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freeze_mechanism: Option<String>,
+    /// 明确被允许直通宿主的路径列表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem_passthrough: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,11 +162,60 @@ pub enum Operation {
         tool_name: String,
         arguments: Value,
     },
+    FilesystemFork { parent_snapshot_id: String, child_snapshot_id: String, path_scope: Vec<PathScope> },
+    FilesystemMark { snapshot_id: String, mark_id: String, path_scope: Vec<PathScope> },
+    FilesystemDiff { base_snapshot_id: String, source_snapshot_id: String, target_snapshot_id: Option<String>, path_scope: Vec<PathScope> },
+    FilesystemAccept { base_snapshot_id: String, source_snapshot_id: String, target_snapshot_id: String, path_scope: Vec<PathScope> },
+    FilesystemDiscard { snapshot_id: String, path_scope: Vec<PathScope> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathScope { Workspace, Tmp }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FilesystemConfirmation {
+    #[serde(default)] pub target_paused: bool,
+    #[serde(default)] pub context_ready: bool,
+    #[serde(default)] pub snapshot_created: bool,
+    #[serde(default)] pub metadata_durable: bool,
+    #[serde(default)] pub writers_quiesced: bool,
+    #[serde(default)] pub published: bool,
+    #[serde(default)] pub refs_updated: bool,
+    #[serde(default)] pub refs_released: bool,
+    #[serde(default)] pub gc_eligible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FilesystemConflict {
+    pub path: String,
+    pub kind: String,
+    pub reason: String,
+    /// 三方合并时的基准、目标分支和来源分支内容摘要。留空表示调用方
+    /// 只关心冲突路径，不要求具体的版本描述。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ours: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theirs: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct FilesystemResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub published_snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub diff_ref: Option<String>,
+    #[serde(default)] pub confirmation: FilesystemConfirmation,
+    #[serde(default)] pub conflicts: Vec<FilesystemConflict>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationRequest {
     pub request_id: String,
+    /// Fences delayed filesystem results; legacy callers default to zero.
+    #[serde(default)]
+    pub generation: u64,
     pub environment_id: String,
     pub operation: Operation,
     /// Policy 用于选择 Runtime 的任务上下文。旧控制面不发送时保持为空。
@@ -203,6 +269,8 @@ pub struct OperationResult {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<CommandOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem: Option<FilesystemResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,4 +320,38 @@ pub enum AdapterMessage {
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum ControlMessage {
     Request(OperationRequest),
+}
+
+#[cfg(test)]
+mod filesystem_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn filesystem_operations_round_trip_with_both_managed_scopes() {
+        let scopes = vec![PathScope::Workspace, PathScope::Tmp];
+        let operations = vec![
+            Operation::FilesystemFork { parent_snapshot_id: "base".into(), child_snapshot_id: "child".into(), path_scope: scopes.clone() },
+            Operation::FilesystemMark { snapshot_id: "child".into(), mark_id: "mark".into(), path_scope: scopes.clone() },
+            Operation::FilesystemDiff { base_snapshot_id: "base".into(), source_snapshot_id: "child".into(), target_snapshot_id: None, path_scope: scopes.clone() },
+            Operation::FilesystemAccept { base_snapshot_id: "base".into(), source_snapshot_id: "child".into(), target_snapshot_id: "target".into(), path_scope: scopes.clone() },
+            Operation::FilesystemDiscard { snapshot_id: "child".into(), path_scope: scopes },
+        ];
+        for operation in operations {
+            let json = serde_json::to_value(&operation).unwrap();
+            assert_eq!(json["path_scope"], serde_json::json!(["workspace", "tmp"]));
+            assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), operation);
+        }
+    }
+
+    #[test]
+    fn conflicts_and_confirmation_survive_wire_round_trip() {
+        let result = FilesystemResult {
+            conflicts: vec![FilesystemConflict { path: "workspace/a".into(), kind: "modify_delete".into(), reason: "both sides changed".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        let decoded: FilesystemResult = serde_json::from_slice(&serde_json::to_vec(&result).unwrap()).unwrap();
+        assert_eq!(decoded, result);
+        assert!(!decoded.confirmation.published);
+        assert!(!decoded.confirmation.gc_eligible);
+    }
 }

@@ -155,7 +155,7 @@ function install(session,branch) {
         }
         const decision=await localDecision(branch,context.toolCall.id,context.toolCall.id,context.toolCall.name,context.args,checkpoint,signal);
         const admitted=decision.kind==='admit_speculation';
-        if(admitted)await report({message:'speculative_admission_request',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint});
+        if(admitted)await report({message:'speculative_admission_request',task_id:taskId,policy_digest:artifact.digest,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint});
         const policy=policies.get(branch);
         if(admitted&&policy){
             const extent=await evaluatePolicy(policy,'extent',{process_state:{steps_completed:hookCounts.get(branch)??0,hook_count:hookCounts.get(branch)??0,phase:'tool_execution'}},signal);

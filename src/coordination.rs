@@ -83,7 +83,7 @@ impl SpeculativeTree {
             && self.branches[&tool.branch_id]
                 .pending_operations
                 .iter()
-                    .any(|op| {
+                .any(|op| {
                     op.operation_id == tool.operation_id && op.status == OperationStatus::Requested
                 })
     }
@@ -91,6 +91,7 @@ impl SpeculativeTree {
     pub fn speculative_admission(&mut self, message: AgentMessage) -> io::Result<ControlActions> {
         let AgentMessage::SpeculativeAdmissionRequest {
             branch_id,
+            policy_digest,
             action_id: operation_id,
             name: tool_name,
             arguments,
@@ -100,12 +101,21 @@ impl SpeculativeTree {
             parent_action_id,
         } = message
         else {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected speculative admission request"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected speculative admission request",
+            ));
         };
         if task_id != self.execution_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "action task does not match tree",
+            ));
+        }
+        if self.local_policy_digest.as_deref() != Some(policy_digest.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "speculative admission does not use the delivered local Policy",
             ));
         }
         let fact = AgentMessage::ActionStarted {
@@ -136,7 +146,8 @@ impl SpeculativeTree {
         self.branches
             .get_mut(&branch_id)
             .expect("admission branch exists")
-            .execution_state.phase = BranchPhase::Select;
+            .execution_state
+            .phase = BranchPhase::Select;
         self.mark_operation_requested(&branch_id, &operation_id, OperationKind::Tool)?;
         self.schedule(
             ControlOperation::Predict(ToolPending {
@@ -164,19 +175,21 @@ impl SpeculativeTree {
         let branch = work.branch().to_string();
         match work {
             ControlOperation::Predict(tool) => {
-        let ToolPending {
+                let ToolPending {
                     branch_id,
                     operation_id,
                     tool_name,
                     checkpoint,
                     ..
                 } = &tool;
-        if self.waiting_point_live(&tool) {
+                if self.waiting_point_live(&tool) {
                     self.branches
                         .get_mut(branch_id)
                         .expect("live waiting branch")
-                        .execution_state.phase = BranchPhase::Predict;
-                    let launch_unsupported = matches!(&result, Ok(ControlResult::PredictionsWithoutAuthority(_)));
+                        .execution_state
+                        .phase = BranchPhase::Predict;
+                    let launch_unsupported =
+                        matches!(&result, Ok(ControlResult::PredictionsWithoutAuthority(_)));
                     // An empty prediction set is not a failed speculation: it means this boundary has no
                     // hypothesis to test. Execute the tool as an ordinary authority action instead of
                     // leaving the adapter's tool call waiting for a result that will never arrive.
@@ -230,10 +243,12 @@ impl SpeculativeTree {
                     // launch=false prototype result: the Proposal is not
                     // cancelled, but validator/evidence-only execution is
                     // unsupported. Do not retry the same point forever.
-                    if !direct_invocation && !launch_unsupported && !self
-                        .branches
-                        .values()
-                        .any(|candidate| candidate.parent_branch_id.as_deref() == Some(branch_id) && candidate.proposal_id.is_some())
+                    if !direct_invocation
+                        && !launch_unsupported
+                        && !self.branches.values().any(|candidate| {
+                            candidate.parent_branch_id.as_deref() == Some(branch_id)
+                                && candidate.proposal_id.is_some()
+                        })
                     {
                         actions.records.push(json!({
                             "message": "launch_not_started",
@@ -288,7 +303,8 @@ impl SpeculativeTree {
                 self.branches
                     .get_mut(&branch_id)
                     .expect("candidate parent exists")
-                    .execution_state.phase = BranchPhase::Effect;
+                    .execution_state
+                    .phase = BranchPhase::Effect;
                 self.complete_operation(
                     &branch_id,
                     Some(&operation_id),
@@ -307,7 +323,8 @@ impl SpeculativeTree {
                     self.branches
                         .get_mut(&candidate)
                         .expect("candidate exists")
-                        .execution_state.phase = BranchPhase::Dispose;
+                        .execution_state
+                        .phase = BranchPhase::Dispose;
                     let (compatible, verdict, error) = match result {
                         Ok(ControlResult::Disposition(compatible, verdict)) => {
                             (compatible, verdict, None)
@@ -422,7 +439,8 @@ impl SpeculativeTree {
                         self.branches
                             .get_mut(&candidate)
                             .expect("candidate exists")
-                            .execution_state.phase = BranchPhase::Match;
+                            .execution_state
+                            .phase = BranchPhase::Match;
                         self.schedule(ControlOperation::Validate(candidate), &mut actions);
                     } else {
                         actions
@@ -530,7 +548,10 @@ impl AgentController {
                         .as_ref()
                         .and_then(|id| tree.proposals.get(id))
                         .ok_or("candidate Proposal is missing")?,
-                    &tree.candidate_evidence(candidate).cloned().unwrap_or(Value::Null),
+                    &tree
+                        .candidate_evidence(candidate)
+                        .cloned()
+                        .unwrap_or(Value::Null),
                 )
                 .map(|(compatible, verdict)| ControlResult::Disposition(compatible, verdict))
                 .map_err(|error| error.to_string()),
@@ -615,11 +636,13 @@ impl AgentController {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        frontier.extend(tree.tool_invocations.iter().map(|pending| json!({
-            "edge_id": pending.operation_id,
-            "tool_name": pending.tool_name,
-            "arguments": pending.arguments,
-        })));
+        frontier.extend(tree.tool_invocations.iter().map(|pending| {
+            json!({
+                "edge_id": pending.operation_id,
+                "tool_name": pending.tool_name,
+                "arguments": pending.arguments,
+            })
+        }));
         if !frontier.iter().any(|item| item["edge_id"] == operation_id) {
             frontier.push(edge.clone());
         }
@@ -648,7 +671,12 @@ impl AgentController {
         Ok(proposals)
     }
 
-    fn launch_allowed(&self, tree: &SpeculativeTree, policy: &CompiledPolicy, tool: &ToolPending) -> bool {
+    fn launch_allowed(
+        &self,
+        tree: &SpeculativeTree,
+        policy: &CompiledPolicy,
+        tool: &ToolPending,
+    ) -> bool {
         let authority = tree
             .authority_branch_id
             .as_ref()
@@ -659,11 +687,15 @@ impl AgentController {
             .map(|id| tree.branches[id].clone())
             .collect();
         PolicyEngine::default()
-            .evaluate(policy, Decision::Launch, &json!({
-                "edge_context": {"edge_id": tool.operation_id, "tool_name": tool.tool_name},
-                "authority_state": authority,
-                "candidate_view": candidates
-            }))
+            .evaluate(
+                policy,
+                Decision::Launch,
+                &json!({
+                    "edge_context": {"edge_id": tool.operation_id, "tool_name": tool.tool_name},
+                    "authority_state": authority,
+                    "candidate_view": candidates
+                }),
+            )
             .map(|value| value == true)
             .unwrap_or(false)
     }
@@ -709,6 +741,8 @@ mod tests {
     fn task() -> (SpeculativeTree, tempfile::TempDir) {
         let root = tempfile::tempdir().unwrap();
         let mut tree = SpeculativeTree::with_workspace("agent", root.path()).unwrap();
+        tree.execution_id = String::new();
+        tree.bind_local_policy("test-policy");
         tree.create_authority("authority", "").unwrap();
         tree.handle_message(AgentMessage::BranchStarted {
             branch_id: "authority".into(),
@@ -720,6 +754,7 @@ mod tests {
     fn waiting() -> AgentMessage {
         AgentMessage::SpeculativeAdmissionRequest {
             task_id: String::new(),
+            policy_digest: "test-policy".into(),
             parent_action_id: None,
             action_kind: crate::agent_control::ActionKind::ToolExecution,
             branch_id: "authority".into(),
@@ -776,6 +811,7 @@ mod tests {
         };
         tree.speculative_admission(AgentMessage::SpeculativeAdmissionRequest {
             task_id: String::new(),
+            policy_digest: "test-policy".into(),
             parent_action_id: None,
             action_kind: crate::agent_control::ActionKind::ToolExecution,
             branch_id: parent,

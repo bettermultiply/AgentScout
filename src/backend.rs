@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::Value;
 
 use crate::contract::{
-    BackendOutput, BackendState, CommandOutput, EnvironmentState, RuntimeCapabilities,
+    BackendOutput, BackendState, CommandOutput, EnvironmentState, FilesystemResult, Operation, RuntimeCapabilities,
 };
+use crate::process::LaunchFragment;
 
 /// 一次 Runtime 请求传给 Backend 的逻辑上下文。
 ///
@@ -19,16 +20,28 @@ use crate::contract::{
 /// `environment_id` 推断全局 Tree；它只使用 Adapter 明确传入的局部身份。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackendContext {
+    /// Stable identity for an operation. Empty for legacy environment calls.
+    pub operation_id: String,
+    /// Fences delayed filesystem results. Zero is the legacy value.
+    pub generation: u64,
     pub task_id: Option<String>,
     pub branch_id: Option<String>,
     pub environment_id: String,
     pub parent_environment_id: Option<String>,
+    /// Filesystem-only optional access point to a target environment's merged
+    /// mount view, for example `/proc/<pid>/root`.  Other Backends ignore it.
+    pub target_mount_pid: Option<u32>,
+    /// Mount namespace inode recorded by ProcessBackend for the target pid.
+    /// FilesystemBackend validates it before replaying into `/proc/<pid>/root`.
+    pub target_mount_namespace: Option<u64>,
 }
 
 impl BackendContext {
     pub fn new(environment_id: impl Into<String>) -> Self {
         Self {
             environment_id: environment_id.into(),
+            operation_id: String::new(),
+            generation: 0,
             ..Self::default()
         }
     }
@@ -250,6 +263,18 @@ pub trait Backend: Send + Sync {
             .map(|output| BackendExecution::single(self.backend_id(), output))
     }
 
+    /// Filesystem version operations are deliberately a typed seam. The
+    /// default is explicit rejection so an unconfigured Backend cannot claim
+    /// that an Agent promotion also published files.
+    fn filesystem_operation(
+        &self,
+        _context: &BackendContext,
+        _operation: &Operation,
+        _cancel: &CancelHandle,
+    ) -> Result<FilesystemResult, BackendError> {
+        Err(BackendError::new("filesystem operation is unsupported by this Backend"))
+    }
+
     fn branch(&self, parent: &str, child: &str) -> Result<(), BackendError>;
 
     fn branch_with_context(
@@ -305,6 +330,15 @@ pub trait Backend: Send + Sync {
     }
 
     fn environments(&self) -> Vec<String>;
+
+    /// 统一启动包装：各 Backend 只贡献挂载/环境片段，由 ProcessBackend 汇总。
+    fn launch_fragment(
+        &self,
+        _context: &BackendContext,
+        _launch: &crate::contract::AgentLaunch,
+    ) -> Result<LaunchFragment, BackendError> {
+        Ok(LaunchFragment::default())
+    }
 
     /// 是否由这个 Runtime 负责 Agent 实际执行实例的进程生命周期。
     fn manages_agent_process(&self) -> bool {

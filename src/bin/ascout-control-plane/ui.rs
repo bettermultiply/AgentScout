@@ -105,7 +105,9 @@ impl Interface {
     pub fn message(&self, message: &AgentMessage) {
         let mut state = self.run_view.lock().unwrap();
         match message {
-            AgentMessage::Output { branch_id, text, .. } => {
+            AgentMessage::Output {
+                branch_id, text, ..
+            } => {
                 state
                     .conversations
                     .entry(branch_id.clone())

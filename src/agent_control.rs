@@ -279,6 +279,9 @@ pub struct SpeculativeTree {
     pub runtime_binding: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capability_view: Option<Value>,
+    /// Digest of the local Policy artifact delivered to the Agent Adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_policy_digest: Option<String>,
     #[serde(default)]
     pending_commands: BTreeMap<String, PendingCommand>,
     #[serde(default)]
@@ -314,6 +317,7 @@ impl SpeculativeTree {
             policy_binding: None,
             runtime_binding: None,
             capability_view: None,
+            local_policy_digest: None,
             pending_commands: BTreeMap::new(),
             queued_prompts: VecDeque::new(),
             workspace_root: PathBuf::new(),
@@ -333,6 +337,10 @@ impl SpeculativeTree {
         self.policy_binding = Some(policy);
         self.runtime_binding = Some(runtime);
         self.capability_view = Some(capabilities);
+    }
+
+    pub fn bind_local_policy(&mut self, digest: impl Into<String>) {
+        self.local_policy_digest = Some(digest.into());
     }
 
     /// 根据完整历史中的父子关系计算当前执行树。
@@ -473,6 +481,7 @@ pub enum AgentMessage {
     /// ActionStarted is only an execution fact and never admits speculation.
     SpeculativeAdmissionRequest {
         task_id: String,
+        policy_digest: String,
         branch_id: String,
         action_id: String,
         action_kind: ActionKind,
@@ -1017,17 +1026,20 @@ impl SpeculativeTree {
                 operation_id: Some(operation_id.clone()),
                 transcript_index,
             };
-        branch.execution_state.phase = BranchPhase::Predict;
+            branch.execution_state.phase = BranchPhase::Predict;
         }
         let proposal_id = format!("proposal-{branch_id}");
         if self.proposals.contains_key(&proposal_id) {
             return Err(invalid_input("proposal id already exists"));
         }
-        self.proposals.insert(proposal_id.clone(), ProposalRecord {
-            proposal_id: proposal_id.clone(),
-            operation_id: operation_id.clone(),
-            payload: prediction,
-        });
+        self.proposals.insert(
+            proposal_id.clone(),
+            ProposalRecord {
+                proposal_id: proposal_id.clone(),
+                operation_id: operation_id.clone(),
+                payload: prediction,
+            },
+        );
         let branch = self.branch_mut(branch_id)?;
         branch.proposal_id = Some(proposal_id.clone());
         branch.assumption_set = vec![proposal_id];
@@ -1224,7 +1236,9 @@ impl SpeculativeTree {
     /// 接收 Pi 报告的启动事实。
     pub fn handle_message(&mut self, message: AgentMessage) -> io::Result<Vec<AgentCommand>> {
         match message {
-            AgentMessage::AgentConnected { agent_id, .. } if agent_id == self.agent_id => Ok(vec![]),
+            AgentMessage::AgentConnected { agent_id, .. } if agent_id == self.agent_id => {
+                Ok(vec![])
+            }
             AgentMessage::AgentConnected { .. } => {
                 Err(invalid_input("agent id does not match controller"))
             }

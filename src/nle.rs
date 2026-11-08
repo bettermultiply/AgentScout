@@ -139,7 +139,6 @@ impl NleBackend {
     }
 
     fn set_state(&self, id: &str, state: EnvironmentState) {
-
         self.states.lock().unwrap().insert(id.to_string(), state);
     }
 
@@ -158,7 +157,6 @@ impl NleBackend {
         }
         Ok(response.get("observation").cloned().unwrap_or(Value::Null))
     }
-
 }
 
 fn error(error: impl std::fmt::Display) -> BackendError {
@@ -190,6 +188,11 @@ impl Backend for NleBackend {
             ],
             shared_environment: true,
             branch_environment: false,
+            filesystem_fast_delete: None,
+            filesystem_fork_cost: None,
+            filesystem_btrfs_incremental_diff: None,
+            freeze_mechanism: None,
+            filesystem_passthrough: None,
         }
     }
 
@@ -340,4 +343,3 @@ impl Backend for NleBackend {
         self.states.lock().unwrap().keys().cloned().collect()
     }
 }
-

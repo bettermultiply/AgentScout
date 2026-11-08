@@ -2,6 +2,47 @@
 
 本文记录已接受的实现架构与验证决策。目标语义归 `docs/design/` 所有。
 
+## 2026-11-07：首版通用文件系统 Backend
+
+文件系统隔离实现为独立 Backend，仅拥有 Overlay upper/work 生命周期和 Agent
+启动时的文件系统视图；不拥有网络、内存、资源或 Agent Session。BaseRuntime
+在该 Backend 提供的 bubblewrap 命令中启动 Agent，mount/user namespace 由
+启动入口继承到全部后代进程。Linux namespace、bubblewrap 或 OverlayFS 不可用
+时必须拒绝启动，不得回退成普通 cwd 启动。Branch 使用父 upper 的只读 lower
+视图，promote 为环境侧 no-op，discard/cleanup 删除 child upper/work；首版不
+自动合并文件变更，也不把文件写入自动提升为权威效果。
+
+启用 `filesystem` 配置时，即使没有填写 `base_runtime`，装配器也自动创建
+`BaseRuntime`，避免 Backend 建立成功但 Agent 启动绕过隔离。BaseRuntime 负责
+Agent 进程组和停止，文件系统 Backend 只负责 namespace/Overlay 视图；进程
+主动创建新 session 后不在进程组停止保证内。
+
+cleanup 的固定顺序是先停止 BaseRuntime 管理的 Agent 进程组，再清理 inner
+和 filesystem；停止失败会保留 AgentProcess 句柄，禁止删除 upper/work。即使
+inner terminate 失败，terminate 仍先尝试停止 Agent，避免其继续污染 Overlay，
+并合并报告所有失败。BaseRuntime 的无 context 方法统一委托对应 context 方法，
+防止绕过 filesystem。
+
+组合 Runtime 在 establish/branch 的 inner Backend 中途失败时，不能直接调用
+filesystem cleanup（其合法前置状态是 Terminated）。现在回滚顺序固定为
+filesystem terminate -> filesystem cleanup；原始错误的 completed/remaining 保留，
+terminate 或 cleanup 失败追加到 cleanup_failures。若回滚仍失败，环境 metadata
+保留以便后续收敛，不伪造已清理。
+
+BaseRuntime 组合 filesystem 后，generic operate、tool_context 和 invoke_tool
+仍由 inner Backend 执行。filesystem 不再执行 generic operate，也不返回自己的
+命令输出；它只在这些调用前检查环境是否为 Available，并在 Agent 启动时提供
+可由后代进程继承的 bubblewrap namespace/Overlay 视图。这样 NLE/Firecracker
+等已有业务 Backend 不会被静默绕过，且同一命令不会因组合而执行两次。
+
+本轮范围审查确认 Adapter 的生命周期门槛是 Runtime Adapter 契约的通用语义，
+不是为 filesystem 临时增加的限制：operate/promote/suspend 需要 Available，
+branch 允许 Available 或 Suspended（暂停只阻止父环境内的新操作，派生读取
+父状态仍是合法操作），resume 需要 Suspended，terminate 允许 Available 或
+Suspended，cleanup 需要 Terminated。保留这些 Adapter 门槛不会改变未启用
+filesystem 的 NLE/Firecracker 行为；filesystem 专属的状态检查仍只在
+FilesystemBackend 和配置了 filesystem 的 BaseRuntime 中执行。
+
 ## 2026-11-06：通用 Agent 事实协议
 
 废弃 `ToolPending`、`ParentOutcome`、`CandidateCompleted` 和含义混合的 `CleanupCompleted` Agent 消息，以及 `Hello` Agent 握手命名。分别使用 `ActionStarted`（等待边界由 result_pending 表达）、`ActionFinished`（带 action kind 与终态）、`AgentSessionReleased` / `BranchReleased`、`AgentConnected`；Runtime 握手不受此命名变更影响。Transcript 不再由 Adapter 声明 Authority/Candidate 角色。线协议与 Pi 接入同步切换，不保留旧消息兼容分支。
@@ -200,8 +241,6 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 2026-10-23 更新测试约束：原型阶段默认不编写测试。只有实际遇到可复现、且今后很可能再次出现的问题时，才针对该问题编写测试；先让测试稳定复现问题，再修复代码直到测试通过。已有测试不因此自动删除，真实执行验证也不等同于必须新增自动化测试。
 
 **废弃记录（2026-10-23）**：不再采用“设计初期先定少量端到端测试、须经用户同意并在业务逻辑实现前定稿”的普遍门槛。早先等待 test 通过／失败的两个 Proposal、确定性 FollowUp 及两个控制面场景的首批测试安排不再作为实现前提。
-
-初期使用一个 `ascout` 库，契约类型放在内部 `contract` 模块，不单独拆分 `ascout-contract` crate。出现独立 Adapter 或产品接入的实际依赖需求后，再讨论拆分；契约类型不反向依赖控制面实现。
 
 早期 `tests/test_outcome.rs` 及其确定性替代实现已经删除，不再作为当前正确性证据。当前 Runtime Adapter 端到端测试直接启动真实 Firecracker，验证 microVM 建立、guest 内操作、物理暂停与恢复、终止与清理、请求重试去重、在飞操作打断、意外停止事件，以及 snapshot/restore 分支和 sibling 隔离；SSH 诊断同样使用真实 virtio-net 与 guest sshd。尚未实现 task 身份校验、全局唯一 Proposal identity、九类完整决策、待选集合、fallback、嵌套树、效果处理和主动环境验证。当前 Rust 接口仍是实验接口，不是稳定对外契约。
 

@@ -12,8 +12,7 @@
 //! 调用它们。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::OpenOptions;
-use std::process::{Child, Command, Stdio};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -22,8 +21,10 @@ use serde_json::Value;
 use crate::backend::{Backend, BackendContext, BackendError, BackendExecution, CancelHandle};
 use crate::contract::{
     AgentLaunch, BackendState, CommandOutput, EnvironmentState, Operation, RuntimeCapabilities,
-    RuntimeTool,
+    RuntimeTool, FilesystemResult,
 };
+use crate::filesystem::FilesystemBackend;
+use crate::process::{FreezeMechanism, LaunchFragment, ProcessBackend, ProcessHandle};
 
 /// Runtime 的一个有序 Backend 选择。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,11 @@ pub struct BackendSelection {
 pub enum BackendOperation {
     Establish,
     Operate,
+    FilesystemFork,
+    FilesystemMark,
+    FilesystemDiff,
+    FilesystemAccept,
+    FilesystemDiscard,
     Branch,
     Promote,
     Suspend,
@@ -63,6 +69,11 @@ impl BackendOperation {
             Operation::CleanupEnvironment => Self::Cleanup,
             Operation::ToolContext { .. } => Self::ToolContext,
             Operation::InvokeTool { .. } => Self::InvokeTool,
+            Operation::FilesystemFork { .. } => Self::FilesystemFork,
+            Operation::FilesystemMark { .. } => Self::FilesystemMark,
+            Operation::FilesystemDiff { .. } => Self::FilesystemDiff,
+            Operation::FilesystemAccept { .. } => Self::FilesystemAccept,
+            Operation::FilesystemDiscard { .. } => Self::FilesystemDiscard,
         }
     }
 }
@@ -528,10 +539,55 @@ impl CompositeRuntime {
         let mut conflicting_tools = BTreeSet::new();
         let mut shared_environment = false;
         let mut branch_environment = true;
+        let mut filesystem_fast_delete: Option<bool> = None;
+        let mut fast_delete_conflict = false;
+        let mut filesystem_fork_cost: Option<String> = None;
+        let mut fork_cost_conflict = false;
+        let mut filesystem_btrfs_incremental_diff: Option<bool> = None;
+        let mut incremental_conflict = false;
+        let mut freeze_mechanism: Option<String> = None;
+        let mut freeze_conflict = false;
+        let mut filesystem_passthrough: Option<Vec<String>> = None;
+        let mut passthrough_conflict = false;
         for connection in &self.connections {
             let capabilities = connection.backend.capabilities();
             shared_environment |= capabilities.shared_environment;
             branch_environment &= capabilities.branch_environment;
+            if let Some(value) = capabilities.filesystem_fast_delete {
+                match filesystem_fast_delete {
+                    None => filesystem_fast_delete = Some(value),
+                    Some(previous) if previous != value => fast_delete_conflict = true,
+                    _ => {}
+                }
+            }
+            if let Some(value) = capabilities.filesystem_fork_cost {
+                match &filesystem_fork_cost {
+                    None => filesystem_fork_cost = Some(value),
+                    Some(previous) if previous != &value => fork_cost_conflict = true,
+                    _ => {}
+                }
+            }
+            if let Some(value) = capabilities.filesystem_btrfs_incremental_diff {
+                match filesystem_btrfs_incremental_diff {
+                    None => filesystem_btrfs_incremental_diff = Some(value),
+                    Some(previous) if previous != value => incremental_conflict = true,
+                    _ => {}
+                }
+            }
+            if let Some(value) = capabilities.freeze_mechanism {
+                match &freeze_mechanism {
+                    None => freeze_mechanism = Some(value),
+                    Some(previous) if previous != &value => freeze_conflict = true,
+                    _ => {}
+                }
+            }
+            if let Some(value) = capabilities.filesystem_passthrough {
+                match &filesystem_passthrough {
+                    None => filesystem_passthrough = Some(value),
+                    Some(previous) if previous != &value => passthrough_conflict = true,
+                    _ => {}
+                }
+            }
             for tool in capabilities.tools {
                 if let Some(previous) = tools.get(&tool.name)
                     && previous != &tool
@@ -549,6 +605,31 @@ impl CompositeRuntime {
             tools: tools.into_values().collect(),
             shared_environment,
             branch_environment,
+            filesystem_fast_delete: if fast_delete_conflict {
+                None
+            } else {
+                filesystem_fast_delete
+            },
+            filesystem_fork_cost: if fork_cost_conflict {
+                None
+            } else {
+                filesystem_fork_cost
+            },
+            filesystem_btrfs_incremental_diff: if incremental_conflict {
+                None
+            } else {
+                filesystem_btrfs_incremental_diff
+            },
+            freeze_mechanism: if freeze_conflict {
+                None
+            } else {
+                freeze_mechanism
+            },
+            filesystem_passthrough: if passthrough_conflict {
+                None
+            } else {
+                filesystem_passthrough
+            },
         }
     }
 }
@@ -586,6 +667,22 @@ impl Backend for CompositeRuntime {
 
     fn capabilities(&self) -> RuntimeCapabilities {
         self.merged_capabilities()
+    }
+
+    fn launch_fragment(
+        &self,
+        context: &BackendContext,
+        launch: &AgentLaunch,
+    ) -> Result<LaunchFragment, BackendError> {
+        let (connections, _) = self.selected(context, BackendOperation::Operate)?;
+        let mut fragment = LaunchFragment::default();
+        for connection in connections {
+            merge_launch_fragment(
+                &mut fragment,
+                connection.backend.launch_fragment(context, launch)?,
+            );
+        }
+        Ok(fragment)
     }
 
     fn establish(&self, environment_id: &str) -> Result<(), BackendError> {
@@ -707,6 +804,35 @@ impl Backend for CompositeRuntime {
         )
     }
 
+    fn filesystem_operation(
+        &self,
+        context: &BackendContext,
+        operation: &Operation,
+        cancel: &CancelHandle,
+    ) -> Result<FilesystemResult, BackendError> {
+        let backend_operation = BackendOperation::for_operation(operation);
+        if !matches!(
+            backend_operation,
+            BackendOperation::FilesystemFork
+                | BackendOperation::FilesystemMark
+                | BackendOperation::FilesystemDiff
+                | BackendOperation::FilesystemAccept
+                | BackendOperation::FilesystemDiscard
+        ) {
+            return Err(BackendError::new(
+                "filesystem dispatch requires a filesystem operation",
+            ));
+        }
+        if cancel.is_cancelled() {
+            return Err(BackendError::interrupted());
+        }
+        let (connections, _) = self.selected(context, backend_operation)?;
+        if connections.len() != 1 {
+            return Err(BackendError::new("filesystem operation requires exactly one selected Backend"));
+        }
+        connections[0].backend.filesystem_operation(context, operation, cancel)
+    }
+
     fn branch(&self, parent: &str, child: &str) -> Result<(), BackendError> {
         let context = BackendContext {
             environment_id: child.to_string(),
@@ -728,10 +854,14 @@ impl Backend for CompositeRuntime {
             .map(|connection| connection.id.clone())
             .collect();
         let child_context = BackendContext {
+            operation_id: context.operation_id.clone(),
+            generation: context.generation,
             environment_id: child.to_string(),
             parent_environment_id: Some(parent.to_string()),
             task_id: context.task_id.clone(),
             branch_id: context.branch_id.clone(),
+            target_mount_pid: context.target_mount_pid,
+            target_mount_namespace: context.target_mount_namespace,
         };
         let mut completed: Vec<&BackendConnection> = Vec::new();
         for (index, connection) in connections.iter().enumerate() {
@@ -850,17 +980,14 @@ impl Backend for CompositeRuntime {
     }
 }
 
-struct AgentProcess {
-    instance_id: String,
-    child: Child,
-}
 
 /// Base Runtime：Runtime 的特殊实现，负责一个 Agent 实际执行实例的
 /// 进程生命周期。Agent Session、会话恢复和工具协议仍由接入侧负责。
 pub struct BaseRuntime {
     id: String,
     inner: Arc<dyn Backend>,
-    agent: Mutex<Option<AgentProcess>>,
+    filesystem: Option<Arc<FilesystemBackend>>,
+    process: ProcessBackend,
 }
 
 impl BaseRuntime {
@@ -868,8 +995,21 @@ impl BaseRuntime {
         Self {
             id: id.into(),
             inner,
-            agent: Mutex::new(None),
+            filesystem: None,
+            process: ProcessBackend::new("process", "bwrap"),
         }
+    }
+
+    /// Wrap Agent startup with a filesystem backend. The backend remains
+    /// filesystem-only; this Runtime wrapper only delegates process lifetime.
+    pub fn with_filesystem(mut self, filesystem: Arc<FilesystemBackend>) -> Self {
+        self.filesystem = Some(filesystem);
+        self
+    }
+
+    pub fn with_bubblewrap(mut self, path: impl Into<PathBuf>) -> Self {
+        self.process = ProcessBackend::new("process", path);
+        self
     }
 
     fn launch_agent_process(
@@ -877,51 +1017,44 @@ impl BaseRuntime {
         context: &BackendContext,
         launch: &AgentLaunch,
     ) -> Result<(), BackendError> {
-        let instance_id = launch
-            .instance_id
-            .clone()
-            .or_else(|| context.branch_id.clone())
-            .unwrap_or_else(|| context.environment_id.clone());
-        let mut slot = self
-            .agent
-            .lock()
-            .map_err(|_| BackendError::new("Base Runtime Agent lock poisoned"))?;
-        if let Some(process) = slot.as_ref() {
-            if process.instance_id == instance_id {
-                return Ok(());
-            }
-            return Err(BackendError::new(format!(
-                "Base Runtime already owns Agent instance {}",
-                process.instance_id
-            )));
+        let mut fragment = self.inner.launch_fragment(context, launch)?;
+        if let Some(filesystem) = &self.filesystem {
+            merge_launch_fragment(&mut fragment, filesystem.launch_fragment(context, launch)?);
         }
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&launch.log)
-            .map_err(error)?;
-        let mut command = Command::new(&launch.command);
-        command
-            .args(&launch.args)
-            .current_dir(&launch.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone().map_err(error)?))
-            .stderr(Stdio::from(log))
-            .envs(&launch.env);
-        let child = command.spawn().map_err(error)?;
-        *slot = Some(AgentProcess { instance_id, child });
-        Ok(())
+        self.process.launch(context, launch, &fragment)
     }
 
     fn stop_agent_process(&self) -> Result<(), BackendError> {
-        let process = self
-            .agent
-            .lock()
-            .map_err(|_| BackendError::new("Base Runtime Agent lock poisoned"))?
-            .take();
-        if let Some(mut process) = process {
-            process.child.kill().map_err(error)?;
-            process.child.wait().map_err(error)?;
+        self.process.stop_all();
+        Ok(())
+    }
+
+    pub fn process_handle(&self, environment_id: &str) -> Option<ProcessHandle> {
+        self.process.process_handle(environment_id)
+    }
+
+    fn ensure_filesystem_available(&self, context: &BackendContext) -> Result<(), BackendError> {
+        if let Some(filesystem) = &self.filesystem {
+            if filesystem.state(&context.environment_id) != Some(EnvironmentState::Available) {
+                return Err(BackendError::new(
+                    "filesystem environment is not available for operation",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_filesystem_state(
+        &self,
+        context: &BackendContext,
+        expected: EnvironmentState,
+    ) -> Result<(), BackendError> {
+        if let Some(filesystem) = &self.filesystem {
+            if filesystem.state(&context.environment_id) != Some(expected) {
+                return Err(BackendError::new(format!(
+                    "filesystem environment is not in required state: expected {expected:?}"
+                )));
+            }
         }
         Ok(())
     }
@@ -939,19 +1072,53 @@ impl Backend for BaseRuntime {
     }
 
     fn backend_ids(&self) -> Vec<String> {
-        self.inner.backend_ids()
+        let mut ids = self.inner.backend_ids();
+        if self.filesystem.is_some() {
+            ids.push("filesystem".to_string());
+        }
+        ids.push("process".to_string());
+        ids
     }
 
     fn capabilities(&self) -> RuntimeCapabilities {
-        self.inner.capabilities()
+        let mut capabilities = self.inner.capabilities();
+        if let Some(filesystem) = &self.filesystem {
+            let filesystem_capabilities = filesystem.capabilities();
+            capabilities.branch_environment &= filesystem_capabilities.branch_environment;
+            capabilities.shared_environment |= filesystem_capabilities.shared_environment;
+            capabilities.filesystem_fast_delete = filesystem_capabilities.filesystem_fast_delete;
+            capabilities.filesystem_fork_cost = filesystem_capabilities.filesystem_fork_cost;
+            capabilities.filesystem_btrfs_incremental_diff =
+                filesystem_capabilities.filesystem_btrfs_incremental_diff;
+            capabilities.filesystem_passthrough = filesystem_capabilities.filesystem_passthrough;
+        }
+        capabilities.freeze_mechanism =
+            Some(self.process.freeze_mechanism().as_str().to_string());
+        capabilities
     }
 
     fn establish(&self, environment_id: &str) -> Result<(), BackendError> {
-        self.inner.establish(environment_id)
+        self.establish_with_context(&BackendContext::new(environment_id))
     }
 
     fn establish_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.inner.establish_with_context(context)
+        if let Some(filesystem) = &self.filesystem {
+            filesystem.establish_with_context(context)?;
+        }
+        if let Err(error) = self.inner.establish_with_context(context) {
+            if let Some(filesystem) = &self.filesystem {
+                let mut error = error;
+                if let Err(terminate) = filesystem.terminate_with_context(context) {
+                    error.add_cleanup_failure("filesystem", format!("terminate: {terminate}"));
+                }
+                if let Err(cleanup) = filesystem.cleanup_with_context(context) {
+                    error.add_cleanup_failure("filesystem", format!("cleanup: {cleanup}"));
+                }
+                return Err(error);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn operate(
@@ -960,7 +1127,14 @@ impl Backend for BaseRuntime {
         command: &[String],
         cancel: &CancelHandle,
     ) -> Result<CommandOutput, BackendError> {
-        self.inner.operate(environment_id, command, cancel)
+        let execution =
+            self.operate_with_context(&BackendContext::new(environment_id), command, cancel)?;
+        execution.single_output().ok_or_else(|| {
+            BackendError::new(
+                "multiple Backend outputs require an explicit output_backend selection",
+            )
+            .with_outputs(execution.outputs)
+        })
     }
 
     fn operate_with_context(
@@ -969,6 +1143,10 @@ impl Backend for BaseRuntime {
         command: &[String],
         cancel: &CancelHandle,
     ) -> Result<BackendExecution, BackendError> {
+        // Filesystem is not a second business command executor. Its state
+        // check prevents direct Backend callers from bypassing suspend, while
+        // the command itself remains owned by the inner Runtime.
+        self.ensure_filesystem_available(context)?;
         self.inner.operate_with_context(context, command, cancel)
     }
 
@@ -978,7 +1156,17 @@ impl Backend for BaseRuntime {
         tool_name: &str,
         cancel: &CancelHandle,
     ) -> Result<CommandOutput, BackendError> {
-        self.inner.tool_context(environment_id, tool_name, cancel)
+        let execution = self.tool_context_with_context(
+            &BackendContext::new(environment_id),
+            tool_name,
+            cancel,
+        )?;
+        execution.single_output().ok_or_else(|| {
+            BackendError::new(
+                "multiple Backend outputs require an explicit output_backend selection",
+            )
+            .with_outputs(execution.outputs)
+        })
     }
 
     fn tool_context_with_context(
@@ -987,6 +1175,7 @@ impl Backend for BaseRuntime {
         tool_name: &str,
         cancel: &CancelHandle,
     ) -> Result<BackendExecution, BackendError> {
+        self.ensure_filesystem_available(context)?;
         self.inner
             .tool_context_with_context(context, tool_name, cancel)
     }
@@ -998,8 +1187,18 @@ impl Backend for BaseRuntime {
         arguments: &Value,
         cancel: &CancelHandle,
     ) -> Result<CommandOutput, BackendError> {
-        self.inner
-            .invoke_tool(environment_id, tool_name, arguments, cancel)
+        let execution = self.invoke_tool_with_context(
+            &BackendContext::new(environment_id),
+            tool_name,
+            arguments,
+            cancel,
+        )?;
+        execution.single_output().ok_or_else(|| {
+            BackendError::new(
+                "multiple Backend outputs require an explicit output_backend selection",
+            )
+            .with_outputs(execution.outputs)
+        })
     }
 
     fn invoke_tool_with_context(
@@ -1009,12 +1208,21 @@ impl Backend for BaseRuntime {
         arguments: &Value,
         cancel: &CancelHandle,
     ) -> Result<BackendExecution, BackendError> {
+        self.ensure_filesystem_available(context)?;
         self.inner
             .invoke_tool_with_context(context, tool_name, arguments, cancel)
     }
 
     fn branch(&self, parent: &str, child: &str) -> Result<(), BackendError> {
-        self.inner.branch(parent, child)
+        self.branch_with_context(
+            &BackendContext {
+                environment_id: child.to_string(),
+                parent_environment_id: Some(parent.to_string()),
+                ..BackendContext::default()
+            },
+            parent,
+            child,
+        )
     }
 
     fn branch_with_context(
@@ -1023,59 +1231,300 @@ impl Backend for BaseRuntime {
         parent: &str,
         child: &str,
     ) -> Result<(), BackendError> {
-        self.inner.branch_with_context(context, parent, child)
+        if let Some(filesystem) = &self.filesystem {
+            filesystem.branch_with_context(context, parent, child)?;
+        }
+        if let Err(error) = self.inner.branch_with_context(context, parent, child) {
+            if let Some(filesystem) = &self.filesystem {
+                let child_context = BackendContext {
+                    environment_id: child.to_string(),
+                    ..context.clone()
+                };
+                let mut error = error;
+                if let Err(terminate) = filesystem.terminate_with_context(&child_context) {
+                    error.add_cleanup_failure("filesystem", format!("terminate: {terminate}"));
+                }
+                if let Err(cleanup) = filesystem.cleanup_with_context(&child_context) {
+                    error.add_cleanup_failure("filesystem", format!("cleanup: {cleanup}"));
+                }
+                return Err(error);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn promote(&self, environment_id: &str) -> Result<(), BackendError> {
-        self.inner.promote(environment_id)
+        self.promote_with_context(&BackendContext::new(environment_id))
     }
 
     fn promote_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.inner.promote_with_context(context)
+        self.ensure_filesystem_state(context, EnvironmentState::Available)?;
+        self.inner.promote_with_context(context)?;
+        if let Some(filesystem) = &self.filesystem {
+            filesystem.promote_with_context(context)?;
+        }
+        Ok(())
     }
 
     fn suspend(&self, environment_id: &str) -> Result<(), BackendError> {
-        self.inner.suspend(environment_id)
+        self.suspend_with_context(&BackendContext::new(environment_id))
     }
 
     fn suspend_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.inner.suspend_with_context(context)
+        self.ensure_filesystem_state(context, EnvironmentState::Available)?;
+        let running = self
+            .process
+            .process_handle(&context.environment_id)
+            .is_some_and(|_| {
+                self.process
+                    .is_running(&context.environment_id)
+                    .unwrap_or(false)
+            });
+        if running && self.process.freeze_mechanism() == FreezeMechanism::None {
+            return Err(BackendError::new(
+                "cannot suspend: no freeze mechanism is available",
+            ));
+        }
+        if running {
+            self.process.freeze(&context.environment_id)?;
+        }
+        let inner = self.inner.suspend_with_context(context);
+        if let Err(error) = inner {
+            if running {
+                let _ = self.process.thaw(&context.environment_id);
+            }
+            return Err(error);
+        }
+        if let Some(filesystem) = &self.filesystem
+            && let Err(error) = filesystem.suspend_with_context(context)
+        {
+            if running {
+                let _ = self.process.thaw(&context.environment_id);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn resume(&self, environment_id: &str) -> Result<(), BackendError> {
-        self.inner.resume(environment_id)
+        self.resume_with_context(&BackendContext::new(environment_id))
     }
 
     fn resume_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.inner.resume_with_context(context)
+        self.ensure_filesystem_state(context, EnvironmentState::Suspended)?;
+        let thaw_needed = self
+            .process
+            .process_handle(&context.environment_id)
+            .is_some()
+            && self.process.freeze_mechanism() != FreezeMechanism::None
+            && self
+                .process
+                .is_running(&context.environment_id)
+                .unwrap_or(false);
+        if thaw_needed {
+            self.process.thaw(&context.environment_id)?;
+        }
+        let inner = self.inner.resume_with_context(context);
+        if let Err(error) = inner {
+            if thaw_needed {
+                let _ = self.process.freeze(&context.environment_id);
+            }
+            return Err(error);
+        }
+        if let Some(filesystem) = &self.filesystem
+            && let Err(error) = filesystem.resume_with_context(context)
+        {
+            if thaw_needed {
+                let _ = self.process.freeze(&context.environment_id);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn terminate(&self, environment_id: &str) -> Result<(), BackendError> {
-        self.inner.terminate(environment_id)
+        self.terminate_with_context(&BackendContext::new(environment_id))
     }
 
     fn terminate_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.inner.terminate_with_context(context)
+        let stopped = self
+            .process
+            .terminate(&context.environment_id)
+            .and_then(|_| self.process.stop(&context.environment_id));
+        let inner = self.inner.terminate_with_context(context);
+        let filesystem = self
+            .filesystem
+            .as_ref()
+            .map(|value| value.terminate_with_context(context));
+        let mut failures = Vec::new();
+        if let Err(error) = stopped {
+            failures.push(format!("process terminate failed: {error}"));
+        }
+        if let Err(error) = inner {
+            failures.push(format!("inner terminate failed: {error}"));
+        }
+        if let Some(Err(error)) = filesystem {
+            failures.push(format!("filesystem terminate failed: {error}"));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::new(failures.join("; ")))
+        }
     }
 
     fn cleanup(&self, environment_id: &str) -> Result<(), BackendError> {
-        self.inner.cleanup(environment_id)
+        self.cleanup_with_context(&BackendContext::new(environment_id))
     }
 
     fn cleanup_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.inner.cleanup_with_context(context)
+        let process = self.process.cleanup(&context.environment_id);
+        let inner = self.inner.cleanup_with_context(context);
+        let filesystem = self
+            .filesystem
+            .as_ref()
+            .map(|value| value.cleanup_with_context(context));
+        let mut failures = Vec::new();
+        if let Err(error) = process {
+            failures.push(format!("process cleanup failed: {error}"));
+        }
+        if let Err(error) = inner {
+            failures.push(format!("inner cleanup failed: {error}"));
+        }
+        if let Some(Err(error)) = filesystem {
+            failures.push(format!("filesystem cleanup failed: {error}"));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::new(failures.join("; ")))
+        }
     }
 
     fn state(&self, environment_id: &str) -> Option<EnvironmentState> {
-        self.inner.state(environment_id)
+        let inner = self.inner.state(environment_id);
+        let filesystem = self
+            .filesystem
+            .as_ref()
+            .and_then(|value| value.state(environment_id));
+        match (inner, filesystem) {
+            (Some(left), Some(right)) if left == right => Some(left),
+            (Some(_), Some(_)) => Some(EnvironmentState::PartiallyAvailable),
+            (Some(_), None) | (None, Some(_)) => Some(EnvironmentState::PartiallyAvailable),
+            (None, None) => None,
+        }
     }
 
     fn backend_states(&self, environment_id: &str) -> Vec<BackendState> {
-        self.inner.backend_states(environment_id)
+        let mut states = self.inner.backend_states(environment_id);
+        if let Some(filesystem) = &self.filesystem {
+            states.push(BackendState {
+                backend_id: filesystem.backend_id().to_string(),
+                state: filesystem.state(environment_id),
+            });
+        }
+        states
+    }
+
+    fn filesystem_operation(
+        &self,
+        context: &BackendContext,
+        operation: &Operation,
+        cancel: &CancelHandle,
+    ) -> Result<FilesystemResult, BackendError> {
+        let mut context = context.clone();
+        let freeze_environment = match operation {
+            Operation::FilesystemFork {
+                parent_snapshot_id, ..
+            } => Some(parent_snapshot_id.clone()),
+            Operation::FilesystemMark { snapshot_id, .. } => Some(snapshot_id.clone()),
+            Operation::FilesystemAccept {
+                target_snapshot_id, ..
+            } => Some(target_snapshot_id.clone()),
+            _ => None,
+        };
+        let target = match operation {
+            Operation::FilesystemAccept {
+                target_snapshot_id, ..
+            } => Some(target_snapshot_id.as_str()),
+            _ => None,
+        };
+        let mut frozen = false;
+        if let Some(environment) = freeze_environment.as_deref()
+            && let Some(handle) = self.process.process_handle(environment)
+        {
+            // A process that already exited has no writers left to quiesce.
+            // Treat it as "not frozen" and let the filesystem operation run
+            // instead of waiting forever on an empty cgroup.
+            let running = self.process.is_running(environment).unwrap_or(false);
+            if running && self.process.freeze_mechanism() != FreezeMechanism::None {
+                self.process.freeze(environment)?;
+                frozen = true;
+                if target.is_some() {
+                    context.target_mount_pid = Some(handle.inner_pid);
+                    context.target_mount_namespace = Some(handle.mount_namespace);
+                }
+            }
+        }
+        let result = if let Some(filesystem) = &self.filesystem {
+            filesystem.filesystem_operation(&context, operation, cancel)
+        } else {
+            self.inner.filesystem_operation(&context, operation, cancel)
+        };
+        let thaw = if frozen {
+            self.process
+                .thaw(freeze_environment.as_deref().unwrap())
+                .err()
+        } else {
+            None
+        };
+        match result {
+            Ok(mut result) => {
+                if frozen && thaw.is_none() {
+                    result.confirmation.writers_quiesced = true;
+                    if target.is_some() {
+                        result.confirmation.target_paused = true;
+                    }
+                }
+                if let Some(error) = thaw {
+                    let mut error = BackendError::new(format!(
+                        "filesystem operation succeeded but process thaw failed: {error}"
+                    ));
+                    error.add_cleanup_failure("process", "thaw after filesystem operation");
+                    return Err(error);
+                }
+                Ok(result)
+            }
+            Err(mut error) => {
+                if let Some(thaw) = thaw {
+                    error.add_cleanup_failure("process", format!("thaw: {thaw}"));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn launch_fragment(
+        &self,
+        context: &BackendContext,
+        launch: &AgentLaunch,
+    ) -> Result<LaunchFragment, BackendError> {
+        let mut fragment = self.inner.launch_fragment(context, launch)?;
+        if let Some(filesystem) = &self.filesystem {
+            merge_launch_fragment(&mut fragment, filesystem.launch_fragment(context, launch)?);
+        }
+        Ok(fragment)
     }
 
     fn environments(&self) -> Vec<String> {
-        self.inner.environments()
+        let mut environments = self.inner.environments();
+        if let Some(filesystem) = &self.filesystem {
+            environments.extend(filesystem.environments());
+        }
+        environments.sort();
+        environments.dedup();
+        environments
     }
 
     fn manages_agent_process(&self) -> bool {
@@ -1095,6 +1544,309 @@ impl Backend for BaseRuntime {
     }
 }
 
-fn error(error: impl std::fmt::Display) -> BackendError {
-    BackendError::new(error.to_string())
+fn merge_launch_fragment(target: &mut LaunchFragment, source: LaunchFragment) {
+    target.mounts.extend(source.mounts);
+    if target.chdir.is_none() {
+        target.chdir = source.chdir;
+    }
+    target.env.extend(source.env);
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::{FilesystemConfirmation, FilesystemResult};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MockBackend {
+        id: String,
+        calls: AtomicUsize,
+        seen: Mutex<Vec<(BackendContext, Operation)>>,
+    }
+
+    impl MockBackend {
+        fn new(id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                id: id.to_string(),
+                calls: AtomicUsize::new(0),
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl Backend for MockBackend {
+        fn backend_id(&self) -> &str { &self.id }
+        fn establish(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn operate(&self, _: &str, _: &[String], _: &CancelHandle) -> Result<CommandOutput, BackendError> {
+            Ok(CommandOutput { exit_code: 0, stdout: String::new(), stderr: String::new() })
+        }
+        fn branch(&self, _: &str, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn suspend(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn resume(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn terminate(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn cleanup(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn state(&self, _: &str) -> Option<EnvironmentState> { Some(EnvironmentState::Available) }
+        fn environments(&self) -> Vec<String> { vec!["env".to_string()] }
+
+        fn filesystem_operation(
+            &self,
+            context: &BackendContext,
+            operation: &Operation,
+            _: &CancelHandle,
+        ) -> Result<FilesystemResult, BackendError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen.lock().unwrap().push((context.clone(), operation.clone()));
+            Ok(FilesystemResult {
+                snapshot_id: Some(self.id.clone()),
+                confirmation: FilesystemConfirmation {
+                    snapshot_created: true,
+                    metadata_durable: true,
+                    published: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        }
+    }
+
+    fn fork_operation() -> Operation {
+        Operation::FilesystemFork {
+            parent_snapshot_id: "parent".into(),
+            child_snapshot_id: "child".into(),
+            path_scope: vec![],
+        }
+    }
+
+    #[test]
+    fn filesystem_policy_selects_backend_and_forwards_context_and_operation() {
+        let left = MockBackend::new("left");
+        let right = MockBackend::new("right");
+        let runtime = CompositeRuntime::new(
+            "runtime",
+            vec![
+                BackendConnection::new("left", left.clone()).unwrap(),
+                BackendConnection::new("right", right.clone()).unwrap(),
+            ],
+            BackendPolicy {
+                default: vec!["right".into()],
+                routes: vec![BackendRoute {
+                    operation: Some(BackendOperation::FilesystemFork),
+                    task_id: Some("task".into()),
+                    backends: vec!["left".into()],
+                    ..Default::default()
+                }],
+            },
+        ).unwrap();
+        let context = BackendContext {
+            task_id: Some("task".into()),
+            environment_id: "env".into(),
+            ..Default::default()
+        };
+        let cancel = CancelHandle::default();
+        runtime.filesystem_operation(&context, &fork_operation(), &cancel).unwrap();
+        assert_eq!(left.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(right.calls.load(Ordering::SeqCst), 0);
+        let seen = left.seen.lock().unwrap();
+        assert_eq!(seen[0].0, context);
+        assert_eq!(seen[0].1, fork_operation());
+    }
+
+    #[test]
+    fn filesystem_multiple_selection_and_cancellation_make_no_calls() {
+        let left = MockBackend::new("left");
+        let right = MockBackend::new("right");
+        let runtime = CompositeRuntime::new(
+            "runtime",
+            vec![
+                BackendConnection::new("left", left.clone()).unwrap(),
+                BackendConnection::new("right", right.clone()).unwrap(),
+            ],
+            BackendPolicy { default: vec!["left".into(), "right".into()], routes: vec![] },
+        ).unwrap();
+        let context = BackendContext::new("env");
+        let cancel = CancelHandle::default();
+        assert!(runtime.filesystem_operation(&context, &fork_operation(), &cancel).is_err());
+        cancel.cancel();
+        assert!(runtime.filesystem_operation(&context, &fork_operation(), &cancel).is_err());
+        assert_eq!(left.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(right.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn base_runtime_freezes_and_marks_writers_quiesced() {
+        let backend = MockBackend::new("mock");
+        let runtime = BaseRuntime::new("runtime", backend);
+        let context = BackendContext::new("env");
+        let log = PathBuf::from(format!(
+            "/tmp/opencode/ascout-freeze-test-{}.log",
+            std::process::id()
+        ));
+        let launch = AgentLaunch {
+            command: "/bin/sleep".into(),
+            args: vec!["5".into()],
+            cwd: PathBuf::from("/tmp"),
+            log: log.clone(),
+            instance_id: Some("test-agent".into()),
+            env: BTreeMap::new(),
+        };
+        runtime.launch_agent(&context, &launch).unwrap();
+        let operation = Operation::FilesystemFork {
+            parent_snapshot_id: "env".into(),
+            child_snapshot_id: "child".into(),
+            path_scope: vec![],
+        };
+        let result = runtime
+            .filesystem_operation(&context, &operation, &CancelHandle::default())
+            .unwrap();
+        assert!(
+            result.confirmation.writers_quiesced,
+            "freeze must be reflected in writers_quiesced"
+        );
+        runtime.stop_agents().unwrap();
+        let _ = std::fs::remove_file(log);
+
+        let result = runtime
+            .filesystem_operation(
+                &BackendContext::new("missing"),
+                &Operation::FilesystemFork {
+                    parent_snapshot_id: "missing".into(),
+                    child_snapshot_id: "child".into(),
+                    path_scope: vec![],
+                },
+                &CancelHandle::default(),
+            )
+            .unwrap();
+        assert!(!result.confirmation.writers_quiesced);
+    }
+
+    fn launch_test_agent(runtime: &BaseRuntime, command: &str, args: Vec<String>) -> BackendContext {
+        let context = BackendContext::new("env");
+        let log = PathBuf::from(format!(
+            "/tmp/opencode/ascout-freeze-test-{}-{}.log",
+            std::process::id(),
+            command.replace('/', "_")
+        ));
+        let launch = AgentLaunch {
+            command: command.to_string(),
+            args,
+            cwd: PathBuf::from("/tmp"),
+            log: log.clone(),
+            instance_id: Some("test-agent".into()),
+            env: BTreeMap::new(),
+        };
+        runtime.launch_agent(&context, &launch).unwrap();
+        context
+    }
+
+    fn env_fork_operation() -> Operation {
+        Operation::FilesystemFork {
+            parent_snapshot_id: "env".into(),
+            child_snapshot_id: "child".into(),
+            path_scope: vec![],
+        }
+    }
+
+    #[test]
+    fn base_runtime_without_freeze_mechanism_still_runs_operations() {
+        let mut runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
+        runtime.process = ProcessBackend::with_mechanism(
+            "process",
+            "bwrap",
+            FreezeMechanism::None,
+        );
+        let context = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
+        let result = runtime
+            .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
+            .unwrap();
+        assert!(!result.confirmation.writers_quiesced);
+        runtime.stop_agents().unwrap();
+    }
+
+    #[test]
+    fn freeze_failure_fails_before_filesystem_operation() {
+        let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
+        let context = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
+        runtime.process.inject_freeze_failure(true);
+        let error = runtime
+            .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
+            .unwrap_err();
+        assert!(
+            error.message.contains("injected freeze failure"),
+            "{}",
+            error.message
+        );
+        runtime.process.inject_freeze_failure(false);
+        runtime.stop_agents().unwrap();
+    }
+
+    #[test]
+    fn thaw_failure_is_reported_as_cleanup_failure() {
+        let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
+        let context = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
+        runtime.process.inject_thaw_failure(true);
+        let error = runtime
+            .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
+            .unwrap_err();
+        assert!(error.message.contains("thaw"), "{}", error.message);
+        assert!(
+            error
+                .cleanup_failures
+                .iter()
+                .any(|value| value.contains("thaw")),
+            "missing thaw cleanup failure: {:?}",
+            error.cleanup_failures
+        );
+        runtime.process.inject_thaw_failure(false);
+        runtime.stop_agents().unwrap();
+    }
+
+    #[test]
+    fn exited_process_does_not_block_filesystem_operation() {
+        let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
+        let context = launch_test_agent(&runtime, "/bin/true", Vec::new());
+        for _ in 0..200 {
+            if !runtime.process.is_running("env").unwrap() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!runtime.process.is_running("env").unwrap());
+        assert!(runtime.process.process_handle("env").is_some());
+        let result = runtime
+            .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
+            .unwrap();
+        assert!(!result.confirmation.writers_quiesced);
+        runtime.stop_agents().unwrap();
+    }
+
+    #[test]
+    fn backend_default_filesystem_operation_is_unsupported() {
+        struct DefaultBackend;
+        impl Backend for DefaultBackend {
+            fn establish(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+            fn operate(&self, _: &str, _: &[String], _: &CancelHandle) -> Result<CommandOutput, BackendError> {
+                Err(BackendError::new("unused"))
+            }
+            fn branch(&self, _: &str, _: &str) -> Result<(), BackendError> { Ok(()) }
+            fn suspend(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+            fn resume(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+            fn terminate(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+            fn cleanup(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+            fn state(&self, _: &str) -> Option<EnvironmentState> { None }
+            fn environments(&self) -> Vec<String> { Vec::new() }
+        }
+        let backend = DefaultBackend;
+        let cancel = CancelHandle::default();
+        let result = Backend::filesystem_operation(
+            &backend,
+            &BackendContext::new("env"),
+            &Operation::OperateEnvironment {
+                command: vec!["true".into()],
+                agent: None,
+            },
+            &cancel,
+        );
+        assert_eq!(result.unwrap_err().message, "filesystem operation is unsupported by this Backend");
+    }
 }

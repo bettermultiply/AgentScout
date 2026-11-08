@@ -105,9 +105,11 @@ mod tests {
         tree.history_root_branch_id = Some("authority".into());
         tree.branches.insert("authority".into(), branch);
         for input in ["0", "2", "abc", "", "-1"] {
-            assert!(select_branch(&tree, input)
-                .unwrap_err()
-                .contains("无效 Branch 编号"));
+            assert!(
+                select_branch(&tree, input)
+                    .unwrap_err()
+                    .contains("无效 Branch 编号")
+            );
         }
         assert_eq!(select_branch(&tree, "1").unwrap(), "authority");
         assert_eq!(tree.authority_branch_id.as_deref(), Some("authority"));

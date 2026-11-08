@@ -17,9 +17,39 @@ use crate::backend::{Backend, BackendContext, BackendError, BackendExecution, Ca
 use crate::contract::{
     AdapterMessage, AgentLaunch, Content, ControlMessage, EnvironmentState, Event, EventPayload,
     FollowUp, Operation, OperationRequest, OperationResult, PROTOCOL_VERSION, ResourceNote,
-    ResultStatus,
+    FilesystemResult, ResultStatus,
 };
 use crate::transport;
+
+const RESULT_CACHE_LIMIT: usize = 256;
+
+/// 已完成请求的有界结果窗口。超出窗口的请求按普通新请求重新执行；窗口
+/// 本身只用于重试去重，不保存环境状态。
+#[derive(Default)]
+struct ResultCache {
+    entries: HashMap<String, OperationResult>,
+    order: VecDeque<String>,
+}
+
+impl ResultCache {
+    fn get(&self, request_id: &str) -> Option<OperationResult> {
+        self.entries.get(request_id).cloned()
+    }
+
+    fn insert(&mut self, request_id: String, result: OperationResult) -> Vec<String> {
+        if self.entries.insert(request_id.clone(), result).is_none() {
+            self.order.push_back(request_id);
+        }
+        let mut evicted = Vec::new();
+        while self.order.len() > RESULT_CACHE_LIMIT {
+            if let Some(old) = self.order.pop_front() {
+                self.entries.remove(&old);
+                evicted.push(old);
+            }
+        }
+        evicted
+    }
+}
 
 pub struct Adapter {
     pub adapter_instance: String,
@@ -53,6 +83,8 @@ impl Adapter {
             out,
             queues: Mutex::new(HashMap::new()),
             seen: Mutex::new(HashSet::new()),
+            results: Mutex::new(ResultCache::default()),
+            result_signal: Condvar::new(),
             known: Mutex::new(HashMap::new()),
             agent: Mutex::new(None),
         });
@@ -82,6 +114,10 @@ struct Shared {
     queues: Mutex<HashMap<String, Arc<Queue>>>,
     /// 已经受理过的请求标识：重发同一标识按重试处理，不重复执行。
     seen: Mutex<HashSet<String>>,
+    /// 已经完成的请求结果，按条数有界。重发同一标识时返回同一逻辑结果；
+    /// 仍在执行的请求会等待原始结果。
+    results: Mutex<ResultCache>,
+    result_signal: Condvar,
     /// Adapter 记录的每个环境最近一次报告的状态，用于发现意外变化。
     known: Mutex<HashMap<String, EnvironmentState>>,
     /// 由 Runtime 启动的 Agent 接入侧进程。一个 run 只有一个，服务所有环境。
@@ -93,6 +129,24 @@ impl Shared {
         {
             let mut seen = self.seen.lock().unwrap();
             if !seen.insert(request.request_id.clone()) {
+                drop(seen);
+                let results = self.results.lock().unwrap();
+                let (_results, timeout) = self
+                    .result_signal
+                    .wait_timeout_while(results, Duration::from_secs(30), |cache| {
+                        cache.get(&request.request_id).is_none()
+                    })
+                    .unwrap();
+                if timeout.timed_out() {
+                    eprintln!(
+                        "adapter: retry for {} timed out waiting for the original result",
+                        request.request_id
+                    );
+                    return;
+                }
+                if let Some(result) = _results.get(&request.request_id) {
+                    let _ = self.out.send(AdapterMessage::Result(result));
+                }
                 return;
             }
         }
@@ -127,6 +181,8 @@ impl Shared {
     ) -> OperationResult {
         let state = self.runtime.state(environment_id);
         let context = BackendContext {
+            operation_id: request.request_id.clone(),
+            generation: request.generation,
             task_id: request.task_id.clone(),
             branch_id: request
                 .branch_id
@@ -134,6 +190,8 @@ impl Shared {
                 .or_else(|| Some(request.environment_id.clone())),
             environment_id: environment_id.to_string(),
             parent_environment_id: None,
+            target_mount_pid: None,
+            target_mount_namespace: None,
         };
 
         match &request.operation {
@@ -205,7 +263,7 @@ impl Shared {
                 child_environment_id,
             } => {
                 match state {
-                    Some(EnvironmentState::Available) | Some(EnvironmentState::Suspended) => {}
+                    Some(EnvironmentState::Available | EnvironmentState::Suspended) => {}
                     Some(other) => {
                         return self.not_applicable(
                             request,
@@ -224,6 +282,8 @@ impl Shared {
                 }
                 match self.runtime.branch_with_context(
                     &BackendContext {
+                        operation_id: request.request_id.clone(),
+                        generation: 0,
                         environment_id: environment_id.to_string(),
                         parent_environment_id: Some(environment_id.to_string()),
                         ..context.clone()
@@ -244,10 +304,7 @@ impl Shared {
                 }
             }
             Operation::PromoteEnvironment => {
-                if !matches!(
-                    state,
-                    Some(EnvironmentState::Available | EnvironmentState::Suspended)
-                ) {
+                if state != Some(EnvironmentState::Available) {
                     return self.not_applicable(request, state, "environment cannot be promoted");
                 }
                 match self.runtime.promote_with_context(&context) {
@@ -259,10 +316,7 @@ impl Shared {
                 }
             }
             Operation::SuspendEnvironment => {
-                if !matches!(
-                    state,
-                    Some(EnvironmentState::Available | EnvironmentState::Suspended)
-                ) {
+                if state != Some(EnvironmentState::Available) {
                     return self.not_applicable(request, state, "environment cannot be suspended");
                 }
                 match self.runtime.suspend_with_context(&context) {
@@ -276,10 +330,7 @@ impl Shared {
                 }
             }
             Operation::ResumeEnvironment => {
-                if !matches!(
-                    state,
-                    Some(EnvironmentState::Suspended | EnvironmentState::Available)
-                ) {
+                if state != Some(EnvironmentState::Suspended) {
                     return self.not_applicable(request, state, "environment cannot be resumed");
                 }
                 match self.runtime.resume_with_context(&context) {
@@ -296,6 +347,12 @@ impl Shared {
                 if state.is_none() {
                     return self.unknown_environment(request);
                 }
+                if !matches!(
+                    state,
+                    Some(EnvironmentState::Available | EnvironmentState::Suspended)
+                ) {
+                    return self.not_applicable(request, state, "environment cannot be terminated");
+                }
                 match self.runtime.terminate_with_context(&context) {
                     Ok(()) => {
                         let mut result =
@@ -309,6 +366,13 @@ impl Shared {
             Operation::CleanupEnvironment => {
                 if state.is_none() {
                     return self.not_applicable(request, None, "unknown environment");
+                }
+                if state != Some(EnvironmentState::Terminated) {
+                    return self.not_applicable(
+                        request,
+                        state,
+                        "cleanup requires a terminated environment",
+                    );
                 }
                 match self.runtime.cleanup_with_context(&context) {
                     Ok(()) => self.success(request, self.runtime.state(environment_id), false),
@@ -350,6 +414,26 @@ impl Shared {
                 {
                     Ok(execution) => {
                         self.execution_result(request, environment_id, execution, true)
+                    }
+                    Err(error) => self.backend_error(request, environment_id, error),
+                }
+            }
+            Operation::FilesystemFork { .. }
+            | Operation::FilesystemMark { .. }
+            | Operation::FilesystemDiff { .. }
+            | Operation::FilesystemAccept { .. }
+            | Operation::FilesystemDiscard { .. } => {
+                match self.runtime.filesystem_operation(&context, &request.operation, cancel) {
+                    Ok(filesystem) => {
+                        let Some(reason) = filesystem_failure_reason(&request.operation, &filesystem) else {
+                            let mut result = self.success(request, state, can_accept(state));
+                            result.filesystem = Some(filesystem);
+                            return result;
+                        };
+                        let mut result = self.reasoned_failure(request, state, reason);
+                        result.status = ResultStatus::PartiallyCompleted;
+                        result.filesystem = Some(filesystem);
+                        result
                     }
                     Err(error) => self.backend_error(request, environment_id, error),
                 }
@@ -579,6 +663,84 @@ impl Shared {
     }
 }
 
+fn filesystem_failure_reason(operation: &Operation, result: &FilesystemResult) -> Option<String> {
+    if !result.conflicts.is_empty() {
+        return Some(format!(
+            "filesystem operation has {} conflict(s); publication was not accepted",
+            result.conflicts.len()
+        ));
+    }
+    let missing = match operation {
+        Operation::FilesystemFork { .. } => (!result.confirmation.snapshot_created)
+            .then_some("snapshot_created")
+            .or_else(|| (!result.confirmation.metadata_durable).then_some("metadata_durable")),
+        Operation::FilesystemMark { .. } => (!result.confirmation.metadata_durable)
+            .then_some("metadata_durable"),
+        Operation::FilesystemAccept { .. } => (!result.confirmation.published)
+            .then_some("published"),
+        _ => None,
+    };
+    missing.map(|field| format!("filesystem operation is not confirmed: missing {field}"))
+}
+
+#[cfg(test)]
+mod filesystem_confirmation_tests {
+    use super::*;
+    use crate::contract::{FilesystemConflict, PathScope};
+
+    #[test]
+    fn accept_requires_publication_and_rejects_conflicts() {
+        let operation = Operation::FilesystemAccept {
+            base_snapshot_id: "base".into(), source_snapshot_id: "source".into(),
+            target_snapshot_id: "target".into(), path_scope: vec![PathScope::Workspace, PathScope::Tmp],
+        };
+        let mut result = FilesystemResult::default();
+        assert!(filesystem_failure_reason(&operation, &result).is_some());
+        result.confirmation.published = true;
+        assert!(filesystem_failure_reason(&operation, &result).is_none());
+        result.conflicts.push(FilesystemConflict { path: "workspace/a".into(), kind: "modify_delete".into(), reason: "conflict".into(), ..Default::default() });
+        assert!(filesystem_failure_reason(&operation, &result).is_some());
+    }
+
+    #[test]
+    fn fork_requires_creation_and_durable_metadata() {
+        let operation = Operation::FilesystemFork { parent_snapshot_id: "base".into(), child_snapshot_id: "child".into(), path_scope: vec![PathScope::Workspace, PathScope::Tmp] };
+        let mut result = FilesystemResult::default();
+        assert!(filesystem_failure_reason(&operation, &result).is_some());
+        result.confirmation.snapshot_created = true;
+        assert!(filesystem_failure_reason(&operation, &result).is_some());
+        result.confirmation.metadata_durable = true;
+        assert!(filesystem_failure_reason(&operation, &result).is_none());
+    }
+
+    #[test]
+    fn completed_result_cache_is_bounded() {
+        let mut cache = ResultCache::default();
+        let mut last_evicted = Vec::new();
+        for index in 0..(RESULT_CACHE_LIMIT + 8) {
+            let request = OperationRequest {
+                request_id: format!("request-{index}"),
+                generation: 0,
+                environment_id: "env".into(),
+                operation: Operation::PromoteEnvironment,
+                task_id: None,
+                branch_id: None,
+            };
+            last_evicted = cache.insert(
+                request.request_id.clone(),
+                result(&request, ResultStatus::Completed, None, false),
+            );
+        }
+        assert_eq!(cache.entries.len(), RESULT_CACHE_LIMIT);
+        assert_eq!(last_evicted.len(), 1);
+        assert!(!cache.entries.contains_key("request-0"));
+        assert!(cache.entries.contains_key(&format!(
+            "request-{}",
+            RESULT_CACHE_LIMIT + 7
+        )));
+    }
+}
+
 fn result(
     request: &OperationRequest,
     status: ResultStatus,
@@ -598,6 +760,7 @@ fn result(
         outputs: Vec::new(),
         reason: None,
         output: None,
+        filesystem: None,
     }
 }
 
@@ -671,6 +834,20 @@ impl Queue {
                 },
             }));
             let result = shared.execute(&environment_id, &request, &self.cancel);
+            {
+                let evicted = shared
+                    .results
+                    .lock()
+                    .unwrap()
+                    .insert(request.request_id.clone(), result.clone());
+                if !evicted.is_empty() {
+                    let mut seen = shared.seen.lock().unwrap();
+                    for request_id in evicted {
+                        seen.remove(&request_id);
+                    }
+                }
+            }
+            shared.result_signal.notify_all();
             if let Some(state) = result.environment_state {
                 shared.set_known(&request.environment_id, state);
                 if let Operation::BranchEnvironment {

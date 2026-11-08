@@ -69,22 +69,24 @@ impl Task<'_> {
                 let AgentWireMessage::Message(message) = message else {
                     return Err(io::Error::other("Agent sent a control-plane command"));
                 };
-                let commands = if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
-                    Vec::new()
-                } else {
-                    self.tree.handle_message(message.clone())?
-                };
+                let commands =
+                    if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
+                        Vec::new()
+                    } else {
+                        self.tree.handle_message(message.clone())?
+                    };
                 self.interface.message(&message);
                 if !matches!(message, AgentMessage::Output { .. }) {
                     let mut fact = serde_json::to_value(&message)?;
                     fact["source"] = json!("agent_adapter");
                     self.record(fact)?;
                 }
-                let mut actions = if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
-                    self.tree.speculative_admission(message)?
-                } else {
-                    ControlActions::default()
-                };
+                let mut actions =
+                    if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
+                        self.tree.speculative_admission(message)?
+                    } else {
+                        ControlActions::default()
+                    };
                 actions.commands.extend(commands);
                 actions
             }

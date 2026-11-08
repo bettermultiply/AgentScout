@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use ascout::adapter::Adapter;
 use ascout::backend::Backend;
+use ascout::filesystem::{FilesystemBackend, FilesystemConfig};
 use ascout::firecracker::FirecrackerBackend;
 use ascout::nle::NleBackend;
 use ascout::runtime::{BackendConnection, BackendPolicy, BaseRuntime, CompositeRuntime};
@@ -41,10 +42,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // `backends` 数组存在时按多 Backend 配置装配；否则走旧单 Backend 配置，
     // 保持既有行为不变。
-    let runtime: Arc<dyn Backend> = if value.get("backends").is_some() {
-        assemble_runtime(&value)?
+    let filesystem = if let Some(config) = value.get("filesystem") {
+        let state = config
+            .get("state_directory")
+            .and_then(|v| v.as_str())
+            .ok_or("filesystem missing state_directory")?;
+        let mut filesystem_config = FilesystemConfig::new(state);
+        if let Some(path) = config.get("bubblewrap_path").and_then(|v| v.as_str()) {
+            filesystem_config.bubblewrap_path = PathBuf::from(path);
+        }
+        Some(Arc::new(FilesystemBackend::new(filesystem_config)?))
     } else {
-        assemble_single_backend(&value)?
+        None
+    };
+    let runtime: Arc<dyn Backend> = if value.get("backends").is_some() {
+        assemble_runtime(&value, filesystem.clone())?
+    } else {
+        assemble_single_backend(&value, filesystem.clone())?
     };
 
     Adapter {
@@ -59,6 +73,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// BaseRuntime 管理单个 Agent 实际执行实例的进程。Agent Session 仍由接入侧管理。
 fn assemble_runtime(
     value: &serde_json::Value,
+    filesystem: Option<Arc<FilesystemBackend>>,
 ) -> Result<Arc<dyn Backend>, Box<dyn std::error::Error>> {
     let entries = value
         .get("backends")
@@ -100,9 +115,21 @@ fn assemble_runtime(
     };
     let composite = CompositeRuntime::new("runtime", connections, policy)?;
 
-    let runtime: Arc<dyn Backend> = match value.get("base_runtime").and_then(|value| value.as_str())
+    let runtime: Arc<dyn Backend> = match value
+        .get("base_runtime")
+        .and_then(|value| value.as_str())
+        .or_else(|| filesystem.as_ref().map(|_| "runtime"))
     {
-        Some(base_id) => Arc::new(BaseRuntime::new(base_id, Arc::new(composite))),
+        Some(base_id) => {
+            let base = BaseRuntime::new(base_id, Arc::new(composite));
+            match filesystem {
+                Some(fs) => {
+                    let bwrap = fs.bubblewrap_path().to_path_buf();
+                    Arc::new(base.with_filesystem(fs).with_bubblewrap(bwrap))
+                }
+                None => Arc::new(base),
+            }
+        }
         None => Arc::new(composite),
     };
     Ok(runtime)
@@ -112,6 +139,7 @@ fn assemble_runtime(
 /// Firecracker 字段构造一个 Backend，再包成单连接的 CompositeRuntime，行为不变。
 fn assemble_single_backend(
     value: &serde_json::Value,
+    filesystem: Option<Arc<FilesystemBackend>>,
 ) -> Result<Arc<dyn Backend>, Box<dyn std::error::Error>> {
     let is_nle = value.get("backend").and_then(|value| value.as_str()) == Some("nle");
     let (id, backend): (&str, Arc<dyn Backend>) = if is_nle {
@@ -132,5 +160,14 @@ fn assemble_single_backend(
         vec![BackendConnection::new(id, backend)?],
         BackendPolicy::single(id),
     )?;
-    Ok(Arc::new(composite))
+    if let Some(filesystem) = filesystem {
+        let bwrap = filesystem.bubblewrap_path().to_path_buf();
+        Ok(Arc::new(
+            BaseRuntime::new("runtime", Arc::new(composite))
+                .with_filesystem(filesystem)
+                .with_bubblewrap(bwrap),
+        ))
+    } else {
+        Ok(Arc::new(composite))
+    }
 }

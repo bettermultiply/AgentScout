@@ -692,7 +692,7 @@ fn validate_binding(
     for input in &binding.inputs {
         require(
             (optional.contains(&input.as_str())
-                    || (decision == Decision::Extent
+                || (decision == Decision::Extent
                     && [
                         "process_state.hook_count",
                         "process_state.active_time",

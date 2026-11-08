@@ -62,6 +62,35 @@ fn install_shutdown_handlers() -> io::Result<()> {
     Ok(())
 }
 
+fn validate_agent_capabilities(
+    capabilities: &ascout::agent_control::AdapterCapabilities,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let required = [
+        (
+            capabilities.pre_execution_interception,
+            "preExecutionInterception",
+        ),
+        (
+            capabilities.local_decision_evaluation,
+            "localDecisionEvaluation",
+        ),
+        (
+            capabilities.checkpoint_continuation,
+            "checkpointContinuation",
+        ),
+        (
+            capabilities.independent_candidate_session,
+            "independentCandidateSession",
+        ),
+        (capabilities.cancel_completion, "cancelCompletion"),
+        (capabilities.tool_result_injection, "toolResultInjection"),
+    ];
+    if let Some((false, name)) = required.into_iter().find(|(supported, _)| !supported) {
+        return Err(format!("Agent Adapter lacks required capability {name}").into());
+    }
+    Ok(())
+}
+
 /// 启动 Runtime Adapter 并完成握手。控制面只持有连接和进程句柄，
 /// 不保存任何环境状态。
 fn start_adapter(
@@ -233,13 +262,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"config_path": config_path}),
         serde_json::to_value(&runtime_capabilities)?,
     );
+    tree.bind_local_policy(policy.digest());
     let runtime_tools = serde_json::to_string(&runtime_capabilities.tools)?;
     // 用哪个 Agent 产品、哪个版本由控制面决定；启动它由 Runtime 完成。
     let mut agent_args = vec![
-        "--import=".to_string() + &pi_root
-            .join("packages/coding-agent/src/experimental/source-resolver.ts")
-            .display()
-            .to_string(),
+        "--import=".to_string()
+            + &pi_root
+                .join("packages/coding-agent/src/experimental/source-resolver.ts")
+                .display()
+                .to_string(),
         "--experimental-strip-types".into(),
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("agent-access/pi/main.ts")
@@ -249,7 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "agent".into(),
     ];
     if let Some(model) = model {
-            agent_args.push("--model".into());
+        agent_args.push("--model".into());
         agent_args.push(model);
     }
     if let Some(thinking) = thinking {
@@ -257,7 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_args.push(thinking);
     }
     let agent_launch = AgentLaunch {
-            command: "/usr/bin/node".into(),
+        command: "/usr/bin/node".into(),
         args: agent_args,
         cwd: tree.workspace(),
         log: run_dir.join("agent.log"),
@@ -300,9 +331,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match transport::read_message(&mut stream)? {
             Some(AgentWireMessage::Message(AgentMessage::AgentConnected {
                 agent_id,
-                capabilities: _,
-            }))
-                if agent_id == "agent" => {}
+                capabilities,
+            })) if agent_id == "agent" => {
+                validate_agent_capabilities(&capabilities)?;
+            }
             _ => return Err("Agent handshake failed".into()),
         }
         stream.set_read_timeout(None)?;
@@ -314,13 +346,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let decisions = Decision::ALL
             .into_iter()
-            .map(|decision| Ok((decision.as_str().to_string(), json!(policy.script(decision)?))))
+            .map(|decision| {
+                Ok((
+                    decision.as_str().to_string(),
+                    json!(policy.script(decision)?),
+                ))
+            })
             .collect::<Result<serde_json::Map<_, _>, Box<dyn std::error::Error>>>()?;
-        send(&mut stream, AgentCommand::LocalPolicy {
-            branch_id: "authority".into(),
-            policy_digest: policy.digest().into(),
-            decisions: serde_json::Value::Object(decisions),
-        })?;
+        send(
+            &mut stream,
+            AgentCommand::LocalPolicy {
+                branch_id: "authority".into(),
+                policy_digest: policy.digest().into(),
+                decisions: serde_json::Value::Object(decisions),
+            },
+        )?;
         send(&mut stream, command)?;
         let (events, receiver) = mpsc::channel();
         let requests = events.clone();

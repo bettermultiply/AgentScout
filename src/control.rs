@@ -165,6 +165,7 @@ impl ControlSession {
     ) -> io::Result<()> {
         let message = ControlMessage::Request(OperationRequest {
             request_id: request_id.to_string(),
+            generation: 0,
             environment_id: environment_id.to_string(),
             operation,
             task_id: task_id.map(str::to_string),

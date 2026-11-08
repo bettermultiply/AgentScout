@@ -6,11 +6,28 @@
 
 ### 当前实现目标
 
-本轮先更新设计，不实现 Runtime 代码。目标语义见 [Runtime 设计](../design/runtime.md)。首阶段优先实现进程级或更轻量的文件系统 Overlay，而不是继续以 VM 为默认承载。Overlay 覆盖的对象是 Agent 及其派生进程的文件系统视图，不只是某个工具函数或工作目录；绝对路径、临时文件以及后代进程的文件操作也必须纳入边界，不能以改变 cwd 或复制目录冒充完整覆盖。
+目标语义见 [Runtime 设计](../design/runtime.md)。首阶段实现了 Linux 文件系统 Backend：通过 bubblewrap 创建 mount/user namespace，并在其中把宿主根目录以只读方式挂载，再用 OverlayFS upper/work 层承载写入。Agent 启动入口在该 namespace 中执行，因此绝对路径、临时文件和全部后代进程继承同一文件系统视图；不是改变 cwd、复制目录或拦截 Agent API。
 
-Overlay 是第一项实现工作，不是所有 Runtime 的必需结构。文件系统视图应让相关进程正常运行，文件修改不得越过声明边界直接污染 Parent 或 Authority；接受和丢弃时按既有状态、效果语义处理，具体挂载、快照、提交及冲突处理方案尚未展开。不在这里预先固定必须复制回 Parent 或必须进行通用合并。
+Overlay 是第一项实现工作，不是所有 Runtime 的必需结构。当前 Backend 的 branch
+为父 upper 做独立副本（优先 reflink，失败时复制）或 btrfs 快照，子 lower 追加该
+副本；父的 upper、lower 和运行中挂载不变。overlay 的 diff 扫描分支自己的 upper
+增量；accept 做三方冲突检测并把增量重放到目标：无 live mount 时直接写 upper，
+有 live mount 时用 bwrap `--json-status-fd` 得到的内层 sandbox pid，校验 mount
+namespace 后以 `/proc/<pid>/root` dirfd 为根、通过 `openat2(RESOLVE_IN_ROOT)`
+安全重放。btrfs 只有在当前权限下 `incremental_diff=true` 时才会被选为数据面，
+否则降级 overlay 并在能力/日志中说明。
 
-尚待实现：通用的低成本动作承载；Session 与环境状态的一致关联；覆盖 Agent 及其后代进程的文件系统 Overlay；受管文件效果的清理和合法生效路径。完整能力组合、Runtime 与 Policy 的协调协商和运行时检测属于后续目标，不是首阶段前置条件。下文的 Registry 与验证流程描述目标接入方式，不表示当前原型已实现，也不能把现有 Firecracker 或 NLE 路径当作上述通用能力已完成的证据。
+尚待实现：受管文件效果的合法生效路径、Overlay 变更的 promote/冲突处理、主动 Registry 验证和运行时偏差检测。该 Backend 只负责文件系统，不负责进程终止、网络、内存、资源或 Agent Session；BaseRuntime 仍负责 Agent 进程句柄。它要求 Linux、可执行 bubblewrap、可创建 user/mount namespace 且宿主允许 OverlayFS；任一条件不满足时启动失败，不回退到未隔离启动。BaseRuntime 将 Agent 入口放入独立进程组并按进程组停止普通后代；若 Agent 主动创建新 session/cgroup 脱离进程组，则不在本版停止保证内。cleanup 会先停止 Agent，停止失败时保留进程句柄并禁止删除 upper/work；只有停止成功后才清理 inner 和 filesystem，任一清理失败都返回失败，不报告 cleanup 已收敛。无 context 的 Backend 方法统一转入 context 路径。establish/branch 的组合失败回滚同样先 terminate filesystem environment，再 cleanup；回滚错误追加到原始 BackendError 的 cleanup_failures。BaseRuntime 配置 filesystem 时，generic operate、tool_context 和 invoke_tool 仍只委托 inner Backend；filesystem 只检查环境状态，并在 Agent 启动时提供可继承的 namespace/Overlay 视图，不执行同一业务命令。
+
+Adapter 中的生命周期状态门槛是所有 Runtime 共同遵守的契约，不是 filesystem
+Backend 的专属规则：operate 只接受 Available；branch 接受 Available 或
+Suspended（暂停只阻止在父环境内执行新操作，派生读取父状态是允许的）；
+promote 和 suspend 只接受 Available；resume 只接受 Suspended；terminate 接受
+Available 或 Suspended；cleanup 只接受 Terminated。这样 Suspended 环境不会
+通过 Adapter 继续接受新的环境内操作，未启用 filesystem 的 NLE/Firecracker 也
+保持相同的 Runtime 生命周期语义。filesystem 的额外检查只存在于其 Backend 和
+启用它的 BaseRuntime 包装层；未配置 filesystem 时这些检查不改变 inner Backend
+行为。
 
 Adapter 接入工作的对象是 Runtime 环境。所有合格 Adapter 都必须支持 `establish_environment`、`operate_environment`、`promote_environment`、`suspend_environment`、`resume_environment`、`terminate_environment` 和 `cleanup_environment`；`branch_environment` 是可选能力，只表示派生独立子环境。`promote_environment` 没有环境侧语义时也必须接受并成功返回，不能把 no-op 当作不支持。Runtime 也可以声明需要在真实环境中执行的环境工具；控制面通过 `tool_context` 和 `invoke_tool` 调用，不解释工具的业务语义。能力声明描述这些操作对不同环境内容形成的实际隔离保证，以及 Branch 之间的非干扰保证。
 
