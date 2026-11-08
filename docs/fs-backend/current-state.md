@@ -71,7 +71,7 @@
 - 有特权时直接 `lower=/`：只做了探测/高权限测试，未作为默认路径。
 - 跨 Backend 冻结/快照/解冻编排、cgroup 归属、进程停止归属、mount ns 是否拆成
   独立 Backend：待用户决定。
-- **ProcessBackend 已实现**：`src/process.rs` 负责 spawn、MountSpec、bwrap
+- **ProcessBackend 已实现**：`src/runtime/process/` 负责 spawn、MountSpec、bwrap
   `--json-status-fd`、进程组、cgroup 创建/加入/冻结/解冻/kill、内层 pid 与 mnt ns。
   FilesystemBackend 只产出 `LaunchFragment`。
 - **真实 freeze 已实现**：cgroup v2 `cgroup.freeze`；不可用时 fallback 进程组

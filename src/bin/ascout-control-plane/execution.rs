@@ -1,6 +1,6 @@
 use super::*;
-use ascout::agent_control::AgentController;
-use ascout::coordination::{ControlActions, ControlResult};
+use ascout::control_plane::agent_control::AgentController;
+use ascout::control_plane::coordination::{ControlActions, ControlResult};
 use std::io::{Read, Write};
 use std::sync::atomic::Ordering;
 

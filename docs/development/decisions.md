@@ -113,7 +113,7 @@ AScout 启动的是 Pi 的 `agent-access` 接入入口，不是 Pi 交互式 CLI
 
 - **Agent 接入进程由 Runtime 启动**。控制面（用户）决定用哪个 Agent 产品、哪个版本，把命令、参数、工作目录和日志路径作为 `operate_environment` 的启动参数交给 Adapter；Adapter 在环境内启动它，并在自己的进程退出时回收。控制面不再 `Command::new("node")`，也不再持有 Agent 进程句柄。
 - **运行目录由调用方创建**。控制面原本自建临时目录，既放日志又当工作目录；这属于实验脚手架。现在第一个命令行参数就是调用方创建好的运行目录，控制面只使用它，不再删除或回收。
-- **事件记录归 Ledger**。新增 `src/ledger.rs`，控制面通过 `Ledger::open` / `record` 追加事实，不再自己 `writeln!` 到文件。Ledger 只记录，不参与决策。
+- **事件记录归 Ledger**。新增 `src/control_plane/ledger.rs`，控制面通过 `Ledger::open` / `record` 追加事实，不再自己 `writeln!` 到文件。Ledger 只记录，不参与决策。
 
 附带约束：当时 `ASCOUT_RUNTIME_CONFIG` 是必需的，因为环境和 Agent 都由 Runtime 建立；后来 Policy 的可选 `runtime` 字段可以提供同一路径，环境变量只用于覆盖。
 
@@ -153,7 +153,7 @@ Agent 接入侧仍然是唯一控制 Agent 会话的地方：创建会话、克�
 - **NLE 只是测试用例，不属于 AScout 实现**。NLE 的 bridge、策略和运行环境作为外部 workload／适配保留，不进入核心 crate 的能力边界；核心契约不得出现 NLE 专用语义。
 - **AScout 不与 Pi 耦合**。Pi 是首个接入实现，不是架构组成；设计文档不得把 Pi 写成 AScout 的前提，控制面也不应把 Pi 的路径、工具或会话结构固化进核心协议。
 
-当前实现差距：`src/nle.rs` 仍在核心 crate 中。控制面已不再对 NLE 调用 `branch_environment`，也不再识别 `nle_action`；它按 Runtime 声明的共享环境和环境工具调用 `tool_context`／`invoke_tool`。Pi 接入的启动已按 2026-11-02 决策移入 Runtime Adapter。
+当前实现差距：`src/runtime/backends/nle.rs` 仍在核心 crate 中。控制面已不再对 NLE 调用 `branch_environment`，也不再识别 `nle_action`；它按 Runtime 声明的共享环境和环境工具调用 `tool_context`／`invoke_tool`。Pi 接入的启动已按 2026-11-02 决策移入 Runtime Adapter。
 
 ## 2026-10-31：NLE 投机改为动作边界暂存，废弃进程级 fork 分支
 

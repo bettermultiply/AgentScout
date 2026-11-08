@@ -1,5 +1,5 @@
 //! AScout control facts only. Agent messages are rendered by the product in its PTY.
-use ascout::agent_control::{BranchRecord, BranchRole, BranchStatus, SpeculativeTree};
+use ascout::control_plane::agent_control::{BranchRecord, BranchRole, BranchStatus, SpeculativeTree};
 use serde_json::Value;
 
 pub fn role_label(role: BranchRole) -> &'static str {
@@ -85,7 +85,7 @@ pub fn structured(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ascout::agent_control::{BranchRole, BranchStatus};
+    use ascout::control_plane::agent_control::{BranchRole, BranchStatus};
     #[test]
     fn invalid_selection_is_explicit_and_valid_selection_is_read_only() {
         let branch = BranchRecord {

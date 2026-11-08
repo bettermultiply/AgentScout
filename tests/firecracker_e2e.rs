@@ -10,10 +10,10 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ascout::contract::{
+use ascout::protocol::contract::{
     EnvironmentState, EventPayload, Operation, OperationResult, PROTOCOL_VERSION, ResultStatus,
 };
-use ascout::control::{ControlServer, ControlSession};
+use ascout::control_plane::session::{ControlServer, ControlSession};
 use serde_json::{Value, json};
 
 static FIRECRACKER_TEST: Mutex<()> = Mutex::new(());
@@ -182,7 +182,7 @@ impl Drop for AdapterHarness {
             }
         }
         for environment in &environments {
-            let namespace = ascout::firecracker::environment_network_namespace(environment);
+            let namespace = ascout::runtime::backends::firecracker::environment_network_namespace(environment);
             let _ = Command::new("sudo")
                 .args(["-n", "ip", "netns", "delete", &namespace])
                 .status();
@@ -528,7 +528,7 @@ fn ssh_diagnostic_reaches_a_real_microvm() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o600);
     fs::set_permissions(&private_key, permissions).unwrap();
 
-    let namespace = ascout::firecracker::environment_network_namespace(environment);
+    let namespace = ascout::runtime::backends::firecracker::environment_network_namespace(environment);
     let output = wait_until(Duration::from_secs(30), || {
         ssh_into_network(&namespace, &private_key, "printf ascout-ssh").ok()
     })

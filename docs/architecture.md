@@ -64,6 +64,58 @@ sequenceDiagram
 
 特别的，ASC-Proxy、Interposer 等 Agent 接入侧组件可以运行在 Agent 执行实体当前使用的执行环境内；该环境可以是多个逻辑 Branch 暂时共享的执行环境，也可以是 Runtime 为某个 Branch 建立的独立环境。
 
+## 3.1 代码模块结构
+
+`src/` 按职责分为三个顶层模块，`lib.rs` 只声明它们：
+
+```text
+src/
+  lib.rs
+  protocol/                    线上契约与传输编解码
+    mod.rs  contract.rs  transport.rs
+  control_plane/               控制面
+    mod.rs
+    agent_control/             Tree、Branch、命令/事件与协议消息
+    coordination/              动作投影与 AgentController
+    ledger.rs
+    policy/                    YAML 编译、Python 求值、Decision、校验
+    session.rs                 会话与请求客户端
+  runtime/                     Runtime Adapter 进程与通用组合层
+    mod.rs
+    adapter/                   会话、队列、结果缓存、分发、Agent 子进程
+    backend.rs                 Backend trait、BackendContext、错误类型
+    base.rs                    BaseRuntime
+    composite.rs               CompositeRuntime
+    capabilities.rs            多 Backend 能力合并
+    selection.rs               选择 Policy、路由与 BackendConnection
+    process/                   bwrap 启动、cgroup、freeze、handle
+    backends/
+      mod.rs
+      filesystem/              文件系统 Backend
+      firecracker/             Firecracker Backend 与 guest_access
+      nle.rs                   NLE Backend
+  bin/                         可执行入口，仅做装配与 import
+```
+
+文件系统 Backend 继续按职责拆分：`config`、`state`（环境/挂载/快照/迁移）、
+`probe`、`refs`、`mounts`、`btrfs`、`ops/{fork,mark,diff,accept,discard}`、
+`layer/`（Node/View、扫描、解析、xattr、变更列表）、`merge`、`replay/`
+（SafeRoot 与重放）、`copy`、`backend_impl`、`util`、`tests/`。
+
+依赖方向：
+
+- `protocol` 只依赖 serde 等外部库，不依赖 `control_plane` 或 `runtime`。
+- `control_plane` 依赖 `protocol`；当前不依赖 `runtime`。
+- `runtime` 依赖 `protocol` 与具体 Backend；Backend 实现依赖 `runtime::backend`
+  的 trait 和 `runtime::process` 的启动片段，不反向把 workload 语义加入通用
+  Adapter 或控制面。
+- `bin/` 依赖库的公开装配 API，不承载实现逻辑。
+
+已知的结构性依赖：`runtime::base` 直接引用具体
+`runtime::backends::filesystem::FilesystemBackend` 用于装配文件系统能力，
+这使 BaseRuntime 对具体 Backend 有编译期依赖；本轮按原行为保留，问题记录在
+`docs/refactor-notes.md`。
+
 ## 4. 相关文档
 
 - [Agent 接入侧设计](design/agent-integration.md)：直接子文档，展开 Agent 接入组件与受控路径

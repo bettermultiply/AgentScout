@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use ascout::policy::{CompiledPolicy, Decision, PolicyEngine};
+use ascout::control_plane::policy::{CompiledPolicy, Decision, PolicyEngine};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args().skip(1).collect();

@@ -1,5 +1,5 @@
 //! Presentation-neutral facts and requests. No layout or lifecycle decisions.
-use ascout::agent_control::{AgentMessage, SpeculativeTree};
+use ascout::control_plane::agent_control::{AgentMessage, SpeculativeTree};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

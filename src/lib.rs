@@ -1,16 +1,4 @@
-pub mod adapter;
-pub mod agent_control;
-pub mod backend;
-pub mod contract;
-pub mod control;
-pub mod filesystem;
-pub mod firecracker;
-pub mod guest_access;
-pub mod ledger;
-pub mod nle;
-pub mod policy;
-pub mod process;
+pub mod control_plane;
+pub mod protocol;
 pub mod runtime;
-pub mod transport;
 
-pub mod coordination;

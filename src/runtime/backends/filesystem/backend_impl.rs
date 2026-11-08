@@ -1,0 +1,401 @@
+//! `impl Backend for FilesystemBackend`。
+
+use super::*;
+
+impl Backend for FilesystemBackend {
+    fn backend_id(&self) -> &str {
+        "filesystem"
+    }
+
+    fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities {
+            shared_environment: false,
+            branch_environment: self.usable,
+            tools: Vec::new(),
+            filesystem_fast_delete: Some(self.fast_delete),
+            filesystem_fork_cost: Some(self.fork_cost.as_str().to_string()),
+            filesystem_btrfs_incremental_diff: Some(self.btrfs_incremental_diff),
+            filesystem_passthrough: Some(
+                self.config
+                    .passthrough_rw
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            ),
+            freeze_mechanism: None,
+        }
+    }
+
+    fn establish(&self, id: &str) -> Result<(), BackendError> {
+        validate_component(id)?;
+        if !self.usable {
+            return Err(BackendError::new(
+                "no usable filesystem data plane (bubblewrap overlay probe failed)",
+            ));
+        }
+        let root = self.paths(id);
+        let scopes = vec![PathScope::Workspace, PathScope::Tmp];
+        {
+            let state = self.environment()?;
+            if state.environments.contains_key(id) {
+                return Err(BackendError::new("filesystem environment already exists"));
+            }
+        }
+        fs::create_dir_all(&root).map_err(error)?;
+        let mut mounts = BTreeMap::new();
+        for target in self.overlayable_mounts() {
+            if !target.is_dir() {
+                continue;
+            }
+            let key = target.display().to_string();
+            let layer_key = format!("mounts/{}", short_hash(&key));
+            mounts.insert(
+                key,
+                MountUnit {
+                    upper: root.join(&layer_key).join("upper"),
+                    work: root.join(&layer_key).join("work"),
+                    target,
+                    lower: Vec::new(),
+                    layer_key,
+                },
+            );
+        }
+        let units: Vec<MountUnit> = mounts.values().cloned().collect();
+        if self.mechanism == FilesystemMechanism::Btrfs {
+            for mount in &units {
+                if let Some(parent) = mount.upper.parent() {
+                    fs::create_dir_all(parent).map_err(error)?;
+                }
+                if let Err(error) = self.btrfs_create(&mount.upper) {
+                    let _ = remove_path(&self.config.btrfs_path, &root, true);
+                    return Err(error);
+                }
+            }
+        }
+        if let Err(error) = Self::prepare_mount_dirs(&units) {
+            let _ = remove_path(
+                &self.config.btrfs_path,
+                &root,
+                self.mechanism == FilesystemMechanism::Btrfs,
+            );
+            return Err(error);
+        }
+        let environment = Environment {
+            id: id.to_string(),
+            root,
+            state: EnvironmentState::Available,
+            snapshot_id: Self::snapshot_id_for_child(id),
+            parent_snapshot_id: None,
+            base_snapshot_id: None,
+            scopes,
+            mounts,
+            lower: BTreeMap::new(),
+            marks: BTreeMap::new(),
+            workspace_root: None,
+        };
+        {
+            let mut state = self.environment()?;
+            state
+                .environments
+                .insert(id.to_string(), environment.clone());
+        }
+        if let Err(error) = self.persist_environment(&environment) {
+            let mut state = self.environment()?;
+            state.environments.remove(id);
+            drop(state);
+            let _ = remove_path(
+                &self.config.btrfs_path,
+                &environment.root,
+                self.mechanism == FilesystemMechanism::Btrfs,
+            );
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn branch(&self, parent: &str, child: &str) -> Result<(), BackendError> {
+        let scopes = {
+            let state = self.environment()?;
+            Self::resolve_environment(&state, parent)?.scopes
+        };
+        self.fork(parent, child, &scopes).map(|_| ())
+    }
+
+    fn operate(
+        &self,
+        id: &str,
+        command: &[String],
+        cancel: &CancelHandle,
+    ) -> Result<crate::protocol::contract::CommandOutput, BackendError> {
+        if cancel.is_cancelled() {
+            return Err(BackendError::interrupted());
+        }
+        if !self.usable {
+            return Err(BackendError::new(
+                "no usable filesystem data plane (bubblewrap overlay probe failed)",
+            ));
+        }
+        let environment = {
+            let state = self.environment()?;
+            state
+                .environments
+                .get(id)
+                .cloned()
+                .ok_or_else(|| BackendError::new("unknown filesystem environment"))?
+        };
+        if environment.state != EnvironmentState::Available {
+            return Err(BackendError::new(format!(
+                "filesystem environment is not available: {:?}",
+                environment.state
+            )));
+        }
+        let mut spec = MountSpec {
+            chdir: Some(PathBuf::from("/")),
+            json_status_fd: None,
+            ..MountSpec::default()
+        };
+        spec.entries.push(MountEntry::RoBind {
+            source: PathBuf::from("/"),
+            target: PathBuf::from("/"),
+        });
+        spec.entries.push(MountEntry::Proc {
+            target: PathBuf::from("/proc"),
+        });
+        spec.entries.push(MountEntry::Dev {
+            target: PathBuf::from("/dev"),
+        });
+        let mut mounts: Vec<MountUnit> = environment.mounts.values().cloned().collect();
+        mounts.sort_by_key(|mount| mount.target.components().count());
+        for mount in &mounts {
+            if !mount.target.is_dir() {
+                continue;
+            }
+            ensure_overlay_disjoint(&mount.target, &mount.upper)?;
+            fs::create_dir_all(&mount.upper).map_err(error)?;
+            reset_dir(&mount.work)?;
+            let lowers = self.launch_lowers(mount);
+            spec.entries.push(MountEntry::Overlay {
+                lowers,
+                upper: mount.upper.clone(),
+                work: mount.work.clone(),
+                target: mount.target.clone(),
+            });
+        }
+        spec.entries.push(MountEntry::Tmpfs {
+            target: self.config.state_directory.clone(),
+        });
+        spec.entries.push(MountEntry::RemountRo {
+            target: self.config.state_directory.clone(),
+        });
+        let mut wrapped = Command::new(&self.config.bubblewrap_path);
+        spec.apply(&mut wrapped);
+        wrapped.arg("--").args(command);
+        let output = wrapped.output().map_err(error)?;
+        Ok(crate::protocol::contract::CommandOutput {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    fn promote(&self, id: &str) -> Result<(), BackendError> {
+        let state = self.environment()?;
+        let environment = state
+            .environments
+            .get(id)
+            .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
+        if environment.state != EnvironmentState::Available {
+            return Err(BackendError::new(format!(
+                "filesystem environment cannot be promoted from {:?}",
+                environment.state
+            )));
+        }
+        Ok(())
+    }
+
+    fn suspend(&self, id: &str) -> Result<(), BackendError> {
+        let mut state = self.environment()?;
+        let environment = state
+            .environments
+            .get_mut(id)
+            .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
+        if environment.state != EnvironmentState::Available {
+            return Err(BackendError::new(format!(
+                "filesystem environment cannot be suspended from {:?}",
+                environment.state
+            )));
+        }
+        environment.state = EnvironmentState::Suspended;
+        let metadata = environment.clone();
+        drop(state);
+        self.persist_environment(&metadata)
+    }
+
+    fn resume(&self, id: &str) -> Result<(), BackendError> {
+        let mut state = self.environment()?;
+        let environment = state
+            .environments
+            .get_mut(id)
+            .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
+        if environment.state != EnvironmentState::Suspended {
+            return Err(BackendError::new(format!(
+                "filesystem environment cannot be resumed from {:?}",
+                environment.state
+            )));
+        }
+        environment.state = EnvironmentState::Available;
+        let metadata = environment.clone();
+        drop(state);
+        self.persist_environment(&metadata)
+    }
+
+    fn terminate(&self, id: &str) -> Result<(), BackendError> {
+        let mut state = self.environment()?;
+        let environment = state
+            .environments
+            .get_mut(id)
+            .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
+        if !matches!(
+            environment.state,
+            EnvironmentState::Available | EnvironmentState::Suspended
+        ) {
+            return Err(BackendError::new(format!(
+                "filesystem environment cannot be terminated from {:?}",
+                environment.state
+            )));
+        }
+        environment.state = EnvironmentState::Terminated;
+        let metadata = environment.clone();
+        drop(state);
+        self.persist_environment(&metadata)
+    }
+
+    fn cleanup(&self, id: &str) -> Result<(), BackendError> {
+        let (environment, garbage) = {
+            let mut state = self.environment()?;
+            let environment = state
+                .environments
+                .get(id)
+                .cloned()
+                .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
+            if environment.state != EnvironmentState::Terminated {
+                return Err(BackendError::new(
+                    "filesystem cleanup requires a terminated environment",
+                ));
+            }
+            remove_path(
+                &self.config.btrfs_path,
+                &environment.root,
+                self.mechanism == FilesystemMechanism::Btrfs,
+            )?;
+            state.environments.remove(id);
+            let garbage = self.refresh_references(&mut state)?;
+            (environment, garbage)
+        };
+        self.remove_environment_metadata(&environment.id)?;
+        self.schedule_gc(garbage)?;
+        Ok(())
+    }
+
+    fn state(&self, id: &str) -> Option<EnvironmentState> {
+        self.state.lock().ok()?.environments.get(id).map(|value| value.state)
+    }
+
+    fn environments(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .map(|state| state.environments.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn filesystem_operation(
+        &self,
+        context: &BackendContext,
+        operation: &Operation,
+        cancel: &CancelHandle,
+    ) -> Result<FilesystemResult, BackendError> {
+        if cancel.is_cancelled() {
+            return Err(BackendError::interrupted());
+        }
+        let name = Self::operation_name(operation);
+        if let Some(record) = self.replay(&context.operation_id, name, context.generation)? {
+            if record.status == "failed" {
+                return Err(BackendError::new(
+                    record
+                        .reason
+                        .unwrap_or_else(|| "filesystem operation failed".to_string()),
+                ));
+            }
+            return Ok(record.result);
+        }
+        let result = match operation {
+            Operation::FilesystemFork {
+                parent_snapshot_id,
+                child_snapshot_id,
+                path_scope,
+            } => self.fork(parent_snapshot_id, child_snapshot_id, path_scope),
+            Operation::FilesystemMark {
+                snapshot_id,
+                mark_id,
+                path_scope,
+            } => self.mark(snapshot_id, mark_id, path_scope),
+            Operation::FilesystemDiff {
+                base_snapshot_id,
+                source_snapshot_id,
+                target_snapshot_id,
+                path_scope,
+            } => self.diff(
+                base_snapshot_id,
+                source_snapshot_id,
+                target_snapshot_id.as_deref(),
+                path_scope,
+            ),
+            Operation::FilesystemAccept {
+                base_snapshot_id,
+                source_snapshot_id,
+                target_snapshot_id,
+                path_scope,
+            } => self.accept(
+                base_snapshot_id,
+                source_snapshot_id,
+                target_snapshot_id,
+                path_scope,
+                context.target_mount_pid,
+                context.target_mount_namespace,
+            ),
+            Operation::FilesystemDiscard {
+                snapshot_id,
+                path_scope,
+            } => self.discard(snapshot_id, path_scope),
+            _ => {
+                return Err(BackendError::new(
+                    "filesystem dispatch requires a filesystem operation",
+                ))
+            }
+        };
+        match result {
+            Ok(result) => {
+                if let Err(error) = self.remember(
+                    &context.operation_id,
+                    name,
+                    context.generation,
+                    &result,
+                    None,
+                ) {
+                    eprintln!("filesystem: operation record was not persisted: {error}");
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = self.remember(
+                    &context.operation_id,
+                    name,
+                    context.generation,
+                    &FilesystemResult::default(),
+                    Some(error.to_string()),
+                );
+                Err(error)
+            }
+        }
+    }
+}

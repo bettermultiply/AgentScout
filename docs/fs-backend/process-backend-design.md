@@ -2,7 +2,7 @@
 
 ## 职责
 
-`ProcessBackend`（`src/process.rs`）是唯一启动、冻结、终止 Agent 进程的组件。
+`ProcessBackend`（`src/runtime/process/`）是唯一启动、冻结、终止 Agent 进程的组件。
 
 - 接收 `CompositeRuntime`/`BaseRuntime` 汇总的 `LaunchFragment`。
 - 把 `MountSpec` 翻译成 bubblewrap 参数并 spawn。

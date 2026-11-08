@@ -1,0 +1,66 @@
+//! 文件系统 Backend 配置与数据面类别。
+
+use std::path::PathBuf;
+
+#[derive(Debug, Clone)]
+pub struct FilesystemConfig {
+    pub state_directory: PathBuf,
+    pub bubblewrap_path: PathBuf,
+    pub btrfs_path: PathBuf,
+    /// Force the portable overlay data plane even when btrfs is available.
+    /// Used by tests that exercise overlay semantics on a btrfs host.
+    pub force_overlay: bool,
+    /// Paths explicitly allowed to pass through read-write to the host.
+    pub passthrough_rw: Vec<PathBuf>,
+    /// Make unmanaged writable mounts read-only inside the sandbox.
+    pub isolate_unmanaged_mounts: bool,
+}
+
+impl FilesystemConfig {
+    pub fn new(state_directory: impl Into<PathBuf>) -> Self {
+        Self {
+            state_directory: state_directory.into(),
+            bubblewrap_path: PathBuf::from("bwrap"),
+            btrfs_path: PathBuf::from("btrfs"),
+            force_overlay: false,
+            passthrough_rw: Vec::new(),
+            isolate_unmanaged_mounts: true,
+        }
+    }
+}
+
+/// The data plane selected for this backend instance.  The btrfs plane is used
+/// only when its snapshot/delete probe succeeds; otherwise the portable
+/// overlay plane is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesystemMechanism {
+    Btrfs,
+    Overlay,
+}
+
+impl FilesystemMechanism {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Btrfs => "btrfs",
+            Self::Overlay => "overlay",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkCost {
+    Reflink,
+    Copy,
+    BtrfsSnapshot,
+}
+
+impl ForkCost {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reflink => "reflink",
+            Self::Copy => "copy",
+            Self::BtrfsSnapshot => "btrfs_snapshot",
+        }
+    }
+}
+

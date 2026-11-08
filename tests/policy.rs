@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use ascout::policy::{Decision, PolicyEngine};
+use ascout::control_plane::policy::{Decision, PolicyEngine};
 use serde_json::json;
 
 // Regression: bubblewrap has no --preserve-fds option. Exercise the real

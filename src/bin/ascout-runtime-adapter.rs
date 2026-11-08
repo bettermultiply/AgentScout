@@ -2,11 +2,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ascout::adapter::Adapter;
-use ascout::backend::Backend;
-use ascout::filesystem::{FilesystemBackend, FilesystemConfig};
-use ascout::firecracker::FirecrackerBackend;
-use ascout::nle::NleBackend;
+use ascout::runtime::adapter::Adapter;
+use ascout::runtime::backend::Backend;
+use ascout::runtime::backends::filesystem::{FilesystemBackend, FilesystemConfig};
+use ascout::runtime::backends::firecracker::FirecrackerBackend;
+use ascout::runtime::backends::nle::NleBackend;
 use ascout::runtime::{BackendConnection, BackendPolicy, BaseRuntime, CompositeRuntime};
 
 fn main() {

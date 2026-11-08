@@ -225,9 +225,9 @@ EOF
 
 ### AScout Runtime Adapter 接入
 
-`src/nle.rs` 现在通过既有 `Backend` 接口调用该 bridge，`src/bin/ascout-runtime-adapter.rs` 根据配置中的 `"backend": "nle"` 选择它；Firecracker 配置路径保持不变。已经用正式的 4 字节大端长度前缀 Unix 协议完成跨边界 smoke test。2026-11-02 起，NLE 不再声明或调用 `branch_environment`：Candidate 与权威共用同一个底层环境，Candidate 动作只在 Agent 接入侧暂存，Promote 前不进入环境。Adapter 退出时会主动终止 bridge 子进程。
+`src/runtime/backends/nle.rs` 现在通过既有 `Backend` 接口调用该 bridge，`src/bin/ascout-runtime-adapter.rs` 根据配置中的 `"backend": "nle"` 选择它；Firecracker 配置路径保持不变。已经用正式的 4 字节大端长度前缀 Unix 协议完成跨边界 smoke test。2026-11-02 起，NLE 不再声明或调用 `branch_environment`：Candidate 与权威共用同一个底层环境，Candidate 动作只在 Agent 接入侧暂存，Promote 前不进入环境。Adapter 退出时会主动终止 bridge 子进程。
 
-`src/nle.rs` 目前仍在核心 crate 中；它作为外部 workload 的 Runtime 适配保留，不应把 NLE 语义加入通用 Agent Adapter 或控制面工具路径。
+`src/runtime/backends/nle.rs` 目前仍在核心 crate 中；它作为外部 workload 的 Runtime 适配保留，不应把 NLE 语义加入通用 Agent Adapter 或控制面工具路径。
 
 ### 控制面等待点接入（当前实现）
 

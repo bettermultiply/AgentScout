@@ -23,12 +23,12 @@ mod view;
 #[path = "ascout-control-plane/web.rs"]
 mod web;
 
-use ascout::agent_control::{AgentCommand, AgentMessage, AgentWireMessage, SpeculativeTree};
-use ascout::contract::{AgentLaunch, Operation, RuntimeCapabilities};
-use ascout::control::{ControlServer, ControlSession};
-use ascout::ledger::Ledger;
-use ascout::policy::{CompiledPolicy, Decision, PolicyEngine};
-use ascout::transport;
+use ascout::control_plane::agent_control::{AgentCommand, AgentMessage, AgentWireMessage, SpeculativeTree};
+use ascout::protocol::contract::{AgentLaunch, Operation, RuntimeCapabilities};
+use ascout::control_plane::session::{ControlServer, ControlSession};
+use ascout::control_plane::ledger::Ledger;
+use ascout::control_plane::policy::{CompiledPolicy, Decision, PolicyEngine};
+use ascout::protocol::transport;
 use serde_json::Value;
 use serde_json::json;
 
@@ -63,7 +63,7 @@ fn install_shutdown_handlers() -> io::Result<()> {
 }
 
 fn validate_agent_capabilities(
-    capabilities: &ascout::agent_control::AdapterCapabilities,
+    capabilities: &ascout::control_plane::agent_control::AdapterCapabilities,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let required = [
         (
@@ -178,7 +178,7 @@ fn runtime_cleanup(
         return Ok(());
     }
     let environment = runtime_environment(capabilities, branch);
-    use ascout::agent_control::RuntimeExecutionState;
+    use ascout::control_plane::agent_control::RuntimeExecutionState;
     tree.record_runtime_state(branch, RuntimeExecutionState::TerminationRequested)?;
     if let Err(error) = runtime_call(session, environment, Operation::TerminateEnvironment) {
         tree.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
@@ -198,9 +198,9 @@ fn runtime_call(
     session: &ControlSession,
     branch: &str,
     operation: Operation,
-) -> Result<ascout::contract::OperationResult, Box<dyn std::error::Error>> {
+) -> Result<ascout::protocol::contract::OperationResult, Box<dyn std::error::Error>> {
     let result = session.call(branch, operation)?;
-    if result.status != ascout::contract::ResultStatus::Completed {
+    if result.status != ascout::protocol::contract::ResultStatus::Completed {
         return Err(format!("Runtime request failed: {:?}", result.reason).into());
     }
     Ok(result)
@@ -342,7 +342,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let command = tree.create_authority("authority", "")?;
         tree.record_runtime_state(
             "authority",
-            ascout::agent_control::RuntimeExecutionState::Ready,
+            ascout::control_plane::agent_control::RuntimeExecutionState::Ready,
         )?;
         let decisions = Decision::ALL
             .into_iter()
@@ -407,33 +407,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if runtime_capabilities.shared_environment {
                 record_shared(
                     &mut tree,
-                    ascout::agent_control::RuntimeExecutionState::TerminationRequested,
+                    ascout::control_plane::agent_control::RuntimeExecutionState::TerminationRequested,
                 )?;
                 if let Err(error) =
                     runtime_call(&session, "authority", Operation::TerminateEnvironment)
                 {
                     record_shared(
                         &mut tree,
-                        ascout::agent_control::RuntimeExecutionState::Failed,
+                        ascout::control_plane::agent_control::RuntimeExecutionState::Failed,
                     )?;
                     return Err(error);
                 }
                 record_shared(
                     &mut tree,
-                    ascout::agent_control::RuntimeExecutionState::Terminated,
+                    ascout::control_plane::agent_control::RuntimeExecutionState::Terminated,
                 )?;
                 if let Err(error) =
                     runtime_call(&session, "authority", Operation::CleanupEnvironment)
                 {
                     record_shared(
                         &mut tree,
-                        ascout::agent_control::RuntimeExecutionState::Failed,
+                        ascout::control_plane::agent_control::RuntimeExecutionState::Failed,
                     )?;
                     return Err(error);
                 }
                 record_shared(
                     &mut tree,
-                    ascout::agent_control::RuntimeExecutionState::Cleaned,
+                    ascout::control_plane::agent_control::RuntimeExecutionState::Cleaned,
                 )?;
             } else {
                 let ids: Vec<_> = tree
@@ -441,7 +441,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .values()
                     .filter(|branch| {
                         branch.execution_state.runtime
-                            != ascout::agent_control::RuntimeExecutionState::Cleaned
+                            != ascout::control_plane::agent_control::RuntimeExecutionState::Cleaned
                     })
                     .map(|branch| branch.branch_id.clone())
                     .collect();

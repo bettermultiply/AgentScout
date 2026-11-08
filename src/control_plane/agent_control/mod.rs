@@ -1,0 +1,628 @@
+//! AScout 控制面管理一个 Agent 的最小状态与 Agent 接入协议。
+//!
+//! 这里的状态属于控制面。Pi 接入侧只能报告事实并执行返回的命令，不能以
+//! 自己的对象保存或裁决 Speculative Tree。
+
+mod candidates;
+mod commands;
+mod protocol;
+mod tree;
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs;
+use std::io;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// 一个 Agent 内 Branch 的角色。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchRole {
+    Authority,
+    Candidate,
+}
+
+/// 控制面已知的 Branch 生命周期。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchStatus {
+    Created,
+    Running,
+    AwaitingValidation,
+    Promoting,
+    Promoted,
+    Discarding,
+    Discarded,
+    Cleaning,
+    Cleaned,
+}
+
+/// The latest decision phase actually reached by this Branch.  This is an
+/// observation of progress, not a permission, quota, or required ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchPhase {
+    #[default]
+    Idle,
+    Select,
+    Rebalance,
+    Extent,
+    Predict,
+    Launch,
+    Effect,
+    Match,
+    Dispose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandOperation {
+    Promote,
+    ResolvePending,
+    Discard,
+    Cleanup,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandStatus {
+    Accepted,
+    Started,
+    Applied,
+    Rejected,
+    Failed,
+    Timeout,
+    Cancelled,
+}
+
+/// Agent action 类型不包含 Authority/Candidate；角色始终由 Tree 决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionKind {
+    ModelInference,
+    ToolExecution,
+    StartSubagent,
+    SendMessage,
+    Wait,
+    Finish,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionStatus {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionRecord {
+    pub action_kind: ActionKind,
+    pub name: String,
+    pub parent_action_id: Option<String>,
+}
+
+/// 控制面操作的种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    Tool,
+    StartAgent,
+    StartCandidate,
+    ResolvePending,
+    Promote,
+    Discard,
+    Cleanup,
+}
+
+/// 控制面操作的落实状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationStatus {
+    Planned,
+    Requested,
+    Succeeded,
+    Failed,
+}
+
+/// Agent 接入侧报告的实际状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentExecutionState {
+    #[default]
+    Unknown,
+    StartRequested,
+    Running,
+    Stopped,
+    Released,
+    Failed,
+}
+
+/// Runtime 报告的实际状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeExecutionState {
+    #[default]
+    Unknown,
+    EnvironmentRequested,
+    Ready,
+    PromotionRequested,
+    Promoted,
+    TerminationRequested,
+    Terminated,
+    Cleaned,
+    Failed,
+}
+
+/// 控制面保存的一条 Branch 记录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchRecord {
+    pub branch_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_branch_id: Option<String>,
+    pub role: BranchRole,
+    pub status: BranchStatus,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub execution_position: ExecutionPosition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_id: Option<String>,
+    /// Unresolved Proposal IDs carried by this Branch. The prototype currently
+    /// creates one direct Proposal per candidate, but preserves this boundary.
+    #[serde(default)]
+    pub assumption_set: Vec<String>,
+    #[serde(default)]
+    pub pending_operations: Vec<PendingOperation>,
+    #[serde(default)]
+    pub execution_state: BranchExecutionState,
+}
+
+/// Branch 在完整投机执行历史中的位置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ExecutionPosition {
+    pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default)]
+    pub transcript_index: usize,
+}
+
+/// Candidate 携带的预测。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposalRecord {
+    pub proposal_id: String,
+    pub operation_id: String,
+    pub payload: Value,
+}
+
+/// Capabilities declared by an Agent Adapter during the wire handshake.
+/// These are descriptive facts; the control plane does not currently use them
+/// to evaluate local Decisions or admit ordinary actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterCapabilities {
+    #[serde(rename = "preExecutionInterception")]
+    pub pre_execution_interception: bool,
+    #[serde(rename = "localDecisionEvaluation")]
+    pub local_decision_evaluation: bool,
+    #[serde(rename = "modelInferencePreExecutionInterception")]
+    pub model_inference_pre_execution_interception: bool,
+    #[serde(rename = "subagentPreExecutionInterception")]
+    pub subagent_pre_execution_interception: bool,
+    #[serde(rename = "checkpointContinuation")]
+    pub checkpoint_continuation: bool,
+    #[serde(rename = "independentCandidateSession")]
+    pub independent_candidate_session: bool,
+    #[serde(rename = "cancelCompletion")]
+    pub cancel_completion: bool,
+    #[serde(rename = "toolResultInjection")]
+    pub tool_result_injection: bool,
+}
+
+/// 控制面希望发生的操作，不代表外部操作已经完成。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingOperation {
+    pub operation_id: String,
+    pub branch_id: String,
+    pub kind: OperationKind,
+    pub status: OperationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+/// Branch 对应的 Agent 与 Runtime 实际事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BranchExecutionState {
+    pub agent: AgentExecutionState,
+    pub runtime: RuntimeExecutionState,
+    #[serde(default)]
+    pub turn_active: bool,
+    #[serde(default)]
+    pub phase: BranchPhase,
+    /// Validation facts belong to the Branch execution record, not to the
+    /// command used to start a candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_outcome: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_evidence: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+/// 一个 Agent 的完整投机树视图。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeculativeTree {
+    pub agent_id: String,
+    #[serde(default)]
+    pub execution_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_root_branch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_branch_id: Option<String>,
+    pub branches: BTreeMap<String, BranchRecord>,
+    /// Immutable Proposal records, indexed independently from Branch state.
+    #[serde(default)]
+    pub proposals: BTreeMap<String, ProposalRecord>,
+    /// Only live actions are retained; completed facts belong to the Ledger.
+    #[serde(default)]
+    pub active_actions: BTreeMap<String, BTreeMap<String, ActionRecord>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_binding: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_binding: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_view: Option<Value>,
+    /// Digest of the local Policy artifact delivered to the Agent Adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_policy_digest: Option<String>,
+    #[serde(default)]
+    pending_commands: BTreeMap<String, PendingCommand>,
+    #[serde(default)]
+    queued_prompts: VecDeque<String>,
+    #[serde(default)]
+    pub workspace_root: PathBuf,
+    #[serde(default)]
+    pub(crate) pending_work: BTreeMap<u64, crate::control_plane::coordination::ControlOperation>,
+    #[serde(default)]
+    pub(crate) tool_invocations: Vec<crate::control_plane::coordination::ToolPending>,
+    #[serde(default)]
+    pub(crate) next_work: u64,
+    #[serde(default)]
+    pub(crate) stopping: bool,
+    #[serde(default)]
+    shutdown_deadline: Option<u64>,
+    #[serde(default = "first_id")]
+    next_generation: u64,
+    #[serde(default = "first_id")]
+    next_command_id: u64,
+}
+
+impl SpeculativeTree {
+    pub fn new(agent_id: String) -> Self {
+        Self {
+            agent_id,
+            execution_id: String::new(),
+            history_root_branch_id: None,
+            authority_branch_id: None,
+            branches: BTreeMap::new(),
+            proposals: BTreeMap::new(),
+            active_actions: BTreeMap::new(),
+            policy_binding: None,
+            runtime_binding: None,
+            capability_view: None,
+            local_policy_digest: None,
+            pending_commands: BTreeMap::new(),
+            queued_prompts: VecDeque::new(),
+            workspace_root: PathBuf::new(),
+            pending_work: BTreeMap::new(),
+            tool_invocations: Vec::new(),
+            next_work: 1,
+            stopping: false,
+            shutdown_deadline: None,
+            next_generation: 1,
+            next_command_id: 1,
+        }
+    }
+
+    /// 绑定这次投机执行使用的 Policy、Runtime Adapter 和能力视图。
+    /// 这些值属于 Tree，不属于某个 Branch。
+    pub fn bind_execution(&mut self, policy: Value, runtime: Value, capabilities: Value) {
+        self.policy_binding = Some(policy);
+        self.runtime_binding = Some(runtime);
+        self.capability_view = Some(capabilities);
+    }
+
+    pub fn bind_local_policy(&mut self, digest: impl Into<String>) {
+        self.local_policy_digest = Some(digest.into());
+    }
+
+    /// 根据完整历史中的父子关系计算当前执行树。
+    /// 当前执行树不是第二套事实，只是从活动根派生的 Branch 集合。
+    pub fn active_branch_ids(&self) -> BTreeSet<String> {
+        let Some(root) = self.authority_branch_id.as_deref() else {
+            return BTreeSet::new();
+        };
+        let mut ids = BTreeSet::from([root.to_string()]);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for branch in self.branches.values() {
+                if branch
+                    .parent_branch_id
+                    .as_deref()
+                    .is_some_and(|parent| ids.contains(parent))
+                    && ids.insert(branch.branch_id.clone())
+                {
+                    changed = true;
+                }
+            }
+        }
+        ids
+    }
+
+    /// 返回当前执行树中的 Branch，而不是完整历史中的全部 Branch。
+    pub fn active_branches(&self) -> Vec<&BranchRecord> {
+        let ids = self.active_branch_ids();
+        self.branches
+            .values()
+            .filter(|branch| ids.contains(&branch.branch_id))
+            .collect()
+    }
+}
+
+/// 控制面向 Pi 接入侧发送的命令。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum AgentCommand {
+    /// Delivers the compiled local Decision artifact. The adapter may reject
+    /// it when it has no real Hook/evaluation seam.
+    LocalPolicy {
+        branch_id: String,
+        policy_digest: String,
+        decisions: Value,
+    },
+    Prompt {
+        branch_id: String,
+        prompt: String,
+    },
+    Abort {
+        branch_id: String,
+    },
+    StartCandidate {
+        branch_id: String,
+        parent_branch_id: String,
+        operation_id: String,
+        tool_name: String,
+        workspace: PathBuf,
+        prediction: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint: Option<Value>,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
+    },
+    ResolvePending {
+        branch_id: String,
+        operation_id: String,
+        accepted: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<Value>,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
+    },
+    StartBranch {
+        branch_id: String,
+        role: BranchRole,
+        workspace: PathBuf,
+        prompt: String,
+    },
+    Promote {
+        branch_id: String,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
+    },
+    Discard {
+        branch_id: String,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
+    },
+    Cleanup {
+        branch_id: String,
+        workspace: PathBuf,
+        #[serde(default)]
+        command_id: String,
+        #[serde(default)]
+        generation: u64,
+    },
+}
+
+/// Agent Adapter 向控制面报告的事实；不包含 Runtime 或 Tree 完成事实。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "message", rename_all = "snake_case")]
+pub enum AgentMessage {
+    Output {
+        branch_id: String,
+        #[serde(default)]
+        action_id: Option<String>,
+        text: String,
+    },
+    TurnCompleted {
+        branch_id: String,
+    },
+    ActionStarted {
+        task_id: String,
+        branch_id: String,
+        action_id: String,
+        action_kind: ActionKind,
+        #[serde(default)]
+        parent_action_id: Option<String>,
+        /// true 表示接入侧停在执行前边界，尚未执行真实 action。
+        result_pending: bool,
+        name: String,
+        arguments: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint: Option<Value>,
+    },
+    /// Explicit request from the adapter's local decision path. An ordinary
+    /// ActionStarted is only an execution fact and never admits speculation.
+    SpeculativeAdmissionRequest {
+        task_id: String,
+        policy_digest: String,
+        branch_id: String,
+        action_id: String,
+        action_kind: ActionKind,
+        #[serde(default)]
+        parent_action_id: Option<String>,
+        name: String,
+        arguments: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint: Option<Value>,
+    },
+    Transcript {
+        branch_id: String,
+        entry: Value,
+    },
+    BranchReleased {
+        branch_id: String,
+    },
+    AgentSessionReleased {
+        branch_id: String,
+    },
+    AgentConnected {
+        agent_id: String,
+        capabilities: AdapterCapabilities,
+    },
+    AdapterCapabilityGap {
+        branch_id: String,
+        capability: String,
+        status: String,
+        reason: String,
+    },
+    BranchStarted {
+        branch_id: String,
+    },
+    ActionFinished {
+        task_id: String,
+        branch_id: String,
+        action_id: String,
+        action_kind: ActionKind,
+        status: ActionStatus,
+        result: Value,
+        #[serde(default)]
+        evidence: Option<Value>,
+    },
+    Usage {
+        branch_id: String,
+        #[serde(default)]
+        action_id: Option<String>,
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_level: Option<String>,
+        usage: Value,
+    },
+    BranchFailed {
+        branch_id: String,
+        reason: String,
+    },
+    AgentReady {
+        agent_id: String,
+    },
+    AgentDisconnected {
+        agent_id: String,
+    },
+    AgentFailed {
+        agent_id: String,
+        reason: String,
+    },
+    AgentReleased {
+        agent_id: String,
+    },
+    BranchCreated {
+        branch_id: String,
+    },
+    BranchReady {
+        branch_id: String,
+    },
+    BranchSuspended {
+        branch_id: String,
+    },
+    BranchResumed {
+        branch_id: String,
+    },
+    CommandResult {
+        command_id: String,
+        branch_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
+        operation: CommandOperation,
+        status: CommandStatus,
+        generation: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+/// Agent socket 上的双向消息。长度前缀由传输层负责，消息本身只描述方向。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+pub enum AgentWireMessage {
+    Command(AgentCommand),
+    Message(AgentMessage),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingCommand {
+    branch_id: String,
+    operation: CommandOperation,
+    operation_id: Option<String>,
+    generation: u64,
+}
+
+
+fn operation_name(operation: CommandOperation) -> &'static str {
+    match operation {
+        CommandOperation::Promote => "promote",
+        CommandOperation::ResolvePending => "resolve",
+        CommandOperation::Discard => "discard",
+        CommandOperation::Cleanup => "cleanup",
+    }
+}
+
+fn invalid_input(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn first_id() -> u64 {
+    1
+}
+
+pub use crate::control_plane::coordination::AgentController;
+
+#[cfg(test)]
+mod tests;
