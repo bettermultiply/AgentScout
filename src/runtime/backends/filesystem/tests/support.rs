@@ -104,13 +104,23 @@ use crate::protocol::contract::AgentLaunch;
         cwd: &Path,
         script: &str,
     ) -> (crate::runtime::process::ProcessBackend, u32, u64) {
+        spawn_in_environment_with_env(backend, environment_id, cwd, script, BTreeMap::new())
+    }
+
+    pub(super) fn spawn_in_environment_with_env(
+        backend: &FilesystemBackend,
+        environment_id: &str,
+        cwd: &Path,
+        script: &str,
+        env: BTreeMap<String, String>,
+    ) -> (crate::runtime::process::ProcessBackend, u32, u64) {
         let launch = AgentLaunch {
             command: "/bin/sh".into(),
             args: vec!["-c".into(), script.into()],
             cwd: cwd.to_path_buf(),
             log: cwd.join("agent.log"),
             instance_id: None,
-            env: BTreeMap::new(),
+            env,
         };
         let context = BackendContext {
             environment_id: environment_id.to_string(),
@@ -132,7 +142,18 @@ use crate::protocol::contract::AgentLaunch;
         cwd: &Path,
         script: &str,
     ) -> bool {
-        let (process, _, _) = spawn_in_environment(backend, environment_id, cwd, script);
+        run_in_environment_with_env(backend, environment_id, cwd, script, BTreeMap::new())
+    }
+
+    pub(super) fn run_in_environment_with_env(
+        backend: &FilesystemBackend,
+        environment_id: &str,
+        cwd: &Path,
+        script: &str,
+        env: BTreeMap<String, String>,
+    ) -> bool {
+        let (process, _, _) =
+            spawn_in_environment_with_env(backend, environment_id, cwd, script, env);
         let status = process.wait(environment_id).unwrap();
         let _ = process.cleanup(environment_id);
         status.success()

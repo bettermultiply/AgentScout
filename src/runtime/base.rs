@@ -1,9 +1,8 @@
-//! BaseRuntime：在另一个 Backend 上管理 Agent 进程与文件系统装配。
+//! BaseRuntime：在另一个 Backend 上管理 Agent 进程与数据面装配。
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::runtime::backends::filesystem::FilesystemBackend;
 use serde_json::Value;
 
 use crate::protocol::contract::{
@@ -17,7 +16,10 @@ use super::selection::merge_launch_fragment;
 pub struct BaseRuntime {
     id: String,
     inner: Arc<dyn Backend>,
-    filesystem: Option<Arc<FilesystemBackend>>,
+    /// Backend that contributes launch mounts and owns FilesystemOperation.
+    /// It is deliberately only a trait object so any composable Backend can
+    /// occupy this slot; BaseRuntime does not know filesystem types.
+    data_plane: Option<Arc<dyn Backend>>,
     pub(super) process: ProcessBackend,
 }
 
@@ -26,15 +28,16 @@ impl BaseRuntime {
         Self {
             id: id.into(),
             inner,
-            filesystem: None,
+            data_plane: None,
             process: ProcessBackend::new("process", "bwrap"),
         }
     }
 
-    /// Wrap Agent startup with a filesystem backend. The backend remains
-    /// filesystem-only; this Runtime wrapper only delegates process lifetime.
-    pub fn with_filesystem(mut self, filesystem: Arc<FilesystemBackend>) -> Self {
-        self.filesystem = Some(filesystem);
+    /// Wrap Agent startup with a data-plane Backend. The Backend remains
+    /// responsible only for its own data plane; this Runtime wrapper delegates
+    /// process lifetime, freeze/thaw ordering and launch-fragment merging.
+    pub fn with_data_plane(mut self, data_plane: Arc<dyn Backend>) -> Self {
+        self.data_plane = Some(data_plane);
         self
     }
 
@@ -49,8 +52,8 @@ impl BaseRuntime {
         launch: &AgentLaunch,
     ) -> Result<(), BackendError> {
         let mut fragment = self.inner.launch_fragment(context, launch)?;
-        if let Some(filesystem) = &self.filesystem {
-            merge_launch_fragment(&mut fragment, filesystem.launch_fragment(context, launch)?);
+        if let Some(data_plane) = &self.data_plane {
+            merge_launch_fragment(&mut fragment, data_plane.launch_fragment(context, launch)?);
         }
         self.process.launch(context, launch, &fragment)
     }
@@ -64,26 +67,26 @@ impl BaseRuntime {
         self.process.process_handle(environment_id)
     }
 
-    fn ensure_filesystem_available(&self, context: &BackendContext) -> Result<(), BackendError> {
-        if let Some(filesystem) = &self.filesystem {
-            if filesystem.state(&context.environment_id) != Some(EnvironmentState::Available) {
+    fn ensure_data_plane_available(&self, context: &BackendContext) -> Result<(), BackendError> {
+        if let Some(data_plane) = &self.data_plane {
+            if data_plane.state(&context.environment_id) != Some(EnvironmentState::Available) {
                 return Err(BackendError::new(
-                    "filesystem environment is not available for operation",
+                    "data plane environment is not available for operation",
                 ));
             }
         }
         Ok(())
     }
 
-    fn ensure_filesystem_state(
+    fn ensure_data_plane_state(
         &self,
         context: &BackendContext,
         expected: EnvironmentState,
     ) -> Result<(), BackendError> {
-        if let Some(filesystem) = &self.filesystem {
-            if filesystem.state(&context.environment_id) != Some(expected) {
+        if let Some(data_plane) = &self.data_plane {
+            if data_plane.state(&context.environment_id) != Some(expected) {
                 return Err(BackendError::new(format!(
-                    "filesystem environment is not in required state: expected {expected:?}"
+                    "data plane environment is not in required state: expected {expected:?}"
                 )));
             }
         }
@@ -104,8 +107,8 @@ impl Backend for BaseRuntime {
 
     fn backend_ids(&self) -> Vec<String> {
         let mut ids = self.inner.backend_ids();
-        if self.filesystem.is_some() {
-            ids.push("filesystem".to_string());
+        if let Some(data_plane) = &self.data_plane {
+            ids.push(data_plane.backend_id().to_string());
         }
         ids.push("process".to_string());
         ids
@@ -113,15 +116,17 @@ impl Backend for BaseRuntime {
 
     fn capabilities(&self) -> RuntimeCapabilities {
         let mut capabilities = self.inner.capabilities();
-        if let Some(filesystem) = &self.filesystem {
-            let filesystem_capabilities = filesystem.capabilities();
-            capabilities.branch_environment &= filesystem_capabilities.branch_environment;
-            capabilities.shared_environment |= filesystem_capabilities.shared_environment;
-            capabilities.filesystem_fast_delete = filesystem_capabilities.filesystem_fast_delete;
-            capabilities.filesystem_fork_cost = filesystem_capabilities.filesystem_fork_cost;
+        if let Some(data_plane) = &self.data_plane {
+            let data_plane_capabilities = data_plane.capabilities();
+            capabilities.branch_environment &= data_plane_capabilities.branch_environment;
+            capabilities.shared_environment |= data_plane_capabilities.shared_environment;
+            capabilities.filesystem_fast_delete = data_plane_capabilities.filesystem_fast_delete;
+            capabilities.filesystem_fork_cost = data_plane_capabilities.filesystem_fork_cost;
             capabilities.filesystem_btrfs_incremental_diff =
-                filesystem_capabilities.filesystem_btrfs_incremental_diff;
-            capabilities.filesystem_passthrough = filesystem_capabilities.filesystem_passthrough;
+                data_plane_capabilities.filesystem_btrfs_incremental_diff;
+            capabilities.filesystem_passthrough = data_plane_capabilities.filesystem_passthrough;
+            capabilities.state_directory_overlaps_mount =
+                data_plane_capabilities.state_directory_overlaps_mount;
         }
         capabilities.freeze_mechanism =
             Some(self.process.freeze_mechanism().as_str().to_string());
@@ -133,17 +138,17 @@ impl Backend for BaseRuntime {
     }
 
     fn establish_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        if let Some(filesystem) = &self.filesystem {
-            filesystem.establish_with_context(context)?;
+        if let Some(data_plane) = &self.data_plane {
+            data_plane.establish_with_context(context)?;
         }
         if let Err(error) = self.inner.establish_with_context(context) {
-            if let Some(filesystem) = &self.filesystem {
+            if let Some(data_plane) = &self.data_plane {
                 let mut error = error;
-                if let Err(terminate) = filesystem.terminate_with_context(context) {
-                    error.add_cleanup_failure("filesystem", format!("terminate: {terminate}"));
+                if let Err(terminate) = data_plane.terminate_with_context(context) {
+                    error.add_cleanup_failure("data_plane", format!("terminate: {terminate}"));
                 }
-                if let Err(cleanup) = filesystem.cleanup_with_context(context) {
-                    error.add_cleanup_failure("filesystem", format!("cleanup: {cleanup}"));
+                if let Err(cleanup) = data_plane.cleanup_with_context(context) {
+                    error.add_cleanup_failure("data_plane", format!("cleanup: {cleanup}"));
                 }
                 return Err(error);
             }
@@ -174,10 +179,10 @@ impl Backend for BaseRuntime {
         command: &[String],
         cancel: &CancelHandle,
     ) -> Result<BackendExecution, BackendError> {
-        // Filesystem is not a second business command executor. Its state
+        // The data plane is not a second business command executor. Its state
         // check prevents direct Backend callers from bypassing suspend, while
         // the command itself remains owned by the inner Runtime.
-        self.ensure_filesystem_available(context)?;
+        self.ensure_data_plane_available(context)?;
         self.inner.operate_with_context(context, command, cancel)
     }
 
@@ -206,7 +211,7 @@ impl Backend for BaseRuntime {
         tool_name: &str,
         cancel: &CancelHandle,
     ) -> Result<BackendExecution, BackendError> {
-        self.ensure_filesystem_available(context)?;
+        self.ensure_data_plane_available(context)?;
         self.inner
             .tool_context_with_context(context, tool_name, cancel)
     }
@@ -239,7 +244,7 @@ impl Backend for BaseRuntime {
         arguments: &Value,
         cancel: &CancelHandle,
     ) -> Result<BackendExecution, BackendError> {
-        self.ensure_filesystem_available(context)?;
+        self.ensure_data_plane_available(context)?;
         self.inner
             .invoke_tool_with_context(context, tool_name, arguments, cancel)
     }
@@ -262,21 +267,21 @@ impl Backend for BaseRuntime {
         parent: &str,
         child: &str,
     ) -> Result<(), BackendError> {
-        if let Some(filesystem) = &self.filesystem {
-            filesystem.branch_with_context(context, parent, child)?;
+        if let Some(data_plane) = &self.data_plane {
+            data_plane.branch_with_context(context, parent, child)?;
         }
         if let Err(error) = self.inner.branch_with_context(context, parent, child) {
-            if let Some(filesystem) = &self.filesystem {
+            if let Some(data_plane) = &self.data_plane {
                 let child_context = BackendContext {
                     environment_id: child.to_string(),
                     ..context.clone()
                 };
                 let mut error = error;
-                if let Err(terminate) = filesystem.terminate_with_context(&child_context) {
-                    error.add_cleanup_failure("filesystem", format!("terminate: {terminate}"));
+                if let Err(terminate) = data_plane.terminate_with_context(&child_context) {
+                    error.add_cleanup_failure("data_plane", format!("terminate: {terminate}"));
                 }
-                if let Err(cleanup) = filesystem.cleanup_with_context(&child_context) {
-                    error.add_cleanup_failure("filesystem", format!("cleanup: {cleanup}"));
+                if let Err(cleanup) = data_plane.cleanup_with_context(&child_context) {
+                    error.add_cleanup_failure("data_plane", format!("cleanup: {cleanup}"));
                 }
                 return Err(error);
             }
@@ -290,10 +295,10 @@ impl Backend for BaseRuntime {
     }
 
     fn promote_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.ensure_filesystem_state(context, EnvironmentState::Available)?;
+        self.ensure_data_plane_state(context, EnvironmentState::Available)?;
         self.inner.promote_with_context(context)?;
-        if let Some(filesystem) = &self.filesystem {
-            filesystem.promote_with_context(context)?;
+        if let Some(data_plane) = &self.data_plane {
+            data_plane.promote_with_context(context)?;
         }
         Ok(())
     }
@@ -303,7 +308,7 @@ impl Backend for BaseRuntime {
     }
 
     fn suspend_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.ensure_filesystem_state(context, EnvironmentState::Available)?;
+        self.ensure_data_plane_state(context, EnvironmentState::Available)?;
         let running = self
             .process
             .process_handle(&context.environment_id)
@@ -327,8 +332,8 @@ impl Backend for BaseRuntime {
             }
             return Err(error);
         }
-        if let Some(filesystem) = &self.filesystem
-            && let Err(error) = filesystem.suspend_with_context(context)
+        if let Some(data_plane) = &self.data_plane
+            && let Err(error) = data_plane.suspend_with_context(context)
         {
             if running {
                 let _ = self.process.thaw(&context.environment_id);
@@ -343,7 +348,7 @@ impl Backend for BaseRuntime {
     }
 
     fn resume_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.ensure_filesystem_state(context, EnvironmentState::Suspended)?;
+        self.ensure_data_plane_state(context, EnvironmentState::Suspended)?;
         let thaw_needed = self
             .process
             .process_handle(&context.environment_id)
@@ -363,8 +368,8 @@ impl Backend for BaseRuntime {
             }
             return Err(error);
         }
-        if let Some(filesystem) = &self.filesystem
-            && let Err(error) = filesystem.resume_with_context(context)
+        if let Some(data_plane) = &self.data_plane
+            && let Err(error) = data_plane.resume_with_context(context)
         {
             if thaw_needed {
                 let _ = self.process.freeze(&context.environment_id);
@@ -385,7 +390,7 @@ impl Backend for BaseRuntime {
             .and_then(|_| self.process.stop(&context.environment_id));
         let inner = self.inner.terminate_with_context(context);
         let filesystem = self
-            .filesystem
+            .data_plane
             .as_ref()
             .map(|value| value.terminate_with_context(context));
         let mut failures = Vec::new();
@@ -396,7 +401,7 @@ impl Backend for BaseRuntime {
             failures.push(format!("inner terminate failed: {error}"));
         }
         if let Some(Err(error)) = filesystem {
-            failures.push(format!("filesystem terminate failed: {error}"));
+            failures.push(format!("data_plane terminate failed: {error}"));
         }
         if failures.is_empty() {
             Ok(())
@@ -413,7 +418,7 @@ impl Backend for BaseRuntime {
         let process = self.process.cleanup(&context.environment_id);
         let inner = self.inner.cleanup_with_context(context);
         let filesystem = self
-            .filesystem
+            .data_plane
             .as_ref()
             .map(|value| value.cleanup_with_context(context));
         let mut failures = Vec::new();
@@ -424,7 +429,7 @@ impl Backend for BaseRuntime {
             failures.push(format!("inner cleanup failed: {error}"));
         }
         if let Some(Err(error)) = filesystem {
-            failures.push(format!("filesystem cleanup failed: {error}"));
+            failures.push(format!("data_plane cleanup failed: {error}"));
         }
         if failures.is_empty() {
             Ok(())
@@ -436,7 +441,7 @@ impl Backend for BaseRuntime {
     fn state(&self, environment_id: &str) -> Option<EnvironmentState> {
         let inner = self.inner.state(environment_id);
         let filesystem = self
-            .filesystem
+            .data_plane
             .as_ref()
             .and_then(|value| value.state(environment_id));
         match (inner, filesystem) {
@@ -449,10 +454,10 @@ impl Backend for BaseRuntime {
 
     fn backend_states(&self, environment_id: &str) -> Vec<BackendState> {
         let mut states = self.inner.backend_states(environment_id);
-        if let Some(filesystem) = &self.filesystem {
+        if let Some(data_plane) = &self.data_plane {
             states.push(BackendState {
-                backend_id: filesystem.backend_id().to_string(),
-                state: filesystem.state(environment_id),
+                backend_id: data_plane.backend_id().to_string(),
+                state: data_plane.state(environment_id),
             });
         }
         states
@@ -498,8 +503,8 @@ impl Backend for BaseRuntime {
                 }
             }
         }
-        let result = if let Some(filesystem) = &self.filesystem {
-            filesystem.filesystem_operation(&context, operation, cancel)
+        let result = if let Some(data_plane) = &self.data_plane {
+            data_plane.filesystem_operation(&context, operation, cancel)
         } else {
             self.inner.filesystem_operation(&context, operation, cancel)
         };
@@ -542,16 +547,16 @@ impl Backend for BaseRuntime {
         launch: &AgentLaunch,
     ) -> Result<LaunchFragment, BackendError> {
         let mut fragment = self.inner.launch_fragment(context, launch)?;
-        if let Some(filesystem) = &self.filesystem {
-            merge_launch_fragment(&mut fragment, filesystem.launch_fragment(context, launch)?);
+        if let Some(data_plane) = &self.data_plane {
+            merge_launch_fragment(&mut fragment, data_plane.launch_fragment(context, launch)?);
         }
         Ok(fragment)
     }
 
     fn environments(&self) -> Vec<String> {
         let mut environments = self.inner.environments();
-        if let Some(filesystem) = &self.filesystem {
-            environments.extend(filesystem.environments());
+        if let Some(data_plane) = &self.data_plane {
+            environments.extend(data_plane.environments());
         }
         environments.sort();
         environments.dedup();

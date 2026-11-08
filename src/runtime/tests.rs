@@ -133,10 +133,8 @@ use std::sync::{Arc, Mutex};
         let backend = MockBackend::new("mock");
         let runtime = BaseRuntime::new("runtime", backend);
         let context = BackendContext::new("env");
-        let log = PathBuf::from(format!(
-            "/tmp/opencode/ascout-freeze-test-{}.log",
-            std::process::id()
-        ));
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = log_dir.path().join("agent.log");
         let launch = AgentLaunch {
             command: "/bin/sleep".into(),
             args: vec!["5".into()],
@@ -159,7 +157,6 @@ use std::sync::{Arc, Mutex};
             "freeze must be reflected in writers_quiesced"
         );
         runtime.stop_agents().unwrap();
-        let _ = std::fs::remove_file(log);
 
         let result = runtime
             .filesystem_operation(
@@ -175,23 +172,24 @@ use std::sync::{Arc, Mutex};
         assert!(!result.confirmation.writers_quiesced);
     }
 
-    fn launch_test_agent(runtime: &BaseRuntime, command: &str, args: Vec<String>) -> BackendContext {
+    fn launch_test_agent(
+        runtime: &BaseRuntime,
+        command: &str,
+        args: Vec<String>,
+    ) -> (BackendContext, tempfile::TempDir) {
         let context = BackendContext::new("env");
-        let log = PathBuf::from(format!(
-            "/tmp/opencode/ascout-freeze-test-{}-{}.log",
-            std::process::id(),
-            command.replace('/', "_")
-        ));
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = log_dir.path().join("agent.log");
         let launch = AgentLaunch {
             command: command.to_string(),
             args,
             cwd: PathBuf::from("/tmp"),
-            log: log.clone(),
+            log,
             instance_id: Some("test-agent".into()),
             env: BTreeMap::new(),
         };
         runtime.launch_agent(&context, &launch).unwrap();
-        context
+        (context, log_dir)
     }
 
     fn env_fork_operation() -> Operation {
@@ -210,7 +208,7 @@ use std::sync::{Arc, Mutex};
             "bwrap",
             FreezeMechanism::None,
         );
-        let context = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
+        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
         let result = runtime
             .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
             .unwrap();
@@ -221,7 +219,7 @@ use std::sync::{Arc, Mutex};
     #[test]
     fn freeze_failure_fails_before_filesystem_operation() {
         let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
-        let context = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
+        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
         runtime.process.inject_freeze_failure(true);
         let error = runtime
             .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
@@ -238,7 +236,7 @@ use std::sync::{Arc, Mutex};
     #[test]
     fn thaw_failure_is_reported_as_cleanup_failure() {
         let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
-        let context = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
+        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
         runtime.process.inject_thaw_failure(true);
         let error = runtime
             .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
@@ -259,7 +257,7 @@ use std::sync::{Arc, Mutex};
     #[test]
     fn exited_process_does_not_block_filesystem_operation() {
         let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
-        let context = launch_test_agent(&runtime, "/bin/true", Vec::new());
+        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/true", Vec::new());
         for _ in 0..200 {
             if !runtime.process.is_running("env").unwrap() {
                 break;
@@ -273,6 +271,21 @@ use std::sync::{Arc, Mutex};
             .unwrap();
         assert!(!result.confirmation.writers_quiesced);
         runtime.stop_agents().unwrap();
+    }
+
+    #[test]
+    fn base_runtime_accepts_any_backend_as_data_plane() {
+        let runtime = BaseRuntime::new("runtime", MockBackend::new("inner"))
+            .with_data_plane(MockBackend::new("plane"));
+        let ids = runtime.backend_ids();
+        assert!(ids.iter().any(|id| id == "plane"));
+        assert!(!ids.iter().any(|id| id == "filesystem"));
+        let context = BackendContext::new("env");
+        let operation = env_fork_operation();
+        let result = runtime
+            .filesystem_operation(&context, &operation, &CancelHandle::default())
+            .unwrap();
+        assert!(result.confirmation.snapshot_created);
     }
 
     #[test]

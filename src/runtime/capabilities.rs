@@ -20,6 +20,8 @@ pub(super) fn merged_capabilities(connections: &[BackendConnection]) -> RuntimeC
         let mut freeze_conflict = false;
         let mut filesystem_passthrough: Option<Vec<String>> = None;
         let mut passthrough_conflict = false;
+        let mut state_directory_overlaps_mount: Option<Vec<String>> = None;
+        let mut overlaps_conflict = false;
         for connection in connections {
             let capabilities = connection.backend.capabilities();
             shared_environment |= capabilities.shared_environment;
@@ -56,6 +58,13 @@ pub(super) fn merged_capabilities(connections: &[BackendConnection]) -> RuntimeC
                 match &filesystem_passthrough {
                     None => filesystem_passthrough = Some(value),
                     Some(previous) if previous != &value => passthrough_conflict = true,
+                    _ => {}
+                }
+            }
+            if let Some(value) = capabilities.state_directory_overlaps_mount {
+                match &state_directory_overlaps_mount {
+                    None => state_directory_overlaps_mount = Some(value),
+                    Some(previous) if previous != &value => overlaps_conflict = true,
                     _ => {}
                 }
             }
@@ -100,6 +109,11 @@ pub(super) fn merged_capabilities(connections: &[BackendConnection]) -> RuntimeC
                 None
             } else {
                 filesystem_passthrough
+            },
+            state_directory_overlaps_mount: if overlaps_conflict {
+                None
+            } else {
+                state_directory_overlaps_mount
             },
         }
     }

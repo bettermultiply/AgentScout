@@ -132,6 +132,10 @@ pub struct RuntimeCapabilities {
     /// 明确被允许直通宿主的路径列表。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem_passthrough: Option<Vec<String>>,
+    /// 状态目录位于其内部的 overlay 挂载点。这些挂载在 fork 时使用
+    /// flatten（O(upper)）而不是 lower 链增量；空列表表示没有重叠。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_directory_overlaps_mount: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

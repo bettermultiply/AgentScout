@@ -72,6 +72,14 @@ impl FilesystemBackend {
     /// rejects overlapping lower directories.  Such mounts are flattened at
     /// fork (parent upper copied into child upper) and their layers are only
     /// used as diff metadata.
+
+    pub(super) fn state_overlap_mounts(&self) -> Vec<PathBuf> {
+        self.overlayable_mounts()
+            .into_iter()
+            .filter(|target| self.config.state_directory.starts_with(target))
+            .collect()
+    }
+
     pub(super) fn mount_uses_flattening(&self, mount: &MountUnit) -> bool {
         self.config.state_directory.starts_with(&mount.target)
     }

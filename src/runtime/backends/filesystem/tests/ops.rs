@@ -79,6 +79,188 @@ use std::os::unix::ffi::OsStrExt;
     }
 
     #[test]
+    fn accept_replay_rolls_back_every_injected_failure() {
+        let root = temp();
+        let token = format!("ascout-rollback-{}", std::process::id());
+        let modify = PathBuf::from(format!("/tmp/{token}-modify"));
+        let delete = PathBuf::from(format!("/tmp/{token}-delete"));
+        let create = PathBuf::from(format!("/tmp/{token}-create"));
+        let backend = new_overlay_backend(root.path());
+        backend.establish("root").unwrap();
+        if !backend
+            .overlayable_mounts()
+            .iter()
+            .any(|target| target == Path::new("/tmp"))
+        {
+            eprintln!(
+                "SKIP accept replay rollback: /tmp is not an overlayable mount (candidates: {:?})",
+                backend.overlayable_mounts()
+            );
+            return;
+        }
+        write_upper(&backend, "root", &modify, "old");
+        write_upper(&backend, "root", &delete, "keep");
+        backend.fork("root", "child", &[]).unwrap();
+        let snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
+        write_upper(&backend, "child", &modify, "new");
+        write_upper(&backend, "child", &create, "new");
+        let child_upper = upper_at(&backend, "child", Path::new("/tmp"));
+        create_whiteout(&child_upper, delete.file_name().unwrap().to_str().unwrap()).unwrap();
+        backend.suspend("root").unwrap();
+
+        for fail_after in 0..3 {
+            backend.inject_replay_failure_after(Some(fail_after));
+            let error = backend
+                .accept(&snapshot, "child", "root", &[], None, None)
+                .expect_err("injected replay failure must not publish");
+            assert!(
+                error.message.contains("injected replay failure")
+                    || error.message.contains("rollback"),
+                "unexpected error: {}",
+                error.message
+            );
+            assert_eq!(
+                fs::read_to_string(upper_at(&backend, "root", &modify)).unwrap(),
+                "old"
+            );
+            assert_eq!(
+                fs::read_to_string(upper_at(&backend, "root", &delete)).unwrap(),
+                "keep"
+            );
+            assert!(!upper_at(&backend, "root", &create).exists());
+        }
+        backend.inject_replay_failure_after(None);
+        let accepted = backend
+            .accept(&snapshot, "child", "root", &[], None, None)
+            .unwrap();
+        assert!(accepted.confirmation.published);
+        assert_eq!(
+            fs::read_to_string(upper_at(&backend, "root", &modify)).unwrap(),
+            "new"
+        );
+        assert!(upper_at(&backend, "root", &create).exists());
+        let journal = root.path().join("state/replay-journal");
+        assert!(
+            !journal.exists() || fs::read_dir(&journal).unwrap().next().is_none(),
+            "successful accept must clean the replay journal"
+        );
+        backend.resume("root").unwrap();
+        backend.terminate("child").unwrap();
+        backend.discard("child", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn replay_directory_replacement_rolls_back() {
+        let root = temp();
+        let upper = root.path().join("upper");
+        fs::create_dir_all(upper.join("replace")).unwrap();
+        fs::write(upper.join("replace/old.txt"), b"old").unwrap();
+        let source = root.path().join("source.txt");
+        fs::write(&source, b"new").unwrap();
+        let mut delta = View::new();
+        delta.insert(
+            "replace".into(),
+            Node {
+                mode: libc::S_IFDIR | 0o755,
+                size: 0,
+                mtime_sec: 0,
+                mtime_nsec: 0,
+                inode: 0,
+                kind: NodeKind::Dir,
+                source: None,
+                opaque: true,
+                redirect: None,
+                metacopy: false,
+            },
+        );
+        delta.insert(
+            "replace/new.txt".into(),
+            Node {
+                mode: libc::S_IFREG | 0o644,
+                size: 3,
+                mtime_sec: 0,
+                mtime_nsec: 0,
+                inode: 0,
+                kind: NodeKind::File,
+                source: Some(source),
+                opaque: false,
+                redirect: None,
+                metacopy: false,
+            },
+        );
+        let mut journal = ReplayJournal::new(root.path().join("journal")).unwrap();
+        let error = replay_delta(
+            &ReplayRoot::Upper(&upper),
+            &delta,
+            &[],
+            &[],
+            &mut journal,
+            &upper,
+            Some(1),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("injected replay failure"), "{}", error.message);
+        let (failures, _) = journal.rollback();
+        assert!(failures.is_empty(), "rollback failed: {failures:?}");
+        assert_eq!(fs::read(upper.join("replace/old.txt")).unwrap(), b"old");
+        assert!(!upper.join("replace/new.txt").exists());
+    }
+
+    #[test]
+    fn accept_replay_reports_rollback_failure() {
+        let root = temp();
+        let token = format!("ascout-rollback-fail-{}", std::process::id());
+        let modify = PathBuf::from(format!("/tmp/{token}-modify"));
+        let added = PathBuf::from(format!("/tmp/{token}-added"));
+        let backend = new_overlay_backend(root.path());
+        backend.establish("root").unwrap();
+        if !backend
+            .overlayable_mounts()
+            .iter()
+            .any(|target| target == Path::new("/tmp"))
+        {
+            eprintln!(
+                "SKIP accept replay rollback: /tmp is not an overlayable mount (candidates: {:?})",
+                backend.overlayable_mounts()
+            );
+            return;
+        }
+        write_upper(&backend, "root", &modify, "old");
+        backend.fork("root", "child", &[]).unwrap();
+        let snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
+        write_upper(&backend, "child", &modify, "new");
+        write_upper(&backend, "child", &added, "new");
+        backend.suspend("root").unwrap();
+        backend.inject_replay_failure_after(Some(1));
+        backend.inject_rollback_failure(true);
+        let error = backend
+            .accept(&snapshot, "child", "root", &[], None, None)
+            .expect_err("injected failure must fail accept");
+        assert!(
+            error.message.contains("rollback failed"),
+            "rollback failure was not reported: {}",
+            error.message
+        );
+        assert!(
+            error
+                .cleanup_failures
+                .iter()
+                .any(|value| value.contains("rollback")),
+            "missing rollback cleanup failure: {:?}",
+            error.cleanup_failures
+        );
+        backend.inject_replay_failure_after(None);
+        backend.inject_rollback_failure(false);
+        backend.resume("root").unwrap();
+        backend.terminate("child").unwrap();
+        backend.discard("child", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
     fn backend_overlay_fork_diff_accept_discard_round_trip() {
         round_trip(temp(), false);
     }

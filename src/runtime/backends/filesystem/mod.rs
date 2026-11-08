@@ -70,6 +70,10 @@ pub struct FilesystemBackend {
     state: Mutex<BackendState>,
     overlay_targets: Mutex<Option<Vec<PathBuf>>>,
     next_token: AtomicU64,
+    #[cfg(test)]
+    pub(super) replay_fail_after: Mutex<Option<usize>>,
+    #[cfg(test)]
+    pub(super) replay_fail_rollback: Mutex<bool>,
 }
 
 impl FilesystemBackend {
@@ -94,6 +98,10 @@ impl FilesystemBackend {
             }),
             overlay_targets: Mutex::new(None),
             next_token: AtomicU64::new(1),
+            #[cfg(test)]
+            replay_fail_after: Mutex::new(None),
+            #[cfg(test)]
+            replay_fail_rollback: Mutex::new(false),
         };
         let overlay_ok = probe.probe_overlay();
         let (btrfs_ok, fast_delete) = if overlay_ok && !config.force_overlay {
@@ -154,6 +162,10 @@ impl FilesystemBackend {
             }),
             overlay_targets: Mutex::new(None),
             next_token: AtomicU64::new(1),
+            #[cfg(test)]
+            replay_fail_after: Mutex::new(None),
+            #[cfg(test)]
+            replay_fail_rollback: Mutex::new(false),
         };
         fs::create_dir_all(backend.environments_root()).map_err(error)?;
         fs::create_dir_all(backend.snapshots_root()).map_err(error)?;
@@ -162,6 +174,13 @@ impl FilesystemBackend {
         fs::create_dir_all(backend.metadata_root()).map_err(error)?;
         fs::create_dir_all(backend.diffs_root()).map_err(error)?;
         backend.load_metadata()?;
+        let overlaps = backend.state_overlap_mounts();
+        if !overlaps.is_empty() {
+            eprintln!(
+                "filesystem: state_directory_overlaps_mount={:?} strategy=flatten fork_cost=O(upper) diff_cost=O(upper)",
+                overlaps
+            );
+        }
         Ok(backend)
     }
 
@@ -401,7 +420,8 @@ impl FilesystemBackend {
         format!("snapshot-{child}")
     }
 
-    pub(super) fn base_snapshot_id_for_child(child: &str) -> String {
+    /// Snapshot id that `diff`/`accept` use as the fork base for `child`.
+    pub fn base_snapshot_id_for_child(child: &str) -> String {
         format!("snapshot-{child}-base")
     }
 
@@ -491,6 +511,22 @@ impl FilesystemBackend {
             },
         );
         self.persist_operations(&state.operations)
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_replay_failure_after(&self, value: Option<usize>) {
+        *self
+            .replay_fail_after
+            .lock()
+            .expect("replay failure lock") = value;
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_rollback_failure(&self, value: bool) {
+        *self
+            .replay_fail_rollback
+            .lock()
+            .expect("rollback failure lock") = value;
     }
 
     pub(super) fn layer_path_for(&self, snapshot_id: &str) -> PathBuf {

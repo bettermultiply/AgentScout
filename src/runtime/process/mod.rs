@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup() {
-        let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        let root = tempfile::tempdir().unwrap();
         let backend = ProcessBackend::new("process", "bwrap");
         let context = launch(&backend, "/bin/sleep", vec!["30".into()], root.path());
         let handle = backend.process_handle(&context.environment_id).unwrap();
@@ -267,12 +267,11 @@ mod tests {
         if let Some(path) = cgroup {
             assert!(!path.exists(), "cleanup left cgroup {}", path.display());
         }
-        let _ = std::fs::remove_file(root.path().join("process-test.log"));
     }
 
     #[test]
     fn exited_process_is_reported_as_not_running() {
-        let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        let root = tempfile::tempdir().unwrap();
         let backend = ProcessBackend::new("process", "bwrap");
         let context = launch(&backend, "/bin/true", Vec::new(), root.path());
         for _ in 0..200 {
@@ -287,6 +286,5 @@ mod tests {
         );
         assert!(!backend.is_running(&context.environment_id).unwrap());
         backend.cleanup(&context.environment_id).unwrap();
-        let _ = std::fs::remove_file(root.path().join("process-test.log"));
     }
 }

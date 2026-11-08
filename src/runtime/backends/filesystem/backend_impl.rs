@@ -23,6 +23,12 @@ impl Backend for FilesystemBackend {
                     .collect(),
             ),
             freeze_mechanism: None,
+            state_directory_overlaps_mount: Some(
+                self.state_overlap_mounts()
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            ),
         }
     }
 

@@ -45,9 +45,21 @@
       `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)` + 最终组件 `O_NOFOLLOW`
       执行 mkdir/unlink/write/symlink；
     - 已实测：目标进程内立即可见合并结果，删除产生 whiteout，宿主 Base 未改。
-  - 路径级操作日志：记录已应用的创建操作；失败时逆序删除已创建文件/目录/符号
-    链接。修改、删除、opaque 替换没有保存旧内容，**不可逆**；这类操作会在错误
-    消息中报告数量，`published=false`。因此仍非原子，但不宣称原子。
+  - 重放操作日志：每个会覆盖或删除目标内容的操作前，把目标 upper 的旧状态
+    保存到 `state/replay-journal/`（优先 reflink；不支持时复制，单文件超过
+    64MiB 会记录告警）。失败时按逆序恢复全部已记录路径；回滚失败会列出未恢复
+    路径并进入 `cleanup_failures`。成功后删除日志区。
+  - 重放是“可回滚、非原子”：并发读者可能在中间态读到部分结果，不宣称原子；
+    失败时 `published=false`。
+- **状态目录重叠检测**
+  - 启动时列出状态目录所在的 overlay 挂载点，写入能力字段
+    `state_directory_overlaps_mount`，并打印
+    `strategy=flatten fork_cost=O(upper) diff_cost=O(upper)`。
+  - 部署建议见 `docs/fs-backend/deployment.md`：生产环境应把状态目录放在不被
+    overlay 的独立挂载点。
+  - 测试：`overlapping_state_directory_is_reported_and_flattened`、
+    `non_overlapping_state_directory_uses_lower_chain`。
+
 - **LaunchFragment / ProcessBackend**
   - FilesystemBackend 只产出 `LaunchFragment` 中的挂载条目，不再 spawn，也不
     记录 pid/mnt namespace。
@@ -66,8 +78,8 @@
 
 - accept selector、依赖闭包、控制面逐条变更列表。
 - `diff(target=Some(_))` 明确返回未实现。
-- accept 对“修改/删除/opaque”没有旧内容备份，不能完整逆序回滚；当前只回滚已创建
-  的文件/目录/符号链接，仍明确非原子。
+- accept 重放已支持修改/删除/创建/目录替换的逆序回滚，但仍非原子；并发读者
+  可能观察到中间状态。
 - 有特权时直接 `lower=/`：只做了探测/高权限测试，未作为默认路径。
 - 跨 Backend 冻结/快照/解冻编排、cgroup 归属、进程停止归属、mount ns 是否拆成
   独立 Backend：待用户决定。
@@ -170,7 +182,7 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
 | xattr / chmod / utimes | ok | ok | 一致 |
 | stat st_dev/st_ino | btrfs inode | overlay st_dev + 变化 inode | 部分一致；overlay 正常语义 |
 | statfs | btrfs | overlayfs | 不一致（机制差异） |
-| id / HOME / pwd | 1000/1000, /home/betmul, base | 同 | 一致 |
+| id / HOME / pwd | 当前 uid/gid、$HOME、base | 同 | 一致 |
 | /dev/shm | ok | ok | 一致 |
 | hostname | betmul | betmul | 一致 |
 | ps 计数 | 466 | 467 | 部分一致（多 bwrap/子进程） |
@@ -178,6 +190,89 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
 
 权威写入留在 branch upper，宿主观察者看不到；何时物化回真实 workspace 仍未实现，
 属于设计已知点。
+
+## 性能实测
+
+环境：kernel `7.2.14-zen1-1-zen`，CPU `AMD Ryzen 7 5800H with Radeon Graphics`。
+`ASCOUT_BENCH_ITERS=20`；N=100/10_000/100_000，每文件 4KiB；child 只修改 10 个文件。
+命令：
+
+```bash
+cargo run --release --example fs_bench
+```
+
+`reflink-flatten`：状态目录与 workspace 都在 `/home`（btrfs），`/home` 重叠 →
+flatten。`reflink-lower`：状态目录在 `/var/tmp`（btrfs），workspace 在 `/home` →
+`/home` 使用 lower 链；`/var/tmp` 自身重叠并 flatten。`tmpfs-flatten`：状态与
+workspace 都在 `/tmp` tmpfs，flatten。
+
+| case | N | operation | p50_ms | p95_ms | fork_cost | mechanism | overlaps |
+|---|---|---|---|---|---|---|---|
+| reflink-flatten | 100 | accept | 260.379 | 527.012 | reflink | overlay | /home |
+| reflink-flatten | 100 | diff | 53.665 | 99.554 | reflink | overlay | /home |
+| reflink-flatten | 100 | discard | 0.596 | 0.731 | reflink | overlay | /home |
+| reflink-flatten | 100 | fork | 162.033 | 244.277 | reflink | overlay | /home |
+| reflink-flatten | 100 | mark | 212.771 | 406.348 | reflink | overlay | /home |
+| reflink-flatten | 10000 | accept | 527.496 | 548.895 | reflink | overlay | /home |
+| reflink-flatten | 10000 | diff | 259.083 | 263.265 | reflink | overlay | /home |
+| reflink-flatten | 10000 | discard | 0.367 | 0.442 | reflink | overlay | /home |
+| reflink-flatten | 10000 | fork | 1592.009 | 1724.363 | reflink | overlay | /home |
+| reflink-flatten | 10000 | mark | 669.853 | 679.776 | reflink | overlay | /home |
+| reflink-flatten | 100000 | accept | 5141.801 | 5224.610 | reflink | overlay | /home |
+| reflink-flatten | 100000 | diff | 2589.382 | 2688.416 | reflink | overlay | /home |
+| reflink-flatten | 100000 | discard | 0.444 | 0.552 | reflink | overlay | /home |
+| reflink-flatten | 100000 | fork | 16183.801 | 16930.011 | reflink | overlay | /home |
+| reflink-flatten | 100000 | mark | 6770.704 | 6979.829 | reflink | overlay | /home |
+| reflink-lower | 100 | accept | 22.406 | 23.694 | reflink | overlay | /var/tmp |
+| reflink-lower | 100 | diff | 3.791 | 4.241 | reflink | overlay | /var/tmp |
+| reflink-lower | 100 | discard | 0.331 | 0.405 | reflink | overlay | /var/tmp |
+| reflink-lower | 100 | fork | 19.532 | 21.100 | reflink | overlay | /var/tmp |
+| reflink-lower | 100 | mark | 15.596 | 17.329 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | accept | 230.464 | 234.675 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | diff | 4.136 | 4.316 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | discard | 0.400 | 0.433 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | fork | 641.238 | 644.489 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | mark | 16.353 | 17.134 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | accept | 2161.833 | 2289.174 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | diff | 4.164 | 8.284 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | discard | 0.398 | 0.448 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | fork | 6569.708 | 6708.488 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | mark | 15.038 | 28.847 | reflink | overlay | /var/tmp |
+| tmpfs-flatten | 100 | accept | 4.235 | 4.433 | copy | overlay | /tmp |
+| tmpfs-flatten | 100 | diff | 1.663 | 1.862 | copy | overlay | /tmp |
+| tmpfs-flatten | 100 | discard | 0.107 | 0.142 | copy | overlay | /tmp |
+| tmpfs-flatten | 100 | fork | 6.544 | 6.715 | copy | overlay | /tmp |
+| tmpfs-flatten | 100 | mark | 3.419 | 3.617 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | accept | 325.180 | 326.711 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | diff | 163.115 | 163.650 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | discard | 0.140 | 0.152 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | fork | 618.973 | 619.960 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | mark | 314.811 | 316.487 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | accept | 3311.214 | 3325.918 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | diff | 1674.503 | 1680.317 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | discard | 0.153 | 0.171 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | fork | 6157.635 | 6179.910 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | mark | 3129.533 | 3225.852 | copy | overlay | /tmp |
+
+### 结论与瓶颈（如实）
+
+- **flatten 路径随 N 线性增长**：`reflink-flatten` 的 fork 从 162ms 增到 16.18s，
+  mark 从 213ms 增到 6.77s，diff 从 54ms 增到 2.59s，accept 从 260ms 增到 5.14s。
+  `tmpfs-flatten` 同样线性增长。原因是 fork/mark 复制整个 upper、diff 比较完整
+  upper，属于本轮已知成本。
+- **lower 链 diff 确实是 O(增量)**：`reflink-lower` 的 diff 在 100、10k、100k
+  下分别约 3.8ms、4.3ms、4.2ms，几乎不随 N 增长。
+- **lower 链 mark 接近 O(1)**：约 15ms，不随 N 增长（child upper 为空）。
+- **lower 链 accept 仍随 N 线性**：22ms → 约 235ms → 2.16s。当前 accept 在冲突检测
+  前读取完整 `target_mount.upper`，并构建完整 source maps，因此不是 O(增量)。
+  这是明确的优化点，本轮未改。
+- **fork 即使 reflink 也随 N 增长**：reflink 只省数据拷贝，仍要遍历/复制 N 个
+  目录项；`reflink-lower` fork 19.5ms → 约 679ms → 6.57s。
+- **discard 热路径接近 O(1)**：所有 case 约 0.1–0.6ms。
+- **复制型 tmpfs 明显更慢**：100k 文件 fork 6.15s、mark 3.13s、accept 3.32s。
+- 基准结束清理阶段出现一次后台删除竞态：
+  `background removal ... failed: No such file or directory`；属于清理/后台删除
+  路径已不存在时的竞态，已记录在 `docs/refactor-notes.md`，本轮未修。
 
 ## P4 调研结论：btrfs 增量
 
@@ -340,5 +435,5 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | cgroup.kill 与 cgroup 目录清理 | **实测**：`terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup` |
 | fallback O(文件数) 后台删除成本 | **推断**：实现为递归删除；未做大数据量性能测量 |
 | overlay work 目录 mode 000 需要 force 删除 | **实测**：测试残留复现并修复 |
-| accept 只回滚创建类操作 | **实测/代码事实**：路径日志 + 逆序删除创建；修改/删除/opaque 不可逆 |
+| accept 回滚覆盖修改/删除/创建/目录替换 | **实测**：`accept_replay_rolls_back_every_injected_failure`、`replay_directory_replacement_rolls_back`；回滚失败见 `accept_replay_reports_rollback_failure` |
 | cgroup v2 在当前 delegated scope 可 freeze | **实测**：创建子 cgroup、写 cgroup.procs、写 cgroup.freeze=1，cgroup.events 显示 frozen 1 |

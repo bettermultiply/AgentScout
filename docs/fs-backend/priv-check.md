@@ -5,7 +5,7 @@
 以**普通用户**运行（不要 `sudo ./scripts/priv-check.sh`）：
 
 ```bash
-cd /home/betmul/BETMUL/AgentScout-suit/AgentScout
+cd /path/to/AgentScout-suit/AgentScout
 ./scripts/priv-check.sh
 ```
 

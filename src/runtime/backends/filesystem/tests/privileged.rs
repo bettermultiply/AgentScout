@@ -9,9 +9,23 @@ use super::support::*;
             eprintln!("SKIP priv_btrfs_fork_diff_accept_discard: ASCOUT_PRIV_TESTS != 1");
             return;
         }
+        let state_root = priv_state_root();
+        let fs_type = Command::new("stat")
+            .args(["-f", "-c", "%T"])
+            .arg(&state_root)
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .unwrap_or_default();
+        if fs_type != "btrfs" {
+            eprintln!(
+                "SKIP priv_btrfs_fork_diff_accept_discard: ASCOUT_PRIV_STATE_DIR is {fs_type}, not btrfs"
+            );
+            return;
+        }
         let root = tempfile::Builder::new()
             .prefix("priv-btrfs-")
-            .tempdir_in(priv_state_root())
+            .tempdir_in(state_root)
             .unwrap();
         let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
         assert_eq!(

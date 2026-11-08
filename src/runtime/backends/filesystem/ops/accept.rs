@@ -151,6 +151,26 @@ impl FilesystemBackend {
             return Ok(result);
         }
 
+        let journal_root = self
+            .config
+            .state_directory
+            .join("replay-journal")
+            .join(self.token());
+        #[cfg(test)]
+        let fail_rollback = *self
+            .replay_fail_rollback
+            .lock()
+            .map_err(|_| BackendError::new("rollback failure lock poisoned"))?;
+        #[cfg(not(test))]
+        let fail_rollback = false;
+        let mut journal = ReplayJournal::new_with_rollback_failure(journal_root, fail_rollback)?;
+        #[cfg(test)]
+        let fail_after = *self
+            .replay_fail_after
+            .lock()
+            .map_err(|_| BackendError::new("replay failure lock poisoned"))?;
+        #[cfg(not(test))]
+        let fail_after = None;
         for (mount, target_mount, delta, redirects, source_maps) in prepared {
             let replay_root = match &safe_root {
                 Some(root) => {
@@ -164,12 +184,39 @@ impl FilesystemBackend {
                 }
                 None => ReplayRoot::Upper(&target_mount.upper),
             };
-            // Phase 1 replay is deliberately non-atomic.  A failure can leave
-            // a partially applied target; the result is an error and
-            // `published` stays false.  The caller must keep the target free
-            // of concurrent writers for the replay window.
-            replay_delta(&replay_root, &delta, &redirects, &source_maps)?;
+            // Replay is rollback-capable but not atomic: every overwrite or
+            // delete records the previous target-upper state first.  On a
+            // failure all recorded operations are reversed in reverse order;
+            // concurrent readers may still observe intermediate states.
+            if let Err(mut error) = replay_delta(
+                &replay_root,
+                &delta,
+                &redirects,
+                &source_maps,
+                &mut journal,
+                &target_mount.upper,
+                fail_after,
+            ) {
+                let (failures, warnings) = journal.rollback();
+                if failures.is_empty() {
+                    error.message.push_str("; rollback restored all recorded paths");
+                } else {
+                    error.message.push_str(&format!(
+                        "; rollback failed for {} path(s): {}",
+                        failures.len(),
+                        failures.join(", ")
+                    ));
+                    error.add_cleanup_failure("filesystem", "accept replay rollback");
+                }
+                if warnings > 0 {
+                    error.message.push_str(&format!(
+                        "; {warnings} rollback backup(s) required copying files over 64MiB without reflink"
+                    ));
+                }
+                return Err(error);
+            }
         }
+        journal.cleanup();
 
         let mut result = FilesystemResult::default();
         result.confirmation.published = true;

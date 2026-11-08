@@ -125,7 +125,7 @@ fn assemble_runtime(
             match filesystem {
                 Some(fs) => {
                     let bwrap = fs.bubblewrap_path().to_path_buf();
-                    Arc::new(base.with_filesystem(fs).with_bubblewrap(bwrap))
+                    Arc::new(base.with_data_plane(fs).with_bubblewrap(bwrap))
                 }
                 None => Arc::new(base),
             }
@@ -164,7 +164,7 @@ fn assemble_single_backend(
         let bwrap = filesystem.bubblewrap_path().to_path_buf();
         Ok(Arc::new(
             BaseRuntime::new("runtime", Arc::new(composite))
-                .with_filesystem(filesystem)
+                .with_data_plane(filesystem)
                 .with_bubblewrap(bwrap),
         ))
     } else {

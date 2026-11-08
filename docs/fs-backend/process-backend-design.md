@@ -29,7 +29,8 @@ fn launch_fragment(&self, context, launch) -> Result<LaunchFragment, BackendErro
 ```
 
 - `CompositeRuntime::launch_fragment` 按 Operate 路由选择 Backend，合并各片段。
-- `BaseRuntime` 合并 inner 与 FilesystemBackend 的片段，交给 `ProcessBackend`。
+- `BaseRuntime` 合并 inner 与 data-plane Backend（`Arc<dyn Backend>`）的片段，
+  交给 `ProcessBackend`；它不再依赖具体 `FilesystemBackend` 类型。
 - `LaunchFragment { mounts: Vec<MountEntry>, chdir, env }`。
 
 `ProcessBackend` 不是单独注册的 Backend 连接，而是 BaseRuntime 的进程执行部件；

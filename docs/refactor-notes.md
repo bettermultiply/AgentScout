@@ -4,10 +4,9 @@
 
 ## 已知问题（只记录，未修改）
 
-1. **`BaseRuntime` 直接依赖具体文件系统 Backend**
-   `src/runtime/base.rs` 引用 `crate::runtime::backends::filesystem::FilesystemBackend`。
-   这与“通用组合层不依赖具体 Backend”的目标方向相反。当前按原行为保留；
-   后续可通过注入 `Arc<dyn Backend>` 或能力接口消除。
+1. **`BaseRuntime` 依赖已解决（第七轮）**
+   `BaseRuntime` 现在持有 `Option<Arc<dyn Backend>>` 作为 data plane，不再引用
+   具体 `FilesystemBackend`。`with_data_plane` 接受任意 Backend trait 对象。
 2. **个别文件略超 600 行**
    - `src/control_plane/agent_control/mod.rs` 约 628 行：主要是类型定义和模块声明，
      按职责继续拆会把紧密相关的状态类型拆散，暂保留。
@@ -45,3 +44,35 @@
 - 未运行 `cargo public-api`（环境未安装），改用 `grep -h '^pub '` 对比
   公开项名称；只出现模块声明和 `use` 行数量差异。
 - 未修改 `docs/` 中设计文档的设计内容，只更新旧文件路径引用和新增模块结构章节。
+
+## 第七轮补充
+
+- 任务 A 已消除 `BaseRuntime` 对具体 `FilesystemBackend` 的编译期依赖；Backend
+  trait 现有接口已足够，未新增 data-plane trait 方法。
+- 任务 B 清理了测试中的本机用户名/绝对路径；依赖特定挂载的测试现在先检查
+  `overlayable_mounts()`，不满足时打印 `SKIP <原因>`。
+- 任务 C 增加 `state_directory_overlaps_mount` 能力字段和启动日志；重叠挂载仍使用
+  flatten，非重叠挂载的 lower 链路径有测试覆盖。
+- 任务 D 的 accept replay journal 会备份目标 upper 的旧内容，失败时逆序恢复；
+  仍非原子，中间态可被并发读者观察。
+- 任务 E 基准发现：flatten 挂载的 fork/diff/mark/accept 随 N 线性增长；
+  非重叠 lower 链的 diff 保持 O(增量)，但当前 accept 仍会读取完整目标 upper，
+  因此 accept 随 N 线性增长（瓶颈位置：`merge_delta_layers` 前读取
+  `target_mount.upper` 整层，以及 replay source maps 构建）。
+
+## 第七轮新发现（未修）
+
+- **accept 不是 O(增量)**：`src/runtime/backends/filesystem/ops/accept.rs` 在冲突
+  检测前执行 `read_layer(&target_mount.upper)`，并构建完整 source maps；
+  benchmark 显示 100k 文件时 accept ≈2.25s（lower 链）且随 N 增长。
+- **复制路径逐文件 `sync_all`**：`src/runtime/backends/filesystem/copy.rs`
+  `copy_file` 对每个文件调用 `sync_all`，在 accept 回滚备份/恢复的大目录上会
+  放大成本。
+- **后台删除竞态**：benchmark 清理阶段出现
+  `background removal ... failed: No such file or directory`；`discard` 的 trash
+  路径与被 benchmark 清理的目录发生竞态，错误只打印，不影响退出码。
+- **flatten 成本**：状态目录与 workspace 同挂载时 fork/mark/diff/accept 都是
+  O(upper)，deployment 文档已建议把状态目录放到独立挂载点。
+- **accept 回滚仍非原子**：journal 支持逆序恢复全部已应用操作，但并发读者可能
+  在重放窗口读到中间态；文档已明确。
+

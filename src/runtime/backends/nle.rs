@@ -193,6 +193,7 @@ impl Backend for NleBackend {
             filesystem_btrfs_incremental_diff: None,
             freeze_mechanism: None,
             filesystem_passthrough: None,
+            state_directory_overlaps_mount: None,
         }
     }
 

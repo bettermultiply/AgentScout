@@ -788,5 +788,7 @@ fn unique_directory(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    PathBuf::from("/tmp/opencode/afc").join(format!("{name}-{}-{nonce}", std::process::id()))
+    std::env::temp_dir()
+        .join("ascout-firecracker-e2e")
+        .join(format!("{name}-{}-{nonce}", std::process::id()))
 }

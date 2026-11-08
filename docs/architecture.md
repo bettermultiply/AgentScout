@@ -111,10 +111,8 @@ src/
   Adapter 或控制面。
 - `bin/` 依赖库的公开装配 API，不承载实现逻辑。
 
-已知的结构性依赖：`runtime::base` 直接引用具体
-`runtime::backends::filesystem::FilesystemBackend` 用于装配文件系统能力，
-这使 BaseRuntime 对具体 Backend 有编译期依赖；本轮按原行为保留，问题记录在
-`docs/refactor-notes.md`。
+`BaseRuntime` 通过 `Option<Arc<dyn Backend>>` 持有 data plane，不再依赖具体
+`FilesystemBackend`；具体 Backend 只由装配代码注入。
 
 ## 4. 相关文档
 
