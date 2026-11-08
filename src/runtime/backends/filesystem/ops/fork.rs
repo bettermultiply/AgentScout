@@ -60,12 +60,12 @@ impl FilesystemBackend {
             let _ = remove_path(
                 &self.config.btrfs_path,
                 &child_root,
-                self.mechanism == FilesystemMechanism::Btrfs,
+                self.uses_btrfs_storage(),
             );
             let _ = remove_path(
                 &self.config.btrfs_path,
                 &layer_path,
-                self.mechanism == FilesystemMechanism::Btrfs,
+                self.uses_btrfs_storage(),
             );
             if path_exists(&child_root) || path_exists(&layer_path) {
                 return Err(BackendError::new(format!(
@@ -148,33 +148,88 @@ impl FilesystemBackend {
                     Self::prepare_mount_dirs(&units)?;
                 }
                 FilesystemMechanism::Overlay => {
-                    fs::create_dir_all(&layer_path).map_err(error)?;
-                    for mount in &selected {
-                        clone_upper(
-                            &mount.upper,
-                            &mount.layer_upper(&layer_path),
-                            self.fork_cost == ForkCost::Reflink,
-                        )?;
-                        if self.mount_uses_flattening(mount) {
-                            // The state directory is below this mount, so the
-                            // snapshot layer may not be used as an overlay
-                            // lower (directories would overlap).  Flatten the
-                            // parent upper into the child upper instead; the
-                            // layer copy is metadata for diff/accept only.
-                            let child_mount = child_environment
-                                .mounts
-                                .get(&mount.target.display().to_string())
-                                .expect("child mount exists");
-                            clone_upper(
-                                &mount.upper,
-                                &child_mount.upper,
-                                self.fork_cost == ForkCost::Reflink,
-                            )?;
+                    let staging = staging_path(&layer_path);
+                    let built = (|| -> Result<(), BackendError> {
+                        fs::create_dir_all(&staging).map_err(error)?;
+                        fs::create_dir_all(&child_root).map_err(error)?;
+                        for mount in &selected {
+                            let layer_upper = mount.layer_upper(&staging);
+                            if self.snapshot_copies {
+                                let parent_volume = mount.upper.parent().ok_or_else(|| {
+                                    BackendError::new("snapshot-copy mount upper has no volume parent")
+                                })?;
+                                let layer_volume = staging.join(&mount.layer_key);
+                                if let Some(parent) = layer_volume.parent() {
+                                    fs::create_dir_all(parent).map_err(error)?;
+                                }
+                                self.btrfs_snapshot(parent_volume, &layer_volume, true)?;
+                                let child_mount = child_environment
+                                    .mounts
+                                    .get(&mount.target.display().to_string())
+                                    .expect("child mount exists");
+                                let child_volume = child_mount.upper.parent().ok_or_else(|| {
+                                    BackendError::new("snapshot-copy child upper has no volume parent")
+                                })?;
+                                if let Some(parent) = child_volume.parent() {
+                                    fs::create_dir_all(parent).map_err(error)?;
+                                }
+                                if self.mount_uses_flattening(mount) {
+                                    // Writable snapshot carries the parent state;
+                                    // the read-only layer remains diff metadata.
+                                    self.btrfs_snapshot(&layer_volume, child_volume, false)?;
+                                } else {
+                                    self.btrfs_create(child_volume)?;
+                                }
+                            } else {
+                                if let Some(parent) = layer_upper.parent() {
+                                    fs::create_dir_all(parent).map_err(error)?;
+                                }
+                                clone_upper(
+                                    &mount.upper,
+                                    &layer_upper,
+                                    self.fork_cost == ForkCost::Reflink,
+                                )?;
+                                if self.mount_uses_flattening(mount) {
+                                    // The state directory is below this mount, so the
+                                    // snapshot layer may not be used as an overlay
+                                    // lower (directories would overlap).  Flatten the
+                                    // parent upper into the child upper instead; the
+                                    // layer copy is metadata for diff/accept only.
+                                    let child_mount = child_environment
+                                        .mounts
+                                        .get(&mount.target.display().to_string())
+                                        .expect("child mount exists");
+                                    clone_upper(
+                                        &mount.upper,
+                                        &child_mount.upper,
+                                        self.fork_cost == ForkCost::Reflink,
+                                    )?;
+                                }
+                            }
                         }
+                        for mount in child_environment.mounts.values() {
+                            if path_exists(&mount.upper) {
+                                continue;
+                            }
+                            if let Some(parent) = mount.upper.parent() {
+                                fs::create_dir_all(parent).map_err(error)?;
+                            }
+                            if self.snapshot_copies {
+                                self.btrfs_create(&mount.upper)?;
+                            } else {
+                                fs::create_dir_all(&mount.upper).map_err(error)?;
+                            }
+                        }
+                        let units: Vec<MountUnit> =
+                            child_environment.mounts.values().cloned().collect();
+                        Self::prepare_mount_dirs(&units)?;
+                        Ok(())
+                    })();
+                    if let Err(error) = built {
+                        let _ = remove_directory_force(&staging);
+                        return Err(error);
                     }
-                    fs::create_dir_all(&child_root).map_err(error)?;
-                    let units: Vec<MountUnit> = child_environment.mounts.values().cloned().collect();
-                    Self::prepare_mount_dirs(&units)?;
+                    finalize_staging(&staging, &layer_path)?;
                 }
             }
             Ok(())
@@ -213,7 +268,7 @@ impl FilesystemBackend {
         self.schedule_gc(garbage)?;
 
         let durable = (|| -> Result<(), BackendError> {
-            self.persist_snapshot(&snapshot)?;
+            self.persist_all_snapshots()?;
             self.persist_environment(&child_environment)?;
             Ok(())
         })();
@@ -243,12 +298,12 @@ impl FilesystemBackend {
         let _ = remove_path(
             &self.config.btrfs_path,
             child_root,
-            self.mechanism == FilesystemMechanism::Btrfs,
+            self.uses_btrfs_storage(),
         );
         let _ = remove_path(
             &self.config.btrfs_path,
             layer_path,
-            self.mechanism == FilesystemMechanism::Btrfs,
+            self.uses_btrfs_storage(),
         );
     }
 

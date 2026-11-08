@@ -155,6 +155,12 @@ use crate::protocol::contract::AgentLaunch;
         let (process, _, _) =
             spawn_in_environment_with_env(backend, environment_id, cwd, script, env);
         let status = process.wait(environment_id).unwrap();
+        if !status.success() {
+            eprintln!(
+                "sandbox command failed: env={environment_id} status={status} log={}",
+                fs::read_to_string(cwd.join("agent.log")).unwrap_or_default()
+            );
+        }
         let _ = process.cleanup(environment_id);
         status.success()
     }

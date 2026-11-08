@@ -4,13 +4,65 @@ use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::runtime::backend::BackendError;
 use super::layer::*;
 use super::util::*;
 
 const FICLONE: libc::c_ulong = 0x4004_9409;
+
+#[cfg(test)]
+thread_local! {
+    static CLONE_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static CLONE_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_clone_failure_after(entries: Option<usize>) {
+    CLONE_FAIL_AFTER.with(|value| value.set(entries));
+    CLONE_ENTRIES.with(|value| value.set(0));
+}
+
+pub(crate) fn staging_path(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "layer".to_string());
+    target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".tmp-{name}-{}", now_nanos()))
+}
+
+/// Atomically publish a fully-written staging tree.  A crash before this
+/// rename leaves only a `.tmp-*` directory, which is never referenced by
+/// metadata and is removed on the next backend start.
+pub(crate) fn finalize_staging(staging: &Path, target: &Path) -> Result<(), BackendError> {
+    if path_exists(target) {
+        remove_directory_force(target)?;
+    }
+    fs::rename(staging, target).map_err(error)?;
+    if let Some(parent) = target.parent()
+        && let Ok(directory) = File::open(parent)
+    {
+        directory.sync_all().map_err(error)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn cleanup_staging(root: &Path) -> Result<(), BackendError> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(".tmp-") {
+            remove_directory_force(&entry.path())?;
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn reflink_file(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -47,6 +99,19 @@ pub(crate) fn clone_upper(source: &Path, target: &Path, use_reflink: bool) -> Re
         .collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
+        #[cfg(test)]
+        {
+            let count = CLONE_ENTRIES.with(|value| {
+                let next = value.get() + 1;
+                value.set(next);
+                next
+            });
+            if let Some(limit) = CLONE_FAIL_AFTER.with(|value| value.get())
+                && count >= limit
+            {
+                return Err(BackendError::new("injected clone failure"));
+            }
+        }
         let from = entry.path();
         let to = target.join(entry.file_name());
         let metadata = fs::symlink_metadata(&from).map_err(error)?;
@@ -160,7 +225,8 @@ pub(crate) fn copy_file(source: &Path, target: &Path) -> Result<(), BackendError
             BackendError::new(format!("open target {}: {value}", target.display()))
         })?;
     std::io::copy(&mut input, &mut output).map_err(error)?;
-    output.sync_all().map_err(error)?;
+    // Persistence is finalized by the caller with one directory sync after
+    // the complete copy layer is atomically renamed into place.
     Ok(())
 }
 

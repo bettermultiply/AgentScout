@@ -229,12 +229,12 @@ impl SafeRoot {
             let (parent, name) = self.parent(&path, true)?;
             let c_name = CString::new(name)
                 .map_err(|_| BackendError::new("invalid target directory name"))?;
-            if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), 0o700) } != 0 {
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), (mode & 0o7777) as libc::mode_t) } != 0 {
                 return Err(error(std::io::Error::last_os_error()));
             }
             return Ok(());
         }
-        if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), 0o700) } != 0 {
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), (mode & 0o7777) as libc::mode_t) } != 0 {
             return Err(error(std::io::Error::last_os_error()));
         }
         let _ = mode;

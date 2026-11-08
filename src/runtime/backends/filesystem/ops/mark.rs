@@ -87,14 +87,38 @@ impl FilesystemBackend {
                 }
                 FilesystemMechanism::Overlay => {
                     // Independent clone of each selected mount upper only.
-                    fs::create_dir_all(&layer_path).map_err(error)?;
-                    for mount in &selected {
-                        clone_upper(
-                            &mount.upper,
-                            &mount.layer_upper(&layer_path),
-                            self.fork_cost == ForkCost::Reflink,
-                        )?;
+                    let staging = staging_path(&layer_path);
+                    let built = (|| -> Result<(), BackendError> {
+                        fs::create_dir_all(&staging).map_err(error)?;
+                        for mount in &selected {
+                            let layer_upper = mount.layer_upper(&staging);
+                            if let Some(parent) = layer_upper.parent() {
+                                fs::create_dir_all(parent).map_err(error)?;
+                            }
+                            if self.snapshot_copies {
+                                let parent_volume = mount.upper.parent().ok_or_else(|| {
+                                    BackendError::new("snapshot-copy mount upper has no volume parent")
+                                })?;
+                                let layer_volume = staging.join(&mount.layer_key);
+                                if let Some(parent) = layer_volume.parent() {
+                                    fs::create_dir_all(parent).map_err(error)?;
+                                }
+                                self.btrfs_snapshot(parent_volume, &layer_volume, true)?;
+                            } else {
+                                clone_upper(
+                                    &mount.upper,
+                                    &layer_upper,
+                                    self.fork_cost == ForkCost::Reflink,
+                                )?;
+                            }
+                        }
+                        Ok(())
+                    })();
+                    if let Err(error) = built {
+                        let _ = remove_directory_force(&staging);
+                        return Err(error);
                     }
+                    finalize_staging(&staging, &layer_path)?;
                 }
             }
             Ok(())
@@ -103,7 +127,7 @@ impl FilesystemBackend {
             let _ = remove_path(
                 &self.config.btrfs_path,
                 &layer_path,
-                self.mechanism == FilesystemMechanism::Btrfs,
+                self.uses_btrfs_storage(),
             );
             return Err(error);
         }
@@ -115,19 +139,21 @@ impl FilesystemBackend {
             lower: record_lower,
             refs: BTreeSet::new(),
         };
-        let (garbage, durable) = {
+        let garbage = {
             let mut state = self.lock()?;
             state.snapshots.insert(snapshot_id.clone(), record.clone());
             updated
                 .marks
                 .insert(mark_id.to_string(), snapshot_id.clone());
             state.environments.insert(updated.id.clone(), updated.clone());
-            let garbage = self.refresh_references(&mut state)?;
-            let durable = self.persist_snapshot(&record).is_ok()
-                && self.persist_environment(&updated).is_ok();
-            (garbage, durable)
+            self.refresh_references(&mut state)?
         };
-        if !durable {
+        let durable = (|| -> Result<(), BackendError> {
+            self.persist_all_snapshots()?;
+            self.persist_environment(&updated)?;
+            Ok(())
+        })();
+        if let Err(error) = durable {
             {
                 let mut state = self.lock()?;
                 state.snapshots.remove(&snapshot_id);
@@ -141,12 +167,12 @@ impl FilesystemBackend {
             let _ = remove_path(
                 &self.config.btrfs_path,
                 &record.path,
-                self.mechanism == FilesystemMechanism::Btrfs,
+                self.uses_btrfs_storage(),
             );
             let _ = self.persist_environment(&environment);
-            return Err(BackendError::new(
-                "filesystem mark metadata was not durable",
-            ));
+            return Err(BackendError::new(format!(
+                "filesystem mark metadata was not durable: {error}"
+            )));
         }
         self.schedule_gc(garbage)?;
         let mut result = Self::snapshot_result(snapshot_id);

@@ -79,6 +79,162 @@ use std::os::unix::ffi::OsStrExt;
     }
 
     #[test]
+    fn safe_root_mkdir_preserves_source_mode() {
+        use std::os::unix::fs::MetadataExt;
+        let safe = SafeRoot::open(std::process::id()).unwrap();
+        let token = format!("ascout-mode-{}", std::process::id());
+        let relative = format!("tmp/{token}");
+        safe.mkdir(&relative, 0o750).unwrap();
+        let metadata = fs::metadata(format!("/{relative}")).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o750);
+        fs::remove_dir(format!("/{relative}")).unwrap();
+    }
+
+    #[test]
+    fn btrfs_snapshot_copy_fork_is_end_to_end() {
+        let root = btrfs_temp();
+        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        if backend.fork_cost() != ForkCost::BtrfsSnapshot || backend.mechanism() != FilesystemMechanism::Overlay {
+            eprintln!(
+                "SKIP btrfs_snapshot_copy_fork_is_end_to_end: state directory is not btrfs or snapshot copies unavailable (mechanism={}, fork_cost={})",
+                backend.mechanism().as_str(),
+                backend.fork_cost().as_str()
+            );
+            return;
+        }
+        backend.establish("root").unwrap();
+        let base = root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        write(&base, "fork.txt", "at-fork");
+        backend.fork("root", "child", &[]).unwrap();
+        let parent_upper = upper_at(&backend, "root", &base);
+        write_upper(&backend, "root", &base.join("late.txt"), "late");
+        assert!(
+            run_in_environment(&backend, "child", &base, "test -f fork.txt && test ! -e late.txt"),
+            "child did not observe the fork-time snapshot"
+        );
+        assert!(
+            run_in_environment(&backend, "child", &base, "rm -f fork.txt && test ! -e fork.txt"),
+            "child whiteout failed"
+        );
+        assert!(base.join("fork.txt").exists(), "child deleted host base");
+        wait_until(|| parent_upper.join("late.txt").exists());
+        let child_root = backend.paths("child");
+        backend.terminate("child").unwrap();
+        backend.discard("child", &[]).unwrap();
+        wait_until(|| !child_root.exists());
+        assert!(!child_root.exists(), "discard left btrfs child subvolumes");
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn failed_clone_and_orphan_staging_are_not_valid_layers() {
+        let root = temp();
+        let backend = new_overlay_backend(root.path());
+        backend.establish("root").unwrap();
+        let base = root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        for index in 0..4 {
+            write_upper(&backend, "root", &base.join(format!("f{index}")), "x");
+        }
+        set_clone_failure_after(Some(2));
+        let error = backend.fork("root", "child", &[]).unwrap_err();
+        set_clone_failure_after(None);
+        assert!(error.message.contains("injected clone failure"), "{}", error.message);
+        assert!(backend.state("child").is_none());
+        assert!(!root
+            .path()
+            .join("state/layers")
+            .join(FilesystemBackend::base_snapshot_id_for_child("child"))
+            .exists());
+        let layers = root.path().join("state/layers");
+        let orphans: Vec<_> = fs::read_dir(&layers)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+            .collect();
+        assert!(orphans.is_empty(), "failed clone left staging dirs");
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+        drop(backend);
+
+        let orphan = layers.join(".tmp-orphan");
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("partial"), b"x").unwrap();
+        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        assert!(!orphan.exists(), "backend start must remove orphan staging");
+        drop(backend);
+    }
+
+    #[test]
+    fn accept_work_does_not_scale_with_unrelated_upper_size() {
+        let small = accept_read_layer_entries(20);
+        let large = accept_read_layer_entries(5000);
+        assert!(
+            large <= small + 50,
+            "accept scanned unrelated upper entries: small={small}, large={large}"
+        );
+    }
+
+    fn accept_read_layer_entries(unrelated: usize) -> usize {
+        let state = match tempfile::tempdir_in("/var/tmp") {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!(
+                    "SKIP accept_work_does_not_scale_with_unrelated_upper_size: /var/tmp unusable: {error}"
+                );
+                return 0;
+            }
+        };
+        let mut config = FilesystemConfig::new(state.path().join("state"));
+        config.force_overlay = true;
+        let backend = FilesystemBackend::new(config).unwrap();
+        backend.establish("root").unwrap();
+        let workspace_root = btrfs_temp();
+        let base = workspace_root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let workspace_mount = mount_for(&backend, "root", &base);
+        if backend.mount_uses_flattening(&workspace_mount) {
+            eprintln!(
+                "SKIP accept_work_does_not_scale_with_unrelated_upper_size: workspace mount is flattened"
+            );
+            return 0;
+        }
+        for index in 0..unrelated {
+            write_upper(
+                &backend,
+                "root",
+                &base.join(format!("unrelated-{index}")),
+                "x",
+            );
+        }
+        backend.fork("root", "child", &[]).unwrap();
+        let snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
+        for index in 0..10.min(unrelated) {
+            write_upper(
+                &backend,
+                "child",
+                &base.join(format!("unrelated-{index}")),
+                "changed",
+            );
+        }
+        backend.suspend("root").unwrap();
+        reset_read_layer_entries();
+        let accepted = backend
+            .accept(&snapshot, "child", "root", &[], None, None)
+            .unwrap();
+        let entries = read_layer_entries();
+        assert!(accepted.confirmation.published);
+        backend.resume("root").unwrap();
+        backend.terminate("child").unwrap();
+        backend.discard("child", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+        entries
+    }
+
+    #[test]
     fn accept_replay_rolls_back_every_injected_failure() {
         let root = temp();
         let token = format!("ascout-rollback-{}", std::process::id());
@@ -149,6 +305,50 @@ use std::os::unix::ffi::OsStrExt;
         backend.discard("child", &[]).unwrap();
         backend.terminate("root").unwrap();
         backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn opaque_removal_error_aborts_replay() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("SKIP opaque_removal_error_aborts_replay: running as root");
+            return;
+        }
+        let root = temp();
+        let upper = root.path().join("upper");
+        fs::create_dir_all(upper.join("opaque")).unwrap();
+        fs::write(upper.join("opaque/old.txt"), b"old").unwrap();
+        fs::set_permissions(&upper, fs::Permissions::from_mode(0o500)).unwrap();
+        let mut delta = View::new();
+        delta.insert(
+            "opaque".into(),
+            Node {
+                mode: libc::S_IFDIR | 0o755,
+                size: 0,
+                mtime_sec: 0,
+                mtime_nsec: 0,
+                inode: 0,
+                kind: NodeKind::Dir,
+                source: None,
+                opaque: true,
+                redirect: None,
+                metacopy: false,
+            },
+        );
+        let mut journal = ReplayJournal::new(root.path().join("journal")).unwrap();
+        let error = replay_delta(
+            &ReplayRoot::Upper(&upper),
+            &delta,
+            &[],
+            &[],
+            &mut journal,
+            &upper,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("replay"), "{}", error.message);
+        fs::set_permissions(&upper, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = journal.rollback();
     }
 
     #[test]

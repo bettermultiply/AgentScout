@@ -106,6 +106,16 @@ impl ReplayJournal {
         (failures, self.copy_warnings)
     }
 
+    pub(crate) fn sync(&self) -> Result<(), BackendError> {
+        if let Ok(directory) = fs::File::open(self.root.join("backups")) {
+            directory.sync_all().map_err(error)?;
+        }
+        if let Ok(directory) = fs::File::open(&self.root) {
+            directory.sync_all().map_err(error)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn cleanup(self) {
         let _ = remove_directory_force(&self.root);
     }
@@ -267,7 +277,7 @@ pub(crate) fn replay_node(
             let target = safe_join(upper, path)?;
             let existed = path_exists(&target);
             if node.opaque {
-                let _ = remove_directory_force(&target);
+                remove_directory_force(&target)?;
                 return Ok(());
             }
             stage_node(upper, path, node, source_maps)?;

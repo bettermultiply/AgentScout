@@ -8,6 +8,20 @@ use super::*;
 use super::super::util::*;
 
 use super::super::state::MountUnit;
+
+#[cfg(test)]
+pub(crate) static READ_LAYER_ENTRIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_read_layer_entries() {
+    READ_LAYER_ENTRIES.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn read_layer_entries() -> usize {
+    READ_LAYER_ENTRIES.load(std::sync::atomic::Ordering::SeqCst)
+}
 use crate::runtime::backend::BackendError;
 
 pub(crate) fn node_from_metadata(path: &Path, metadata: &fs::Metadata) -> Result<Node, BackendError> {
@@ -62,6 +76,8 @@ pub(crate) fn walk_layer(
         .collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
+        #[cfg(test)]
+        READ_LAYER_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(error)?;
         let relative = path

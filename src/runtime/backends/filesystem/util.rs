@@ -62,7 +62,11 @@ pub(super) fn remove_directory_force(path: &Path) -> Result<(), BackendError> {
     if metadata.is_dir() {
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
         for entry in fs::read_dir(path).map_err(error)? {
-            let entry = entry.map_err(error)?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(value) if value.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(value) => return Err(error(value)),
+            };
             remove_directory_force(&entry.path())?;
         }
         fs::remove_dir(path).map_err(error)?;
@@ -188,7 +192,11 @@ pub(super) fn remove_btrfs_tree(btrfs: &Path, path: &Path) -> Result<(), Backend
             Err(value) => Err(error(value)),
         }
     } else {
-        fs::remove_file(path).map_err(error)
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(value) if value.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(value) => Err(error(value)),
+        }
     }
 }
 

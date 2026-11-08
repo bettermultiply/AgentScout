@@ -66,6 +66,7 @@ pub struct FilesystemBackend {
     fast_delete: bool,
     btrfs_incremental_diff: bool,
     fork_cost: ForkCost,
+    snapshot_copies: bool,
     usable: bool,
     state: Mutex<BackendState>,
     overlay_targets: Mutex<Option<Vec<PathBuf>>>,
@@ -74,6 +75,12 @@ pub struct FilesystemBackend {
     pub(super) replay_fail_after: Mutex<Option<usize>>,
     #[cfg(test)]
     pub(super) replay_fail_rollback: Mutex<bool>,
+    #[cfg(test)]
+    persist_fail_operations: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    persist_fail_environment: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    persist_delay_ms: AtomicU64,
 }
 
 impl FilesystemBackend {
@@ -90,6 +97,7 @@ impl FilesystemBackend {
             fast_delete: false,
             btrfs_incremental_diff: false,
             fork_cost: ForkCost::Copy,
+            snapshot_copies: false,
             usable: false,
             state: Mutex::new(BackendState {
                 environments: HashMap::new(),
@@ -102,6 +110,12 @@ impl FilesystemBackend {
             replay_fail_after: Mutex::new(None),
             #[cfg(test)]
             replay_fail_rollback: Mutex::new(false),
+            #[cfg(test)]
+            persist_fail_operations: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            persist_fail_environment: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            persist_delay_ms: AtomicU64::new(0),
         };
         let overlay_ok = probe.probe_overlay();
         let (btrfs_ok, fast_delete) = if overlay_ok && !config.force_overlay {
@@ -134,7 +148,14 @@ impl FilesystemBackend {
                 "filesystem: btrfs create/snapshot works but incremental diff is unavailable; falling back to overlay"
             );
         }
+        let snapshot_copies = mechanism == FilesystemMechanism::Overlay
+            && !config.force_overlay
+            && btrfs_ok
+            && fast_delete
+            && probe.probe_btrfs_snapshot_copies();
         let fork_cost = if mechanism == FilesystemMechanism::Btrfs {
+            ForkCost::BtrfsSnapshot
+        } else if snapshot_copies {
             ForkCost::BtrfsSnapshot
         } else if probe.probe_reflink() {
             ForkCost::Reflink
@@ -142,11 +163,12 @@ impl FilesystemBackend {
             ForkCost::Copy
         };
         eprintln!(
-            "filesystem: data plane={} fast_delete={} incremental_diff={} fork_cost={}",
+            "filesystem: data plane={} fast_delete={} incremental_diff={} fork_cost={} snapshot_copies={}",
             mechanism.as_str(),
             mechanism == FilesystemMechanism::Btrfs && fast_delete,
             btrfs_incremental_diff,
-            fork_cost.as_str()
+            fork_cost.as_str(),
+            snapshot_copies
         );
         let backend = Self {
             config,
@@ -154,6 +176,7 @@ impl FilesystemBackend {
             fast_delete,
             btrfs_incremental_diff,
             fork_cost,
+            snapshot_copies,
             usable: overlay_ok,
             state: Mutex::new(BackendState {
                 environments: HashMap::new(),
@@ -166,6 +189,12 @@ impl FilesystemBackend {
             replay_fail_after: Mutex::new(None),
             #[cfg(test)]
             replay_fail_rollback: Mutex::new(false),
+            #[cfg(test)]
+            persist_fail_operations: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            persist_fail_environment: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            persist_delay_ms: AtomicU64::new(0),
         };
         fs::create_dir_all(backend.environments_root()).map_err(error)?;
         fs::create_dir_all(backend.snapshots_root()).map_err(error)?;
@@ -173,6 +202,7 @@ impl FilesystemBackend {
         fs::create_dir_all(backend.trash_root()).map_err(error)?;
         fs::create_dir_all(backend.metadata_root()).map_err(error)?;
         fs::create_dir_all(backend.diffs_root()).map_err(error)?;
+        cleanup_staging(&backend.layers_root())?;
         backend.load_metadata()?;
         let overlaps = backend.state_overlap_mounts();
         if !overlaps.is_empty() {
@@ -299,16 +329,52 @@ impl FilesystemBackend {
                 }
             }
         }
-        if let Ok(bytes) = fs::read(self.operations_path())
-            && let Ok(operations) = serde_json::from_slice::<BTreeMap<String, OperationRecord>>(&bytes)
-        {
-            state.operations = operations;
+        let operations_path = self.operations_path();
+        match fs::read(&operations_path) {
+            Ok(bytes) => match serde_json::from_slice::<BTreeMap<String, OperationRecord>>(&bytes) {
+                Ok(operations) => state.operations = operations,
+                Err(error) => {
+                    let corrupt = self
+                        .metadata_root()
+                        .join(format!("operations.json.corrupt-{}", std::process::id()));
+                    let _ = fs::rename(&operations_path, &corrupt);
+                    eprintln!(
+                        "filesystem: operations metadata is corrupt ({error}); isolated at {}",
+                        corrupt.display()
+                    );
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BackendError::new(format!(
+                    "cannot read operations metadata {}: {error}",
+                    operations_path.display()
+                )))
+            }
         }
         drop(state);
         Ok(())
     }
 
     pub(super) fn write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<(), BackendError> {
+        #[cfg(test)]
+        {
+            let delay = self.persist_delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            let text = path.to_string_lossy();
+            if self.persist_fail_operations.load(Ordering::SeqCst)
+                && text.ends_with("operations.json")
+            {
+                return Err(BackendError::new("injected operations persistence failure"));
+            }
+            if self.persist_fail_environment.load(Ordering::SeqCst)
+                && text.contains("/environments/")
+            {
+                return Err(BackendError::new("injected environment persistence failure"));
+            }
+        }
         let parent = path
             .parent()
             .ok_or_else(|| BackendError::new("metadata path has no parent"))?;
@@ -499,18 +565,26 @@ impl FilesystemBackend {
         } else {
             "conflict"
         };
-        let mut state = self.lock()?;
-        state.operations.insert(
-            operation_id.to_string(),
-            OperationRecord {
-                operation: operation.to_string(),
-                generation,
-                status: status.to_string(),
-                result: result.clone(),
-                reason: reason.clone(),
-            },
-        );
-        self.persist_operations(&state.operations)
+        let operations = {
+            let mut state = self.lock()?;
+            state.operations.insert(
+                operation_id.to_string(),
+                OperationRecord {
+                    operation: operation.to_string(),
+                    generation,
+                    status: status.to_string(),
+                    result: result.clone(),
+                    reason: reason.clone(),
+                },
+            );
+            state.operations.clone()
+        };
+        if let Err(error) = self.persist_operations(&operations) {
+            let mut state = self.lock()?;
+            state.operations.remove(operation_id);
+            return Err(error);
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -527,6 +601,28 @@ impl FilesystemBackend {
             .replay_fail_rollback
             .lock()
             .expect("rollback failure lock") = value;
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_operation_persist_failure(&self, value: bool) {
+        self.persist_fail_operations
+            .store(value, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_environment_persist_failure(&self, value: bool) {
+        self.persist_fail_environment
+            .store(value, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_persist_delay(&self, millis: u64) {
+        self.persist_delay_ms.store(millis, Ordering::SeqCst);
+    }
+
+    pub(super) fn uses_btrfs_storage(&self) -> bool {
+        self.mechanism == FilesystemMechanism::Btrfs
+            || self.fork_cost == ForkCost::BtrfsSnapshot
     }
 
     pub(super) fn layer_path_for(&self, snapshot_id: &str) -> PathBuf {

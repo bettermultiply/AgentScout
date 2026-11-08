@@ -2,6 +2,53 @@
 
 use super::*;
 
+impl FilesystemBackend {
+    fn transition_state(
+        &self,
+        id: &str,
+        from: &[EnvironmentState],
+        to: EnvironmentState,
+    ) -> Result<(), BackendError> {
+        let (candidate, previous) = {
+            let state = self.environment()?;
+            let environment = state
+                .environments
+                .get(id)
+                .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
+            if !from.contains(&environment.state) {
+                return Err(BackendError::new(format!(
+                    "filesystem environment cannot transition from {:?} to {:?}",
+                    environment.state, to
+                )));
+            }
+            let previous = environment.state;
+            let mut candidate = environment.clone();
+            candidate.state = to;
+            (candidate, previous)
+        };
+        // Persist before publishing the in-memory transition.  The Adapter
+        // serializes operations per environment; if a direct backend caller
+        // races, restore the old metadata and fail instead of lying.
+        self.persist_environment(&candidate)?;
+        let mut state = self.environment()?;
+        let current = state
+            .environments
+            .get_mut(id)
+            .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
+        if current.state != previous {
+            let rollback = current.clone();
+            drop(state);
+            let _ = self.persist_environment(&rollback);
+            return Err(BackendError::new(
+                "filesystem environment state changed during transition",
+            ));
+        }
+        current.state = to;
+        Ok(())
+    }
+
+}
+
 impl Backend for FilesystemBackend {
     fn backend_id(&self) -> &str {
         "filesystem"
@@ -54,7 +101,11 @@ impl Backend for FilesystemBackend {
                 continue;
             }
             let key = target.display().to_string();
-            let layer_key = format!("mounts/{}", short_hash(&key));
+            let layer_key = if self.snapshot_copies {
+                format!("mounts/{}/volume", short_hash(&key))
+            } else {
+                format!("mounts/{}", short_hash(&key))
+            };
             mounts.insert(
                 key,
                 MountUnit {
@@ -67,12 +118,19 @@ impl Backend for FilesystemBackend {
             );
         }
         let units: Vec<MountUnit> = mounts.values().cloned().collect();
-        if self.mechanism == FilesystemMechanism::Btrfs {
+        if self.uses_btrfs_storage() || self.snapshot_copies {
             for mount in &units {
-                if let Some(parent) = mount.upper.parent() {
+                let volume = if self.snapshot_copies {
+                    mount.upper.parent().ok_or_else(|| {
+                        BackendError::new("snapshot-copy mount upper has no volume parent")
+                    })?
+                } else {
+                    &mount.upper
+                };
+                if let Some(parent) = volume.parent() {
                     fs::create_dir_all(parent).map_err(error)?;
                 }
-                if let Err(error) = self.btrfs_create(&mount.upper) {
+                if let Err(error) = self.btrfs_create(volume) {
                     let _ = remove_path(&self.config.btrfs_path, &root, true);
                     return Err(error);
                 }
@@ -82,7 +140,7 @@ impl Backend for FilesystemBackend {
             let _ = remove_path(
                 &self.config.btrfs_path,
                 &root,
-                self.mechanism == FilesystemMechanism::Btrfs,
+                self.uses_btrfs_storage(),
             );
             return Err(error);
         }
@@ -112,7 +170,7 @@ impl Backend for FilesystemBackend {
             let _ = remove_path(
                 &self.config.btrfs_path,
                 &environment.root,
-                self.mechanism == FilesystemMechanism::Btrfs,
+                self.uses_btrfs_storage(),
             );
             return Err(error);
         }
@@ -220,60 +278,27 @@ impl Backend for FilesystemBackend {
     }
 
     fn suspend(&self, id: &str) -> Result<(), BackendError> {
-        let mut state = self.environment()?;
-        let environment = state
-            .environments
-            .get_mut(id)
-            .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
-        if environment.state != EnvironmentState::Available {
-            return Err(BackendError::new(format!(
-                "filesystem environment cannot be suspended from {:?}",
-                environment.state
-            )));
-        }
-        environment.state = EnvironmentState::Suspended;
-        let metadata = environment.clone();
-        drop(state);
-        self.persist_environment(&metadata)
+        self.transition_state(
+            id,
+            &[EnvironmentState::Available],
+            EnvironmentState::Suspended,
+        )
     }
 
     fn resume(&self, id: &str) -> Result<(), BackendError> {
-        let mut state = self.environment()?;
-        let environment = state
-            .environments
-            .get_mut(id)
-            .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
-        if environment.state != EnvironmentState::Suspended {
-            return Err(BackendError::new(format!(
-                "filesystem environment cannot be resumed from {:?}",
-                environment.state
-            )));
-        }
-        environment.state = EnvironmentState::Available;
-        let metadata = environment.clone();
-        drop(state);
-        self.persist_environment(&metadata)
+        self.transition_state(
+            id,
+            &[EnvironmentState::Suspended],
+            EnvironmentState::Available,
+        )
     }
 
     fn terminate(&self, id: &str) -> Result<(), BackendError> {
-        let mut state = self.environment()?;
-        let environment = state
-            .environments
-            .get_mut(id)
-            .ok_or_else(|| BackendError::new("unknown filesystem environment"))?;
-        if !matches!(
-            environment.state,
-            EnvironmentState::Available | EnvironmentState::Suspended
-        ) {
-            return Err(BackendError::new(format!(
-                "filesystem environment cannot be terminated from {:?}",
-                environment.state
-            )));
-        }
-        environment.state = EnvironmentState::Terminated;
-        let metadata = environment.clone();
-        drop(state);
-        self.persist_environment(&metadata)
+        self.transition_state(
+            id,
+            &[EnvironmentState::Available, EnvironmentState::Suspended],
+            EnvironmentState::Terminated,
+        )
     }
 
     fn cleanup(&self, id: &str) -> Result<(), BackendError> {
@@ -292,12 +317,13 @@ impl Backend for FilesystemBackend {
             remove_path(
                 &self.config.btrfs_path,
                 &environment.root,
-                self.mechanism == FilesystemMechanism::Btrfs,
+                self.uses_btrfs_storage(),
             )?;
             state.environments.remove(id);
             let garbage = self.refresh_references(&mut state)?;
             (environment, garbage)
         };
+        self.persist_all_snapshots()?;
         self.remove_environment_metadata(&environment.id)?;
         self.schedule_gc(garbage)?;
         Ok(())
@@ -388,18 +414,27 @@ impl Backend for FilesystemBackend {
                     &result,
                     None,
                 ) {
-                    eprintln!("filesystem: operation record was not persisted: {error}");
+                    let mut error = BackendError::new(format!(
+                        "filesystem operation {name} was applied but its operation record was not persisted: {error}"
+                    ));
+                    error.add_cleanup_failure("filesystem", "operation record persistence");
+                    return Err(error);
                 }
                 Ok(result)
             }
-            Err(error) => {
-                let _ = self.remember(
+            Err(mut error) => {
+                if let Err(remember) = self.remember(
                     &context.operation_id,
                     name,
                     context.generation,
                     &FilesystemResult::default(),
                     Some(error.to_string()),
-                );
+                ) {
+                    error.add_cleanup_failure(
+                        "filesystem",
+                        format!("failed operation record persistence: {remember}"),
+                    );
+                }
                 Err(error)
             }
         }

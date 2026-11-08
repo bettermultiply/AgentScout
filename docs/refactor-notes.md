@@ -60,19 +60,45 @@
   因此 accept 随 N 线性增长（瓶颈位置：`merge_delta_layers` 前读取
   `target_mount.upper` 整层，以及 replay source maps 构建）。
 
-## 第七轮新发现（未修）
+## 第七轮新发现的处理状态
 
-- **accept 不是 O(增量)**：`src/runtime/backends/filesystem/ops/accept.rs` 在冲突
-  检测前执行 `read_layer(&target_mount.upper)`，并构建完整 source maps；
-  benchmark 显示 100k 文件时 accept ≈2.25s（lower 链）且随 N 增长。
-- **复制路径逐文件 `sync_all`**：`src/runtime/backends/filesystem/copy.rs`
-  `copy_file` 对每个文件调用 `sync_all`，在 accept 回滚备份/恢复的大目录上会
-  放大成本。
-- **后台删除竞态**：benchmark 清理阶段出现
-  `background removal ... failed: No such file or directory`；`discard` 的 trash
-  路径与被 benchmark 清理的目录发生竞态，错误只打印，不影响退出码。
-- **flatten 成本**：状态目录与 workspace 同挂载时 fork/mark/diff/accept 都是
-  O(upper)，deployment 文档已建议把状态目录放到独立挂载点。
-- **accept 回滚仍非原子**：journal 支持逆序恢复全部已应用操作，但并发读者可能
-  在重放窗口读到中间态；文档已明确。
+- **accept 不是 O(增量)**：第八轮已修复主路径：冲突检测按 delta 路径探测，
+  不再读取完整 target upper；rename/metacopy 才构建 source 视图。
+- **复制路径逐文件 `sync_all`**：第八轮已移除；由 staging 目录原子 rename +
+  目录 sync 表示副本完成。
+- **后台删除竞态**：第八轮对 NotFound 统一视为成功，并修正 background 删除
+  路径；最终 benchmark 清理未再出现 NotFound 告警。
+- **flatten 成本**：仍存在；deployment 文档继续建议独立状态挂载点。
+- **accept 回滚仍非原子**：仍存在；journal 可逆序恢复，但读者可能看到中间态。
+
+## 第八轮补充
+
+- 新增 btrfs 快照副本模式：每个挂载 upper 位于一个 btrfs 子卷的 `upper`
+  子目录，fork/mark 用只读/可写快照，O(1)。本机普通用户 `btrfs subvolume
+  delete` 返回 EPERM，`fast_delete=false`，因此该模式在本机被禁用并 SKIP；
+  只有创建/快照/删除探测全部成功才启用。最终基准表中两个 btrfs-snapshot
+  case 均为 SKIP，非静默通过。
+- btrfs 快照模式仍保留 staging + 原子 rename；失败/崩溃的 `.tmp-*` 在下次
+  启动清理。
+- `clone_upper` 的并行克隆评估：未实现。当前 fork 的主要剩余成本是目录项遍历；
+  reflink/快照已覆盖数据拷贝，目视没有低风险且可观的收益，故不在本轮引入
+  并行目录/xattr 写入顺序风险。
+- 新增 `examples/fs_bench.rs` btrfs-snapshot 两个 case；本机因
+  `fast_delete=false` 输出 SKIP。accept lower 链最终基准约 5–6ms，不再随
+  N 线性增长。
+
+## 第八轮 FS 错误修复
+
+- `filesystem_operation` 在 operation 记录持久化失败时返回
+  “applied but operation record was not persisted”错误，并清理内存中的非持久化记录。
+- suspend/resume/terminate 改为持久化候选状态后再替换内存状态。
+- `remember`、refresh 后的 snapshot 持久化、fork/mark 的 metadata 写盘都移到
+  `state` 锁外；snapshot 持久化由 `persist_all_snapshots` 统一完成。
+- launch_fragment 的 workspace root / 新 mount 持久化失败改为返回错误。
+- opaque 目录删除失败不再被忽略，会触发 replay 错误与回滚。
+- SafeRoot::mkdir 使用源节点 mode，而不是固定 0o700。
+- btrfs send/receive 并发 drain send stderr；receive spawn 失败会 kill+wait send。
+- 损坏的 `operations.json` 改名为 `.corrupt-<pid>` 并告警。
+- 后台删除/递归删除把 NotFound 视为成功；最终 benchmark 未再出现该告警。
+- mark 的两个持久化错误不再压成 bool，原始错误进入返回消息。
 

@@ -54,10 +54,20 @@ impl FilesystemBackend {
             state.snapshots.remove(id);
             self.remove_snapshot_metadata(id);
         }
-        for snapshot in state.snapshots.values() {
-            self.persist_snapshot(snapshot)?;
-        }
         Ok(garbage)
+    }
+
+    /// Persist the current snapshot set after the global state lock has been
+    /// released.  Callers must invoke this after `refresh_references`.
+    pub(super) fn persist_all_snapshots(&self) -> Result<(), BackendError> {
+        let snapshots: Vec<SnapshotRecord> = {
+            let state = self.lock()?;
+            state.snapshots.values().cloned().collect()
+        };
+        for snapshot in snapshots {
+            self.persist_snapshot(&snapshot)?;
+        }
+        Ok(())
     }
 
     pub(super) fn schedule_gc(&self, paths: Vec<(String, PathBuf)>) -> Result<(), BackendError> {
@@ -79,7 +89,7 @@ impl FilesystemBackend {
         if !path_exists(path) {
             return Ok(());
         }
-        if self.mechanism == FilesystemMechanism::Btrfs {
+        if self.uses_btrfs_storage() {
             let _ = Command::new(&self.config.btrfs_path)
                 .args([
                     std::ffi::OsStr::new("property"),
@@ -105,7 +115,7 @@ impl FilesystemBackend {
     }
 
     pub(super) fn delete_in_background(&self, path: PathBuf) {
-        let btrfs = self.mechanism == FilesystemMechanism::Btrfs;
+        let btrfs = self.uses_btrfs_storage();
         let fast_delete = self.fast_delete;
         let btrfs_path = self.config.btrfs_path.clone();
         thread::spawn(move || {

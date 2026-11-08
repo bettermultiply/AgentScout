@@ -40,6 +40,7 @@ impl FilesystemBackend {
                 (Some(environment), None, None, garbage)
             }
         };
+        self.persist_all_snapshots()?;
         if let Some(environment) = &environment {
             self.remove_environment_metadata(&environment.id)?;
         }

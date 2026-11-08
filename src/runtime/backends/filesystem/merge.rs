@@ -1,6 +1,7 @@
 //! 三方合并与冲突检测。
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use super::layer::*;
 use crate::protocol::contract::FilesystemConflict;
@@ -24,9 +25,20 @@ pub(crate) fn conflict(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn target_upper_has_changes_under(upper: &View, path: &str) -> bool {
     let prefix = format!("{path}/");
     upper.keys().any(|key| key.starts_with(&prefix))
+}
+
+/// Path-based equivalent used by accept: it checks only the target upper
+/// subtree at `path` instead of materializing the whole target upper.
+pub(crate) fn target_upper_path_has_changes(upper: &Path, path: &str) -> bool {
+    let target = upper.join(path);
+    match fs::read_dir(&target) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -110,7 +122,7 @@ pub(crate) fn merge_delta_layers(
     redirects: &[(String, String)],
     base_layers: &[PathBuf],
     target_mount: &MountUnit,
-    target_upper: &View,
+    target_upper: &Path,
 ) -> Result<Vec<FilesystemConflict>, BackendError> {
     let mut conflicts = Vec::new();
     for (path, node) in delta {
@@ -146,7 +158,7 @@ pub(crate) fn merge_delta_layers(
             ));
         }
         if matches!(node.kind, NodeKind::Dir) && node.opaque
-            && target_upper_has_changes_under(target_upper, path)
+            && target_upper_path_has_changes(target_upper, path)
             && !conflicts.iter().any(|value| value.path == *path)
         {
             conflicts.push(conflict(

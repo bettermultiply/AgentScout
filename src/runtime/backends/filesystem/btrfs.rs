@@ -4,45 +4,67 @@ use std::path::Path;
 
 use super::*;
 
+fn btrfs_send_dump_with(
+    btrfs_path: &Path,
+    base: &Path,
+    snapshot: &Path,
+) -> Result<String, BackendError> {
+    let mut send = Command::new(btrfs_path)
+        .args([
+            std::ffi::OsStr::new("send"),
+            std::ffi::OsStr::new("-p"),
+            base.as_os_str(),
+            snapshot.as_os_str(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(error)?;
+    let stdout = send
+        .stdout
+        .take()
+        .ok_or_else(|| BackendError::new("btrfs send has no stdout"))?;
+    let stderr = send.stderr.take();
+    let stderr_thread = stderr.map(|mut stderr| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        })
+    });
+    let dump = match Command::new(btrfs_path)
+        .args([
+            std::ffi::OsStr::new("receive"),
+            std::ffi::OsStr::new("--dump"),
+        ])
+        .stdin(Stdio::from(stdout))
+        .output()
+    {
+        Ok(dump) => dump,
+        Err(value) => {
+            let _ = send.kill();
+            let _ = send.wait();
+            return Err(error(value));
+        }
+    };
+    let status = send.wait().map_err(error)?;
+    let send_error = stderr_thread
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default();
+    if !status.success() || !dump.status.success() {
+        return Err(BackendError::new(format!(
+            "btrfs send/receive --dump failed: send={status}; send_err={}; receive_err={}",
+            send_error.trim(),
+            String::from_utf8_lossy(&dump.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&dump.stdout).into_owned())
+}
+
 impl FilesystemBackend {
     pub(super) fn btrfs_send_dump(&self, base: &Path, snapshot: &Path) -> Result<String, BackendError> {
-        let mut send = Command::new(&self.config.btrfs_path)
-            .args([
-                std::ffi::OsStr::new("send"),
-                std::ffi::OsStr::new("-p"),
-                base.as_os_str(),
-                snapshot.as_os_str(),
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(error)?;
-        let stdout = send
-            .stdout
-            .take()
-            .ok_or_else(|| BackendError::new("btrfs send has no stdout"))?;
-        let dump = Command::new(&self.config.btrfs_path)
-            .args([
-                std::ffi::OsStr::new("receive"),
-                std::ffi::OsStr::new("--dump"),
-            ])
-            .stdin(Stdio::from(stdout))
-            .output()
-            .map_err(error)?;
-        let status = send.wait().map_err(error)?;
-        if !status.success() || !dump.status.success() {
-            let mut send_error = String::new();
-            if let Some(mut stderr) = send.stderr.take() {
-                use std::io::Read;
-                let _ = stderr.read_to_string(&mut send_error);
-            }
-            return Err(BackendError::new(format!(
-                "btrfs send/receive --dump failed: send={status}; send_err={}; receive_err={}",
-                send_error.trim(),
-                String::from_utf8_lossy(&dump.stderr).trim()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&dump.stdout).into_owned())
+        btrfs_send_dump_with(&self.config.btrfs_path, base, snapshot)
     }
 
     pub(super) fn btrfs_delete_strict(&self, path: &Path) -> Result<(), BackendError> {
@@ -92,6 +114,73 @@ impl FilesystemBackend {
         arguments.push(source.as_os_str());
         arguments.push(target.as_os_str());
         self.run_btrfs(&arguments)
+    }
+
+
+    pub(super) fn probe_btrfs_snapshot_copies(&self) -> bool {
+        let root = self.config.state_directory.join(".probe-btrfs-snapshot");
+        let _ = remove_path(&self.config.btrfs_path, &root, true);
+        if fs::create_dir_all(&root).is_err() {
+            return false;
+        }
+        let sub = root.join("sub");
+        let snap = root.join("snap");
+        let upper = root.join("upper");
+        let work = root.join("work");
+        let target = root.join("target");
+        let ok = self.btrfs_create(&sub).is_ok()
+            && fs::write(sub.join("file"), b"snapshot-copy").is_ok()
+            && self.btrfs_snapshot(&sub, &snap, true).is_ok()
+            && fs::create_dir_all(&upper).is_ok()
+            && fs::create_dir_all(&work).is_ok()
+            && fs::create_dir_all(&target).is_ok();
+        let mounted = if ok {
+            let command = if Path::new("/usr/bin/true").exists() {
+                "/usr/bin/true"
+            } else {
+                "/bin/true"
+            };
+            let spec = MountSpec {
+                entries: vec![
+                    MountEntry::RoBind {
+                        source: PathBuf::from("/"),
+                        target: PathBuf::from("/"),
+                    },
+                    MountEntry::Proc {
+                        target: PathBuf::from("/proc"),
+                    },
+                    MountEntry::Dev {
+                        target: PathBuf::from("/dev"),
+                    },
+                    MountEntry::Overlay {
+                        lowers: vec![snap.clone()],
+                        upper: upper.clone(),
+                        work: work.clone(),
+                        target: target.clone(),
+                    },
+                ],
+                chdir: Some(PathBuf::from("/")),
+                json_status_fd: None,
+            };
+            let mut probe = Command::new(&self.config.bubblewrap_path);
+            spec.apply(&mut probe);
+            matches!(
+                probe
+                    .arg("--")
+                    .arg(command)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status(),
+                Ok(status) if status.success()
+            )
+        } else {
+            false
+        };
+        let _ = self.btrfs_delete_strict(&snap);
+        let _ = self.btrfs_delete_strict(&sub);
+        let _ = remove_path(&self.config.btrfs_path, &root, true);
+        mounted
     }
 
     pub(super) fn btrfs_delta(
@@ -233,3 +322,35 @@ pub(super) fn parse_send_dump(dump: &str, layer_key: &str) -> Vec<FilesystemChan
     changes
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn send_dump_drains_large_send_stderr() {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("fake-btrfs.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+if [ "$1" = "send" ]; then
+  i=0
+  while [ "$i" -lt 20000 ]; do
+    echo "send stderr line $i" >&2
+    i=$((i+1))
+  done
+  echo "send payload"
+else
+  cat >/dev/null
+  echo "receive dump"
+fi
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dump = btrfs_send_dump_with(&script, root.path(), root.path()).unwrap();
+        assert!(dump.contains("receive dump"));
+    }
+}

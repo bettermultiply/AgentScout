@@ -183,6 +183,103 @@ print("ok" if data else "fail")
     }
 
     #[test]
+    fn persistence_failures_are_reported_and_locks_are_released() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let root = temp();
+        let backend = Arc::new(new_overlay_backend(root.path()));
+        backend.establish("root").unwrap();
+
+        let base = root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let launch = AgentLaunch {
+            command: "/bin/true".into(),
+            args: Vec::new(),
+            cwd: base,
+            log: root.path().join("agent.log"),
+            instance_id: None,
+            env: BTreeMap::new(),
+        };
+        backend.inject_environment_persist_failure(true);
+        let launch_error = backend
+            .launch_fragment(&BackendContext::new("root"), &launch)
+            .unwrap_err();
+        assert!(launch_error
+            .message
+            .contains("failed to persist workspace root"));
+        backend.inject_environment_persist_failure(false);
+
+        backend.inject_environment_persist_failure(true);
+        let error = backend.suspend("root").unwrap_err();
+        assert!(error.message.contains("injected environment persistence failure"));
+        assert_eq!(backend.state("root"), Some(EnvironmentState::Available));
+        backend.inject_environment_persist_failure(false);
+
+        backend.inject_operation_persist_failure(true);
+        let context = BackendContext {
+            operation_id: "persist-failure-fork".into(),
+            generation: 1,
+            environment_id: "root".into(),
+            ..BackendContext::default()
+        };
+        let operation = Operation::FilesystemFork {
+            parent_snapshot_id: "root".into(),
+            child_snapshot_id: "child".into(),
+            path_scope: vec![],
+        };
+        let error = backend
+            .filesystem_operation(&context, &operation, &CancelHandle::default())
+            .unwrap_err();
+        assert!(error.message.contains("was applied but its operation record"));
+        assert!(error
+            .cleanup_failures
+            .iter()
+            .any(|value| value.contains("operation record")));
+        backend.inject_operation_persist_failure(false);
+        backend.terminate("child").unwrap();
+        backend.discard("child", &[]).unwrap();
+
+        backend.inject_persist_delay(500);
+        let worker = backend.clone();
+        let thread = std::thread::spawn(move || worker.suspend("root"));
+        std::thread::sleep(Duration::from_millis(100));
+        let start = Instant::now();
+        assert_eq!(backend.state("root"), Some(EnvironmentState::Available));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "state() blocked on persistence lock for {elapsed:?}"
+        );
+        thread.join().unwrap().unwrap();
+        backend.inject_persist_delay(0);
+        backend.resume("root").unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn corrupt_operations_metadata_is_isolated() {
+        let root = temp();
+        let backend = new_overlay_backend(root.path());
+        backend.establish("root").unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+        drop(backend);
+        let operations = root.path().join("state/metadata/operations.json");
+        fs::write(&operations, b"{not-json").unwrap();
+        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        assert!(!operations.exists(), "corrupt operations file was not moved");
+        let corrupt: Vec<_> = fs::read_dir(root.path().join("state/metadata"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("operations.json.corrupt-"))
+            .collect();
+        assert_eq!(corrupt.len(), 1, "corrupt operations file was not isolated");
+        drop(backend);
+    }
+
+    #[test]
     fn overlapping_state_directory_is_reported_and_flattened() {
         let root = btrfs_temp();
         let backend = new_overlay_backend(root.path());

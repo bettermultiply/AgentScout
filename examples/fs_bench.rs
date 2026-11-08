@@ -59,6 +59,23 @@ fn main() {
             workspace: PathBuf::from(format!("/tmp/ascout-fs-bench-{pid}/ws")),
             cleanup: vec![PathBuf::from(format!("/tmp/ascout-fs-bench-{pid}"))],
         },
+        Case {
+            name: "btrfs-snapshot-flatten",
+            root: project.join(format!("target/fs-bench-{pid}-snapshot-flatten")),
+            state: project.join(format!("target/fs-bench-{pid}-snapshot-flatten/state")),
+            workspace: project.join(format!("target/fs-bench-{pid}-snapshot-flatten/ws")),
+            cleanup: vec![project.join(format!("target/fs-bench-{pid}-snapshot-flatten"))],
+        },
+        Case {
+            name: "btrfs-snapshot-lower",
+            root: project.join(format!("target/fs-bench-{pid}-snapshot-lower")),
+            state: PathBuf::from(format!("/var/tmp/ascout-fs-bench-snapshot-state-{pid}")),
+            workspace: project.join(format!("target/fs-bench-{pid}-snapshot-lower/ws")),
+            cleanup: vec![
+                project.join(format!("target/fs-bench-{pid}-snapshot-lower")),
+                PathBuf::from(format!("/var/tmp/ascout-fs-bench-snapshot-state-{pid}")),
+            ],
+        },
     ];
 
     println!("machine:");
@@ -112,6 +129,13 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), String> {
         .filesystem_fork_cost
         .clone()
         .unwrap_or_else(|| "unknown".into());
+    if case.name.starts_with("btrfs-snapshot") && fork_cost != "btrfs_snapshot" {
+        println!(
+            "{},{},all,SKIP: btrfs snapshot copies unavailable fork_cost={},,,",
+            case.name, n, fork_cost
+        );
+        return Ok(());
+    }
     let mechanism = backend.mechanism().as_str().to_string();
     let cwd = case.workspace.clone();
     let mut total = BTreeMap::<&'static str, Vec<Duration>>::new();

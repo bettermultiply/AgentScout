@@ -121,26 +121,34 @@ impl FilesystemBackend {
             };
             let base_layers =
                 Self::snapshot_mount_layers(&base_record, &source_environment, mount);
-            let target_upper = read_layer(&target_mount.upper)?;
             conflicts.extend(
                 merge_delta_layers(
                     &delta,
                     &redirects,
                     &base_layers,
                     target_mount,
-                    &target_upper,
+                    &target_mount.upper,
                 )?
                 .into_iter()
                 .map(|conflict| prefix_conflict(&mount.target, conflict)),
             );
-            let source_maps = if self.mechanism == FilesystemMechanism::Btrfs
-                || self.mount_uses_flattening(mount)
-            {
-                vec![read_layer(&mount.upper)?]
+            // Only rename/metacopy handling needs a source-wide view.  The
+            // common modify/delete/create path replays nodes directly from the
+            // delta and never scans the whole source or target upper.
+            let needs_source_maps =
+                !redirects.is_empty() || delta.values().any(|node| node.metacopy);
+            let source_maps = if needs_source_maps {
+                if self.mechanism == FilesystemMechanism::Btrfs
+                    || self.mount_uses_flattening(mount)
+                {
+                    vec![read_layer(&mount.upper)?]
+                } else {
+                    let mut maps = self.read_chain(&mount.lower, mount)?;
+                    maps.push(read_layer(&mount.upper)?);
+                    maps
+                }
             } else {
-                let mut maps = self.read_chain(&mount.lower, mount)?;
-                maps.push(read_layer(&mount.upper)?);
-                maps
+                Vec::new()
             };
             let _ = key;
             prepared.push((mount.clone(), target_mount.clone(), delta, redirects, source_maps));
@@ -216,6 +224,7 @@ impl FilesystemBackend {
                 return Err(error);
             }
         }
+        journal.sync()?;
         journal.cleanup();
 
         let mut result = FilesystemResult::default();

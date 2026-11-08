@@ -10,7 +10,16 @@
     overlay xattr、权限、符号链接和 mtime；不使用硬链接。
   - 子 lower = 父 lower + S，子 upper 为空。父 upper、lower 和运行中挂载不变。
   - S 由子（以及 mark/diff 基准）引用，按引用计数 GC。
-  - `filesystem_fork_cost=reflink|copy`，启动时在状态目录文件系统上试 FICLONE。
+  - 快照层/副本层先写入 staging 目录，完成后原子 rename 到最终路径并 sync 父目录；
+    没有完成 rename 的 `.tmp-*` 在下次启动清理，不被视为有效层。复制文件不再
+    逐文件 `sync_all`。
+  - `filesystem_fork_cost=btrfs_snapshot|reflink|copy`。选择顺序：
+    **方案 A（btrfs 增量）→ 方案 2 + btrfs 快照副本 → reflink → copy**。
+  - 当状态目录在 btrfs 且 `probe_btrfs_snapshot_copies` 成功（创建/只读快照/
+    overlay lower/子卷删除均可用）时，每个挂载的 upper 置于一个 btrfs 子卷的
+    `upper` 目录中，fork/mark 用只读快照产生层，成本 O(1)；子 upper 是新的空
+    子卷，flatten 情形用可写快照。若子卷删除不可用（本机 `fast_delete=false`），
+    不启用该模式，避免 discard 无法回收。
   - FS Backend 自身不冻结写者。经 BaseRuntime 调用时，进程在 fork/mark/accept
     前由 ProcessBackend 冻结，成功后 `writers_quiesced=true`；直接调用 FS API 或
     冻结机制为 `none` 时仍为 false，并发写可能导致副本跨文件交错。
@@ -24,8 +33,20 @@
     overlay 并在日志/能力中说明。btrfs diff/accept 已实现：diff 解析 send dump，
     accept 用同一 dump 构建增量视图后走 live-mount/openat2 重放。本机无权限，
     btrfs 测试 SKIP；高权限验证见 `scripts/priv-check.sh`。
+- **btrfs 快照副本（overlay 方案 2）**
+  - 探测 `probe_btrfs_snapshot_copies`：建子卷、写文件、只读快照、把快照作为
+    overlay lower 真实 bwrap 挂载、删除子卷。全部成功且 `fast_delete=true`
+    才启用。
+  - 每个挂载 upper 位于一个 btrfs 子卷的 `upper` 子目录；fork 用只读快照作为
+    lower 层，子 upper 为新空子卷；flatten 情形用可写快照。mark 用只读快照。
+  - 选择顺序：方案 A → 方案 2 + btrfs 快照 → reflink → copy。
+  - 本机普通用户 `btrfs subvolume delete` EPERM，因此本机不启用，测试与基准
+    条目打印 SKIP；具备删除权限的环境应得到 O(1) fork/mark。
+  - 测试：`btrfs_snapshot_copy_fork_is_end_to_end`（本机 SKIP）。
+
 - **mark**
   - overlay：逐选中挂载独立复制当前 upper，不改 live upper。
+  - overlay + btrfs_snapshot：逐选中挂载对 upper 所在子卷做只读快照，O(1)。
   - btrfs：逐选中挂载只读子卷快照，不改 live upper。
 - **diff**
   - overlay：扫描分支 upper 增量，不读内容。
@@ -51,6 +72,10 @@
     路径并进入 `cleanup_failures`。成功后删除日志区。
   - 重放是“可回滚、非原子”：并发读者可能在中间态读到部分结果，不宣称原子；
     失败时 `published=false`。
+  - lower 链 accept 只对 source 相对 base 的增量路径探测 ours；不再读取完整
+    target upper。rename/metacopy 才构建 source 视图。计数测试
+    `accept_work_does_not_scale_with_unrelated_upper_size` 证明 5000 个无关文件
+    不会增加扫描项。
 - **状态目录重叠检测**
   - 启动时列出状态目录所在的 overlay 挂载点，写入能力字段
     `state_directory_overlaps_mount`，并打印
@@ -73,6 +98,14 @@
   - 环境、快照、operation 记录持久化并可重启读回。
   - operation id + generation 重放返回同一结果；更小 generation 为 stale。
   - fork/mark 重放验证快照和元数据存在，否则报错。
+  - operation 记录持久化失败时，已生效操作返回
+    “applied but operation record was not persisted” 错误，不静默忽略。
+  - suspend/resume/terminate 先持久化候选状态，成功后才替换内存状态；失败保持
+    原状态。全局 state 锁外执行持久化写盘。
+  - 损坏的 `operations.json` 会改名为 `.corrupt-<pid>` 并告警，不静默当作空。
+  - 副本层使用 staging 目录 + 原子 rename + 目录 sync；没有完成 rename 的
+    `.tmp-*` 在下次启动清理，不视为有效层。
+  - `btrfs send | receive --dump` 并发 drain send stderr，避免大输出死锁。
 
 ## 未实现 / Phase 2
 
@@ -99,9 +132,14 @@
 - btrfs 低权限下通常不满足 `incremental_diff`，会降级 overlay；btrfs fork 代码
   路径在本机未被选中，未做端到端验证。
 - accept 直接写 upper / live mount 重放均非原子。
+- 并行 `clone_upper` 未实现：reflink/快照已覆盖数据拷贝，剩余主要成本是目录项
+  遍历；并行目录/xattr/whiteout 写入顺序风险未在本轮引入。
 - 当前挂载含状态目录时，fork 采用“upper 展平 + 快照仅作 diff 元数据”，不再把
   该快照层作为 lowerdir；这是为了避免 OverlayFS 的
   `Overlay directories may not overlap`。
+- 本机 btrfs 支持创建子卷/只读快照，但普通用户 `btrfs subvolume delete` 返回
+  EPERM（`fast_delete=false`），因此 btrfs 快照副本模式在本机被禁用，测试打印
+  SKIP；在具备子卷删除权限的环境应启用。
 
 ## 未验证 / 需高权限
 
@@ -191,6 +229,20 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
 权威写入留在 branch upper，宿主观察者看不到；何时物化回真实 workspace 仍未实现，
 属于设计已知点。
 
+## 成本表（实测/推断）
+
+| 操作 | 方案 A btrfs 增量 | 方案 2 + btrfs 快照 | 方案 2 + reflink | 方案 2 + copy |
+|---|---|---|---|---|
+| fork | O(1) 快照（推断） | O(1) 快照（推断；本机因删除权限 SKIP） | O(目录项数) | O(目录项数 + 数据) |
+| mark | O(1) 快照 | O(1) 快照 | O(upper 目录项数) | O(upper 数据) |
+| diff lower 链 | O(增量 + send) | O(增量) | O(增量) | O(增量) |
+| diff flatten | O(upper) | O(upper) | O(upper) | O(upper) |
+| accept lower 链 | O(增量) | O(增量) | O(增量) | O(增量) |
+| accept flatten | O(upper) | O(upper) | O(upper) | O(upper) |
+| discard 热路径 | O(1) rename | O(1) rename + 后台删除 | O(1) rename | O(1) rename |
+
+`accept` 的 O(增量) 已由本轮计数测试和最终基准验证；flatten 仍为 O(upper)。
+
 ## 性能实测
 
 环境：kernel `7.2.14-zen1-1-zen`，CPU `AMD Ryzen 7 5800H with Radeon Graphics`。
@@ -208,51 +260,77 @@ workspace 都在 `/tmp` tmpfs，flatten。
 
 | case | N | operation | p50_ms | p95_ms | fork_cost | mechanism | overlaps |
 |---|---|---|---|---|---|---|---|
-| reflink-flatten | 100 | accept | 260.379 | 527.012 | reflink | overlay | /home |
-| reflink-flatten | 100 | diff | 53.665 | 99.554 | reflink | overlay | /home |
-| reflink-flatten | 100 | discard | 0.596 | 0.731 | reflink | overlay | /home |
-| reflink-flatten | 100 | fork | 162.033 | 244.277 | reflink | overlay | /home |
-| reflink-flatten | 100 | mark | 212.771 | 406.348 | reflink | overlay | /home |
-| reflink-flatten | 10000 | accept | 527.496 | 548.895 | reflink | overlay | /home |
-| reflink-flatten | 10000 | diff | 259.083 | 263.265 | reflink | overlay | /home |
-| reflink-flatten | 10000 | discard | 0.367 | 0.442 | reflink | overlay | /home |
-| reflink-flatten | 10000 | fork | 1592.009 | 1724.363 | reflink | overlay | /home |
-| reflink-flatten | 10000 | mark | 669.853 | 679.776 | reflink | overlay | /home |
-| reflink-flatten | 100000 | accept | 5141.801 | 5224.610 | reflink | overlay | /home |
-| reflink-flatten | 100000 | diff | 2589.382 | 2688.416 | reflink | overlay | /home |
-| reflink-flatten | 100000 | discard | 0.444 | 0.552 | reflink | overlay | /home |
-| reflink-flatten | 100000 | fork | 16183.801 | 16930.011 | reflink | overlay | /home |
-| reflink-flatten | 100000 | mark | 6770.704 | 6979.829 | reflink | overlay | /home |
-| reflink-lower | 100 | accept | 22.406 | 23.694 | reflink | overlay | /var/tmp |
-| reflink-lower | 100 | diff | 3.791 | 4.241 | reflink | overlay | /var/tmp |
-| reflink-lower | 100 | discard | 0.331 | 0.405 | reflink | overlay | /var/tmp |
-| reflink-lower | 100 | fork | 19.532 | 21.100 | reflink | overlay | /var/tmp |
-| reflink-lower | 100 | mark | 15.596 | 17.329 | reflink | overlay | /var/tmp |
-| reflink-lower | 10000 | accept | 230.464 | 234.675 | reflink | overlay | /var/tmp |
-| reflink-lower | 10000 | diff | 4.136 | 4.316 | reflink | overlay | /var/tmp |
-| reflink-lower | 10000 | discard | 0.400 | 0.433 | reflink | overlay | /var/tmp |
-| reflink-lower | 10000 | fork | 641.238 | 644.489 | reflink | overlay | /var/tmp |
-| reflink-lower | 10000 | mark | 16.353 | 17.134 | reflink | overlay | /var/tmp |
-| reflink-lower | 100000 | accept | 2161.833 | 2289.174 | reflink | overlay | /var/tmp |
-| reflink-lower | 100000 | diff | 4.164 | 8.284 | reflink | overlay | /var/tmp |
-| reflink-lower | 100000 | discard | 0.398 | 0.448 | reflink | overlay | /var/tmp |
-| reflink-lower | 100000 | fork | 6569.708 | 6708.488 | reflink | overlay | /var/tmp |
-| reflink-lower | 100000 | mark | 15.038 | 28.847 | reflink | overlay | /var/tmp |
-| tmpfs-flatten | 100 | accept | 4.235 | 4.433 | copy | overlay | /tmp |
-| tmpfs-flatten | 100 | diff | 1.663 | 1.862 | copy | overlay | /tmp |
-| tmpfs-flatten | 100 | discard | 0.107 | 0.142 | copy | overlay | /tmp |
-| tmpfs-flatten | 100 | fork | 6.544 | 6.715 | copy | overlay | /tmp |
-| tmpfs-flatten | 100 | mark | 3.419 | 3.617 | copy | overlay | /tmp |
-| tmpfs-flatten | 10000 | accept | 325.180 | 326.711 | copy | overlay | /tmp |
-| tmpfs-flatten | 10000 | diff | 163.115 | 163.650 | copy | overlay | /tmp |
-| tmpfs-flatten | 10000 | discard | 0.140 | 0.152 | copy | overlay | /tmp |
-| tmpfs-flatten | 10000 | fork | 618.973 | 619.960 | copy | overlay | /tmp |
-| tmpfs-flatten | 10000 | mark | 314.811 | 316.487 | copy | overlay | /tmp |
-| tmpfs-flatten | 100000 | accept | 3311.214 | 3325.918 | copy | overlay | /tmp |
-| tmpfs-flatten | 100000 | diff | 1674.503 | 1680.317 | copy | overlay | /tmp |
-| tmpfs-flatten | 100000 | discard | 0.153 | 0.171 | copy | overlay | /tmp |
-| tmpfs-flatten | 100000 | fork | 6157.635 | 6179.910 | copy | overlay | /tmp |
-| tmpfs-flatten | 100000 | mark | 3129.533 | 3225.852 | copy | overlay | /tmp |
+| btrfs-snapshot-flatten | 100 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
+| btrfs-snapshot-flatten | 10000 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
+| btrfs-snapshot-flatten | 100000 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
+| btrfs-snapshot-lower | 100 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
+| btrfs-snapshot-lower | 10000 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
+| btrfs-snapshot-lower | 100000 | all | SKIP: btrfs snapshot copies unavailable fork_cost=reflink |  |  |  |
+| reflink-flatten | 100 | accept | 8.801 | 13.433 | reflink | overlay | /home |
+| reflink-flatten | 100 | diff | 6.143 | 8.564 | reflink | overlay | /home |
+| reflink-flatten | 100 | discard | 0.614 | 1.191 | reflink | overlay | /home |
+| reflink-flatten | 100 | fork | 29.781 | 45.363 | reflink | overlay | /home |
+| reflink-flatten | 100 | mark | 19.407 | 27.606 | reflink | overlay | /home |
+| reflink-flatten | 10000 | accept | 272.239 | 287.042 | reflink | overlay | /home |
+| reflink-flatten | 10000 | diff | 271.157 | 286.988 | reflink | overlay | /home |
+| reflink-flatten | 10000 | discard | 0.575 | 0.761 | reflink | overlay | /home |
+| reflink-flatten | 10000 | fork | 1732.160 | 1819.097 | reflink | overlay | /home |
+| reflink-flatten | 10000 | mark | 904.401 | 1023.580 | reflink | overlay | /home |
+| reflink-flatten | 100000 | accept | 2707.857 | 2995.416 | reflink | overlay | /home |
+| reflink-flatten | 100000 | diff | 2705.498 | 2810.918 | reflink | overlay | /home |
+| reflink-flatten | 100000 | discard | 0.680 | 0.853 | reflink | overlay | /home |
+| reflink-flatten | 100000 | fork | 21334.920 | 23178.252 | reflink | overlay | /home |
+| reflink-flatten | 100000 | mark | 7219.313 | 8422.537 | reflink | overlay | /home |
+| reflink-lower | 100 | accept | 5.100 | 5.225 | reflink | overlay | /var/tmp |
+| reflink-lower | 100 | diff | 3.107 | 3.218 | reflink | overlay | /var/tmp |
+| reflink-lower | 100 | discard | 0.406 | 0.460 | reflink | overlay | /var/tmp |
+| reflink-lower | 100 | fork | 16.153 | 17.086 | reflink | overlay | /var/tmp |
+| reflink-lower | 100 | mark | 10.881 | 11.608 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | accept | 5.249 | 5.601 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | diff | 3.174 | 3.245 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | discard | 0.421 | 0.469 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | fork | 644.411 | 653.522 | reflink | overlay | /var/tmp |
+| reflink-lower | 10000 | mark | 11.298 | 11.529 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | accept | 6.366 | 15.214 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | diff | 4.434 | 12.126 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | discard | 0.418 | 0.506 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | fork | 6817.275 | 7208.904 | reflink | overlay | /var/tmp |
+| reflink-lower | 100000 | mark | 16.736 | 51.573 | reflink | overlay | /var/tmp |
+| tmpfs-flatten | 100 | accept | 2.564 | 2.582 | copy | overlay | /tmp |
+| tmpfs-flatten | 100 | diff | 1.662 | 1.714 | copy | overlay | /tmp |
+| tmpfs-flatten | 100 | discard | 0.108 | 0.122 | copy | overlay | /tmp |
+| tmpfs-flatten | 100 | fork | 6.493 | 6.534 | copy | overlay | /tmp |
+| tmpfs-flatten | 100 | mark | 3.393 | 3.451 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | accept | 163.562 | 171.390 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | diff | 162.097 | 166.976 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | discard | 0.142 | 0.161 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | fork | 617.501 | 628.632 | copy | overlay | /tmp |
+| tmpfs-flatten | 10000 | mark | 315.190 | 317.426 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | accept | 1665.411 | 1715.608 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | diff | 1667.799 | 1816.359 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | discard | 0.149 | 0.168 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | fork | 6167.011 | 6366.283 | copy | overlay | /tmp |
+| tmpfs-flatten | 100000 | mark | 3148.152 | 3249.308 | copy | overlay | /tmp |
+
+### 结论与瓶颈（如实）
+
+- **lower 链 accept 已做到 O(增量)**：`reflink-lower` 的 accept 在
+  100 / 10k / 100k 下 p50 约 5.1 / 5.2 / 6.4ms，基本不随 upper 总大小增长。
+  这是本轮任务 1 的实测结果。
+- **lower 链 diff 仍是 O(增量)**：约 3.1 / 3.2 / 4.4ms。
+- **lower 链 mark 接近 O(1)**：约 10.9 / 11.3 / 16.7ms。
+- **fork 仍随 N 增长**：reflink lower 16ms → 644ms → 6.82s。reflink 只省数据
+  拷贝，仍要遍历 N 个目录项；btrfs 快照副本在可用环境应提供 O(1) fork，但本机
+  `fast_delete=false`，基准显示 SKIP。
+- **flatten 路径仍 O(upper)**：`reflink-flatten` fork 29.8ms → 1.73s → 21.3s，
+  mark 19.4ms → 904ms → 7.22s，diff/accept 也随 N 增长。状态目录与 workspace
+  同挂载时无法使用 lower 链增量。
+- **tmpfs 复制路径随 N 增长**：100k fork 6.17s、mark 3.15s、accept 1.67s。
+- **discard 热路径仍 O(1)**：所有 case 约 0.1–0.7ms。
+- 本轮基准未再出现 prior background removal 的 NotFound 告警。
+- `btrfs-snapshot-*` 两个 case 本机 SKIP：普通用户无法 `btrfs subvolume delete`
+  （`fast_delete=false`），快照副本模式按设计不启用；在具备子卷删除权限的
+  环境应产出实际数字。
 
 ### 结论与瓶颈（如实）
 
@@ -273,6 +351,19 @@ workspace 都在 `/tmp` tmpfs，flatten。
 - 基准结束清理阶段出现一次后台删除竞态：
   `background removal ... failed: No such file or directory`；属于清理/后台删除
   路径已不存在时的竞态，已记录在 `docs/refactor-notes.md`，本轮未修。
+
+### 第八轮新增测试证据
+
+| 项 | 证据 |
+|---|---|
+| accept 不扫描无关 upper | `accept_work_does_not_scale_with_unrelated_upper_size`（read_layer entry 计数） |
+| staged clone 崩溃恢复 | `failed_clone_and_orphan_staging_are_not_valid_layers` |
+| 持久化失败返回错误 / 锁外写盘 | `persistence_failures_are_reported_and_locks_are_released` |
+| opaque 删除失败中止重放 | `opaque_removal_error_aborts_replay` |
+| SafeRoot mkdir mode | `safe_root_mkdir_preserves_source_mode` |
+| btrfs send stderr drain | `send_dump_drains_large_send_stderr` |
+| 损坏 operations.json 隔离 | `corrupt_operations_metadata_is_isolated` |
+| btrfs 快照 fork | `btrfs_snapshot_copy_fork_is_end_to_end`（本机 SKIP） |
 
 ## P4 调研结论：btrfs 增量
 

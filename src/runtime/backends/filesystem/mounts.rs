@@ -121,15 +121,13 @@ impl FilesystemBackend {
         }
         if environment.workspace_root.as_deref() != Some(launch.cwd.as_path()) {
             environment.workspace_root = Some(launch.cwd.clone());
-            {
-                let mut state = self.environment()?;
-                state
-                    .environments
-                    .insert(environment.id.clone(), environment.clone());
-            }
-            if let Err(error) = self.persist_environment(&environment) {
-                eprintln!("filesystem: failed to persist workspace root: {error}");
-            }
+            self.persist_environment(&environment).map_err(|error| {
+                BackendError::new(format!("failed to persist workspace root: {error}"))
+            })?;
+            let mut state = self.environment()?;
+            state
+                .environments
+                .insert(environment.id.clone(), environment.clone());
         }
         // Add mount units that appeared after establish (or were absent from
         // migrated legacy metadata).  Every writable overlayable mount is a
@@ -143,7 +141,11 @@ impl FilesystemBackend {
             if environment.mounts.contains_key(&key) {
                 continue;
             }
-            let layer_key = format!("mounts/{}", short_hash(&key));
+            let layer_key = if self.snapshot_copies {
+                format!("mounts/{}/volume", short_hash(&key))
+            } else {
+                format!("mounts/{}", short_hash(&key))
+            };
             environment.mounts.insert(
                 key,
                 MountUnit {
@@ -164,16 +166,27 @@ impl FilesystemBackend {
         }
         if mounts_added {
             let units: Vec<MountUnit> = environment.mounts.values().cloned().collect();
+            if self.snapshot_copies {
+                for mount in &units {
+                    let volume = mount.upper.parent().ok_or_else(|| {
+                        BackendError::new("snapshot-copy mount upper has no volume parent")
+                    })?;
+                    if !path_exists(volume) {
+                        if let Some(parent) = volume.parent() {
+                            fs::create_dir_all(parent).map_err(error)?;
+                        }
+                        self.btrfs_create(volume)?;
+                    }
+                }
+            }
             Self::prepare_mount_dirs(&units)?;
-            {
-                let mut state = self.environment()?;
-                state
-                    .environments
-                    .insert(environment.id.clone(), environment.clone());
-            }
-            if let Err(error) = self.persist_environment(&environment) {
-                eprintln!("filesystem: failed to persist newly discovered mounts: {error}");
-            }
+            self.persist_environment(&environment).map_err(|error| {
+                BackendError::new(format!("failed to persist newly discovered mounts: {error}"))
+            })?;
+            let mut state = self.environment()?;
+            state
+                .environments
+                .insert(environment.id.clone(), environment.clone());
         }
 
         let mut fragment = LaunchFragment {
