@@ -17,6 +17,14 @@ namespace 后以 `/proc/<pid>/root` dirfd 为根、通过 `openat2(RESOLVE_IN_RO
 安全重放。btrfs 只有在当前权限下 `incremental_diff=true` 时才会被选为数据面，
 否则降级 overlay 并在能力/日志中说明。
 
+btrfs diff/accept 共用 send dump 增量视图：从 snapshot 声明取得根前缀，按
+`rename <source> dest=<target>` 跟踪临时 inode 名称、真实 rename 和删除，普通
+变更统一输出 `change`。真实目录 rename 只读取目标子树以补足没有独立 send
+命令的未修改子项，不扫描无关 upper。2026-11-09 用户的 `log.txt` 已证明宿主
+create/snapshot/send dump/严格删除和初始 userns 的 direct root overlay 成功；
+Rust btrfs 测试在 diff 断言失败，尚未到 accept。修复已做无特权回归，仍需用户
+重跑 `scripts/priv-check.sh`，不能据此宣称 btrfs accept 特权端到端通过。
+
 尚待实现：受管文件效果的合法生效路径、主动 Registry 验证和运行时偏差检测；`diff(target=Some(_))` 明确返回未实现。Overlay 变更的 accept/冲突处理已实现：三方冲突检测后，无 live mount 时直接写目标 upper，有 live mount 时经 mount namespace 校验与 `openat2` 安全重放。该 Backend 只负责文件系统，不负责进程终止、网络、内存、资源或 Agent Session；进程启动、冻结、终止和句柄由 `runtime/process` 的 ProcessBackend 负责，FilesystemBackend 只产出 `LaunchFragment` 中的挂载条目。它要求 Linux、可执行 bubblewrap、可创建 user/mount namespace 且宿主允许 OverlayFS；任一条件不满足时启动失败，不回退到未隔离启动。ProcessBackend 将 Agent 入口放入独立进程组，cgroup v2 可用时用 `cgroup.freeze`，否则回退进程组 SIGSTOP/SIGCONT；若 Agent 主动创建新 session/cgroup 脱离控制，则不在本版停止保证内。cleanup 会先停止 Agent，停止失败时保留进程句柄并禁止删除 upper/work；只有停止成功后才清理 inner 和 filesystem，任一清理失败都返回失败，不报告 cleanup 已收敛。无 context 的 Backend 方法统一转入 context 路径。establish/branch 的组合失败回滚同样先 terminate filesystem environment，再 cleanup；回滚错误追加到原始 BackendError 的 cleanup_failures。BaseRuntime 配置 filesystem 时，generic operate、tool_context 和 invoke_tool 仍只委托 inner Backend；filesystem 只检查环境状态，并在 Agent 启动时提供可继承的 namespace/Overlay 视图，不执行同一业务命令。
 
 Adapter 中的生命周期状态门槛是所有 Runtime 共同遵守的契约，不是 filesystem

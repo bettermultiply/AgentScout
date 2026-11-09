@@ -45,7 +45,8 @@
     `btrfs send -p <snapshot> <snapshot> | btrfs receive --dump`。失败则降级
     overlay 并在日志/能力中说明。btrfs diff/accept 已实现：diff 解析 send dump，
     accept 用同一 dump 构建增量视图后走 live-mount/openat2 重放。本机无权限，
-    btrfs 测试 SKIP；高权限验证见 `scripts/priv-check.sh`。
+    无特权 btrfs 测试 SKIP；用户 2026-11-09 的特权运行已到 diff，暴露 dump
+    前缀/rename 解析错误，已修复但尚未重跑完整 accept。见 `scripts/priv-check.sh`。
 - **btrfs 快照副本（overlay 方案 2）**
   - 探测 `probe_btrfs_snapshot_copies`：建子卷、写文件、只读快照、把快照作为
     overlay lower 真实 bwrap 挂载，再走 btrfs-aware 递归删除路径确认能删净。
@@ -150,8 +151,8 @@
 
 - overlay fork 的副本不是冻结快照：并发写时各文件可能来自不同时刻；是否冻结
   由 BaseRuntime/ProcessBackend 在操作窗口内负责。
-- btrfs 低权限下通常不满足 `incremental_diff`，会降级 overlay；btrfs fork 代码
-  路径在本机未被选中，未做端到端验证。
+- btrfs 低权限下通常不满足 `incremental_diff`，会降级 overlay；用户特权日志已
+  选中 btrfs，Rust 测试在 diff 断言失败，修复后的端到端尚未重跑。
 - accept 直接写 upper / live mount 重放均非原子。
 - 并行 `clone_upper` 未实现：reflink/快照已覆盖数据拷贝，剩余主要成本是目录项
   遍历；并行目录/xattr/whiteout 写入顺序风险未在本轮引入。
@@ -163,8 +164,9 @@
 
 ## 未验证 / 需高权限
 
-- **btrfs fork/diff/accept 成功路径**：本机 send/subvolume 无权限，探测降级
-  overlay；需要高权限环境验证。测试在不满足条件时打印 `SKIP`。运行
+- **btrfs fork/diff/accept 成功路径**：用户 `log.txt` 已证明真实 send dump 可用，
+  dump snapshot 前缀、临时 `rename ... dest=...`、真实 rename/删除与共用 accept
+  增量视图已有无特权回归；修复后的特权 Rust accept 全程仍待重跑。运行
   `scripts/priv-check.sh`，见 `docs/fs-backend/priv-check.md`。
 - **严格 btrfs subvolume delete ioctl**：本机 `fast_delete=false`；fallback 的
   O(文件数) 后台删除未做大数据量性能验证。
@@ -547,8 +549,8 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 - **无特权、直接 lower=/：不可行**（根继承的 locked 子挂载）。
 - **无特权、新根/新挂载树：可行**。实验：pivot_root 到 userns 内新建的 tmpfs 根，
   子挂载也由 userns 创建（非 locked），`lowerdir=/` overlay 成功。
-- **有特权初始 userns：预计直接 lower=/ 可行**，因为继承挂载不再是 MNT_LOCKED；
-  本机无 sudo/初始 userns 权限，未实测，标记推断。
+- **有特权初始 userns：直接 lower=/ 可行**，用户 2026-11-09 的 `log.txt`
+  263–266、310–311 行分别记录脚本检查和 Rust direct-root 测试通过。
 - **备选：逐挂载点 overlay**：可行，但必须处理 locked 子挂载和嵌套挂载。
 
 ### 嵌套/相邻挂载
@@ -603,11 +605,11 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | upper/work 在 lower 路径之下本身不会 EINVAL | **实测**：lower=/tmp、upper/work 在 /tmp 下成功 |
 | 根 `/` overlay EINVAL 来自 locked 子挂载 | **实测 + 源码**：open_tree(CLONE) on / = EINVAL；clone_private_mount/__do_loopback 的 has_locked_children 返回 EINVAL；pivot 到新根后 lower=/ 成功 |
 | 无特权新根（子挂载由 userns 创建）可 lower=/ overlay | **实测**：pivot_root 新 tmpfs 根，lower=/ overlay rc=0 |
-| 初始 userns 特权下 lower=/ 可行 | **推断**：基于 MNT_LOCKED 只在跨 userns 继承时设置；本机无 sudo，未实测 |
+| 初始 userns 特权下 lower=/ 可行 | **用户实测**：2026-11-09 `log.txt` 脚本检查和 Rust direct-root 测试通过 |
 | 相邻挂载同时 overlay | **实测**：bwrap 同时 overlay /home 与 /tmp，exit 0 |
 | 嵌套挂载可同时 overlay（先保存 child lower，再 parent，再 child） | **实测**：父子 tmpfs overlay 后两个文件都可见 |
 | 逐挂载 overlay 的挂载数/元数据成本 | **实测**：13 个可写挂载；200 次 mount+umount ~634ms；stat +34% |
-| btrfs fork/diff/accept 端到端 | **未验证（需高权限）**：send/`find-new` 本机 EPERM，测试 SKIP；代码与 `scripts/priv-check.sh` 已就绪 |
+| btrfs fork/diff/accept 端到端 | **尚未通过**：用户特权运行选中 btrfs，在 diff 断言失败，尚未到 accept；解析修复已有无特权回归，需重跑 `scripts/priv-check.sh` |
 | ProcessBackend 启动/冻结/解冻 | **实测**：`process_freeze_thaw_stops_and_resumes_writer` 冻结期间 counter 不变，thaw 后继续 |
 | 进程组 SIGSTOP/SIGCONT fallback | **实测**：`process_group_fallback_freezes_and_reports_mechanism`，能力上报 `process_group` |
 | BaseRuntime writers_quiesced | **实测**：`base_runtime_freezes_and_marks_writers_quiesced` 有进程时 true，无进程时 false |
