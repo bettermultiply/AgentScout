@@ -61,6 +61,21 @@ use util::*;
 /// See `docs/fs-backend/current-state.md` for the measured cross-over between
 /// per-entry reflink cost and the fixed btrfs transaction/snapshot cost.
 pub(crate) const SNAPSHOT_CLONE_ENTRY_LIMIT: usize = 256;
+
+/// Default upper-entry threshold for the per-fork layout choice: an upper
+/// smaller than this is copied into the child upper (Flatten), otherwise the
+/// snapshot layer joins the child lower chain (Chain).  Overridden through
+/// `FilesystemConfig::fork_flatten_entry_limit` by tests and benchmarks.
+pub(crate) const DEFAULT_FORK_FLATTEN_ENTRY_LIMIT: usize = 256;
+
+/// Maximum number of immutable lower layers a Chain-layout mount may carry.
+/// Measured on this machine with real `bwrap --overlay-src ... --ro-overlay`:
+/// 231 lower sources mount, 232 fail (`Invalid argument`; bwrap rewrites each
+/// source to `/proc/self/fd/N`, so the underlying path length is not the
+/// limit).  This keeps a margin below half of the measured maximum.  Exceeding
+/// it is an explicit error before any directory is created, never a silent
+/// Flatten fallback.
+pub(crate) const MAX_LOWER_DEPTH: usize = 96;
 use state::{
     BackendState, Environment, EnvironmentMetadata, MountUnit, OperationRecord, SnapshotMetadata,
     SnapshotRecord,

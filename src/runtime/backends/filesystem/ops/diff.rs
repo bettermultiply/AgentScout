@@ -22,8 +22,10 @@ impl FilesystemBackend {
         let mounts = source_environment.selected_mounts(&scopes)?;
         let mut changes = Vec::new();
         for mount in &mounts {
-            let in_lower = !self.mount_uses_flattening(mount)
-                && mount.lower.iter().any(|layer| layer == &base_record.path);
+            // Chain layout lists the base snapshot layer in the mount's lower
+            // chain; Flatten layout copies it into the upper instead, so the
+            // whole upper is compared with the base layer below.
+            let in_lower = mount.lower.iter().any(|layer| layer == &base_record.path);
             let mount_changes = if in_lower {
                 let (delta, redirects) =
                     self.delta_since(&source_environment, mount, &base_record.path)?;

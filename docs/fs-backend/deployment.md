@@ -12,15 +12,26 @@ replay journal）。当状态目录位于某个会被 Agent overlay 的挂载点
 的挂载点路径，以及“把状态目录放到被隔离挂载点之外”的修复建议。拒绝时不会留下
 半成品。
 
-flatten 降级仍保留在代码中，但只能由内部开关
+针对“状态目录重叠”的 flatten 降级仍保留在代码中，但只能由内部开关
 `allow_overlapping_state_directory=true`（仅测试与诊断）启用；它不属于外部配置
 文件，默认 false。启用时：
 
-- 有 btrfs 快照副本时，flatten 的 child upper 用可写快照，O(1)；
-- 没有快照副本时，fork 把父 upper 整个复制到 child upper，成本 O(upper 大小)；
-- diff 用完整 upper 与快照比较，而不是只扫描增量；
+- 该重叠挂载强制 Flatten：有 btrfs 快照副本时 child upper 用可写快照，O(1)；
+  没有快照副本时 fork 把父 upper 整个复制到 child upper，成本 O(upper 大小)；
+- diff/accept 用 child upper 与快照基准比较，而不是只扫描增量；
 - 启动日志和能力字段仍列出重叠挂载。
-- 非重叠挂载仍使用 lower 链增量路径。
+
+这与正常部署里的逐次布局选择是两回事。即使状态目录不重叠，每次 fork 也会按
+该挂载 upper 的条目数选择布局：
+
+- 条目数 < `DEFAULT_FORK_FLATTEN_ENTRY_LIMIT`（默认 256）→ Flatten：父 upper
+  复制进 child upper，子 lower = 父 lower；
+- 条目数 ≥ 阈值 → Chain：新增只读层 S 到子 lower，子 upper 为空。
+
+阈值可由 `FilesystemConfig::fork_flatten_entry_limit` 覆盖（测试与基准；
+`0` = 总是 Chain，`usize::MAX` = 总是 Flatten），不进入外部配置文件。Chain
+每次会让该挂载的 lower 链加深一层；达到 `MAX_LOWER_DEPTH`（96，低于本机实测
+bwrap 上限 231/232 的一半）时 fork 返回明确错误，不会静默改成 Flatten。
 
 生产部署要求把状态目录放在**不会被 Agent overlay 的独立挂载点**上，例如：
 
@@ -56,8 +67,10 @@ flatten 降级仍保留在代码中，但只能由内部开关
 3. **方案 2 + reflink**：支持 FICLONE。fork 仍需遍历 N 个目录项，数据 O(1)。
 4. **方案 2 + copy**：逐文件复制。
 
-状态目录与 workspace 不同挂载且不重叠时，fork/diff 走 lower 链增量；重叠时默认
-拒绝启动，只有内部测试开关启用时才使用 flatten（O(upper)）。
+状态目录与 workspace 不同挂载且不重叠时，每个挂载按 upper 条目数逐次选择
+Chain（diff/accept O(增量)）或 Flatten（diff/accept O(upper)）；重叠时默认
+拒绝启动，只有内部测试开关启用时才强制 flatten。阈值与实测数据见
+`docs/fs-backend/current-state.md`。
 
 ## 验证
 
@@ -69,7 +82,8 @@ flatten 降级仍保留在代码中，但只能由内部开关
 }
 ```
 
-空列表表示状态目录不在任何被隔离挂载内，所有挂载都走 lower 链增量路径。
+空列表表示状态目录不在任何被隔离挂载内；每个挂载仍按 upper 条目数逐次选择
+Chain 或 Flatten，不会因为不重叠就一律使用 lower 链。
 
 若看到：
 
@@ -86,3 +100,7 @@ filesystem: state_directory_overlaps_mount=["/home"] startup=refused_by_default 
 - `overlapping_state_directory_is_reported_and_flattened`
 - `non_overlapping_state_directory_uses_lower_chain`
 - `default_config_starts_when_state_directory_is_outside_isolated_mounts`
+- `fork_layout_flattens_small_upper_and_chains_large_upper`
+- `mixed_chain_and_flatten_layout_diff_and_accept_preserve_parent_view`
+- `mixed_layout_accept_reports_conflict_and_writes_nothing`
+- `fork_refuses_chain_deeper_than_max_lower_depth_before_creating_anything`

@@ -18,6 +18,19 @@ pub(crate) enum ForkProducer {
     Clone,
 }
 
+/// How a fork places the parent's current upper for one mount.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ForkLayout {
+    /// Add the new read-only snapshot layer S to the child lower chain and
+    /// leave the child upper empty.  Cost is O(changed entries) for later
+    /// diff/accept, but each such fork deepens the chain.
+    Chain,
+    /// Copy the parent upper into the child upper and keep the parent lower
+    /// chain.  The chain does not grow, but diff/accept compare the whole
+    /// upper against the snapshot layer.
+    Flatten,
+}
+
 /// One step of a per-mount production chain.  Steps of one mount stay
 /// sequential (a writable child snapshot needs its layer snapshot first);
 /// different mounts may run concurrently.
@@ -46,6 +59,10 @@ impl ForkTask {
 struct ForkPlan {
     selected: Vec<MountUnit>,
     produced: BTreeMap<String, ForkProducer>,
+    layouts: BTreeMap<String, ForkLayout>,
+    /// View chain recorded on the snapshot: parent lower + S for every
+    /// produced mount, regardless of whether the child mount itself flattens.
+    snapshot_lower: BTreeMap<String, Vec<PathBuf>>,
     child_environment: Environment,
 }
 
@@ -213,28 +230,44 @@ impl FilesystemBackend {
         // dominant case for speculative branches (only the workspace mount
         // is written).
         let produced = profile.run("plan", || self.fork_producers(&selected));
+        let layouts = profile.run("plan", || self.fork_layouts(&selected, &produced))?;
         let child_mounts = profile.run("plan", || {
             let mut child_mounts = BTreeMap::new();
             for mount in parent_environment.mounts.values() {
                 let key = mount.target.display().to_string();
-                let mut unit = MountUnit {
+                let produced_here = produced.contains_key(&key);
+                let mut lower = mount.lower.clone();
+                if produced_here && layouts.get(&key) == Some(&ForkLayout::Chain) {
+                    lower.push(layer_path.to_path_buf());
+                }
+                let unit = MountUnit {
                     target: mount.target.clone(),
                     upper: child_root.join(&mount.layer_key).join("upper"),
                     work: child_root.join(&mount.layer_key).join("work"),
-                    lower: mount.lower.clone(),
+                    lower,
                     layer_key: mount.layer_key.clone(),
-                    volume_is_subvolume: produced
-                        .get(&key)
-                        .is_some_and(|producer| *producer == ForkProducer::Snapshot)
+                    volume_is_subvolume: produced_here
+                        && produced.get(&key) == Some(&ForkProducer::Snapshot)
                         && self.snapshot_copies,
                 };
-                if produced.contains_key(&key) {
-                    unit.lower.push(layer_path.to_path_buf());
-                }
                 child_mounts.insert(key, unit);
             }
             child_mounts
         });
+        // The merge base must see the parent state that was frozen into S even
+        // when the child mount itself uses Flatten and does not list S as an
+        // overlay lower.
+        let snapshot_lower: BTreeMap<String, Vec<PathBuf>> = parent_environment
+            .mounts
+            .iter()
+            .map(|(key, mount)| {
+                let mut chain = mount.lower.clone();
+                if produced.contains_key(key) {
+                    chain.push(layer_path.to_path_buf());
+                }
+                (key.clone(), chain)
+            })
+            .collect();
         let child_environment = Environment {
             id: child.to_string(),
             root: child_root.to_path_buf(),
@@ -251,8 +284,53 @@ impl FilesystemBackend {
         Ok(ForkPlan {
             selected,
             produced,
+            layouts,
+            snapshot_lower,
             child_environment,
         })
+    }
+
+    /// Choose the per-fork layout for every mount whose upper is non-empty.
+    /// The entry count stops at the configured threshold, so the decision is
+    /// O(min(entries, threshold)).
+    fn fork_layouts(
+        &self,
+        selected: &[MountUnit],
+        produced: &BTreeMap<String, ForkProducer>,
+    ) -> Result<BTreeMap<String, ForkLayout>, BackendError> {
+        let mut layouts = BTreeMap::new();
+        for mount in selected {
+            let key = mount.target.display().to_string();
+            if !produced.contains_key(&key) {
+                continue;
+            }
+            let layout = if self.config.state_directory.starts_with(&mount.target) {
+                // The state directory lives below this mount; a snapshot layer
+                // there cannot be a lowerdir of the same mount.
+                ForkLayout::Flatten
+            } else if self.config.fork_flatten_entry_limit == 0 {
+                ForkLayout::Chain
+            } else {
+                let limit = self.config.fork_flatten_entry_limit;
+                let count = upper_entry_count(&mount.upper, limit);
+                if count < limit {
+                    ForkLayout::Flatten
+                } else {
+                    ForkLayout::Chain
+                }
+            };
+            if layout == ForkLayout::Chain && mount.lower.len() >= MAX_LOWER_DEPTH {
+                return Err(BackendError::new(format!(
+                    "filesystem fork would deepen the lower chain of mount {} from {} to {} layers, exceeding MAX_LOWER_DEPTH={}; refusing instead of silently switching to Flatten. Fork fewer generations or move the state directory to an independent mount",
+                    mount.target.display(),
+                    mount.lower.len(),
+                    mount.lower.len() + 1,
+                    MAX_LOWER_DEPTH
+                )));
+            }
+            layouts.insert(key, layout);
+        }
+        Ok(layouts)
     }
 
     fn create_btrfs_mounts(
@@ -282,7 +360,7 @@ impl FilesystemBackend {
                 source: mount.upper.clone(),
                 target: layer_upper.clone(),
             }];
-            if self.mount_uses_flattening(mount) {
+            if plan.layouts.get(&key) == Some(&ForkLayout::Flatten) {
                 // Writable snapshot carries the parent state, so the layer is
                 // metadata/lower only and the mount is launched with the host
                 // mount as sole lower.
@@ -338,6 +416,7 @@ impl FilesystemBackend {
                     mount,
                     child_mount,
                     *producer,
+                    plan.layouts.get(&key).copied().unwrap_or(ForkLayout::Flatten),
                     &staging,
                     &key,
                     &mut chain_targets,
@@ -371,17 +450,28 @@ impl FilesystemBackend {
         mount: &MountUnit,
         child_mount: &MountUnit,
         producer: ForkProducer,
+        layout: ForkLayout,
         staging: &Path,
         key: &str,
         chain_targets: &mut BTreeSet<String>,
     ) -> Result<Vec<ForkTask>, BackendError> {
         match producer {
-            ForkProducer::Snapshot => {
-                self.overlay_snapshot_chain(mount, child_mount, staging, key, chain_targets)
-            }
-            ForkProducer::Clone => {
-                self.overlay_clone_chain(mount, child_mount, staging, key, chain_targets)
-            }
+            ForkProducer::Snapshot => self.overlay_snapshot_chain(
+                mount,
+                child_mount,
+                layout,
+                staging,
+                key,
+                chain_targets,
+            ),
+            ForkProducer::Clone => self.overlay_clone_chain(
+                mount,
+                child_mount,
+                layout,
+                staging,
+                key,
+                chain_targets,
+            ),
         }
     }
 
@@ -389,6 +479,7 @@ impl FilesystemBackend {
         &self,
         mount: &MountUnit,
         child_mount: &MountUnit,
+        layout: ForkLayout,
         staging: &Path,
         key: &str,
         chain_targets: &mut BTreeSet<String>,
@@ -405,7 +496,7 @@ impl FilesystemBackend {
             target: layer_volume.clone(),
         }];
         chain_targets.insert(key.to_string());
-        if self.mount_uses_flattening(mount) {
+        if layout == ForkLayout::Flatten {
             // Writable snapshot carries the parent state; the read-only layer
             // remains diff metadata.
             chain.push(ForkTask::SnapshotChild {
@@ -424,6 +515,7 @@ impl FilesystemBackend {
         &self,
         mount: &MountUnit,
         child_mount: &MountUnit,
+        layout: ForkLayout,
         staging: &Path,
         key: &str,
         chain_targets: &mut BTreeSet<String>,
@@ -434,11 +526,10 @@ impl FilesystemBackend {
             target: mount.layer_upper(staging),
             reflink,
         }];
-        if self.mount_uses_flattening(mount) {
-            // The state directory is below this mount, so the snapshot layer
-            // may not be used as an overlay lower (directories would
-            // overlap).  Flatten the parent upper into the child upper
-            // instead; the layer copy is metadata for diff/accept only.
+        if layout == ForkLayout::Flatten {
+            // Flatten the parent upper into the child upper.  The layer copy
+            // is metadata for diff/accept only and never joins the child
+            // lower chain.
             let _ = child_mount.upper.parent().ok_or_else(|| {
                 BackendError::new("snapshot-copy child upper has no volume parent")
             })?;
@@ -460,12 +551,7 @@ impl FilesystemBackend {
         plan: &ForkPlan,
         profile: &mut Profile,
     ) -> Result<(), BackendError> {
-        let snapshot_lower: BTreeMap<String, Vec<PathBuf>> = plan
-            .child_environment
-            .mounts
-            .iter()
-            .map(|(key, mount)| (key.clone(), mount.lower.clone()))
-            .collect();
+        let snapshot_lower: BTreeMap<String, Vec<PathBuf>> = plan.snapshot_lower.clone();
         let snapshot = SnapshotRecord {
             snapshot_id: Self::base_snapshot_id_for_child(child),
             path: layer_path.to_path_buf(),

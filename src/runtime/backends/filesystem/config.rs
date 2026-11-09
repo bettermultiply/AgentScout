@@ -20,6 +20,12 @@ pub struct FilesystemConfig {
     /// isolated mount; `FilesystemConfig` is built in code and is not
     /// deserialized from external configuration.
     pub allow_overlapping_state_directory: bool,
+    /// Per-fork layout threshold.  An upper with fewer entries is flattened
+    /// into the child upper; a larger one adds a snapshot layer to the child
+    /// lower chain.  `0` always uses Chain and `usize::MAX` always uses
+    /// Flatten.  Tests and benchmarks override this; production uses the
+    /// default constant.
+    pub fork_flatten_entry_limit: usize,
 }
 
 impl FilesystemConfig {
@@ -32,6 +38,7 @@ impl FilesystemConfig {
             passthrough_rw: Vec::new(),
             isolate_unmanaged_mounts: true,
             allow_overlapping_state_directory: false,
+            fork_flatten_entry_limit: super::DEFAULT_FORK_FLATTEN_ENTRY_LIMIT,
         }
     }
 }

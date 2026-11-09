@@ -60,10 +60,17 @@ pub(crate) fn equivalent(left: Option<&Node>, right: Option<&Node>) -> bool {
     match (left, right) {
         (None, None) => true,
         (Some(left), Some(right)) => {
+            // A directory's size and mtime change whenever its children are
+            // created or removed.  Those child changes are reported on their
+            // own paths, so comparing directory timestamps would add a
+            // spurious parent entry to every Flatten diff.  Mode and overlay
+            // markers still distinguish real directory changes.
+            let content_equivalent = (left.kind == NodeKind::Dir && right.kind == NodeKind::Dir)
+                || (left.size == right.size
+                    && left.mtime_sec == right.mtime_sec
+                    && left.mtime_nsec == right.mtime_nsec);
             left.mode == right.mode
-                && left.size == right.size
-                && left.mtime_sec == right.mtime_sec
-                && left.mtime_nsec == right.mtime_nsec
+                && content_equivalent
                 && left.kind == right.kind
                 && left.opaque == right.opaque
                 && left.redirect == right.redirect

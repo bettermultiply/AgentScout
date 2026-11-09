@@ -18,7 +18,8 @@ FilesystemBackend 不再 spawn、不再记录 pid/namespace，只产出 `LaunchF
 当后端状态目录位于某个被 overlay 的挂载点下时，该挂载点的快照层不能再作为
 lowerdir（OverlayFS 报 `Overlay directories may not overlap`）。此时 fork 把父
 upper 展平进 child upper，快照层只作为 diff/accept 的元数据；启动时该挂载点
-只用宿主挂载点作 lower。其他挂载点仍使用 lower 链。
+只用宿主挂载点作 lower。其他挂载点按每次 fork 的逐挂载布局选择 lower 链或
+flatten（正常部署也会对小 upper 选择 flatten）。
 
 ## 接口与组合
 

@@ -401,3 +401,54 @@ O(upper)。flatten 路径保留，但只允许通过内部开关
 **废弃记录**：不再把“检测到重叠后自动 flatten”作为默认策略。能力字段
 `state_directory_overlaps_mount` 与启动日志保留上报，日志措辞改为说明默认拒绝
 启动、除非内部开关开启。
+
+# 2026-11-10：fork 的逐挂载 Chain / Flatten 布局与链深度上限
+
+决定：fork 时每个有产出的挂载（upper 非空）单独选择一次布局，不再用
+“状态目录是否在该挂载内”这种对挂载恒定的判断。
+
+- **Chain**：对父 upper 做只读快照/复制得到 S，S 加入子 lower（子 lower =
+  父 lower + S），子 upper 为空。fork 便宜；子 upper 只含子自己的改动，
+  diff/accept 成本随改动量增长；代价是每次 fork 让链加深一层。
+- **Flatten**：父 upper 整个复制（或可写快照）成子 upper，子 lower = 父 lower，
+  不加入 S。链不增长；代价是 fork 复制父 upper，diff/accept 随 upper 条目数增长。
+
+选择规则：状态目录位于该挂载内（只可能由内部测试开关
+`allow_overlapping_state_directory` 制造）时强制 Flatten；否则用
+`upper_entry_count` 封顶计数，条目数 < `DEFAULT_FORK_FLATTEN_ENTRY_LIMIT` 用
+Flatten，否则用 Chain。新配置字段 `FilesystemConfig::fork_flatten_entry_limit`
+供测试与基准覆盖（`0` = 总是 Chain，`usize::MAX` = 总是 Flatten），默认取常量。
+它与 `SNAPSHOT_CLONE_ENTRY_LIMIT` 是两件事：后者决定 S 用复制还是 btrfs 快照，
+前者决定 S/父 upper 放在子 lower 还是子 upper。
+
+快照基准：`SnapshotRecord.lower` 无论布局都显式记录“父 lower + S”（该挂载有
+产出时），作为 diff/accept 三方合并的基准视图。Flatten 下不能直接取子挂载
+lower，否则基准会缺 S。
+
+diff/accept：`in_lower` 只判断 mount.lower 是否包含 base 路径（Chain 为真，
+Flatten 为假）。Flatten 走现有的 upper 副本比较（overlay：
+`changes_from_upper_copy` / `upper_delta_from_base`；btrfs：`btrfs_delta`）。
+accept 中 Chain 的 `delta_since` 必须排在 btrfs 分支之前；否则用 S 全量与只含
+本分支改动的子 upper 比较，会把父内容全部误判为删除。`needs_source_maps`
+不再按 btrfs/flatten 只读子 upper，而是 lower 为空时只读 upper，否则读取
+`read_chain(lower)` + upper。
+
+链深度保护：新增 `MAX_LOWER_DEPTH = 96`。本机无特权实测 `bwrap --overlay-src`
+叠层：231 个 lower 源成功，232 个 `Invalid argument`；bwrap 把源转成
+`/proc/self/fd/N`，限制与底层路径长度无关。取低于实测上限一半并留余量的 96。
+超过时 fork 在创建任何目录或元数据之前返回 `BackendError`，说明当前深度、上限
+和原因；不静默降级为 Flatten，也不实现整链合并。
+
+阈值标定：在同一非重叠布局下强制 Chain/Flatten，用 `examples/fs_bench.rs`
+（ITERS=5，N=16/64/256/1024/4096）。Flatten 的 diff+accept p50 在 N=256 首次
+比 Chain 高约 12.3ms（此前 N=16/64 分别约 5.5/2.2ms），向下取 2 的幂得到
+`DEFAULT_FORK_FLATTEN_ENTRY_LIMIT = 256`。数据与命令写入
+`docs/fs-backend/current-state.md`；这是本机测量，换环境需重测。
+
+**未验证**：btrfs 数据面的 Chain 布局（`in_lower` 优先走 `delta_since`）尚未在
+真实特权环境验证，需要 `scripts/priv-check.sh` 补测 Chain 与 Flatten 两种布局。
+
+**废弃记录**：`FilesystemBackend::mount_uses_flattening` 及“flatten 只由状态目录
+重叠决定”的规则被删除；`launch_lowers` 不再因该判断忽略 lower 层，始终使用
+`[挂载点] + mount.lower` 的真实链。重叠场景仍强制 Flatten，但由逐次布局逻辑
+显式判断，不再有对挂载恒定的辅助函数。

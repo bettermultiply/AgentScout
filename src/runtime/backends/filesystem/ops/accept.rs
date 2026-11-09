@@ -74,16 +74,20 @@ impl FilesystemBackend {
                 ))
             })?;
             let base_layer = mount.layer_upper(&base_record.path);
-            let in_lower = !self.mount_uses_flattening(mount)
-                && mount.lower.iter().any(|layer| layer == &base_record.path);
-            let (delta, redirects) = if self.mechanism == FilesystemMechanism::Btrfs
+            // Chain layout lists the base snapshot layer in the root lower
+            // chain and its upper holds only this branch's changes, so the
+            // cheap delta scan is both correct and sufficient.  Flatten layout
+            // copies the base into the upper and must compare against the
+            // whole base layer instead.
+            let in_lower = mount.lower.iter().any(|layer| layer == &base_record.path);
+            let (delta, redirects) = if in_lower {
+                self.delta_since(&source_environment, mount, &base_record.path)?
+            } else if self.mechanism == FilesystemMechanism::Btrfs
                 && path_exists(&base_layer)
             {
                 let (delta, redirects, _) =
                     self.btrfs_delta(&source_environment, mount, &base_record.path)?;
                 (delta, redirects)
-            } else if in_lower {
-                self.delta_since(&source_environment, mount, &base_record.path)?
             } else {
                 // Marks and empty fork bases are not in the lower chain; a
                 // missing layer is an empty base view.
@@ -108,9 +112,7 @@ impl FilesystemBackend {
             let needs_source_maps =
                 !redirects.is_empty() || delta.values().any(|node| node.metacopy);
             let source_maps = if needs_source_maps {
-                if self.mechanism == FilesystemMechanism::Btrfs
-                    || self.mount_uses_flattening(mount)
-                {
+                if mount.lower.is_empty() {
                     vec![read_layer(&mount.upper)?]
                 } else {
                     let mut maps = self.read_chain(&mount.lower, mount)?;

@@ -4,11 +4,26 @@
 
 ## 已实现
 
-- **overlay fork（独立 upper 副本）**
-  - 只复制父当前 upper，不复制 lower 链和 Base。
+- **overlay fork（逐挂载 Chain / Flatten）**
+  - 空 upper 完全跳过（见下），非空 upper 为每个挂载单独选择一次布局。
+  - **Chain**：对父 upper 做只读快照/复制得到 S；子 lower = 父 lower + S，
+    子 upper 为空。fork 便宜，子 upper 只含子自己的改动，diff/accept 成本只随
+    改动量增长；每次 Chain fork 都会让该挂载的 lower 链加深一层。
+  - **Flatten**：父 upper 整个复制（或可写快照）成子 upper；子 lower = 父 lower，
+    不加入 S。链不增长，但子 upper 混着父的内容，diff/accept 要拿子 upper 与
+    基准 S 比较，成本随 upper 条目数增长。fork 时需要复制父 upper，冻结窗口内
+    的复制成本更高。
+  - 逐挂载布局规则：状态目录位于该挂载内（只可能由内部开关
+    `allow_overlapping_state_directory=true` 制造）时强制 Flatten；否则用
+    `upper_entry_count` 封顶计数，条目数 < `DEFAULT_FORK_FLATTEN_ENTRY_LIMIT`
+    走 Flatten，否则走 Chain。计数的成本是 O(min(N, 阈值))。
   - 逐文件优先 FICLONE reflink；不支持时普通复制。保留目录、whiteout 字符设备、
     overlay xattr、权限、符号链接和 mtime；不使用硬链接。
-  - 子 lower = 父 lower + S，子 upper 为空。父 upper、lower 和运行中挂载不变。
+  - 子挂载的 lower 只有在 Chain 布局下才追加 S；Flatten 不追加。父 upper、lower
+    和运行中挂载不变。
+  - `SnapshotRecord.lower`（快照的视图链）无论子挂载采用哪种布局，都显式记录
+    **父 lower + S**（该挂载有产出时）。diff/accept 的三方合并以它为基准视图；
+    若直接取子挂载 lower，Flatten 下会缺少 S 的内容。
   - S 由子（以及 mark/diff 基准）引用，按引用计数 GC。
   - 快照层/副本层先写入 staging 目录，完成后原子 rename 到最终路径并 sync 父目录；
     没有完成 rename 的 `.tmp-*` 在下次启动清理，不被视为有效层。复制文件不再
@@ -17,9 +32,10 @@
     **方案 A（btrfs 增量）→ 方案 2 + btrfs 快照副本 → reflink → copy**。
   - 当状态目录在 btrfs 且 `probe_btrfs_snapshot_copies` 成功（创建/只读快照/
     overlay lower/子卷删除均可用）时，每个挂载的 upper 置于一个 btrfs 子卷的
-    `upper` 目录中，fork/mark 用只读快照产生层；子 upper 是新的空子卷，flatten
-    情形用可写快照。启用探测要求创建/只读快照/overlay lower/btrfs-aware 递归
-    删除成功；`fast_delete` 只影响后台删除成本，不阻止启用。
+    `upper` 目录中，fork/mark 用只读快照产生层。Chain 布局为子 upper 建新的空
+    子卷；Flatten 布局用 S 的可写快照作为子 upper。启用探测要求创建/只读快照/
+    overlay lower/btrfs-aware 递归删除成功；`fast_delete` 只影响后台删除成本，
+    不阻止启用。
   - **空 upper 跳过**：fork/mark 先对每个挂载用 `read_dir` 取第一个条目（O(1)）
     判断 upper 是否为空。空 upper 不建层、不复制，子的该挂载直接得到空 upper，
     lower 链沿用父链。投机分支通常只有 workspace 挂载被写，其余系统挂载全部走
@@ -27,7 +43,19 @@
   - **按挂载自适应生产者**：非空 upper 先递归计数到 `SNAPSHOT_CLONE_ENTRY_LIMIT`
     （256）即停止，成本 O(min(N, 256))。条目数 < 256 用 reflink（不支持时普通
     复制），≥256 用 btrfs 快照；记录在 `MountUnit::volume_is_subvolume=false`
-    的挂载（空挂载产生的普通目录）只能继续复制，不能快照。
+    的挂载（空挂载产生的普通目录）只能继续复制，不能快照。这个阈值只决定
+    “S 怎么产生”（复制还是快照），与下面的 fork 布局阈值是两件不同的事，不要
+    混用。
+  - **逐挂载布局阈值**：`DEFAULT_FORK_FLATTEN_ENTRY_LIMIT = 256`，可由
+    `FilesystemConfig::fork_flatten_entry_limit` 覆盖（测试与基准使用；
+    `0` = 总是 Chain，`usize::MAX` = 总是 Flatten）。它决定本次 fork 把父
+    upper 放进子 upper（Flatten）还是放进子 lower 链（Chain）。
+  - **链深度上限**：`MAX_LOWER_DEPTH = 96`。若本次 Chain 会让子 lower 超过该
+    上限，`fork` 在创建任何目录或元数据之前返回 `BackendError`，说明当前深度、
+    上限和原因；不静默降级为 Flatten，也不合并整条链。本机实测 bwrap 在 231
+    个 lower 源时成功、232 个时 `Invalid argument`；bwrap 会把每个源转换成
+    `/proc/self/fd/N`，所以限制不是底层路径长度。96 低于实测最大值的一半并留
+    余量。
   - **有界并行**：多个非空挂载的层/子卷创建最多用 4 个线程；同一挂载的“层→
     子 upper”保持顺序。任一挂载失败仍整体回滚 child root 与 staging，错误按挂载
     顺序返回（与串行循环一致）。
@@ -38,9 +66,13 @@
     冻结机制为 `none` 时仍为 false，并发写可能导致副本跨文件交错。
 - **btrfs fork**
   - 每个挂载点的 upper 是一个独立 btrfs 子卷；fork 对每个选中挂载的父 upper
-    分别做只读快照 S_child，再为 child 建可写子卷（含状态目录的挂载用 S_child
-    的可写快照展平，避免 lower 重叠）。
+    分别做只读快照 S_child。Chain 布局为 child 建新的空可写子卷并把 S_child
+    加入子 lower；Flatten 布局用 S_child 的可写快照作为 child upper，不加
+    lower。含状态目录的挂载（仅内部开关）强制 Flatten，避免 lower 重叠。
   - 父 upper/lower 和挂载不变。
+  - 链布局下 accept 优先走 `delta_since`（子 upper 只含本分支改动）；只有
+    Flatten 才用 `btrfs_delta`（拿 S 全量与子 upper 比较）。否则 Chain 会把
+    父内容全部误判为删除。此路径尚无真实特权环境验证，见下文。
   - btrfs 只有在 `incremental_diff=true` 时才被选为数据面；探测真实执行
     `btrfs send -p <snapshot> <snapshot> | btrfs receive --dump`。失败则降级
     overlay 并在日志/能力中说明。btrfs diff/accept 已实现：diff 解析 send dump，
@@ -176,7 +208,16 @@
 - 当前挂载含状态目录时，默认拒绝启动；只有内部测试开关
   `allow_overlapping_state_directory=true` 才采用“upper 展平 + 快照仅作 diff
   元数据”，不再把该快照层作为 lowerdir；这是为了避免 OverlayFS 的
-  `Overlay directories may not overlap`。
+  `Overlay directories may not overlap`。非重叠挂载的 Flatten 是正常的逐次布局
+  选择，不是这个开关造成的。
+- Flatten 的 diff 用“当前 upper 副本 vs 基准层副本”比较。目录的 size/mtime 会
+  因子项增删而变化，而子项变化已经单独报告；因此目录比较只看 mode、kind 和
+  overlay 标记，不把父目录时间戳变化算成额外 diff 项。文件仍比较 size/mtime。
+- Chain 布局的 lower 链每代加深一层；`MAX_LOWER_DEPTH=96` 只负责明确报错，
+  不实现整链合并。达到上限后需要换分支策略或把状态目录放到独立挂载。
+- **btrfs 数据面的 Chain 布局尚未在真实特权环境验证**。无特权测试只覆盖
+  overlay 数据面；`in_lower` 优先于 `btrfs_delta` 的 accept 分支仅经过代码推理，
+  需要 `scripts/priv-check.sh` 在特权 btrfs 环境补测。
 - 本机普通用户 `btrfs subvolume delete` 返回 EPERM，`fast_delete=false`；快照
   副本仍可启用，后台删除走 recursion fallback（已验证可删净），只是成本更高。
 
@@ -186,6 +227,10 @@
   dump snapshot 前缀、临时 `rename ... dest=...`、真实 rename/删除与共用 accept
   增量视图已有无特权回归；修复后的特权 Rust accept 全程仍待重跑。运行
   `scripts/priv-check.sh`，见 `docs/fs-backend/priv-check.md`。
+- **btrfs 数据面的 Chain 布局**：`in_lower` 时走 `delta_since`、否则走
+  `btrfs_delta` 的优先级只在代码层推理；本机无特权，`btrfs` 机制测试会 SKIP。
+  需要用 `scripts/priv-check.sh` 在真实特权 btrfs 环境分别验证 Chain 与 Flatten
+  的 diff/accept/冲突检测，特别是 Chain 下不能把父内容误判为删除。
 - **严格 btrfs subvolume delete ioctl**：本机 `fast_delete=false`；fallback 的
   O(文件数) 后台删除未做大数据量性能验证。
 - 真实内核生成的 redirect/opaque/metacopy 只用合成 xattr 测试；whiteout 字符
@@ -207,8 +252,9 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
   fuse 等，候选逐挂载做 bwrap overlay probe 并缓存；`launch_fragment` 启动前
   补齐新出现的可 overlay 挂载。
 - fork/mark/diff/accept 遍历同一组 `MountUnit`：父 upper 复制到
-  `layers/<snapshot>/mounts/<hash>/upper`，子 lower 链按挂载点追加；accept 按
-  挂载点分别合并且重放到目标 upper 或 `/proc/<pid>/root`。
+  `layers/<snapshot>/mounts/<hash>/upper`；Chain 布局把该层追加到子 lower，
+  Flatten 布局把父 upper 复制进子 upper、不追加 lower；accept 按挂载点分别
+  合并且重放到目标 upper 或 `/proc/<pid>/root`。
 - diff 文档中的路径带绝对挂载点前缀（例如 `/var/tmp/foo`），不会与另一个
   挂载点的相对路径冲突。
 - 不能 overlay 的可写挂载在 sandbox 内 ro-bind；`passthrough_rw` 可显式直通
@@ -224,8 +270,9 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
   `/home`，fork 后启动子进程即报错。现在默认在 `establish`/`launch_fragment`
   创建环境根、upper 和元数据之前拒绝启动，并报告状态目录与冲突挂载点。只有内部
   测试开关 `allow_overlapping_state_directory=true` 才保留原有降级：该挂载 fork
-  时把父 upper **展平**到 child upper，快照层只用于 diff/accept 元数据，启动时
-  lower 只用宿主挂载点；其它挂载仍使用 lower 链。
+  时强制 **Flatten**，把父 upper 复制到 child upper，快照层只用于 diff/accept
+  元数据，启动时 lower 只用宿主挂载点；其它挂载按逐次 fork 的布局规则选择
+  Chain 或 Flatten。
 - 嵌套挂载当前未实现。当前 bwrap 参数层做不到不等于实际做不到，之后可以另找
   实现手段；父挂载与子挂载分别 probe；现有参数无法保存子挂载 lower 后再重挂。
   失败候选会被 ro-bind，不静默直通。
@@ -238,7 +285,7 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
 
 | 操作 | 覆盖范围 | 实现 | 验证 |
 |---|---|---|---|
-| fork | 选中（默认全部）挂载 | 每挂载复制 upper / 追加 lower；含状态目录的挂载展平（仅内部开关） | `extra_mount_...`、`backend_overlay_...`、`overlay_fork_isolates...` |
+| fork | 选中（默认全部）挂载 | 每挂载按 upper 大小选 Chain（追加 lower）或 Flatten（复制进 upper）；含状态目录的挂载强制 Flatten（仅内部开关） | `extra_mount_...`、`backend_overlay_...`、`overlay_fork_isolates...`、`fork_layout_...`、`mixed_chain_and_flatten_...` |
 | mark | 选中挂载 | 每挂载独立快照副本，记录每挂载 lower | `extra_mount_...`（mark diff） |
 | diff | 选中挂载 | 每挂载 delta 或 upper 副本比较，路径加挂载前缀 | `extra_mount_...`、`real_overlay_whiteout...` |
 | accept | 选中挂载 | 每挂载三方合并 + 目标 upper/live root 重放 | `extra_mount_...`、`live_target_accept...` |
@@ -311,7 +358,9 @@ flatten。`reflink-lower`：状态目录在 `/var/tmp`（btrfs），workspace �
 `/home` 使用 lower 链；`/var/tmp` 自身重叠并 flatten。`tmpfs-flatten`：状态与
 workspace 都在 `/tmp` tmpfs，flatten。所有基准用例的状态目录都位于被隔离挂载内，
 因此 `fs_bench` 显式打开内部测试开关 `allow_overlapping_state_directory`；生产
-部署默认拒绝这种布局。
+部署默认拒绝这种布局。这些历史 case 现在用
+`FilesystemConfig::fork_flatten_entry_limit`（`0` 或 `usize::MAX`）显式强制
+Chain/Flatten，以免默认阈值改变后与旧数据不可比。
 
 | case | N | operation | p50_ms | p95_ms | fork_cost | mechanism | overlaps |
 |---|---|---|---|---|---|---|---|
@@ -390,6 +439,40 @@ workspace 都在 `/tmp` tmpfs，flatten。所有基准用例的状态目录都�
 | tmpfs-flatten | 100000 | discard | 0.149 | 0.168 | copy | overlay | /tmp |
 | tmpfs-flatten | 100000 | fork | 6167.011 | 6366.283 | copy | overlay | /tmp |
 | tmpfs-flatten | 100000 | mark | 3148.152 | 3249.308 | copy | overlay | /tmp |
+
+### 逐挂载布局阈值实测（2026-11-10，本机）
+
+同一非重叠布局下强制 Chain 与强制 Flatten 对比。状态目录在 `/var/tmp`（btrfs），
+workspace 在仓库 `target/`（`/home`，btrfs）；每个改动的 child 只写 10 个文件。
+命令：
+
+```bash
+ASCOUT_BENCH_CASES=nonoverlap ASCOUT_BENCH_ITERS=5 \
+ASCOUT_BENCH_SIZES=16,64,256,1024,4096 \
+  timeout 600 target/release/examples/fs_bench
+```
+
+`reflink-chain-nonoverlap` 用 `fork_flatten_entry_limit=0` 强制 Chain，
+`reflink-flatten-nonoverlap` 用 `usize::MAX` 强制 Flatten。p50 毫秒：
+
+| N | Chain diff | Chain accept | Chain diff+accept | Flatten diff | Flatten accept | Flatten diff+accept | Chain fork | Flatten fork |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 3.875 | 5.765 | 9.640 | 6.704 | 8.387 | 15.091 | 11.635 | 21.740 |
+| 64 | 7.121 | 8.328 | 15.449 | 6.973 | 10.636 | 17.609 | 24.513 | 29.118 |
+| 256 | 7.104 | 8.262 | 15.366 | 13.132 | 14.540 | 27.672 | 37.901 | 54.864 |
+| 1024 | 7.119 | 8.563 | 15.682 | 28.591 | 29.831 | 58.422 | 86.173 | 150.147 |
+| 4096 | 6.493 | 7.621 | 14.114 | 121.910 | 92.360 | 214.270 | 283.889 | 524.862 |
+
+选择准则：取 Flatten 的 diff+accept p50 开始明显高于 Chain（超过约 10ms）的
+最小条目数，再向下取 2 的幂。N=16、64 的差分别约 5.5ms、2.2ms；N=256 的差
+约 12.3ms，是第一个超过 10ms 的点，且 256 已是 2 的幂。因此
+`DEFAULT_FORK_FLATTEN_ENTRY_LIMIT = 256`：条目数 < 256 用 Flatten，≥256 用
+Chain。Chain 的 fork p50 在所有 N 下都低于 Flatten（它只产生一次 S，子 upper
+为空；Flatten 还要把父 upper 复制进子 upper），所以小 upper 用 Flatten 换
+diff/accept，大 upper 用 Chain 换 fork 和链增长，两个方向都不吃亏。
+
+这是本机（kernel `7.2.14-zen1-1-zen`、Ryzen 7 5800H、btrfs）测得的值；换文件
+系统、CPU 或状态目录所在挂载后需要重测。阈值只影响布局选择，不是正确性边界。
 
 ### 第十轮：快照模式 fork/mark 前后对比
 
@@ -492,6 +575,11 @@ N=100k  fork snapshot_layer=464.139ms(1) create_child=1.834ms(1) prepare_dirs=1.
 | 空闲工作者被下一次 discard 唤醒 | `idle_worker_wakes_for_a_later_discard` |
 | 连续 discard 信号合并后 trash 为空 | `repeated_discards_leave_trash_empty` |
 | btrfs 快照 fork | `btrfs_snapshot_copy_fork_is_end_to_end`（本机通过） |
+| 逐次布局选择（小 flatten / 大 chain） | `fork_layout_flattens_small_upper_and_chains_large_upper` |
+| 混合链/展平多代 diff、真实启动、accept | `mixed_chain_and_flatten_layout_diff_and_accept_preserve_parent_view` |
+| 混合布局冲突不写入 | `mixed_layout_accept_reports_conflict_and_writes_nothing` |
+| 超过链深度上限时 fork 前失败、无半成品 | `fork_refuses_chain_deeper_than_max_lower_depth_before_creating_anything` |
+| bwrap lower 层数上限 | 本机实测 231 成功、232 `Invalid argument`；`MAX_LOWER_DEPTH=96` |
 
 ## P4 调研结论：btrfs 增量
 

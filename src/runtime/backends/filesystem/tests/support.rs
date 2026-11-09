@@ -98,6 +98,26 @@ use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
         backend
     }
 
+    /// Overlay backend whose state directory is on a different mount than
+    /// `workspace`, so the workspace mount is not forced to flatten by the
+    /// overlap rule and the per-fork layout threshold decides.  The state
+    /// mount itself still overlaps (it holds the state directory), so the
+    /// internal switch stays enabled.
+    pub(super) fn layout_backend(
+        workspace: &Path,
+        flatten_entry_limit: usize,
+    ) -> Option<(tempfile::TempDir, FilesystemBackend)> {
+        let state = separate_state_tempdir(workspace)?;
+        let mut config = FilesystemConfig::new(state.path().join("state"));
+        config.force_overlay = true;
+        config.allow_overlapping_state_directory = true;
+        config.fork_flatten_entry_limit = flatten_entry_limit;
+        let backend = FilesystemBackend::new(config).unwrap();
+        assert!(backend.usable, "bubblewrap overlay probe failed");
+        assert_eq!(backend.mechanism(), FilesystemMechanism::Overlay);
+        Some((state, backend))
+    }
+
     pub(super) fn mount_for(backend: &FilesystemBackend, environment_id: &str, path: &Path) -> MountUnit {
         let state = backend.lock().unwrap();
         state.environments[environment_id]

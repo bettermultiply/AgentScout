@@ -21,6 +21,10 @@ struct Case {
     state: PathBuf,
     workspace: PathBuf,
     cleanup: Vec<PathBuf>,
+    /// Per-fork layout threshold override: `0` forces Chain and `usize::MAX`
+    /// forces Flatten.
+    flatten_limit: usize,
+    isolate_unmanaged: bool,
 }
 
 #[derive(Debug)]
@@ -63,6 +67,8 @@ fn run() -> Result<(), String> {
             state: project.join(format!("target/fs-bench-{pid}-reflink-flatten/state")),
             workspace: project.join(format!("target/fs-bench-{pid}-reflink-flatten/ws")),
             cleanup: vec![project.join(format!("target/fs-bench-{pid}-reflink-flatten"))],
+            flatten_limit: usize::MAX,
+            isolate_unmanaged: true,
         },
         Case {
             name: "reflink-lower",
@@ -73,6 +79,35 @@ fn run() -> Result<(), String> {
                 project.join(format!("target/fs-bench-{pid}-reflink-lower")),
                 PathBuf::from(format!("/var/tmp/ascout-fs-bench-state-{pid}")),
             ],
+            flatten_limit: 0,
+            isolate_unmanaged: true,
+        },
+        Case {
+            // Forced Chain in the same non-overlapping layout as the forced
+            // Flatten case below: state on a separate mount, only the
+            // workspace mount participates in launch isolation.
+            name: "reflink-chain-nonoverlap",
+            root: project.join(format!("target/fs-bench-{pid}-chain-nonoverlap")),
+            state: PathBuf::from(format!("/var/tmp/ascout-fs-bench-chain-state-{pid}")),
+            workspace: project.join(format!("target/fs-bench-{pid}-chain-nonoverlap/ws")),
+            cleanup: vec![
+                project.join(format!("target/fs-bench-{pid}-chain-nonoverlap")),
+                PathBuf::from(format!("/var/tmp/ascout-fs-bench-chain-state-{pid}")),
+            ],
+            flatten_limit: 0,
+            isolate_unmanaged: false,
+        },
+        Case {
+            name: "reflink-flatten-nonoverlap",
+            root: project.join(format!("target/fs-bench-{pid}-flat-nonoverlap")),
+            state: PathBuf::from(format!("/var/tmp/ascout-fs-bench-flat-state-{pid}")),
+            workspace: project.join(format!("target/fs-bench-{pid}-flat-nonoverlap/ws")),
+            cleanup: vec![
+                project.join(format!("target/fs-bench-{pid}-flat-nonoverlap")),
+                PathBuf::from(format!("/var/tmp/ascout-fs-bench-flat-state-{pid}")),
+            ],
+            flatten_limit: usize::MAX,
+            isolate_unmanaged: false,
         },
         Case {
             name: "tmpfs-flatten",
@@ -80,6 +115,8 @@ fn run() -> Result<(), String> {
             state: PathBuf::from(format!("/tmp/ascout-fs-bench-{pid}/state")),
             workspace: PathBuf::from(format!("/tmp/ascout-fs-bench-{pid}/ws")),
             cleanup: vec![PathBuf::from(format!("/tmp/ascout-fs-bench-{pid}"))],
+            flatten_limit: usize::MAX,
+            isolate_unmanaged: true,
         },
         Case {
             name: "btrfs-snapshot-flatten",
@@ -87,6 +124,8 @@ fn run() -> Result<(), String> {
             state: project.join(format!("target/fs-bench-{pid}-snapshot-flatten/state")),
             workspace: project.join(format!("target/fs-bench-{pid}-snapshot-flatten/ws")),
             cleanup: vec![project.join(format!("target/fs-bench-{pid}-snapshot-flatten"))],
+            flatten_limit: usize::MAX,
+            isolate_unmanaged: true,
         },
         Case {
             name: "btrfs-snapshot-lower",
@@ -97,6 +136,8 @@ fn run() -> Result<(), String> {
                 project.join(format!("target/fs-bench-{pid}-snapshot-lower")),
                 PathBuf::from(format!("/var/tmp/ascout-fs-bench-snapshot-state-{pid}")),
             ],
+            flatten_limit: 0,
+            isolate_unmanaged: true,
         },
     ];
 
@@ -163,6 +204,8 @@ fn cleanup_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> Vec<String> {
 fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
     let mut config = FilesystemConfig::new(&case.state);
     config.force_overlay = !case.name.starts_with("btrfs-snapshot");
+    config.isolate_unmanaged_mounts = case.isolate_unmanaged;
+    config.fork_flatten_entry_limit = case.flatten_limit;
     // Benchmark layouts deliberately place the state directory under an
     // isolated mount (including the *-flatten cases); production must not.
     config.allow_overlapping_state_directory = true;

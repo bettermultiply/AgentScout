@@ -108,16 +108,10 @@ impl FilesystemBackend {
         )))
     }
 
-    pub(super) fn mount_uses_flattening(&self, mount: &MountUnit) -> bool {
-        self.config.state_directory.starts_with(&mount.target)
-    }
-
     pub(super) fn launch_lowers(&self, mount: &MountUnit) -> Vec<PathBuf> {
         let mut lowers = vec![mount.target.clone()];
-        if !self.mount_uses_flattening(mount) {
-            for layer in &mount.lower {
-                lowers.push(mount.layer_upper(layer));
-            }
+        for layer in &mount.lower {
+            lowers.push(mount.layer_upper(layer));
         }
         lowers
     }

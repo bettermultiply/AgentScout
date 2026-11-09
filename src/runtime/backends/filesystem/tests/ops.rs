@@ -221,15 +221,10 @@ use std::os::unix::fs::FileTypeExt;
         // The state mount itself is isolated; only the workspace mount's
         // lower chain is under test here.
         config.allow_overlapping_state_directory = true;
+        // Force Chain: this test measures the delta-only accept path.
+        config.fork_flatten_entry_limit = 0;
         let backend = FilesystemBackend::new(config).unwrap();
         backend.establish("root").unwrap();
-        let workspace_mount = mount_for(&backend, "root", &base);
-        if backend.mount_uses_flattening(&workspace_mount) {
-            eprintln!(
-                "SKIP accept_work_does_not_scale_with_unrelated_upper_size: workspace mount is flattened"
-            );
-            return None;
-        }
         for index in 0..unrelated {
             write_upper(
                 &backend,
@@ -1057,6 +1052,359 @@ use std::os::unix::fs::FileTypeExt;
         backend.discard("child-snapshot", &[]).unwrap();
         backend.terminate("child-clone").unwrap();
         backend.discard("child-clone", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn fork_layout_flattens_small_upper_and_chains_large_upper() {
+        let root = btrfs_temp();
+        let base = root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let Some((_state, backend)) = layout_backend(&base, 32) else {
+            eprintln!(
+                "SKIP fork_layout_flattens_small_upper_and_chains_large_upper: no writable mount separate from workspace"
+            );
+            return;
+        };
+        backend.establish("root").unwrap();
+        for index in 0..2 {
+            write_upper(
+                &backend,
+                "root",
+                &base.join(format!("small-{index}")),
+                "small",
+            );
+        }
+        let parent_lower = mount_for(&backend, "root", &base).lower;
+        assert!(parent_lower.is_empty(), "root starts without lower layers");
+
+        backend.fork("root", "child-small", &[]).unwrap();
+        let small = mount_for(&backend, "child-small", &base);
+        assert_eq!(
+            small.lower, parent_lower,
+            "small upper must flatten: the child lower is the parent lower without a new layer"
+        );
+        assert!(
+            upper_at(&backend, "child-small", &base.join("small-0")).exists(),
+            "flattened child upper must carry the parent files"
+        );
+        let small_base = FilesystemBackend::base_snapshot_id_for_child("child-small");
+        let small_key = small.target.display().to_string();
+        let (small_chain, small_layer) = {
+            let state = backend.lock().unwrap();
+            let record = &state.snapshots[&small_base];
+            (
+                record.lower[&small_key].clone(),
+                record.path.clone(),
+            )
+        };
+        let mut expected_chain = parent_lower.clone();
+        expected_chain.push(small_layer);
+        assert_eq!(
+            small_chain, expected_chain,
+            "the snapshot merge base must still be parent lower + S even when the child mount flattens"
+        );
+
+        for index in 2..66 {
+            write_upper(
+                &backend,
+                "root",
+                &base.join(format!("large-{index}")),
+                "large",
+            );
+        }
+        backend.fork("root", "child-large", &[]).unwrap();
+        let large = mount_for(&backend, "child-large", &base);
+        let large_base = FilesystemBackend::base_snapshot_id_for_child("child-large");
+        let large_key = large.target.display().to_string();
+        let (large_chain, large_layer) = {
+            let state = backend.lock().unwrap();
+            let record = &state.snapshots[&large_base];
+            (
+                record.lower[&large_key].clone(),
+                record.path.clone(),
+            )
+        };
+        assert_eq!(
+            large.lower,
+            vec![large_layer.clone()],
+            "large upper must chain: the new layer joins the child lower"
+        );
+        assert_eq!(
+            large_chain, large.lower,
+            "chain snapshot view is the child lower chain"
+        );
+        assert!(
+            fs::read_dir(&large.upper)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false),
+            "chained child upper must start empty"
+        );
+
+        backend.terminate("child-small").unwrap();
+        backend.discard("child-small", &[]).unwrap();
+        backend.terminate("child-large").unwrap();
+        backend.discard("child-large", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn mixed_chain_and_flatten_layout_diff_and_accept_preserve_parent_view() {
+        let root = btrfs_temp();
+        let base = root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let Some((_state, backend)) = layout_backend(&base, 32) else {
+            eprintln!(
+                "SKIP mixed_chain_and_flatten_layout_diff_and_accept_preserve_parent_view: no writable mount separate from workspace"
+            );
+            return;
+        };
+        backend.establish("root").unwrap();
+        write_upper(&backend, "root", &base.join("keep"), "base-keep");
+        write_upper(&backend, "root", &base.join("remove"), "base-remove");
+        for index in 0..40 {
+            write_upper(
+                &backend,
+                "root",
+                &base.join(format!("filler-{index}")),
+                "filler",
+            );
+        }
+
+        backend.fork("root", "child1", &[]).unwrap();
+        let child1 = mount_for(&backend, "child1", &base);
+        assert_eq!(child1.lower.len(), 1, "root upper is large: child1 chains");
+        write_upper(
+            &backend,
+            "child1",
+            &base.join("child1-only"),
+            "child1-only",
+        );
+
+        backend.fork("child1", "grandchild", &[]).unwrap();
+        let grandchild = mount_for(&backend, "grandchild", &base);
+        assert_eq!(
+            grandchild.lower, child1.lower,
+            "child1 upper is small: grandchild flattens without adding S2 to its lower"
+        );
+        assert!(
+            upper_at(&backend, "grandchild", &base.join("child1-only")).exists(),
+            "flattened grandchild upper must carry child1's own write"
+        );
+        assert!(
+            !upper_at(&backend, "grandchild", &base.join("keep")).exists(),
+            "root files must come from the inherited S1 lower, not the flattened upper"
+        );
+
+        assert!(
+            run_in_environment(
+                &backend,
+                "grandchild",
+                &base,
+                "test -f keep && test -f remove && test -f child1-only && \
+                 printf modified > keep && rm -f remove && printf new > newfile"
+            ),
+            "grandchild did not see the mixed lower-chain + flattened view"
+        );
+
+        let grandchild_base = FilesystemBackend::base_snapshot_id_for_child("grandchild");
+        let diff = backend
+            .diff(&grandchild_base, "grandchild", &[])
+            .unwrap();
+        let document: DiffDocument =
+            serde_json::from_slice(&fs::read(diff.diff_ref.unwrap()).unwrap()).unwrap();
+        let changes: BTreeSet<(String, String)> = document
+            .changes
+            .iter()
+            .map(|change| (change.path.clone(), change.kind.clone()))
+            .collect();
+        let expected: BTreeSet<(String, String)> = [
+            (base.join("keep").display().to_string(), "change".to_string()),
+            (base.join("remove").display().to_string(), "delete".to_string()),
+            (base.join("newfile").display().to_string(), "change".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            changes, expected,
+            "mixed-layout diff must report exactly the three grandchild changes"
+        );
+
+        backend.suspend("child1").unwrap();
+        let accepted = backend
+            .accept(&grandchild_base, "grandchild", "child1", &[], None, None)
+            .unwrap();
+        assert!(accepted.conflicts.is_empty(), "{:?}", accepted.conflicts);
+        assert!(accepted.confirmation.published);
+        backend.resume("child1").unwrap();
+        assert!(
+            run_in_environment(
+                &backend,
+                "child1",
+                &base,
+                "test \"$(cat keep)\" = modified && test ! -e remove && \
+                 test \"$(cat newfile)\" = new && test -f child1-only"
+            ),
+            "accepted changes are not visible in child1"
+        );
+        assert!(
+            run_in_environment(
+                &backend,
+                "root",
+                &base,
+                "test \"$(cat keep)\" = base-keep && test -f remove && test ! -e newfile"
+            ),
+            "accept into child1 changed the parent root"
+        );
+
+        backend.terminate("grandchild").unwrap();
+        backend.discard("grandchild", &[]).unwrap();
+        backend.terminate("child1").unwrap();
+        backend.discard("child1", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn mixed_layout_accept_reports_conflict_and_writes_nothing() {
+        let root = btrfs_temp();
+        let base = root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let Some((_state, backend)) = layout_backend(&base, 32) else {
+            eprintln!(
+                "SKIP mixed_layout_accept_reports_conflict_and_writes_nothing: no writable mount separate from workspace"
+            );
+            return;
+        };
+        backend.establish("root").unwrap();
+        write_upper(&backend, "root", &base.join("keep"), "base-keep");
+        for index in 0..40 {
+            write_upper(
+                &backend,
+                "root",
+                &base.join(format!("filler-{index}")),
+                "filler",
+            );
+        }
+        backend.fork("root", "child1", &[]).unwrap();
+        write_upper(&backend, "child1", &base.join("child1-only"), "child1-only");
+        backend.fork("child1", "grandchild", &[]).unwrap();
+        write_upper(&backend, "grandchild", &base.join("keep"), "grandchild-keep");
+        write_upper(&backend, "grandchild", &base.join("newfile"), "new");
+        // The target changes the same path after the fork.
+        write_upper(&backend, "child1", &base.join("keep"), "target-keep");
+
+        let grandchild_base = FilesystemBackend::base_snapshot_id_for_child("grandchild");
+        backend.suspend("child1").unwrap();
+        let accepted = backend
+            .accept(&grandchild_base, "grandchild", "child1", &[], None, None)
+            .unwrap();
+        assert!(
+            accepted
+                .conflicts
+                .iter()
+                .any(|conflict| conflict.path == base.join("keep").display().to_string()),
+            "accept did not report the conflicting path: {:?}",
+            accepted.conflicts
+        );
+        assert!(
+            !accepted.confirmation.published,
+            "conflicting accept must not publish"
+        );
+        assert_eq!(
+            fs::read_to_string(upper_at(&backend, "child1", &base.join("keep"))).unwrap(),
+            "target-keep",
+            "conflicting accept overwrote the target"
+        );
+        assert!(
+            !upper_at(&backend, "child1", &base.join("newfile")).exists(),
+            "conflicting accept applied an unrelated change"
+        );
+        backend.resume("child1").unwrap();
+        backend.terminate("grandchild").unwrap();
+        backend.discard("grandchild", &[]).unwrap();
+        backend.terminate("child1").unwrap();
+        backend.discard("child1", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn fork_refuses_chain_deeper_than_max_lower_depth_before_creating_anything() {
+        let root = btrfs_temp();
+        let base = root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let Some((_state, backend)) = layout_backend(&base, 0) else {
+            eprintln!(
+                "SKIP fork_refuses_chain_deeper_than_max_lower_depth_before_creating_anything: no writable mount separate from workspace"
+            );
+            return;
+        };
+        backend.establish("root").unwrap();
+        write_upper(&backend, "root", &base.join("gen-0"), "x");
+        // Build the deepest allowed chain directly: the guard only depends on
+        // the recorded lower depth, and creating 96 real forks would add no
+        // coverage to the pre-creation failure assertion.
+        let target = mount_for(&backend, "root", &base).target;
+        {
+            let mut state = backend.lock().unwrap();
+            let environment = state.environments.get_mut("root").unwrap();
+            let mount = environment.mounts.get_mut(&target.display().to_string()).unwrap();
+            for index in 0..MAX_LOWER_DEPTH {
+                let layer = backend.layers_root().join(format!("fake-layer-{index}"));
+                fs::create_dir_all(mount.layer_upper(&layer)).unwrap();
+                mount.lower.push(layer);
+            }
+        }
+        let parent_depth = mount_for(&backend, "root", &base).lower.len();
+        assert_eq!(parent_depth, MAX_LOWER_DEPTH);
+
+        let error = backend
+            .fork("root", "chain-overflow", &[])
+            .expect_err("fork beyond MAX_LOWER_DEPTH must fail");
+        assert!(
+            error.message.contains("lower"),
+            "error must explain the lower chain: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains(&MAX_LOWER_DEPTH.to_string()),
+            "error must state the limit {}: {}",
+            MAX_LOWER_DEPTH,
+            error.message
+        );
+        assert!(
+            error.message.contains(&(MAX_LOWER_DEPTH + 1).to_string()),
+            "error must state the resulting depth {}: {}",
+            MAX_LOWER_DEPTH + 1,
+            error.message
+        );
+        assert!(backend.state("chain-overflow").is_none());
+        assert!(
+            !backend.paths("chain-overflow").exists(),
+            "failed fork left a child environment root"
+        );
+        assert!(
+            !backend
+                .environment_metadata_path("chain-overflow")
+                .exists(),
+            "failed fork left child environment metadata"
+        );
+        assert!(
+            !backend
+                .layer_path_for(&FilesystemBackend::base_snapshot_id_for_child(
+                    "chain-overflow"
+                ))
+                .exists(),
+            "failed fork left a layer directory"
+        );
+        for index in 0..MAX_LOWER_DEPTH {
+            let _ = remove_directory_force(
+                &backend.layers_root().join(format!("fake-layer-{index}")),
+            );
+        }
         backend.terminate("root").unwrap();
         backend.cleanup("root").unwrap();
     }

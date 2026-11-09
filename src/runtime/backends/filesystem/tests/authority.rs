@@ -339,14 +339,27 @@ print("ok" if data else "fail")
         assert!(!reported.is_empty());
         let mount = mount_for(&backend, "root", root.path());
         assert!(
-            backend.mount_uses_flattening(&mount),
-            "overlapping mount must use flattening"
+            backend.config.state_directory.starts_with(&mount.target),
+            "state directory must sit below this mount in the overlapping test layout"
         );
         assert_eq!(
             backend.launch_lowers(&mount),
             vec![mount.target.clone()],
-            "flattened mount must not use snapshot layers as lowerdirs"
+            "a mount without lower layers launches with only the host mount"
         );
+        write_upper(&backend, "root", &root.path().join("overlap.txt"), "parent");
+        backend.fork("root", "child", &[]).unwrap();
+        let child = mount_for(&backend, "child", root.path());
+        assert!(
+            child.lower.is_empty(),
+            "overlapping mount must flatten: the child must not add a snapshot layer to its lower chain"
+        );
+        assert!(
+            upper_at(&backend, "child", &root.path().join("overlap.txt")).exists(),
+            "flattened child upper must carry the parent content"
+        );
+        backend.terminate("child").unwrap();
+        backend.discard("child", &[]).unwrap();
         backend.terminate("root").unwrap();
         backend.cleanup("root").unwrap();
     }
@@ -418,6 +431,9 @@ print("ok" if data else "fail")
         // The state mount itself is isolated; only the workspace mount's
         // lower chain is under test here.
         config.allow_overlapping_state_directory = true;
+        // Force Chain so this test keeps covering the lower-chain path; the
+        // per-fork default would flatten the small test upper.
+        config.fork_flatten_entry_limit = 0;
         let backend = FilesystemBackend::new(config).unwrap();
         if !backend
             .overlayable_mounts()
@@ -429,10 +445,6 @@ print("ok" if data else "fail")
         }
         backend.establish("root").unwrap();
         let workspace_mount = mount_for(&backend, "root", &base);
-        assert!(
-            !backend.mount_uses_flattening(&workspace_mount),
-            "workspace mount must use lower chains when state is on a different mount"
-        );
         assert!(
             !backend
                 .state_overlap_mounts()
