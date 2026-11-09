@@ -23,11 +23,33 @@ struct Case {
     cleanup: Vec<PathBuf>,
 }
 
+#[derive(Debug)]
+enum CaseError {
+    Unsupported(String),
+    Failed(String),
+}
+
+impl From<String> for CaseError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
 fn main() {
+    if let Err(error) = run() {
+        eprintln!("fs_bench failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
     let iterations: usize = std::env::var("ASCOUT_BENCH_ITERS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(20);
+    if iterations == 0 {
+        return Err("ASCOUT_BENCH_ITERS must be greater than zero".into());
+    }
     let sizes: Vec<usize> = std::env::var("ASCOUT_BENCH_SIZES")
         .ok()
         .map(|value| value.split(',').filter_map(|v| v.parse().ok()).collect())
@@ -78,13 +100,14 @@ fn main() {
         },
     ];
 
+    let execution = (|| -> Result<(), String> {
     println!("machine:");
     println!("  kernel: {}", uname("-r"));
     println!("  cpu: {}", cpu_model());
     for case in &cases {
-        fs::create_dir_all(&case.root).unwrap();
-        fs::create_dir_all(&case.state).unwrap();
-        fs::create_dir_all(&case.workspace).unwrap();
+        fs::create_dir_all(&case.root).map_err(|e| format!("create root: {e}"))?;
+        fs::create_dir_all(&case.state).map_err(|e| format!("create state: {e}"))?;
+        fs::create_dir_all(&case.workspace).map_err(|e| format!("create workspace: {e}"))?;
         let fs_type = Command::new("stat")
             .args(["-f", "-c", "%T"])
             .arg(&case.state)
@@ -103,27 +126,47 @@ fn main() {
         }
         for &n in &sizes {
             if let Err(error) = run_case(case, n, iterations) {
-                println!(
-                    "{},{},{},SKIP: {},,,",
-                    case.name, n, "all", error
-                );
+                match error {
+                CaseError::Unsupported(error) => {
+                    println!("{},{},{},SKIP: {},,,", case.name, n, "all", error);
+                }
+                CaseError::Failed(error) => {
+                    return Err(format!("{} N={n}: {error}", case.name));
+                }
+                }
             }
         }
     }
-    for case in &cases {
-        for path in &case.cleanup {
-            let _ = fs::remove_dir_all(path);
-        }
+    Ok(())
+    })();
+    let cleanup_errors = cleanup_paths(cases.iter().flat_map(|case| case.cleanup.iter()));
+    match (execution, cleanup_errors.is_empty()) {
+        (result, true) => result,
+        (result, false) => Err(format!("{}cleanup failed: {}",
+            result.err().map(|e| format!("{e}; ")).unwrap_or_default(),
+            cleanup_errors.join("; "))),
     }
 }
 
-fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), String> {
+fn cleanup_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> Vec<String> {
+    let mut cleanup_errors = Vec::new();
+        for path in paths {
+            if let Err(error) = fs::remove_dir_all(path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    cleanup_errors.push(format!("remove {}: {error}", path.display()));
+                }
+            }
+        }
+    cleanup_errors
+}
+
+fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
     let mut config = FilesystemConfig::new(&case.state);
     config.force_overlay = !case.name.starts_with("btrfs-snapshot");
     let backend = FilesystemBackend::new(config).map_err(|e| e.to_string())?;
     let capabilities = backend.capabilities();
     if !capabilities.branch_environment {
-        return Err("bubblewrap overlay probe failed".into());
+        return Err(CaseError::Unsupported("bubblewrap overlay probe failed".into()));
     }
     let overlaps = capabilities
         .state_directory_overlaps_mount
@@ -134,11 +177,7 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), String> {
         .clone()
         .unwrap_or_else(|| "unknown".into());
     if case.name.starts_with("btrfs-snapshot") && fork_cost != "btrfs_snapshot" {
-        println!(
-            "{},{},all,SKIP: btrfs snapshot copies unavailable fork_cost={},,,",
-            case.name, n, fork_cost
-        );
-        return Ok(());
+        return Err(CaseError::Unsupported("btrfs snapshot copies unavailable".into()));
     }
     let mechanism = backend.mechanism().as_str().to_string();
     let cwd = case.workspace.clone();
@@ -177,7 +216,7 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         total.entry("accept").or_default().push(accept_start.elapsed());
         if !accepted.conflicts.is_empty() {
-            return Err(format!("accept conflicts: {:?}", accepted.conflicts));
+            return Err(format!("accept conflicts: {:?}", accepted.conflicts).into());
         }
         backend.resume("root").map_err(|e| e.to_string())?;
         backend.terminate(&child).map_err(|e| e.to_string())?;

@@ -484,8 +484,9 @@ btrfs fork 结构。
   `.scope` 可创建子 cgroup、写入 `cgroup.procs`、写 `cgroup.freeze=1`，并观察到
   `cgroup.events` 中 `frozen 1`。实测成功（无需 sudo）。
 - **SIGSTOP/SIGCONT**：BaseRuntime 已在 `pre_exec` 设置独立进程组，终止用
-  `kill(-pgid, SIGKILL)`；同样的进程组原语可扩展为 `SIGSTOP/SIGCONT`，但当前
-  没有实现。限制：Agent 自建新 session/进程组后后代不受该组信号影响。
+  `kill(-pgid, SIGKILL)`；ProcessBackend 已实现 `SIGSTOP/SIGCONT` fallback，
+  由 `process_group_fallback_freezes_and_reports_mechanism` 验证。限制：Agent
+  自建新 session/进程组后后代不受该组信号影响。
 - 本轮已实现 cgroup v2 freeze，作为 ProcessBackend 的 freeze/thaw；cgroup 不可用
   时 fallback 到进程组 SIGSTOP/SIGCONT。`BaseRuntime` 在 fork/mark/accept 前冻结、
   之后解冻，只有真实冻结+解冻成功才把 `writers_quiesced` 置 true。

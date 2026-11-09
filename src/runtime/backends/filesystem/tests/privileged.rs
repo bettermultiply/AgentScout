@@ -17,12 +17,7 @@ use super::support::*;
             .ok()
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .unwrap_or_default();
-        if fs_type != "btrfs" {
-            eprintln!(
-                "SKIP priv_btrfs_fork_diff_accept_discard: ASCOUT_PRIV_STATE_DIR is {fs_type}, not btrfs"
-            );
-            return;
-        }
+        assert_eq!(fs_type, "btrfs", "ASCOUT_PRIV_TESTS=1 requires a btrfs state directory");
         let root = tempfile::Builder::new()
             .prefix("priv-btrfs-")
             .tempdir_in(state_root)
@@ -78,6 +73,7 @@ use super::support::*;
             eprintln!("SKIP priv_direct_root_overlay_is_available_in_initial_userns: ASCOUT_PRIV_TESTS != 1");
             return;
         }
+        assert_eq!(unsafe { libc::geteuid() }, 0, "ASCOUT_PRIV_TESTS=1 requires root for direct lower=/ overlay");
         let root = tempfile::Builder::new()
             .prefix("priv-root-")
             .tempdir_in(priv_state_root())
@@ -86,10 +82,6 @@ use super::support::*;
         let work = root.path().join("work");
         fs::create_dir_all(&upper).unwrap();
         fs::create_dir_all(&work).unwrap();
-        if unsafe { libc::geteuid() } != 0 {
-            eprintln!("SKIP priv_direct_root_overlay_is_available_in_initial_userns: not root");
-            return;
-        }
         let status = Command::new("unshare")
             .args(["--mount", "--propagation", "private", "bwrap"])
             .args(["--die-with-parent", "--ro-bind", "/", "/"])
@@ -108,4 +100,3 @@ use super::support::*;
             .unwrap();
         assert!(status.success(), "privileged direct lower=/ overlay failed");
     }
-

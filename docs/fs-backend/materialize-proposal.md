@@ -11,7 +11,13 @@
 
 ## 触发条件
 
-物化只能在没有存活的投机分支、且 authority 已静止时发生：
+用户确认的触发偏好（不代表本轮实现）是：
+
+- 默认在 Agent 等待用户输入，或达成阶段目标而停止活动时触发；
+- 更积极的模式可在没有存活的投机分支时提前触发，以分摊物化成本。
+
+“没有存活的投机分支”不等于“没有写者”。无论采用哪种触发偏好，物化只能在
+authority 已静止并完成写者协调后发生：
 
 1. authority 环境处于 `Suspended`，ProcessBackend 已真实冻结并确认
    `writers_quiesced=true`；或 authority 没有运行进程且 filesystem 状态为
@@ -105,9 +111,9 @@ host_base_updated: bool,
 物化后，宿主 Base 收到 authority 的最终视图，才真正接近“无投机直接运行”的外部
 可见性。物化仍然不是原子的：中间态可见，且失败时可能已经部分写入再回滚。
 
-## 需要用户决定的问题
+## 仍需用户决定的问题
 
-1. 物化触发者是控制面、Runtime 还是显式用户命令？
+1. 物化由控制面、Runtime 还是显式用户命令最终发起（触发偏好已记录）？
 2. authority 在物化后是否保留？保留多久？谁负责最终 cleanup？
 3. 宿主并发修改默认策略：fail-closed、人工合并，还是 Policy 可配置 authority-wins？
 4. materialize 是否复用 `FilesystemResult.confirmation.published`，还是新增

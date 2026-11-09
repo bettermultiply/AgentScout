@@ -357,6 +357,13 @@ mod tests {
         }
         let error = backend.stop(&context.environment_id).unwrap_err();
         assert!(error.message.contains("cgroup.kill"), "{error}");
+        assert!(
+            backend.process_handle(&context.environment_id).is_some(),
+            "failed stop must retain the process handle for cleanup retry"
+        );
+        fs::remove_dir(fake_cgroup.path().join("cgroup.kill")).unwrap();
+        backend.cleanup(&context.environment_id).unwrap();
+        assert!(backend.process_handle(&context.environment_id).is_none());
     }
 
     #[test]

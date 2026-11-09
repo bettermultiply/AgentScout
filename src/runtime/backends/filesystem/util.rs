@@ -188,10 +188,15 @@ pub(super) fn remove_btrfs_tree(btrfs: &Path, path: &Path) -> Result<(), Backend
             .stderr(Stdio::null())
             .status();
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                remove_btrfs_tree(btrfs, &entry.path())?;
+        match fs::read_dir(path) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(error)?;
+                    remove_btrfs_tree(btrfs, &entry.path())?;
+                }
             }
+            Err(value) if value.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(value) => return Err(error(value)),
         }
         let _ = Command::new(btrfs)
             .args([
@@ -274,5 +279,4 @@ pub(crate) fn now_nanos() -> u128 {
         .map(|value| value.as_nanos())
         .unwrap_or(0)
 }
-
 

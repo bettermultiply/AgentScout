@@ -331,6 +331,7 @@ use std::sync::{Arc, Mutex};
     fn suspend_rollback_thaw_failure_is_reported() {
         let runtime = BaseRuntime::new("runtime", Arc::new(FailLifecycle { suspend: true, resume: false }));
         if runtime.process.freeze_mechanism() == FreezeMechanism::None {
+            eprintln!("SKIP suspend_rollback_thaw_failure_is_reported: no freeze mechanism");
             return;
         }
         let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["30".into()]);
@@ -351,6 +352,7 @@ use std::sync::{Arc, Mutex};
     fn resume_rollback_freeze_failure_is_reported() {
         let runtime = BaseRuntime::new("runtime", Arc::new(FailLifecycle { suspend: false, resume: true }));
         if runtime.process.freeze_mechanism() == FreezeMechanism::None {
+            eprintln!("SKIP resume_rollback_freeze_failure_is_reported: no freeze mechanism");
             return;
         }
         let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["30".into()]);

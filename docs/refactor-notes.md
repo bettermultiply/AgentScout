@@ -85,7 +85,8 @@
   reflink/快照已覆盖数据拷贝，目视没有低风险且可观的收益，故不在本轮引入
   并行目录/xattr 写入顺序风险。
 - 新增 `examples/fs_bench.rs` btrfs-snapshot 两个 case；本机因
-  `fast_delete=false` 输出 SKIP。accept lower 链最终基准约 5–6ms，不再随
+  快照副本探测失败时输出 SKIP，`fast_delete=false` 本身不再阻止运行。
+  accept lower 链最终基准约 5–6ms，不再随
   N 线性增长。
 
 ## 第八轮 FS 错误修复
@@ -145,7 +146,8 @@
   `btrfs subvolume snapshot -r` 对 100k 文件测到首次约 0.22s、后续接近 0，
   说明剩余成本在完整 fork 的 per-mount snapshot/prepare 流程；本轮未继续优化。
 - `target/tmp` 中仍有少量空的只读 btrfs 子卷根，来自手工探测；普通用户
-  `btrfs subvolume delete` EPERM，无法完全删除，非测试失败残留。
+  `btrfs subvolume delete` EPERM。此为当轮诊断，不是所有后续残留的结论；
+  后续必须重新检查挂载、权限、子卷和后台删除状态，不能据此排除测试残留。
 - 长函数拆分、firecracker 两个 start 的重复代码、ops 前置检查提取、firecracker
   超时常量未处理，已在上一节列出原因。
 
@@ -185,4 +187,3 @@
   仍是公开或 crate 可见的数据面 API，未收窄。
 - `docs/development/decisions.md` 与 `filesystem::operate` 的表述不一致仍存在；
   该文档不在本轮可改范围。
-

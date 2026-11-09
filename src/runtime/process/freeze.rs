@@ -146,6 +146,12 @@ impl ProcessBackend {
         if failures.is_empty() {
             Ok(())
         } else {
+            // Keep ownership after failure so cleanup can retry the same
+            // process/cgroup instead of losing a still-live resource.
+            self.processes
+                .lock()
+                .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?
+                .insert(environment_id.to_string(), process);
             Err(BackendError::new(failures.join("; ")))
         }
     }
