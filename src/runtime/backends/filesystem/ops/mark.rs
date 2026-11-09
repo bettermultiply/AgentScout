@@ -11,7 +11,8 @@ impl FilesystemBackend {
         scope: &[PathScope],
     ) -> Result<FilesystemResult, BackendError> {
         let scopes = normalize_scopes(scope)?;
-        let (environment, existing, existing_snapshot) = {
+        let mut profile = Profile::new("mark");
+        let (environment, existing, existing_snapshot) = profile.run("resolve", || {
             let state = self.lock()?;
             let environment = Self::resolve_environment(&state, snapshot)?;
             let existing = environment.marks.get(mark_id).cloned();
@@ -19,8 +20,8 @@ impl FilesystemBackend {
                 .as_ref()
                 .and_then(|id| state.snapshots.get(id))
                 .cloned();
-            (environment, existing, record)
-        };
+            Ok::<_, BackendError>((environment, existing, record))
+        })?;
         if let Some(snapshot_id) = existing {
             let verified = existing_snapshot
                 .as_ref()
@@ -49,18 +50,15 @@ impl FilesystemBackend {
             )));
         }
 
-        let selected = environment.selected_mounts(&scopes)?;
-        let selected_targets: BTreeSet<String> = selected
-            .iter()
-            .map(|mount| mount.target.display().to_string())
-            .collect();
+        let selected = profile.run("scan", || environment.selected_mounts(&scopes))?;
+        let produced = profile.run("plan", || self.fork_producers(&selected));
         let mut updated = environment.clone();
         let mut record_lower: BTreeMap<String, Vec<PathBuf>> = environment
             .mounts
             .iter()
             .map(|(key, mount)| {
                 let mut chain = mount.lower.clone();
-                if selected_targets.contains(key) {
+                if produced.contains_key(key) {
                     chain.push(layer_path.clone());
                 }
                 (key.clone(), chain)
@@ -74,51 +72,63 @@ impl FilesystemBackend {
         let created = (|| -> Result<(), BackendError> {
             match self.mechanism {
                 FilesystemMechanism::Btrfs => {
-                    // One read-only snapshot per selected mount upper.  The
-                    // live mount and uppers are not changed.
+                    // One read-only snapshot per non-empty selected mount
+                    // upper.  The live mount and uppers are not changed.
                     fs::create_dir_all(&layer_path).map_err(error)?;
+                    let mut chains = Vec::new();
                     for mount in &selected {
-                        let layer_upper = mount.layer_upper(&layer_path);
-                        if let Some(parent) = layer_upper.parent() {
-                            fs::create_dir_all(parent).map_err(error)?;
+                        let key = mount.target.display().to_string();
+                        if produced.get(&key) != Some(&ForkProducer::Snapshot) {
+                            continue;
                         }
-                        self.btrfs_snapshot(&mount.upper, &layer_upper, true)?;
+                        chains.push(vec![ForkTask::SnapshotLayer {
+                            source: mount.upper.clone(),
+                            target: mount.layer_upper(&layer_path),
+                        }]);
                     }
+                    self.run_fork_chains(&mut profile, chains)?;
                 }
                 FilesystemMechanism::Overlay => {
-                    // Independent clone of each selected mount upper only.
+                    // Independent clone of each non-empty selected mount upper
+                    // only.  Empty uppers are represented by an empty view and
+                    // do not get a layer at all.
                     let staging = staging_path(&layer_path);
                     let built = (|| -> Result<(), BackendError> {
                         fs::create_dir_all(&staging).map_err(error)?;
+                        let mut chains = Vec::new();
                         for mount in &selected {
-                            let layer_upper = mount.layer_upper(&staging);
-                            if let Some(parent) = layer_upper.parent() {
-                                fs::create_dir_all(parent).map_err(error)?;
-                            }
-                            if self.snapshot_copies {
-                                let parent_volume = mount.upper.parent().ok_or_else(|| {
-                                    BackendError::new("snapshot-copy mount upper has no volume parent")
-                                })?;
-                                let layer_volume = staging.join(&mount.layer_key);
-                                if let Some(parent) = layer_volume.parent() {
-                                    fs::create_dir_all(parent).map_err(error)?;
+                            let key = mount.target.display().to_string();
+                            let Some(producer) = produced.get(&key) else {
+                                continue;
+                            };
+                            let chain = match producer {
+                                ForkProducer::Snapshot => {
+                                    let parent_volume = mount.upper.parent().ok_or_else(|| {
+                                        BackendError::new(
+                                            "snapshot-copy mount upper has no volume parent",
+                                        )
+                                    })?;
+                                    vec![ForkTask::SnapshotLayer {
+                                        source: parent_volume.to_path_buf(),
+                                        target: staging.join(&mount.layer_key),
+                                    }]
                                 }
-                                self.btrfs_snapshot(parent_volume, &layer_volume, true)?;
-                            } else {
-                                clone_upper(
-                                    &mount.upper,
-                                    &layer_upper,
-                                    self.fork_cost == ForkCost::Reflink,
-                                )?;
-                            }
+                                ForkProducer::Clone => vec![ForkTask::CloneLayer {
+                                    source: mount.upper.clone(),
+                                    target: mount.layer_upper(&staging),
+                                    reflink: self.reflink_available,
+                                }],
+                            };
+                            chains.push(chain);
                         }
+                        self.run_fork_chains(&mut profile, chains)?;
                         Ok(())
                     })();
                     if let Err(error) = built {
                         let _ = remove_directory_force(&staging);
                         return Err(error);
                     }
-                    finalize_staging(&staging, &layer_path)?;
+                    profile.run("finalize", || finalize_staging(&staging, &layer_path))?;
                 }
             }
             Ok(())
@@ -139,20 +149,22 @@ impl FilesystemBackend {
             lower: record_lower,
             refs: BTreeSet::new(),
         };
-        let garbage = {
+        let garbage = profile.run("state_refs", || {
             let mut state = self.lock()?;
             state.snapshots.insert(snapshot_id.clone(), record.clone());
             updated
                 .marks
                 .insert(mark_id.to_string(), snapshot_id.clone());
             state.environments.insert(updated.id.clone(), updated.clone());
-            self.refresh_references(&mut state)?
-        };
-        let durable = (|| -> Result<(), BackendError> {
-            self.persist_all_snapshots()?;
+            self.refresh_references(&mut state)
+        })?;
+        let durable = profile.run("persist", || {
+            // Only the new snapshot changed in this operation; persisting the
+            // whole snapshot set would make mark O(historical snapshots).
+            self.persist_snapshot(&record)?;
             self.persist_environment(&updated)?;
-            Ok(())
-        })();
+            Ok::<_, BackendError>(())
+        });
         if let Err(error) = durable {
             {
                 let mut state = self.lock()?;
@@ -174,7 +186,8 @@ impl FilesystemBackend {
                 "filesystem mark metadata was not durable: {error}"
             )));
         }
-        self.schedule_gc(garbage)?;
+        profile.run("gc", || self.schedule_gc(garbage))?;
+        profile.finish();
         let mut result = Self::snapshot_result(snapshot_id);
         result.confirmation.snapshot_created = true;
         result.confirmation.metadata_durable = true;
@@ -182,5 +195,4 @@ impl FilesystemBackend {
         result.confirmation.writers_quiesced = false;
         Ok(result)
     }
-
 }

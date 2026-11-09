@@ -28,6 +28,15 @@ pub(crate) struct MountUnit {
     /// may still use `workspace` or `tmp`.
     #[serde(default = "default_layer_key")]
     pub(crate) layer_key: String,
+    /// True when `upper.parent()` is a btrfs subvolume that can be used as the
+    /// source of a snapshot.  Empty child mounts get plain directories, so a
+    /// later fork must fall back to cloning instead of snapshotting them.
+    #[serde(default = "default_volume_is_subvolume")]
+    pub(crate) volume_is_subvolume: bool,
+}
+
+fn default_volume_is_subvolume() -> bool {
+    true
 }
 
 fn default_layer_key() -> String {
@@ -208,6 +217,7 @@ impl EnvironmentMetadata {
                         target: target.clone(),
                         lower: layers.clone(),
                         layer_key: key.clone(),
+                        volume_is_subvolume: true,
                     },
                 );
             }

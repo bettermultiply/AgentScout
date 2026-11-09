@@ -108,222 +108,323 @@ impl SpeculativeTree {
         let branch = work.branch().to_string();
         match work {
             ControlOperation::Predict(tool) => {
-                let ToolPending {
-                    branch_id,
-                    operation_id,
-                    tool_name,
-                    checkpoint,
-                    ..
-                } = &tool;
-                if self.waiting_point_live(&tool) {
-                    self.branches
-                        .get_mut(branch_id)
-                        .expect("live waiting branch")
-                        .execution_state
-                        .phase = BranchPhase::Predict;
-                    let launch_unsupported =
-                        matches!(&result, Ok(ControlResult::PredictionsWithoutAuthority(_)));
-                    // An empty prediction set is not a failed speculation: it means this boundary has no
-                    // hypothesis to test. Execute the tool as an ordinary authority action instead of
-                    // leaving the adapter's tool call waiting for a result that will never arrive.
-                    let mut direct_invocation = false;
-                    match result {
-                        Ok(ControlResult::Predictions(predictions)) if predictions.is_empty() => {
-                            direct_invocation = true;
-                            self.tool_invocations.push(tool.clone());
-                        }
-                        Ok(ControlResult::Predictions(predictions)) => {
-                            for prediction in predictions {
-                                let command = self.start_candidate(
-                                    branch_id,
-                                    operation_id,
-                                    tool_name,
-                                    prediction,
-                                    checkpoint.clone(),
-                                )?;
-                                let child = match &command {
-                                    AgentCommand::StartCandidate { branch_id, .. } => branch_id,
-                                    _ => unreachable!(),
-                                };
-                                actions.records.push(json!({"message":"candidate_created", "branch_id":child, "parent":branch_id, "fork_at":self.branches[child].execution_position.transcript_index}));
-                                self.schedule(ControlOperation::Establish(command), &mut actions);
-                            }
-                        }
-                        Ok(ControlResult::PredictionsWithoutAuthority(predictions)) => {
-                            for prediction in predictions {
-                                let command = self.start_candidate(
-                                    branch_id,
-                                    operation_id,
-                                    tool_name,
-                                    prediction,
-                                    checkpoint.clone(),
-                                )?;
-                                let child = match &command {
-                                    AgentCommand::StartCandidate { branch_id, .. } => branch_id,
-                                    _ => unreachable!(),
-                                };
-                                actions.records.push(json!({"message":"candidate_created", "branch_id":child, "parent":branch_id, "launch":"unsupported"}));
-                                self.schedule(ControlOperation::Establish(command), &mut actions);
-                            }
-                            actions.records.push(json!({"message":"launch_not_started", "branch_id":branch_id, "operation_id":operation_id, "status":"unsupported", "reason":"validator/evidence-only path is unsupported"}));
-                        }
-                        Err(error) => actions.records.push(
-                            json!({"message":"policy_error", "branch_id":branch, "reason":error}),
-                        ),
-                        _ => unreachable!(),
-                    }
-                    // An empty prediction set includes the truthful
-                    // launch=false prototype result: the Proposal is not
-                    // cancelled, but validator/evidence-only execution is
-                    // unsupported. Do not retry the same point forever.
-                    if !direct_invocation
-                        && !launch_unsupported
-                        && !self.branches.values().any(|candidate| {
-                            candidate.parent_branch_id.as_deref() == Some(branch_id)
-                                && candidate.proposal_id.is_some()
-                        })
-                    {
-                        actions.records.push(json!({
-                            "message": "launch_not_started",
-                            "branch_id": branch_id,
-                            "operation_id": operation_id,
-                            "status": "unsupported",
-                            "reason": "validator/evidence-only path is unsupported; Proposal retained outside Branch execution"
-                        }));
-                    } else if !direct_invocation && !launch_unsupported {
-                        // Retain the waiting point until all child environments exist.
-                        self.tool_invocations.push(tool);
-                    }
-                }
+                self.complete_predict(tool, result, &mut actions, &branch)?;
             }
-            ControlOperation::Establish(command) => match result {
-                Ok(ControlResult::Completed) => {
-                    self.record_runtime_state(&branch, RuntimeExecutionState::Ready)?;
-                    if !self.stopping && self.branches[&branch].status == BranchStatus::Created {
-                        actions.commands.push(command);
-                    }
-                }
-                Err(reason) => {
-                    self.record_runtime_state(&branch, RuntimeExecutionState::Failed)?;
-                    actions.records.push(json!({"message":"runtime_operation_failed","branch_id":branch,"reason":reason}));
-                    actions
-                        .commands
-                        .extend(self.resolve_candidate(&branch, false)?);
-                }
-                _ => unreachable!(),
-            },
+            ControlOperation::Establish(command) => {
+                self.complete_establish(command, result, &mut actions, &branch)?;
+            }
             ControlOperation::Invoke(tool) => {
-                let live = self.waiting_point_live(&tool);
-                let ToolPending {
-                    branch_id,
-                    operation_id,
-                    launch: _,
-                    ..
-                } = tool;
-                let (outcome, evidence) =
-                    result
-                        .map_err(io::Error::other)
-                        .and_then(|value| match value {
-                            ControlResult::Outcome(outcome, evidence) => Ok((outcome, evidence)),
-                            _ => unreachable!(),
-                        })?;
-                self.record_candidate_outcome(
-                    &branch_id,
-                    &operation_id,
-                    outcome.clone(),
-                    Some(evidence),
-                )?;
-                self.branches
-                    .get_mut(&branch_id)
-                    .expect("candidate parent exists")
-                    .execution_state
-                    .phase = BranchPhase::Effect;
-                self.complete_operation(
-                    &branch_id,
-                    Some(&operation_id),
-                    OperationStatus::Succeeded,
-                )?;
-                if live {
-                    actions.commands.push(self.resolve_pending(
-                        &branch_id,
-                        &operation_id,
-                        outcome,
-                    )?);
-                }
+                self.complete_invoke(tool, result, &mut actions)?;
             }
             ControlOperation::Validate(candidate) => {
-                if !self.stopping && self.candidate_due(&candidate) {
-                    self.branches
-                        .get_mut(&candidate)
-                        .expect("candidate exists")
-                        .execution_state
-                        .phase = BranchPhase::Dispose;
-                    let (compatible, verdict, error) = match result {
-                        Ok(ControlResult::Disposition(compatible, verdict)) => {
-                            (compatible, verdict, None)
-                        }
-                        Err(error) => (false, "error".into(), Some(error)),
-                        _ => unreachable!(),
-                    };
-                    let proposal = self.branches[&candidate]
-                        .proposal_id
-                        .as_ref()
-                        .and_then(|id| self.proposals.get(id))
-                        .ok_or_else(|| io::Error::other("candidate Proposal is missing"))?;
-                    let record = json!({"branch_id":candidate, "hypothesis":proposal.payload, "verdict":verdict, "policy_error":error});
-                    if self.can_promote(&candidate, compatible) {
-                        self.record_runtime_state(
-                            &candidate,
-                            RuntimeExecutionState::PromotionRequested,
-                        )?;
-                        self.branches.get_mut(&candidate).unwrap().status = BranchStatus::Promoting;
-                        self.schedule(ControlOperation::Promote(candidate, record), &mut actions);
-                    } else {
-                        actions
-                            .commands
-                            .extend(self.resolve_candidate(&candidate, false)?);
-                        let mut record = record;
-                        record["disposition"] = json!("Discard");
-                        actions.records.push(record);
-                    }
-                }
+                self.complete_validate(candidate, result, &mut actions)?;
             }
-            ControlOperation::Promote(candidate, mut record) => {
-                let succeeded = result.is_ok();
-                self.record_runtime_state(
-                    &candidate,
-                    if succeeded {
-                        RuntimeExecutionState::Promoted
-                    } else {
-                        RuntimeExecutionState::Failed
-                    },
-                )?;
-                if !self.stopping && self.branches[&candidate].status == BranchStatus::Promoting {
-                    actions
-                        .commands
-                        .extend(self.finish_runtime_promotion(&candidate, succeeded)?);
-                    record["disposition"] = json!(if succeeded { "Promote" } else { "Discard" });
-                    record["runtime_promote_error"] = json!(result.err());
-                    actions.records.push(record);
-                }
+            ControlOperation::Promote(candidate, record) => {
+                self.complete_promote(candidate, record, result, &mut actions)?;
             }
             work @ (ControlOperation::Terminate(_) | ControlOperation::Cleanup(_)) => {
-                if let Err(error) = result {
-                    self.record_runtime_state(&branch, RuntimeExecutionState::Failed)?;
-                    return Err(io::Error::other(error));
-                }
-                let state = if matches!(work, ControlOperation::Terminate(_)) {
-                    RuntimeExecutionState::Terminated
-                } else {
-                    RuntimeExecutionState::Cleaned
-                };
-                self.record_runtime_state(&branch, state)?;
-                if state == RuntimeExecutionState::Terminated {
-                    self.schedule(ControlOperation::Cleanup(branch), &mut actions);
-                }
+                self.complete_terminate_or_cleanup(work, result, &mut actions, &branch)?;
             }
         }
         Ok(actions)
+    }
+
+    fn complete_predict(
+        &mut self,
+        tool: ToolPending,
+        result: Result<ControlResult, String>,
+        actions: &mut ControlActions,
+        branch: &str,
+    ) -> io::Result<()> {
+        let ToolPending {
+            branch_id,
+            operation_id,
+            tool_name,
+            checkpoint,
+            ..
+        } = &tool;
+        if !self.waiting_point_live(&tool) {
+            return Ok(());
+        }
+        self.branches
+            .get_mut(branch_id)
+            .expect("live waiting branch")
+            .execution_state
+            .phase = BranchPhase::Predict;
+        let launch_unsupported = matches!(&result, Ok(ControlResult::PredictionsWithoutAuthority(_)));
+        // An empty prediction set is not a failed speculation: it means this
+        // boundary has no hypothesis to test. Execute the tool as an ordinary
+        // authority action instead of leaving the adapter's tool call waiting
+        // for a result that will never arrive.
+        let mut direct_invocation = false;
+        match result {
+            Ok(ControlResult::Predictions(predictions)) if predictions.is_empty() => {
+                direct_invocation = true;
+                self.tool_invocations.push(tool.clone());
+            }
+            Ok(ControlResult::Predictions(predictions)) => {
+                self.start_candidates(
+                    branch_id,
+                    operation_id,
+                    tool_name,
+                    predictions,
+                    checkpoint.clone(),
+                    actions,
+                    false,
+                )?;
+            }
+            Ok(ControlResult::PredictionsWithoutAuthority(predictions)) => {
+                self.start_candidates(
+                    branch_id,
+                    operation_id,
+                    tool_name,
+                    predictions,
+                    checkpoint.clone(),
+                    actions,
+                    true,
+                )?;
+            }
+            Err(error) => actions.records.push(
+                json!({"message":"policy_error", "branch_id":branch, "reason":error}),
+            ),
+            _ => unreachable!(),
+        }
+        self.finish_predict_waiting_point(
+            tool,
+            direct_invocation,
+            launch_unsupported,
+            actions,
+        );
+        Ok(())
+    }
+
+    /// An empty prediction set includes the truthful launch=false prototype
+    /// result: the Proposal is not cancelled, but validator/evidence-only
+    /// execution is unsupported. Do not retry the same point forever.
+    fn finish_predict_waiting_point(
+        &mut self,
+        tool: ToolPending,
+        direct_invocation: bool,
+        launch_unsupported: bool,
+        actions: &mut ControlActions,
+    ) {
+        let ToolPending {
+            branch_id,
+            operation_id,
+            ..
+        } = &tool;
+        if !direct_invocation
+            && !launch_unsupported
+            && !self.branches.values().any(|candidate| {
+                candidate.parent_branch_id.as_deref() == Some(branch_id)
+                    && candidate.proposal_id.is_some()
+            })
+        {
+            actions.records.push(json!({
+                "message": "launch_not_started",
+                "branch_id": branch_id,
+                "operation_id": operation_id,
+                "status": "unsupported",
+                "reason": "validator/evidence-only path is unsupported; Proposal retained outside Branch execution"
+            }));
+        } else if !direct_invocation && !launch_unsupported {
+            // Retain the waiting point until all child environments exist.
+            self.tool_invocations.push(tool);
+        }
+    }
+
+    fn start_candidates(
+        &mut self,
+        branch_id: &str,
+        operation_id: &str,
+        tool_name: &str,
+        predictions: Vec<Value>,
+        checkpoint: Option<Value>,
+        actions: &mut ControlActions,
+        unsupported: bool,
+    ) -> io::Result<()> {
+        for prediction in predictions {
+            let command = self.start_candidate(
+                branch_id,
+                operation_id,
+                tool_name,
+                prediction,
+                checkpoint.clone(),
+            )?;
+            let child = match &command {
+                AgentCommand::StartCandidate { branch_id, .. } => branch_id,
+                _ => unreachable!(),
+            };
+            if unsupported {
+                actions.records.push(json!({"message":"candidate_created", "branch_id":child, "parent":branch_id, "launch":"unsupported"}));
+            } else {
+                actions.records.push(json!({"message":"candidate_created", "branch_id":child, "parent":branch_id, "fork_at":self.branches[child].execution_position.transcript_index}));
+            }
+            self.schedule(ControlOperation::Establish(command), actions);
+        }
+        if unsupported {
+            actions.records.push(json!({"message":"launch_not_started", "branch_id":branch_id, "operation_id":operation_id, "status":"unsupported", "reason":"validator/evidence-only path is unsupported"}));
+        }
+        Ok(())
+    }
+
+    fn complete_establish(
+        &mut self,
+        command: AgentCommand,
+        result: Result<ControlResult, String>,
+        actions: &mut ControlActions,
+        branch: &str,
+    ) -> io::Result<()> {
+        match result {
+            Ok(ControlResult::Completed) => {
+                self.record_runtime_state(branch, RuntimeExecutionState::Ready)?;
+                if !self.stopping && self.branches[branch].status == BranchStatus::Created {
+                    actions.commands.push(command);
+                }
+            }
+            Err(reason) => {
+                self.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
+                actions.records.push(json!({"message":"runtime_operation_failed","branch_id":branch,"reason":reason}));
+                actions
+                    .commands
+                    .extend(self.resolve_candidate(branch, false)?);
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn complete_invoke(
+        &mut self,
+        tool: ToolPending,
+        result: Result<ControlResult, String>,
+        actions: &mut ControlActions,
+    ) -> io::Result<()> {
+        let live = self.waiting_point_live(&tool);
+        let ToolPending {
+            branch_id,
+            operation_id,
+            launch: _,
+            ..
+        } = tool;
+        let (outcome, evidence) = result
+            .map_err(io::Error::other)
+            .and_then(|value| match value {
+                ControlResult::Outcome(outcome, evidence) => Ok((outcome, evidence)),
+                _ => unreachable!(),
+            })?;
+        self.record_candidate_outcome(
+            &branch_id,
+            &operation_id,
+            outcome.clone(),
+            Some(evidence),
+        )?;
+        self.branches
+            .get_mut(&branch_id)
+            .expect("candidate parent exists")
+            .execution_state
+            .phase = BranchPhase::Effect;
+        self.complete_operation(
+            &branch_id,
+            Some(&operation_id),
+            OperationStatus::Succeeded,
+        )?;
+        if live {
+            actions
+                .commands
+                .push(self.resolve_pending(&branch_id, &operation_id, outcome)?);
+        }
+        Ok(())
+    }
+
+    fn complete_validate(
+        &mut self,
+        candidate: String,
+        result: Result<ControlResult, String>,
+        actions: &mut ControlActions,
+    ) -> io::Result<()> {
+        if self.stopping || !self.candidate_due(&candidate) {
+            return Ok(());
+        }
+        self.branches
+            .get_mut(&candidate)
+            .expect("candidate exists")
+            .execution_state
+            .phase = BranchPhase::Dispose;
+        let (compatible, verdict, error) = match result {
+            Ok(ControlResult::Disposition(compatible, verdict)) => (compatible, verdict, None),
+            Err(error) => (false, "error".into(), Some(error)),
+            _ => unreachable!(),
+        };
+        let proposal = self.branches[&candidate]
+            .proposal_id
+            .as_ref()
+            .and_then(|id| self.proposals.get(id))
+            .ok_or_else(|| io::Error::other("candidate Proposal is missing"))?;
+        let record = json!({"branch_id":candidate, "hypothesis":proposal.payload, "verdict":verdict, "policy_error":error});
+        if self.can_promote(&candidate, compatible) {
+            self.record_runtime_state(&candidate, RuntimeExecutionState::PromotionRequested)?;
+            self.branches.get_mut(&candidate).unwrap().status = BranchStatus::Promoting;
+            self.schedule(ControlOperation::Promote(candidate, record), actions);
+        } else {
+            actions
+                .commands
+                .extend(self.resolve_candidate(&candidate, false)?);
+            let mut record = record;
+            record["disposition"] = json!("Discard");
+            actions.records.push(record);
+        }
+        Ok(())
+    }
+
+    fn complete_promote(
+        &mut self,
+        candidate: String,
+        mut record: Value,
+        result: Result<ControlResult, String>,
+        actions: &mut ControlActions,
+    ) -> io::Result<()> {
+        let succeeded = result.is_ok();
+        self.record_runtime_state(
+            &candidate,
+            if succeeded {
+                RuntimeExecutionState::Promoted
+            } else {
+                RuntimeExecutionState::Failed
+            },
+        )?;
+        if !self.stopping && self.branches[&candidate].status == BranchStatus::Promoting {
+            actions
+                .commands
+                .extend(self.finish_runtime_promotion(&candidate, succeeded)?);
+            record["disposition"] = json!(if succeeded { "Promote" } else { "Discard" });
+            record["runtime_promote_error"] = json!(result.err());
+            actions.records.push(record);
+        }
+        Ok(())
+    }
+
+    fn complete_terminate_or_cleanup(
+        &mut self,
+        work: ControlOperation,
+        result: Result<ControlResult, String>,
+        actions: &mut ControlActions,
+        branch: &str,
+    ) -> io::Result<()> {
+        if let Err(error) = result {
+            self.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
+            return Err(io::Error::other(error));
+        }
+        let state = if matches!(work, ControlOperation::Terminate(_)) {
+            RuntimeExecutionState::Terminated
+        } else {
+            RuntimeExecutionState::Cleaned
+        };
+        self.record_runtime_state(branch, state)?;
+        if state == RuntimeExecutionState::Terminated {
+            self.schedule(ControlOperation::Cleanup(branch.to_string()), actions);
+        }
+        Ok(())
     }
 
     pub fn pending_work(&self) -> bool {

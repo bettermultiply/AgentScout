@@ -114,6 +114,7 @@ impl Backend for FilesystemBackend {
                     target,
                     lower: Vec::new(),
                     layer_key,
+                    volume_is_subvolume: self.snapshot_copies,
                 },
             );
         }

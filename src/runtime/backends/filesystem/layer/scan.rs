@@ -50,3 +50,12 @@ pub(crate) fn read_layer(root: &Path) -> Result<View, BackendError> {
     Ok(nodes)
 }
 
+/// Read a layer that may legitimately not exist because the source upper was
+/// empty at snapshot time.  A missing layer is an empty view.
+pub(crate) fn read_layer_if_exists(root: &Path) -> Result<View, BackendError> {
+    if !path_exists(root) {
+        return Ok(View::new());
+    }
+    read_layer(root)
+}
+

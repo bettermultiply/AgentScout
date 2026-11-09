@@ -101,6 +101,17 @@ impl FilesystemBackend {
         context: &BackendContext,
         launch: &crate::protocol::contract::AgentLaunch,
     ) -> Result<LaunchFragment, BackendError> {
+        let environment = self.launch_environment(context, launch)?;
+        self.fragment_for_environment(&environment, launch)
+    }
+
+    /// Load the environment, record the Agent workspace root and add mount
+    /// units that appeared after establish.
+    fn launch_environment(
+        &self,
+        context: &BackendContext,
+        launch: &crate::protocol::contract::AgentLaunch,
+    ) -> Result<Environment, BackendError> {
         if !self.usable {
             return Err(BackendError::new(
                 "no usable filesystem data plane (bubblewrap overlay probe failed)",
@@ -129,10 +140,24 @@ impl FilesystemBackend {
                 .environments
                 .insert(environment.id.clone(), environment.clone());
         }
-        // Add mount units that appeared after establish (or were absent from
-        // migrated legacy metadata).  Every writable overlayable mount is a
-        // normal isolation unit, not a special workspace/tmp case.
-        let mut mounts_added = false;
+        let before = environment.mounts.len();
+        self.discover_mounts(&mut environment)?;
+        if environment.mount_for_path(&launch.cwd).is_none() {
+            return Err(BackendError::new(format!(
+                "workspace {} is not on an overlayable mounted filesystem; configure a separate writable mount or allow passthrough_rw",
+                launch.cwd.display()
+            )));
+        }
+        if environment.mounts.len() > before {
+            self.provision_discovered_mounts(&mut environment)?;
+        }
+        Ok(environment)
+    }
+
+    /// Add mount units that appeared after establish (or were absent from
+    /// migrated legacy metadata).  Every writable overlayable mount is a
+    /// normal isolation unit, not a special workspace/tmp case.
+    fn discover_mounts(&self, environment: &mut Environment) -> Result<(), BackendError> {
         for target in self.overlayable_mounts() {
             if !target.is_dir() {
                 continue;
@@ -154,41 +179,51 @@ impl FilesystemBackend {
                     target,
                     lower: Vec::new(),
                     layer_key,
+                    volume_is_subvolume: self.snapshot_copies,
                 },
             );
-            mounts_added = true;
         }
-        if environment.mount_for_path(&launch.cwd).is_none() {
-            return Err(BackendError::new(format!(
-                "workspace {} is not on an overlayable mounted filesystem; configure a separate writable mount or allow passthrough_rw",
-                launch.cwd.display()
-            )));
+        Ok(())
+    }
+
+    /// Create storage for mount units discovered by `discover_mounts`.
+    fn provision_discovered_mounts(
+        &self,
+        environment: &mut Environment,
+    ) -> Result<(), BackendError> {
+        if environment.mounts.is_empty() {
+            return Ok(());
         }
-        if mounts_added {
-            let units: Vec<MountUnit> = environment.mounts.values().cloned().collect();
-            if self.snapshot_copies {
-                for mount in &units {
-                    let volume = mount.upper.parent().ok_or_else(|| {
-                        BackendError::new("snapshot-copy mount upper has no volume parent")
-                    })?;
-                    if !path_exists(volume) {
-                        if let Some(parent) = volume.parent() {
-                            fs::create_dir_all(parent).map_err(error)?;
-                        }
-                        self.btrfs_create(volume)?;
+        let units: Vec<MountUnit> = environment.mounts.values().cloned().collect();
+        if self.snapshot_copies {
+            for mount in &units {
+                let volume = mount.upper.parent().ok_or_else(|| {
+                    BackendError::new("snapshot-copy mount upper has no volume parent")
+                })?;
+                if !path_exists(volume) {
+                    if let Some(parent) = volume.parent() {
+                        fs::create_dir_all(parent).map_err(error)?;
                     }
+                    self.btrfs_create(volume)?;
                 }
             }
-            Self::prepare_mount_dirs(&units)?;
-            self.persist_environment(&environment).map_err(|error| {
-                BackendError::new(format!("failed to persist newly discovered mounts: {error}"))
-            })?;
-            let mut state = self.environment()?;
-            state
-                .environments
-                .insert(environment.id.clone(), environment.clone());
         }
+        Self::prepare_mount_dirs(&units)?;
+        self.persist_environment(environment).map_err(|error| {
+            BackendError::new(format!("failed to persist newly discovered mounts: {error}"))
+        })?;
+        let mut state = self.environment()?;
+        state
+            .environments
+            .insert(environment.id.clone(), environment.clone());
+        Ok(())
+    }
 
+    fn fragment_for_environment(
+        &self,
+        environment: &Environment,
+        launch: &crate::protocol::contract::AgentLaunch,
+    ) -> Result<LaunchFragment, BackendError> {
         let mut fragment = LaunchFragment {
             chdir: Some(launch.cwd.clone()),
             ..LaunchFragment::default()
@@ -208,16 +243,29 @@ impl FilesystemBackend {
             ensure_overlay_disjoint(&mount.target, &mount.upper)?;
             fs::create_dir_all(&mount.upper).map_err(error)?;
             reset_dir(&mount.work)?;
-            let lowers = self.launch_lowers(mount);
             fragment.mounts.push(MountEntry::Overlay {
-                lowers,
+                lowers: self.launch_lowers(mount),
                 upper: mount.upper.clone(),
                 work: mount.work.clone(),
                 target: mount.target.clone(),
             });
             covered.insert(mount.target.clone());
         }
-        // Everything writable that we did not overlay stays read-only.
+        self.append_unmanaged_mounts(&mut fragment, &covered);
+        self.append_state_masks(&mut fragment);
+        fragment.mounts.sort_by_key(|entry| match entry {
+            MountEntry::RoBind { .. } | MountEntry::Proc { .. } | MountEntry::Dev { .. } => 0,
+            MountEntry::Overlay { .. } => 1,
+            MountEntry::Bind { .. } => 2,
+            MountEntry::Tmpfs { .. }
+            | MountEntry::RemountRo { .. }
+            | MountEntry::Dir { .. } => 3,
+        });
+        Ok(fragment)
+    }
+
+    /// Everything writable that we did not overlay stays read-only.
+    fn append_unmanaged_mounts(&self, fragment: &mut LaunchFragment, covered: &BTreeSet<PathBuf>) {
         for target in if self.config.isolate_unmanaged_mounts {
             real_writable_mounts()
         } else {
@@ -247,22 +295,16 @@ impl FilesystemBackend {
                 });
             }
         }
-        // Hide our own state (upper/work/snapshots/metadata) from the Agent.
+    }
+
+    /// Hide our own state (upper/work/snapshots/metadata) from the Agent.
+    fn append_state_masks(&self, fragment: &mut LaunchFragment) {
         fragment.mounts.push(MountEntry::Tmpfs {
             target: self.config.state_directory.clone(),
         });
         fragment.mounts.push(MountEntry::RemountRo {
             target: self.config.state_directory.clone(),
         });
-        fragment.mounts.sort_by_key(|entry| match entry {
-            MountEntry::RoBind { .. } | MountEntry::Proc { .. } | MountEntry::Dev { .. } => 0,
-            MountEntry::Overlay { .. } => 1,
-            MountEntry::Bind { .. } => 2,
-            MountEntry::Tmpfs { .. }
-            | MountEntry::RemountRo { .. }
-            | MountEntry::Dir { .. } => 3,
-        });
-        Ok(fragment)
     }
 }
 

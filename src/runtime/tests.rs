@@ -2,7 +2,8 @@
 
 use super::base::BaseRuntime;
 use super::composite::CompositeRuntime;
-use super::process::{FreezeMechanism, LaunchFragment, MountEntry, ProcessBackend};
+use super::launch_plan::{LaunchFragment, MountEntry};
+use super::process::{FreezeMechanism, ProcessBackend};
 use super::selection::{BackendConnection, BackendOperation, BackendPolicy, BackendRoute};
 use crate::protocol::contract::{
     AgentLaunch, CommandOutput, EnvironmentState, FilesystemConfirmation, FilesystemResult,

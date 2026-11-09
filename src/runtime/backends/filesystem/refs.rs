@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Only one background reclamation runs at a time.  Concurrent recursive
+/// deletes of many btrfs snapshots contend for filesystem transactions and
+/// slow the next fork; serializing them keeps the foreground latency bounded.
+static BACKGROUND_DELETE_LOCK: Mutex<()> = Mutex::new(());
+
 impl FilesystemBackend {
     /// Rebuild snapshot reference tokens from the current environment graph.
     /// Unreferenced snapshots are removed from memory and scheduled for GC.
@@ -119,6 +124,9 @@ impl FilesystemBackend {
         let fast_delete = self.fast_delete;
         let btrfs_path = self.config.btrfs_path.clone();
         thread::spawn(move || {
+            let _serial = BACKGROUND_DELETE_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Err(error) = remove_path_with_mode(&btrfs_path, &path, btrfs, fast_delete) {
                 eprintln!(
                     "filesystem: background removal of {} failed: {error}",

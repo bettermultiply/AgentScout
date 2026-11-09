@@ -39,6 +39,7 @@ mod copy;
 mod mounts;
 mod ops;
 mod probe;
+mod profile;
 mod refs;
 mod state;
 mod layer;
@@ -50,8 +51,15 @@ pub use config::{FilesystemConfig, FilesystemMechanism, ForkCost};
 use copy::*;
 use layer::*;
 use merge::*;
+use profile::Profile;
 use replay::*;
 use util::*;
+
+/// Upper trees with fewer entries are cloned with reflink/copy; larger ones
+/// use a btrfs snapshot.  The bound makes the entry count O(min(N, limit)).
+/// See `docs/fs-backend/current-state.md` for the measured cross-over between
+/// per-entry reflink cost and the fixed btrfs transaction/snapshot cost.
+pub(crate) const SNAPSHOT_CLONE_ENTRY_LIMIT: usize = 256;
 use state::{
     BackendState, Environment, EnvironmentMetadata, MountUnit, OperationRecord, SnapshotMetadata,
     SnapshotRecord,
@@ -67,6 +75,7 @@ pub struct FilesystemBackend {
     btrfs_incremental_diff: bool,
     fork_cost: ForkCost,
     snapshot_copies: bool,
+    reflink_available: bool,
     usable: bool,
     state: Mutex<BackendState>,
     overlay_targets: Mutex<Option<Vec<PathBuf>>>,
@@ -98,6 +107,7 @@ impl FilesystemBackend {
             btrfs_incremental_diff: false,
             fork_cost: ForkCost::Copy,
             snapshot_copies: false,
+            reflink_available: false,
             usable: false,
             state: Mutex::new(BackendState {
                 environments: HashMap::new(),
@@ -141,11 +151,12 @@ impl FilesystemBackend {
             && !config.force_overlay
             && btrfs_ok
             && probe.probe_btrfs_snapshot_copies();
+        let reflink_available = probe.probe_reflink();
         let fork_cost = if mechanism == FilesystemMechanism::Btrfs {
             ForkCost::BtrfsSnapshot
         } else if snapshot_copies {
             ForkCost::BtrfsSnapshot
-        } else if probe.probe_reflink() {
+        } else if reflink_available {
             ForkCost::Reflink
         } else {
             ForkCost::Copy
@@ -165,6 +176,7 @@ impl FilesystemBackend {
             btrfs_incremental_diff,
             fork_cost,
             snapshot_copies,
+            reflink_available,
             usable: overlay_ok,
             state: Mutex::new(BackendState {
                 environments: HashMap::new(),

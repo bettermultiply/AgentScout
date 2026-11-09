@@ -38,13 +38,19 @@ impl FilesystemBackend {
                 // A mark is an independent copy of the upper, not a layer in
                 // the live lower chain.  Compare the branch's own upper with
                 // that copy; cost is O(upper entries), never the lineage.
+                // A missing base layer means the base upper was empty.
                 let current = read_layer(&mount.upper)?;
-                let mark = read_layer(&mount.layer_upper(&base_record.path))?;
+                let mark = read_layer_if_exists(&mount.layer_upper(&base_record.path))?;
                 changes_from_upper_copy(&current, &mark)
-            } else {
+            } else if path_exists(&mount.layer_upper(&base_record.path)) {
                 let (_delta, _redirects, raw) =
                     self.btrfs_delta(&source_environment, mount, &base_record.path)?;
                 raw
+            } else {
+                // The base upper was empty and therefore has no layer; every
+                // current entry is a change.
+                let current = read_layer(&mount.upper)?;
+                changes_from_upper_copy(&current, &View::new())
             };
             changes.extend(
                 mount_changes

@@ -73,51 +73,21 @@ impl FilesystemBackend {
                     mount.target.display()
                 ))
             })?;
-            let (delta, redirects) = if self.mechanism == FilesystemMechanism::Btrfs {
+            let base_layer = mount.layer_upper(&base_record.path);
+            let in_lower = !self.mount_uses_flattening(mount)
+                && mount.lower.iter().any(|layer| layer == &base_record.path);
+            let (delta, redirects) = if self.mechanism == FilesystemMechanism::Btrfs
+                && path_exists(&base_layer)
+            {
                 let (delta, redirects, _) =
                     self.btrfs_delta(&source_environment, mount, &base_record.path)?;
                 (delta, redirects)
-            } else if self.mount_uses_flattening(mount) {
-                let current = read_layer(&mount.upper)?;
-                let base_view = read_layer(&mount.layer_upper(&base_record.path))?;
-                let changes = changes_from_upper_copy(&current, &base_view);
-                let mut delta = View::new();
-                let mut redirects = Vec::new();
-                for change in changes {
-                    match change.kind.as_str() {
-                        "delete" => {
-                            delta.insert(change.path.clone(), whiteout_node());
-                        }
-                        "rename" => {
-                            if let Some(old) = change.old_path.clone() {
-                                delta.insert(old, whiteout_node());
-                            }
-                            if let Some(node) = layer_node_at(&mount.upper, &change.path)? {
-                                if let Some(redirect) = node.redirect.clone() {
-                                    redirects.push((redirect, change.path.clone()));
-                                }
-                                delta.insert(change.path.clone(), node);
-                            }
-                        }
-                        _ => {
-                            if let Some(node) = layer_node_at(&mount.upper, &change.path)? {
-                                if node.is_whiteout() {
-                                    delta.insert(change.path.clone(), whiteout_node());
-                                } else {
-                                    if let Some(redirect) = node.redirect.clone() {
-                                        redirects.push((redirect, change.path.clone()));
-                                    }
-                                    delta.insert(change.path.clone(), node);
-                                }
-                            } else {
-                                delta.insert(change.path.clone(), whiteout_node());
-                            }
-                        }
-                    }
-                }
-                (delta, redirects)
-            } else {
+            } else if in_lower {
                 self.delta_since(&source_environment, mount, &base_record.path)?
+            } else {
+                // Marks and empty fork bases are not in the lower chain; a
+                // missing layer is an empty base view.
+                self.upper_delta_from_base(mount, &base_record.path)?
             };
             let base_layers =
                 Self::snapshot_mount_layers(&base_record, &source_environment, mount);

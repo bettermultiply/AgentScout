@@ -109,7 +109,7 @@
 
 - `LaunchFragment/MountEntry/MountSpec` 移到中立模块 `runtime/launch_plan.rs`；
   `runtime/backend.rs` 与 filesystem 不再依赖 `runtime::process` 的挂载计划类型。
-  `process` 保留公开 re-export 以避免破坏现有公开路径。
+  （第十轮已删除 `process` 的 re-export 垫片，所有引用改到 `runtime::launch_plan`。）
 - 删除恒为 true 的 `BTRFS_INCREMENTAL_DIFF_IMPLEMENTED` 及对应注释/不可达分支。
 - `ProcessBackend` 的三个构造器提取共享 `empty` 初始化；仅测试使用的
   `with_mechanism/new_process_group/capabilities` 加 `#[cfg(test)]`，删除无用的
@@ -123,10 +123,9 @@
 未处理（如实记录）：
 
 - `handle_message`、`complete_work`、`execute`、filesystem `fork` 的按职责拆分：
-  它们包含密集的状态机分支；本轮优先保证行为不变，未强行拆散 `match`。
-  `launch_fragment` 已复用 base mount helper，但未进一步拆成多个阶段函数。
-- firecracker 两个 `start_*` 函数的重复 prologue/rollback：需要同时改错误路径，
-  为降低与并行 firecracker 修复冲突的风险，未在本轮重构。
+  第九轮未做；第十轮已完成，见下一节。
+- firecracker 两个 `start_*` 函数的重复 prologue/rollback：第九轮未做；
+  第十轮已提取共享 `prepare_environment_start` / `rollback_environment_start`。
 - `ops/*.rs` 的 fork/mark/diff/accept 前置检查提取：各操作的合法性条件不同，
   只在 accept 内保留现有语义，未抽出可能改变错误顺序的共享函数。
 - `FilesystemBackend::mechanism/fast_delete/fork_cost` 仍为 pub：examples 和测试
@@ -149,4 +148,41 @@
   `btrfs subvolume delete` EPERM，无法完全删除，非测试失败残留。
 - 长函数拆分、firecracker 两个 start 的重复代码、ops 前置检查提取、firecracker
   超时常量未处理，已在上一节列出原因。
+
+## 第十轮代码异味处理
+
+已完成：
+
+- `handle_message`：保留消息 `match`，各分支体提取为 `handle_branch_*`、
+  `handle_action_*`、`handle_command_result`、`apply_command_result` 等具名方法；
+  `apply_command_result` 仍直接展示 Promote/Discard/Cleanup 的状态分支。
+- `complete_work`：保留操作 `match`，提取 `complete_predict`、`complete_establish`、
+  `complete_invoke`、`complete_validate`、`complete_promote`、
+  `complete_terminate_or_cleanup`。
+- `execute`：保留 Operation `match`，提取 `execute_establish/operate/branch/...`；
+  `BackendContext` 构造移到 `operation_context`。
+- filesystem `fork`：保留 mechanism `match` 与每挂载 chain；提取 replay 校验、
+  plan、btrfs/overlay 创建、overlay 单挂载 chain、commit/persist。
+- `launch_fragment`：拆为加载环境、发现/准备 mount、构建 fragment、追加未管理
+  只读 mount 与 state mask。
+- firecracker 两个 `start_*` 共享 `prepare_environment_start`、回滚
+  `rollback_environment_start`、收尾 `finish_environment_start`。
+- 删除 `runtime/process/mod.rs` 的 LaunchFragment/MountEntry/MountSpec re-export
+  垫片；`runtime/tests.rs` 与 process 测试改从 `runtime::launch_plan` 引用。
+
+仍未处理（如实记录）：
+
+- `ops/*.rs` 的 fork/mark/diff/accept 前置检查未抽成一个共享函数：各操作的合法
+  条件与错误顺序不同，抽出容易改变错误文本/顺序。空 upper 的缺失层语义单独在
+  diff/accept 中按空视图处理。
+- 后台回收仍按文件数线性：本机普通用户不能 `btrfs subvolume delete`，只能
+  `property set ro false` 后递归删除。已用进程级互斥把多个后台删除串行化，
+  降低与前台 fork 的 btrfs 事务争用；未改变最终会删净的语义。
+- `MountUnit::volume_is_subvolume` 为新增内部元数据（serde 默认 true）。空挂载
+  的子卷父目录现在是普通目录，后续 fork 对该挂载只能复制、不能快照；旧状态
+  仍按 true 读取。
+- `FilesystemBackend::mechanism/fast_delete/fork_cost`、`ops/*.rs` 的 `pub fn`
+  仍是公开或 crate 可见的数据面 API，未收窄。
+- `docs/development/decisions.md` 与 `filesystem::operate` 的表述不一致仍存在；
+  该文档不在本轮可改范围。
 

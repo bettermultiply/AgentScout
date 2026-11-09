@@ -6,6 +6,8 @@ pub(super) mod discard;
 pub(super) mod fork;
 pub(super) mod mark;
 
+use fork::{ForkProducer, ForkTask};
+
 use super::*;
 
 impl FilesystemBackend {
@@ -48,6 +50,53 @@ impl FilesystemBackend {
             maps.push(read_layer(&mount.layer_upper(layer))?);
         }
         Ok(maps)
+    }
+
+    /// Compare the live upper with one base layer copy.  Used for marks and
+    /// for fork bases whose upper was empty (the layer does not exist).
+    pub(super) fn upper_delta_from_base(
+        &self,
+        mount: &MountUnit,
+        base: &Path,
+    ) -> Result<(View, Vec<(String, String)>), BackendError> {
+        let current = read_layer(&mount.upper)?;
+        let base_view = read_layer_if_exists(&mount.layer_upper(base))?;
+        let changes = changes_from_upper_copy(&current, &base_view);
+        let mut delta = View::new();
+        let mut redirects = Vec::new();
+        for change in changes {
+            match change.kind.as_str() {
+                "delete" => {
+                    delta.insert(change.path.clone(), whiteout_node());
+                }
+                "rename" => {
+                    if let Some(old) = change.old_path.clone() {
+                        delta.insert(old, whiteout_node());
+                    }
+                    if let Some(node) = layer_node_at(&mount.upper, &change.path)? {
+                        if let Some(redirect) = node.redirect.clone() {
+                            redirects.push((redirect, change.path.clone()));
+                        }
+                        delta.insert(change.path.clone(), node);
+                    }
+                }
+                _ => {
+                    if let Some(node) = layer_node_at(&mount.upper, &change.path)? {
+                        if node.is_whiteout() {
+                            delta.insert(change.path.clone(), whiteout_node());
+                        } else {
+                            if let Some(redirect) = node.redirect.clone() {
+                                redirects.push((redirect, change.path.clone()));
+                            }
+                            delta.insert(change.path.clone(), node);
+                        }
+                    } else {
+                        delta.insert(change.path.clone(), whiteout_node());
+                    }
+                }
+            }
+        }
+        Ok((delta, redirects))
     }
 
 }

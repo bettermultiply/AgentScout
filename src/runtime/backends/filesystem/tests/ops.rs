@@ -956,3 +956,145 @@ use std::os::unix::fs::FileTypeExt;
         wait_until(|| trash_is_empty(&root.path().join("trash")));
     }
 
+
+    fn merged_view_entries(
+        backend: &FilesystemBackend,
+        environment_id: &str,
+        path: &Path,
+    ) -> BTreeSet<String> {
+        let (layers, upper) = {
+            let state = backend.lock().unwrap();
+            let environment = state.environments.get(environment_id).unwrap();
+            let mount = environment.mount_for_path(path).unwrap();
+            (
+                mount
+                    .lower
+                    .iter()
+                    .map(|layer| mount.layer_upper(layer))
+                    .collect::<Vec<_>>(),
+                mount.upper.clone(),
+            )
+        };
+        let mut view = View::new();
+        for layer in &layers {
+            apply_layer(&mut view, layer).unwrap();
+        }
+        apply_layer(&mut view, &upper).unwrap();
+        view.into_keys().collect()
+    }
+
+    fn producer_for(backend: &FilesystemBackend, base: &Path) -> crate::runtime::backends::filesystem::ops::fork::ForkProducer {
+        let mount = mount_for(backend, "root", base);
+        let producers = backend.fork_producers(std::slice::from_ref(&mount));
+        *producers
+            .get(&mount.target.display().to_string())
+            .expect("non-empty mount has a producer")
+    }
+
+    #[test]
+    fn adaptive_fork_producer_matches_upper_size_and_child_view() {
+        use crate::runtime::backends::filesystem::ops::fork::ForkProducer;
+
+        let root = btrfs_temp();
+        let base = root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let state = match separate_state_tempdir(&base) {
+            Some(value) => value,
+            None => {
+                eprintln!("SKIP adaptive_fork_producer_matches_upper_size_and_child_view: no writable state mount separate from workspace");
+                return;
+            }
+        };
+        let backend = FilesystemBackend::new(FilesystemConfig::new(state.path().join("state"))).unwrap();
+        if backend.mechanism() != FilesystemMechanism::Overlay
+            || backend.fork_cost() != ForkCost::BtrfsSnapshot
+        {
+            eprintln!("SKIP adaptive_fork_producer_matches_upper_size_and_child_view: btrfs snapshot copies unavailable");
+            return;
+        }
+        backend.establish("root").unwrap();
+        for index in 0..10 {
+            write_upper(&backend, "root", &base.join(format!("small-{index}")), "small");
+        }
+        assert_eq!(producer_for(&backend, &base), ForkProducer::Clone);
+        let small_parent = merged_view_entries(&backend, "root", &base);
+        backend.fork("root", "child-small", &[]).unwrap();
+        assert_eq!(
+            merged_view_entries(&backend, "child-small", &base),
+            small_parent,
+            "clone producer changed the child view"
+        );
+
+        for index in 10..600 {
+            write_upper(&backend, "root", &base.join(format!("large-{index}")), "large");
+        }
+        assert_eq!(producer_for(&backend, &base), ForkProducer::Snapshot);
+        let large_parent = merged_view_entries(&backend, "root", &base);
+        backend.fork("root", "child-snapshot", &[]).unwrap();
+        let snapshot_view = merged_view_entries(&backend, "child-snapshot", &base);
+        assert_eq!(snapshot_view, large_parent, "snapshot producer changed the child view");
+
+        // Force the same parent view through the clone producer.  Empty
+        // mounts normally carry `volume_is_subvolume=false`; flipping the live
+        // mount exercises the clone path without changing the view.
+        {
+            let mut state = backend.lock().unwrap();
+            for mount in state.environments.get_mut("root").unwrap().mounts.values_mut() {
+                mount.volume_is_subvolume = false;
+            }
+        }
+        assert_eq!(producer_for(&backend, &base), ForkProducer::Clone);
+        backend.fork("root", "child-clone", &[]).unwrap();
+        let clone_view = merged_view_entries(&backend, "child-clone", &base);
+        assert_eq!(clone_view, large_parent, "forced clone producer changed the child view");
+        assert_eq!(clone_view, snapshot_view, "producers produced different child views");
+
+        backend.terminate("child-small").unwrap();
+        backend.discard("child-small", &[]).unwrap();
+        backend.terminate("child-snapshot").unwrap();
+        backend.discard("child-snapshot", &[]).unwrap();
+        backend.terminate("child-clone").unwrap();
+        backend.discard("child-clone", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn empty_upper_fork_base_is_treated_as_empty_during_diff_and_accept() {
+        let root = btrfs_temp();
+        let base = root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        let backend = new_overlay_backend(root.path());
+        backend.establish("root").unwrap();
+        backend.fork("root", "child", &[]).unwrap();
+        let late = base.join("late.txt");
+        write_upper(&backend, "child", &late, "late");
+
+        let base_snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
+        let diff = backend
+            .diff(&base_snapshot, "child", None, &[])
+            .unwrap();
+        let document: crate::runtime::backends::filesystem::DiffDocument =
+            serde_json::from_slice(&fs::read(diff.diff_ref.unwrap()).unwrap()).unwrap();
+        assert!(
+            document
+                .changes
+                .iter()
+                .any(|change| change.path == late.display().to_string()),
+            "diff missed a write on a mount whose base upper was empty"
+        );
+
+        backend.suspend("root").unwrap();
+        backend
+            .accept(&base_snapshot, "child", "root", &[], None, None)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(upper_at(&backend, "root", &late)).unwrap(),
+            "late"
+        );
+        backend.resume("root").unwrap();
+        backend.terminate("child").unwrap();
+        backend.discard("child", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }

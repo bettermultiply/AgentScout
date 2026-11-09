@@ -24,6 +24,19 @@ pub(crate) fn set_clone_failure_after(entries: Option<usize>) {
     CLONE_ENTRIES.with(|value| value.set(0));
 }
 
+/// Tests inject clone failures through thread-local counters, so cloning must
+/// stay on the caller's thread while an injection is armed.
+pub(crate) fn clone_failure_requires_serial_execution() -> bool {
+    #[cfg(test)]
+    {
+        CLONE_FAIL_AFTER.with(|value| value.get().is_some())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 pub(crate) fn staging_path(target: &Path) -> PathBuf {
     let name = target
         .file_name()
@@ -86,10 +99,48 @@ pub(crate) fn reflink_file(source: &Path, target: &Path) -> std::io::Result<()> 
     }
 }
 
+/// True when an upper tree has no entries.  `read_dir` only fetches the first
+/// directory entry, so this is O(1) in the number of files.  The overlay
+/// `work` directory is a sibling of `upper`, never a child.
+pub(crate) fn upper_is_empty(path: &Path) -> bool {
+    match fs::read_dir(path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(value) if value.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+/// Count upper entries recursively, stopping at `limit`.  Cost is
+/// O(min(entries, limit)); directories count as entries.  Symlinks are not
+/// followed.
+pub(crate) fn upper_entry_count(path: &Path, limit: usize) -> usize {
+    let mut count = 0;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            count += 1;
+            if count >= limit {
+                return count;
+            }
+            if let Ok(file_type) = entry.file_type()
+                && file_type.is_dir()
+            {
+                pending.push(entry.path());
+            }
+        }
+    }
+    count
+}
+
 /// Clone only one upper directory.  Preserves overlay markers, whiteouts,
 /// modes, symlinks and mtimes.  Never uses hard links.
-pub(crate) fn clone_upper(source: &Path, target: &Path, use_reflink: bool) -> Result<(), BackendError> {
-    if !path_exists(source) {
+pub(crate) fn clone_upper(source: &Path, target: &Path, use_reflink: bool) -> Result<(), BackendError> {    if !path_exists(source) {
         return Ok(());
     }
     fs::create_dir_all(target).map_err(error)?;

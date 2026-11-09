@@ -12,7 +12,6 @@ mod freeze;
 mod launch;
 
 pub use freeze::{FreezeMechanism, ProcessHandle};
-pub use crate::runtime::launch_plan::{LaunchFragment, MountEntry, MountSpec};
 
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
@@ -41,6 +40,9 @@ struct PendingStatus {
     read: OwnedFd,
     write: OwnedFd,
 }
+
+#[cfg(test)]
+use crate::runtime::launch_plan::{LaunchFragment, MountEntry};
 
 pub struct ProcessBackend {
     bubblewrap_path: PathBuf,

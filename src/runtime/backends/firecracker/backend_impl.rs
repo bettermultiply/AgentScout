@@ -202,11 +202,13 @@ impl FirecrackerBackend {
         Ok(rootfs)
     }
 
-    pub(super) fn start_fresh(
+    /// Create the network, check socket paths, write network metadata and
+    /// spawn the firecracker process.  Every failure tears down the partial
+    /// start, so callers never observe a half-created Environment.
+    fn prepare_environment_start(
         &self,
         id: &str,
         directory: PathBuf,
-        rootfs: PathBuf,
     ) -> Result<Environment, BackendError> {
         let network = self.create_network(id)?;
         let api_socket = directory.join("api.sock");
@@ -235,14 +237,40 @@ impl FirecrackerBackend {
                 return Err(failure);
             }
         };
-        let mut environment = Environment {
+        Ok(Environment {
             state: EnvironmentState::Available,
             child: Some(child),
             directory,
             api_socket,
             vsock_socket,
             network,
-        };
+        })
+    }
+
+    /// Shared rollback for a started-but-not-fully-configured Environment.
+    fn rollback_environment_start(&self, id: &str, environment: &mut Environment) {
+        if let Some(child) = environment.child.as_mut() {
+            let _ = kill_environment_process(child);
+        }
+        environment.network.teardown();
+        self.release_network(id);
+    }
+
+    fn finish_environment_start(
+        &self,
+        environment: &mut Environment,
+    ) -> Result<(), BackendError> {
+        let pid = environment.child.as_ref().map(Child::id).unwrap_or_default();
+        Self::write_runtime_metadata(&environment.directory, &environment.network, pid)
+    }
+
+    pub(super) fn start_fresh(
+        &self,
+        id: &str,
+        directory: PathBuf,
+        rootfs: PathBuf,
+    ) -> Result<Environment, BackendError> {
+        let mut environment = self.prepare_environment_start(id, directory)?;
         if let Err(failure) = (|| {
             wait_for_path(&environment.api_socket, Duration::from_secs(5))?;
             self.api.put(
@@ -298,21 +326,11 @@ impl FirecrackerBackend {
             wait_for_guest(&environment.vsock_socket, Duration::from_secs(20))?;
             configure_guest_network(&environment.vsock_socket)
         })() {
-            if let Some(child) = environment.child.as_mut() {
-                let _ = kill_environment_process(child);
-            }
-            environment.network.teardown();
-            self.release_network(id);
+            self.rollback_environment_start(id, &mut environment);
             return Err(failure);
         }
-        let pid = environment.child.as_ref().map(Child::id).unwrap_or_default();
-        if let Err(failure) = Self::write_runtime_metadata(&environment.directory, &environment.network, pid)
-        {
-            if let Some(child) = environment.child.as_mut() {
-                let _ = kill_environment_process(child);
-            }
-            environment.network.teardown();
-            self.release_network(id);
+        if let Err(failure) = self.finish_environment_start(&mut environment) {
+            self.rollback_environment_start(id, &mut environment);
             return Err(failure);
         }
         Ok(environment)
@@ -326,41 +344,7 @@ impl FirecrackerBackend {
         snapshot: PathBuf,
         memory: PathBuf,
     ) -> Result<Environment, BackendError> {
-        let network = self.create_network(id)?;
-        let api_socket = directory.join("api.sock");
-        let vsock_socket = directory.join("vsock.sock");
-        if let Err(failure) = check_socket_paths(&api_socket, &vsock_socket) {
-            network.teardown();
-            self.release_network(id);
-            return Err(failure);
-        }
-        if let Err(failure) = Self::write_network_metadata(&directory, &network) {
-            network.teardown();
-            self.release_network(id);
-            return Err(failure);
-        }
-        let child = match spawn_firecracker(
-            &self.config.firecracker_path,
-            id,
-            &directory,
-            &api_socket,
-            &network,
-        ) {
-            Ok(child) => child,
-            Err(failure) => {
-                network.teardown();
-                self.release_network(id);
-                return Err(failure);
-            }
-        };
-        let mut environment = Environment {
-            state: EnvironmentState::Available,
-            child: Some(child),
-            directory,
-            api_socket,
-            vsock_socket,
-            network,
-        };
+        let mut environment = self.prepare_environment_start(id, directory)?;
         if let Err(failure) = (|| {
             wait_for_path(&environment.api_socket, Duration::from_secs(5))?;
             self.api.put(
@@ -393,21 +377,11 @@ impl FirecrackerBackend {
             wait_for_guest(&environment.vsock_socket, Duration::from_secs(20))?;
             configure_guest_network(&environment.vsock_socket)
         })() {
-            if let Some(child) = environment.child.as_mut() {
-                let _ = kill_environment_process(child);
-            }
-            environment.network.teardown();
-            self.release_network(id);
+            self.rollback_environment_start(id, &mut environment);
             return Err(failure);
         }
-        let pid = environment.child.as_ref().map(Child::id).unwrap_or_default();
-        if let Err(failure) = Self::write_runtime_metadata(&environment.directory, &environment.network, pid)
-        {
-            if let Some(child) = environment.child.as_mut() {
-                let _ = kill_environment_process(child);
-            }
-            environment.network.teardown();
-            self.release_network(id);
+        if let Err(failure) = self.finish_environment_start(&mut environment) {
+            self.rollback_environment_start(id, &mut environment);
             return Err(failure);
         }
         Ok(environment)
