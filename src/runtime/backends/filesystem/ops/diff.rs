@@ -10,15 +10,9 @@ impl FilesystemBackend {
         &self,
         base: &str,
         source: &str,
-        target: Option<&str>,
         scope: &[PathScope],
     ) -> Result<FilesystemResult, BackendError> {
         let scopes = normalize_scopes(scope)?;
-        if target.is_some() {
-            return Err(BackendError::new(
-                "filesystem diff target filtering is not implemented (Phase 2)",
-            ));
-        }
         let (base_record, source_environment) = {
             let state = self.lock()?;
             let base = Self::resolve_snapshot(&state, base)?;

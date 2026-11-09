@@ -206,7 +206,7 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
         }
         let diff_start = Instant::now();
         backend
-            .diff(&base, &child, None, &[])
+            .diff(&base, &child, &[])
             .map_err(|e| e.to_string())?;
         total.entry("diff").or_default().push(diff_start.elapsed());
         backend.suspend("root").map_err(|e| e.to_string())?;

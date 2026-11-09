@@ -37,7 +37,7 @@ use super::support::*;
         write_upper(&backend, "child", &workspace.join("child.txt"), "child");
         let base = FilesystemBackend::base_snapshot_id_for_child("child");
         let diff = backend
-            .diff(&base, "child", None, &[PathScope::Workspace])
+            .diff(&base, "child", &[PathScope::Workspace])
             .unwrap();
         let document: DiffDocument =
             serde_json::from_slice(&fs::read(diff.diff_ref.unwrap()).unwrap()).unwrap();

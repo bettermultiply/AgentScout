@@ -114,6 +114,13 @@
     `--json-status-fd`，并对外提供 `process_handle(env)`。
 - **删除**
   - discard 热路径 rename 到 trash，O(1)；后台删除。
+  - 后台删除由常驻工作者执行：首次需要物理删除时发信号；工作者持续扫描 trash
+    并删除，直到为空后静默阻塞等待下一次信号，多次信号合并。启动时若 trash
+    非空，发一次信号回收崩溃或被杀进程遗留的目录。
+  - 删除失败记录日志、保留条目，并在下一次信号或有界延迟后重试，不忙等。
+    扫描跳过瞬态或半创建项，不删除尚未完成 rename 的条目。
+  - 工作者不持有 backend 强引用；backend 被 drop 后工作者退出，未删完的目录
+    留在 trash 供下次启动回收。
   - 严格 btrfs 子卷删除可用时 `fast_delete=true`，否则 false 并走 O(文件数)
     后台删除。能力字段如实上报。
 - **持久化/幂等**
@@ -124,7 +131,11 @@
     “applied but operation record was not persisted” 错误，不静默忽略。
   - suspend/resume/terminate 先持久化候选状态，成功后才替换内存状态；失败保持
     原状态。全局 state 锁外执行持久化写盘。
-  - 损坏的 `operations.json` 会改名为 `.corrupt-<pid>` 并告警，不静默当作空。
+  - 损坏的 `operations.json` 改名为 `.corrupt-<pid>` 并大声告警，随后以空记录
+    继续；若改名隔离失败，加载返回明确错误并保留坏文件，不以空记录继续，也不
+    覆盖坏文件。元数据写入是 temp + `sync_all` + rename 原子写，写到一半崩溃
+    不会留下损坏的 `operations.json`；损坏来源是磁盘错误、人为编辑或版本不一致。
+    环境/快照元数据读不出来仍跳过并记录日志。
   - 副本层使用 staging 目录 + 原子 rename + 目录 sync；没有完成 rename 的
     `.tmp-*` 在下次启动清理，不视为有效层。
   - `btrfs send | receive --dump` 并发 drain send stderr，避免大输出死锁。
@@ -132,7 +143,6 @@
 ## 未实现 / Phase 2
 
 - accept selector、依赖闭包、控制面逐条变更列表。
-- `diff(target=Some(_))` 明确返回未实现。
 - accept 重放已支持修改/删除/创建/目录替换的逆序回滚，但仍非原子；并发读者
   可能观察到中间状态。
 - 有特权时直接 `lower=/`：只做了探测/高权限测试，未作为默认路径。
@@ -206,8 +216,9 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
   `/home`，fork 后启动子进程即报错。解决：该挂载 fork 时把父 upper **展平**
   到 child upper，快照层只用于 diff/accept 元数据，启动时 lower 只用宿主挂载
   点。其它挂载仍使用 lower 链。
-- 嵌套挂载仍受 bwrap 参数层限制：父挂载与子挂载分别 probe；不能在纯 bwrap
-  参数中保存子挂载 lower 后再重挂。失败候选会被 ro-bind，不静默直通。
+- 嵌套挂载当前未实现。当前 bwrap 参数层做不到不等于实际做不到，之后可以另找
+  实现手段；父挂载与子挂载分别 probe；现有参数无法保存子挂载 lower 后再重挂。
+  失败候选会被 ro-bind，不静默直通。
 - 实测测试：`extra_mount_fork_diff_accept_discard_round_trip`（`/var/tmp`：
   父写 a、fork 子见 a、子写 b + 删除宿主 lower、diff 报告 b/delete、accept
   目标可见、mark 覆盖额外挂载、discard 清理 upper）、
@@ -248,8 +259,11 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
 | ps 计数 | 466 | 467 | 部分一致（多 bwrap/子进程） |
 | inotify | ok | ok | 一致（lower 文件被 upper 修改后收到事件） |
 
-权威写入留在 branch upper，宿主观察者看不到；何时物化回真实 workspace 仍未实现，
-属于设计已知点。
+权威写入留在 branch upper，宿主观察者看不到。物化是可选能力，不在关键路径上；
+运行阶段物化后重置 authority 的基准，任务结束即结束 authority 的使命。宿主写回
+要求写前逐文件与基准比对再原子替换，并检查性能（先比大小和修改时间，仅在不一致
+时算哈希）。冲突倾向让 authority 覆盖，尚未最终确认；暂不为被覆盖的宿主版本保留
+可恢复副本。以上均未实现。
 
 ## 成本表（实测/推断）
 
@@ -461,6 +475,10 @@ N=100k  fork snapshot_layer=464.139ms(1) create_child=1.834ms(1) prepare_dirs=1.
 | SafeRoot mkdir mode | `safe_root_mkdir_preserves_source_mode` |
 | btrfs send stderr drain | `send_dump_drains_large_send_stderr` |
 | 损坏 operations.json 隔离 | `corrupt_operations_metadata_is_isolated` |
+| 隔离 rename 失败时失败关闭 | `corrupt_operations_metadata_fails_closed_when_isolation_fails` |
+| 启动回收崩溃遗留 trash | `startup_reclaims_trash_left_by_a_previous_run` |
+| 空闲工作者被下一次 discard 唤醒 | `idle_worker_wakes_for_a_later_discard` |
+| 连续 discard 信号合并后 trash 为空 | `repeated_discards_leave_trash_empty` |
 | btrfs 快照 fork | `btrfs_snapshot_copy_fork_is_end_to_end`（本机通过） |
 
 ## P4 调研结论：btrfs 增量
@@ -556,7 +574,9 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 ### 嵌套/相邻挂载
 
 - 相邻挂载：bwrap 同时 overlay `/home` 和 `/tmp`，两边内容都正确，实测 OK。
-- 嵌套挂载：父挂载 overlay 后，子挂载会被隐藏。实测顺序必须是：
+- 嵌套挂载当前未实现；以下是原始 mount 实验结论，不是当前 bwrap 参数实现。
+  当前 bwrap 参数层做不到不等于实际做不到，之后可以另找实现手段。
+  父挂载 overlay 后，子挂载会被隐藏。实测顺序必须是：
   1. 先把子挂载的原 lower bind 到一个稳定路径（`mount --bind <child> <saved>`）；
   2. overlay 父挂载；
   3. 在父 overlay 内重建子挂载点；
@@ -607,7 +627,7 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | 无特权新根（子挂载由 userns 创建）可 lower=/ overlay | **实测**：pivot_root 新 tmpfs 根，lower=/ overlay rc=0 |
 | 初始 userns 特权下 lower=/ 可行 | **用户实测**：2026-11-09 `log.txt` 脚本检查和 Rust direct-root 测试通过 |
 | 相邻挂载同时 overlay | **实测**：bwrap 同时 overlay /home 与 /tmp，exit 0 |
-| 嵌套挂载可同时 overlay（先保存 child lower，再 parent，再 child） | **实测**：父子 tmpfs overlay 后两个文件都可见 |
+| 嵌套挂载在原始 mount 实验中可同时 overlay（先保存 child lower，再 parent，再 child） | **实测**：父子 tmpfs overlay 后两个文件都可见；当前 bwrap 参数实现未接入 |
 | 逐挂载 overlay 的挂载数/元数据成本 | **实测**：13 个可写挂载；200 次 mount+umount ~634ms；stat +34% |
 | btrfs fork/diff/accept 端到端 | **尚未通过**：用户特权运行选中 btrfs，在 diff 断言失败，尚未到 accept；解析修复已有无特权回归，需重跑 `scripts/priv-check.sh` |
 | ProcessBackend 启动/冻结/解冻 | **实测**：`process_freeze_thaw_stops_and_resumes_writer` 冻结期间 counter 不变，thaw 后继续 |

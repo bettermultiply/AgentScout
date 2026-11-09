@@ -168,7 +168,7 @@ pub enum Operation {
     },
     FilesystemFork { parent_snapshot_id: String, child_snapshot_id: String, path_scope: Vec<PathScope> },
     FilesystemMark { snapshot_id: String, mark_id: String, path_scope: Vec<PathScope> },
-    FilesystemDiff { base_snapshot_id: String, source_snapshot_id: String, target_snapshot_id: Option<String>, path_scope: Vec<PathScope> },
+    FilesystemDiff { base_snapshot_id: String, source_snapshot_id: String, path_scope: Vec<PathScope> },
     FilesystemAccept { base_snapshot_id: String, source_snapshot_id: String, target_snapshot_id: String, path_scope: Vec<PathScope> },
     FilesystemDiscard { snapshot_id: String, path_scope: Vec<PathScope> },
 }
@@ -336,7 +336,7 @@ mod filesystem_protocol_tests {
         let operations = vec![
             Operation::FilesystemFork { parent_snapshot_id: "base".into(), child_snapshot_id: "child".into(), path_scope: scopes.clone() },
             Operation::FilesystemMark { snapshot_id: "child".into(), mark_id: "mark".into(), path_scope: scopes.clone() },
-            Operation::FilesystemDiff { base_snapshot_id: "base".into(), source_snapshot_id: "child".into(), target_snapshot_id: None, path_scope: scopes.clone() },
+            Operation::FilesystemDiff { base_snapshot_id: "base".into(), source_snapshot_id: "child".into(), path_scope: scopes.clone() },
             Operation::FilesystemAccept { base_snapshot_id: "base".into(), source_snapshot_id: "child".into(), target_snapshot_id: "target".into(), path_scope: scopes.clone() },
             Operation::FilesystemDiscard { snapshot_id: "child".into(), path_scope: scopes },
         ];

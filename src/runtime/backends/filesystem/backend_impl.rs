@@ -375,14 +375,8 @@ impl Backend for FilesystemBackend {
             Operation::FilesystemDiff {
                 base_snapshot_id,
                 source_snapshot_id,
-                target_snapshot_id,
                 path_scope,
-            } => self.diff(
-                base_snapshot_id,
-                source_snapshot_id,
-                target_snapshot_id.as_deref(),
-                path_scope,
-            ),
+            } => self.diff(base_snapshot_id, source_snapshot_id, path_scope),
             Operation::FilesystemAccept {
                 base_snapshot_id,
                 source_snapshot_id,

@@ -534,7 +534,7 @@ use std::os::unix::fs::FileTypeExt;
         );
 
         if expect_btrfs {
-            let diff = backend.diff(&base, "child", None, &[PathScope::Workspace]);
+            let diff = backend.diff(&base, "child", &[PathScope::Workspace]);
             assert!(
                 diff.is_err(),
                 "btrfs diff must fail explicitly without generation privileges"
@@ -551,7 +551,7 @@ use std::os::unix::fs::FileTypeExt;
             assert!(accept.is_err());
         } else {
             let diff = backend
-                .diff(&base, "child", None, &[PathScope::Workspace])
+                .diff(&base, "child", &[PathScope::Workspace])
                 .unwrap();
             assert!(diff.confirmation.metadata_durable);
             let document: DiffDocument =
@@ -576,7 +576,6 @@ use std::os::unix::fs::FileTypeExt;
                 .diff(
                     mark.snapshot_id.as_deref().unwrap(),
                     "child",
-                    None,
                     &[PathScope::Workspace],
                 )
                 .unwrap();
@@ -644,7 +643,7 @@ use std::os::unix::fs::FileTypeExt;
 
         let base_snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
         let diff = backend
-            .diff(&base_snapshot, "child", None, &[PathScope::Workspace])
+            .diff(&base_snapshot, "child", &[PathScope::Workspace])
             .unwrap();
         let document: DiffDocument =
             serde_json::from_slice(&fs::read(diff.diff_ref.unwrap()).unwrap()).unwrap();
@@ -816,7 +815,7 @@ use std::os::unix::fs::FileTypeExt;
         assert!(lower_file.exists(), "child deleted the host lower file");
 
         let base_snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
-        let diff = backend.diff(&base_snapshot, "child", None, &[]).unwrap();
+        let diff = backend.diff(&base_snapshot, "child", &[]).unwrap();
         let document: DiffDocument =
             serde_json::from_slice(&fs::read(diff.diff_ref.unwrap()).unwrap()).unwrap();
         assert!(
@@ -876,7 +875,7 @@ use std::os::unix::fs::FileTypeExt;
             &format!("echo marked > {}", mark_file.display()),
         ));
         let mark_diff = backend
-            .diff(mark.snapshot_id.as_deref().unwrap(), "child", None, &[])
+            .diff(mark.snapshot_id.as_deref().unwrap(), "child", &[])
             .unwrap();
         let mark_document: DiffDocument =
             serde_json::from_slice(&fs::read(mark_diff.diff_ref.unwrap()).unwrap()).unwrap();
@@ -1072,7 +1071,7 @@ use std::os::unix::fs::FileTypeExt;
 
         let base_snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
         let diff = backend
-            .diff(&base_snapshot, "child", None, &[])
+            .diff(&base_snapshot, "child", &[])
             .unwrap();
         let document: crate::runtime::backends::filesystem::DiffDocument =
             serde_json::from_slice(&fs::read(diff.diff_ref.unwrap()).unwrap()).unwrap();

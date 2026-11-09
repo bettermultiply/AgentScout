@@ -6,3 +6,4 @@ mod ops;
 mod privileged;
 mod process;
 mod support;
+mod trash;

@@ -18,7 +18,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::Serialize;
@@ -52,6 +52,7 @@ use copy::*;
 use layer::*;
 use merge::*;
 use profile::Profile;
+use refs::{spawn_delete_worker, DeleteWorker};
 use replay::*;
 use util::*;
 
@@ -80,6 +81,7 @@ pub struct FilesystemBackend {
     state: Mutex<BackendState>,
     overlay_targets: Mutex<Option<Vec<PathBuf>>>,
     next_token: AtomicU64,
+    delete_worker: Arc<DeleteWorker>,
     #[cfg(test)]
     pub(super) replay_fail_after: Mutex<Option<usize>>,
     #[cfg(test)]
@@ -116,6 +118,7 @@ impl FilesystemBackend {
             }),
             overlay_targets: Mutex::new(None),
             next_token: AtomicU64::new(1),
+            delete_worker: Arc::new(DeleteWorker::new(&config, false, false)),
             #[cfg(test)]
             replay_fail_after: Mutex::new(None),
             #[cfg(test)]
@@ -169,6 +172,9 @@ impl FilesystemBackend {
             fork_cost.as_str(),
             snapshot_copies
         );
+        let use_btrfs = mechanism == FilesystemMechanism::Btrfs
+            || fork_cost == ForkCost::BtrfsSnapshot;
+        let delete_worker = Arc::new(DeleteWorker::new(&config, use_btrfs, fast_delete));
         let backend = Self {
             config,
             mechanism,
@@ -185,6 +191,7 @@ impl FilesystemBackend {
             }),
             overlay_targets: Mutex::new(None),
             next_token: AtomicU64::new(1),
+            delete_worker,
             #[cfg(test)]
             replay_fail_after: Mutex::new(None),
             #[cfg(test)]
@@ -204,6 +211,14 @@ impl FilesystemBackend {
         fs::create_dir_all(backend.diffs_root()).map_err(error)?;
         cleanup_staging(&backend.layers_root())?;
         backend.load_metadata()?;
+        spawn_delete_worker(Arc::clone(&backend.delete_worker));
+        let trash_has_entries = fs::read_dir(backend.trash_root())
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false);
+        if trash_has_entries {
+            // Reclaim entries left behind by a crashed or killed runtime.
+            backend.delete_worker.signal();
+        }
         let overlaps = backend.state_overlap_mounts();
         if !overlaps.is_empty() {
             eprintln!(
@@ -337,11 +352,19 @@ impl FilesystemBackend {
                     let corrupt = self
                         .metadata_root()
                         .join(format!("operations.json.corrupt-{}", std::process::id()));
-                    let _ = fs::rename(&operations_path, &corrupt);
-                    eprintln!(
-                        "filesystem: operations metadata is corrupt ({error}); isolated at {}",
-                        corrupt.display()
-                    );
+                    match fs::rename(&operations_path, &corrupt) {
+                        Ok(()) => eprintln!(
+                            "filesystem: operations metadata is corrupt ({error}); isolated at {}",
+                            corrupt.display()
+                        ),
+                        Err(rename_error) => {
+                            return Err(BackendError::new(format!(
+                                "operations metadata {} is corrupt ({error}) and could not be isolated at {}: {rename_error}",
+                                operations_path.display(),
+                                corrupt.display()
+                            )))
+                        }
+                    }
                 }
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -644,7 +667,13 @@ impl FilesystemBackend {
 
 }
 
-
+impl Drop for FilesystemBackend {
+    fn drop(&mut self) {
+        // Stop the worker, but do not wait: any unfinished trash entries are
+        // reclaimed by the next startup.
+        self.delete_worker.shutdown();
+    }
+}
 
 #[cfg(test)]
 mod tests;

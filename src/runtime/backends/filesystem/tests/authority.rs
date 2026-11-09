@@ -280,6 +280,49 @@ print("ok" if data else "fail")
     }
 
     #[test]
+    fn corrupt_operations_metadata_fails_closed_when_isolation_fails() {
+        let root = temp();
+        let backend = new_overlay_backend(root.path());
+        backend.establish("root").unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+        drop(backend);
+
+        let operations = root.path().join("state/metadata/operations.json");
+        fs::write(&operations, b"{not-json").unwrap();
+        // A non-empty directory at the isolation target makes rename fail.
+        let corrupt = root
+            .path()
+            .join("state/metadata")
+            .join(format!("operations.json.corrupt-{}", std::process::id()));
+        fs::create_dir_all(&corrupt).unwrap();
+        fs::write(corrupt.join("keep"), b"keep").unwrap();
+
+        let error = match FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))) {
+            Ok(_) => panic!(
+                "corrupt operations metadata must fail closed when it cannot be isolated"
+            ),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("operations.json"),
+            "error did not name the corrupt file: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("could not be isolated"),
+            "error did not report the isolation failure: {}",
+            error.message
+        );
+        assert!(
+            operations.exists(),
+            "bad operations file must not be removed when isolation fails"
+        );
+        assert_eq!(fs::read(&operations).unwrap(), b"{not-json");
+        assert_eq!(fs::read(corrupt.join("keep")).unwrap(), b"keep");
+    }
+
+    #[test]
     fn overlapping_state_directory_is_reported_and_flattened() {
         let root = btrfs_temp();
         let backend = new_overlay_backend(root.path());
