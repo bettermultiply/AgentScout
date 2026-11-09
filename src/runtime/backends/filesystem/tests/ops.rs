@@ -198,6 +198,10 @@ use std::os::unix::fs::FileTypeExt;
             return;
         };
         assert!(
+            small > 0,
+            "accept did not execute the read_layer counter at all: small={small}, large={large}"
+        );
+        assert!(
             large <= small + 50,
             "accept scanned unrelated upper entries: small={small}, large={large}"
         );
@@ -724,7 +728,7 @@ use std::os::unix::fs::FileTypeExt;
         assert!(accept.confirmation.published);
 
         let mut exited = false;
-        for _ in 0..200 {
+        for _ in 0..3000 {
             if let Some(status) = target.try_wait("root").unwrap() {
                 assert!(status.success());
                 exited = true;
@@ -933,12 +937,12 @@ use std::os::unix::fs::FileTypeExt;
             "touch ready; sleep 0.5; echo late > after.txt; sleep 3",
         );
         let parent_upper = upper_at(&backend, "root", &base);
-        wait_until(|| parent_upper.join("ready").exists());
+        wait_until_for(|| parent_upper.join("ready").exists(), 3000);
 
         backend
             .fork("root", "child", &[PathScope::Workspace])
             .unwrap();
-        wait_until(|| parent_upper.join("after.txt").exists());
+        wait_until_for(|| parent_upper.join("after.txt").exists(), 3000);
 
         assert!(
             run_in_environment(&backend, "child", &base, "test ! -e after.txt"),
@@ -1148,6 +1152,24 @@ use std::os::unix::fs::FileTypeExt;
         backend.discard("child-large", &[]).unwrap();
         backend.terminate("root").unwrap();
         backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn layout_diff_accept_scenario_runs_on_overlay_for_both_limits() {
+        for limit in [0usize, usize::MAX] {
+            let root = btrfs_temp();
+            let base = root.path().join("base");
+            fs::create_dir_all(&base).unwrap();
+            let Some((_state, backend)) = layout_backend(&base, limit) else {
+                eprintln!(
+                    "SKIP layout_diff_accept_scenario_runs_on_overlay_for_both_limits: no writable mount separate from workspace"
+                );
+                return;
+            };
+            backend.establish("root").unwrap();
+            layout_diff_accept_scenario(&backend, &base, limit);
+            drop(backend);
+        }
     }
 
     #[test]

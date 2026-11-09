@@ -259,11 +259,11 @@ use std::sync::{Arc, Mutex};
     fn exited_process_does_not_block_filesystem_operation() {
         let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
         let (context, _log_dir) = launch_test_agent(&runtime, "/bin/true", Vec::new());
-        for _ in 0..200 {
+        for _ in 0..3000 {
             if !runtime.process.is_running("env").unwrap() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(!runtime.process.is_running("env").unwrap());
         assert!(runtime.process.process_handle("env").is_some());

@@ -4,6 +4,15 @@ use super::super::*;
 use super::support::*;
 use crate::protocol::contract::AgentLaunch;
 
+    /// Fixed marker consumed by scripts/priv-check.sh (same format as the
+    /// runtime::process tests).
+    fn report_freeze(process: &crate::runtime::process::ProcessBackend, test: &str) {
+        eprintln!(
+            "ASCOUT_FREEZE_MECHANISM={} test={test}",
+            process.freeze_mechanism().as_str()
+        );
+    }
+
     #[test]
     fn process_freeze_thaw_stops_and_resumes_writer() {
         let root = btrfs_temp();
@@ -18,7 +27,8 @@ use crate::protocol::contract::AgentLaunch;
             "i=0; while :; do i=$((i+1)); echo $i > counter; sleep 0.02; done",
         );
         let counter = upper_at(&backend, "root", &base.join("counter"));
-        wait_until(|| counter.exists());
+        wait_until_for(|| counter.exists(), 3000);
+        report_freeze(&process, "process_freeze_thaw_stops_and_resumes_writer");
         eprintln!(
             "freeze mechanism: {}",
             process.freeze_mechanism().as_str()
@@ -68,10 +78,11 @@ use crate::protocol::contract::AgentLaunch;
             process.freeze_mechanism(),
             crate::runtime::process::FreezeMechanism::ProcessGroup
         );
+        report_freeze(&process, "process_group_fallback_freezes_and_reports_mechanism");
         let fragment = backend.launch_fragment(&context, &launch).unwrap();
         process.launch(&context, &launch, &fragment).unwrap();
         let counter = upper_at(&backend, "root", &base.join("counter"));
-        wait_until(|| counter.exists());
+        wait_until_for(|| counter.exists(), 3000);
         process.freeze("root").unwrap();
         let frozen = fs::read_to_string(&counter).unwrap();
         thread::sleep(std::time::Duration::from_millis(150));

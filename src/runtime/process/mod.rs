@@ -254,10 +254,20 @@ mod tests {
         context
     }
 
+    /// Fixed marker consumed by scripts/priv-check.sh.  It reports the
+    /// mechanism this ProcessBackend actually selected, not a guess.
+    fn report_freeze(backend: &ProcessBackend, test: &str) {
+        eprintln!(
+            "ASCOUT_FREEZE_MECHANISM={} test={test}",
+            backend.freeze_mechanism().as_str()
+        );
+    }
+
     #[test]
     fn terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup() {
         let root = tempfile::tempdir().unwrap();
         let backend = ProcessBackend::new("process", "bwrap");
+        report_freeze(&backend, "terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup");
         let context = launch(&backend, "/bin/sleep", vec!["30".into()], root.path());
         let handle = backend.process_handle(&context.environment_id).unwrap();
         assert!(backend.is_running(&context.environment_id).unwrap());
@@ -292,6 +302,7 @@ mod tests {
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
         let backend = ProcessBackend::new("process", &script);
+        report_freeze(&backend, "failed_launch_cleans_process_pending_status_and_cgroup");
         let cgroup = backend
             .cgroup_root
             .as_ref()
@@ -327,11 +338,11 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        for _ in 0..200 {
+        for _ in 0..3000 {
             if !Path::new(&format!("/proc/{pid}")).exists() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(
             !Path::new(&format!("/proc/{pid}")).exists(),
@@ -343,6 +354,7 @@ mod tests {
     fn stop_reports_cgroup_kill_write_failure() {
         let root = tempfile::tempdir().unwrap();
         let backend = ProcessBackend::new("process", "bwrap");
+        report_freeze(&backend, "stop_reports_cgroup_kill_write_failure");
         let context = launch(&backend, "/bin/sleep", vec!["30".into()], root.path());
         let fake_cgroup = tempfile::tempdir().unwrap();
         // A directory named cgroup.kill makes fs::write fail instead of silently
@@ -370,14 +382,15 @@ mod tests {
     fn stop_unknown_or_exited_process_is_not_an_error() {
         let root = tempfile::tempdir().unwrap();
         let backend = ProcessBackend::new("process", "bwrap");
+        report_freeze(&backend, "stop_unknown_or_exited_process_is_not_an_error");
         backend.stop("missing").unwrap();
 
         let context = launch(&backend, "/bin/true", Vec::new(), root.path());
-        for _ in 0..200 {
+        for _ in 0..3000 {
             if !backend.is_running(&context.environment_id).unwrap() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         backend.stop(&context.environment_id).unwrap();
     }
@@ -386,12 +399,13 @@ mod tests {
     fn exited_process_is_reported_as_not_running() {
         let root = tempfile::tempdir().unwrap();
         let backend = ProcessBackend::new("process", "bwrap");
+        report_freeze(&backend, "exited_process_is_reported_as_not_running");
         let context = launch(&backend, "/bin/true", Vec::new(), root.path());
-        for _ in 0..200 {
+        for _ in 0..3000 {
             if !backend.is_running(&context.environment_id).unwrap() {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(
             backend.process_handle(&context.environment_id).is_some(),

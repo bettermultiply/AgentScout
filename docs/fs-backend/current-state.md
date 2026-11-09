@@ -78,7 +78,9 @@
     overlay 并在日志/能力中说明。btrfs diff/accept 已实现：diff 解析 send dump，
     accept 用同一 dump 构建增量视图后走 live-mount/openat2 重放。本机无权限，
     无特权 btrfs 测试 SKIP；用户 2026-11-09 的特权运行已到 diff，暴露 dump
-    前缀/rename 解析错误，已修复但尚未重跑完整 accept。见 `scripts/priv-check.sh`。
+    前缀/rename 解析错误，已修复。原 `priv_btrfs_fork_diff_accept_discard` 已由
+    新的 Chain / Flatten / mixed 三个特权测试取代，但用户尚未运行新脚本，
+    真实 btrfs 的 Chain/Flatten accept 仍未验证。见 `scripts/priv-check.sh`。
 - **btrfs 快照副本（overlay 方案 2）**
   - 探测 `probe_btrfs_snapshot_copies`：建子卷、写文件、只读快照、把快照作为
     overlay lower 真实 bwrap 挂载，再走 btrfs-aware 递归删除路径确认能删净。
@@ -215,9 +217,14 @@
   overlay 标记，不把父目录时间戳变化算成额外 diff 项。文件仍比较 size/mtime。
 - Chain 布局的 lower 链每代加深一层；`MAX_LOWER_DEPTH=96` 只负责明确报错，
   不实现整链合并。达到上限后需要换分支策略或把状态目录放到独立挂载。
+- Chain 的 diff 走 `delta_since`，会报告子 upper 中因写入而 copy-up 的祖先
+  目录；这是结构项，不是文件内容误报。Flatten 的目录比较只对 mode/kind/overlay
+  标记敏感。特权测试把 Chain 的这些结构目录纳入精确集合，额外条目仍失败。
 - **btrfs 数据面的 Chain 布局尚未在真实特权环境验证**。无特权测试只覆盖
-  overlay 数据面；`in_lower` 优先于 `btrfs_delta` 的 accept 分支仅经过代码推理，
-  需要 `scripts/priv-check.sh` 在特权 btrfs 环境补测。
+  overlay 数据面；`in_lower` 优先于 `btrfs_delta` 的 accept 分支仅经过代码推理。
+  新的特权测试 `priv_btrfs_chain_layout`、`priv_btrfs_flatten_layout` 和
+  `priv_btrfs_mixed_generations` 已写好，需要用户运行 `scripts/priv-check.sh`
+  在真实 btrfs 环境验证。
 - 本机普通用户 `btrfs subvolume delete` 返回 EPERM，`fast_delete=false`；快照
   副本仍可启用，后台删除走 recursion fallback（已验证可删净），只是成本更高。
 
@@ -225,12 +232,16 @@
 
 - **btrfs fork/diff/accept 成功路径**：用户 `log.txt` 已证明真实 send dump 可用，
   dump snapshot 前缀、临时 `rename ... dest=...`、真实 rename/删除与共用 accept
-  增量视图已有无特权回归；修复后的特权 Rust accept 全程仍待重跑。运行
-  `scripts/priv-check.sh`，见 `docs/fs-backend/priv-check.md`。
+  增量视图已有无特权回归。原 `priv_btrfs_fork_diff_accept_discard` 已删除，由
+  Chain、Flatten、mixed 三个测试取代；用户尚未运行新脚本，修复后的特权 Rust
+  accept 全程仍待重跑。运行 `scripts/priv-check.sh`，见
+  `docs/fs-backend/priv-check.md`。
 - **btrfs 数据面的 Chain 布局**：`in_lower` 时走 `delta_since`、否则走
   `btrfs_delta` 的优先级只在代码层推理；本机无特权，`btrfs` 机制测试会 SKIP。
-  需要用 `scripts/priv-check.sh` 在真实特权 btrfs 环境分别验证 Chain 与 Flatten
-  的 diff/accept/冲突检测，特别是 Chain 下不能把父内容误判为删除。
+  新的 `priv_btrfs_chain_layout` 与 `priv_btrfs_flatten_layout` 分别在
+  `fork_flatten_entry_limit=0` / `usize::MAX` 下验证 Chain 与 Flatten 的
+  fork/diff/accept，`priv_btrfs_mixed_generations` 验证大 Chain + 小 Flatten
+  两代混合；三者在真实 btrfs 环境尚未执行。
 - **严格 btrfs subvolume delete ioctl**：本机 `fast_delete=false`；fallback 的
   O(文件数) 后台删除未做大数据量性能验证。
 - 真实内核生成的 redirect/opaque/metacopy 只用合成 xattr 测试；whiteout 字符
@@ -239,9 +250,14 @@
   ACL/ownership 未验证。
 
 高权限验证入口：普通用户运行 `./scripts/priv-check.sh`（可用
-`ASCOUT_PRIV_STATE_DIR` 指定 btrfs 目录）；脚本会以普通用户编译测试，再用 sudo
-运行 `ASCOUT_PRIV_TESTS=1 <test-binary> filesystem::tests::priv_ --nocapture`。
-live mount 重放不要求高权限，本机实际运行并通过。当前本机 btrfs 测试会打印 SKIP。
+`ASCOUT_PRIV_STATE_DIR` 指定 btrfs 基目录，用 `ASCOUT_PRIV_WORKSPACE_DIR`
+指定另一个挂载上的 workspace 基目录）；脚本以普通用户编译测试并运行进程组
+冻结测试，再用 sudo 运行 `ASCOUT_PRIV_TESTS=1 <test-binary>
+runtime::backends::filesystem::tests::privileged::priv_ --nocapture` 的 4 个测试。
+状态目录必须位于后端隔离的挂载之外，脚本和测试都会断言这一点。live mount
+重放不要求高权限，本机实际运行并通过。当前本机 btrfs 测试会打印 SKIP，因为
+没有 btrfs send/receive 权限；Chain/Flatten/mixed 三个 btrfs 测试要等用户运行
+新脚本后才第一次进入真实 btrfs 数据面。
 
 ## 逐挂载 overlay（无特权默认，实测）
 
@@ -729,7 +745,7 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | 相邻挂载同时 overlay | **实测**：bwrap 同时 overlay /home 与 /tmp，exit 0 |
 | 嵌套挂载在原始 mount 实验中可同时 overlay（先保存 child lower，再 parent，再 child） | **实测**：父子 tmpfs overlay 后两个文件都可见；当前 bwrap 参数实现未接入 |
 | 逐挂载 overlay 的挂载数/元数据成本 | **实测**：13 个可写挂载；200 次 mount+umount ~634ms；stat +34% |
-| btrfs fork/diff/accept 端到端 | **尚未通过**：用户特权运行选中 btrfs，在 diff 断言失败，尚未到 accept；解析修复已有无特权回归，需重跑 `scripts/priv-check.sh` |
+| btrfs fork/diff/accept 端到端 | **尚未通过**：旧 `priv_btrfs_fork_diff_accept_discard` 在 diff 断言失败，已由 `priv_btrfs_chain_layout` / `priv_btrfs_flatten_layout` / `priv_btrfs_mixed_generations` 取代；用户尚未运行新 `scripts/priv-check.sh`，Chain/Flatten accept 仍未验证 |
 | ProcessBackend 启动/冻结/解冻 | **实测**：`process_freeze_thaw_stops_and_resumes_writer` 冻结期间 counter 不变，thaw 后继续 |
 | 进程组 SIGSTOP/SIGCONT fallback | **实测**：`process_group_fallback_freezes_and_reports_mechanism`，能力上报 `process_group` |
 | BaseRuntime writers_quiesced | **实测**：`base_runtime_freezes_and_marks_writers_quiesced` 有进程时 true，无进程时 false |

@@ -10,17 +10,22 @@ use super::super::util::*;
 use super::super::state::MountUnit;
 
 #[cfg(test)]
-pub(crate) static READ_LAYER_ENTRIES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// Per-thread entry counter.  `read_layer`/`walk_layer` are called from
+    /// the calling thread on the accept path (the btrfs subprocess stderr
+    /// drain thread does not walk layers), so a process-global counter would
+    /// let unrelated tests running in parallel pollute this measurement.
+    static READ_LAYER_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn reset_read_layer_entries() {
-    READ_LAYER_ENTRIES.store(0, std::sync::atomic::Ordering::SeqCst);
+    READ_LAYER_ENTRIES.with(|entries| entries.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn read_layer_entries() -> usize {
-    READ_LAYER_ENTRIES.load(std::sync::atomic::Ordering::SeqCst)
+    READ_LAYER_ENTRIES.with(std::cell::Cell::get)
 }
 use crate::runtime::backend::BackendError;
 
@@ -77,7 +82,7 @@ pub(crate) fn walk_layer(
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         #[cfg(test)]
-        READ_LAYER_ENTRIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        READ_LAYER_ENTRIES.with(|entries| entries.set(entries.get() + 1));
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(error)?;
         let relative = path
