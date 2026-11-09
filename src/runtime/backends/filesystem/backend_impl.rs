@@ -94,6 +94,7 @@ impl Backend for FilesystemBackend {
                 return Err(BackendError::new("filesystem environment already exists"));
             }
         }
+        self.ensure_state_directory_outside_isolated_mounts(self.overlayable_mounts())?;
         fs::create_dir_all(&root).map_err(error)?;
         let mut mounts = BTreeMap::new();
         for target in self.overlayable_mounts() {

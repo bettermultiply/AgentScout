@@ -222,7 +222,7 @@ impl FilesystemBackend {
         let overlaps = backend.state_overlap_mounts();
         if !overlaps.is_empty() {
             eprintln!(
-                "filesystem: state_directory_overlaps_mount={:?} strategy=flatten fork_cost=O(upper) diff_cost=O(upper)",
+                "filesystem: state_directory_overlaps_mount={:?} startup=refused_by_default unless internal allow_overlapping_state_directory=true; flatten fallback retained for tests/diagnostics (fork_cost=O(upper) diff_cost=O(upper))",
                 overlaps
             );
         }

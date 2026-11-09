@@ -1,21 +1,28 @@
 # 文件系统 Backend 部署建议
 
-## 状态目录必须尽量放在独立挂载点
+## 状态目录必须在被隔离挂载点之外
 
 `FilesystemBackend` 会把状态目录放在自己内部（environments、layers、snapshots、
 replay journal）。当状态目录位于某个会被 Agent overlay 的挂载点内时，OverlayFS
 不允许把该状态目录下的快照层同时作为同一挂载的 lowerdir
 （`Overlay directories may not overlap`）。
 
-当前实现会自动检测这种重叠，并对重叠挂载使用 **flatten**：
+当前实现检测到这种重叠会**默认拒绝启动**：`establish` 和 `launch_fragment` 在
+创建环境根、upper 目录或环境元数据之前返回明确错误，错误包含状态目录路径、冲突
+的挂载点路径，以及“把状态目录放到被隔离挂载点之外”的修复建议。拒绝时不会留下
+半成品。
+
+flatten 降级仍保留在代码中，但只能由内部开关
+`allow_overlapping_state_directory=true`（仅测试与诊断）启用；它不属于外部配置
+文件，默认 false。启用时：
 
 - 有 btrfs 快照副本时，flatten 的 child upper 用可写快照，O(1)；
 - 没有快照副本时，fork 把父 upper 整个复制到 child upper，成本 O(upper 大小)；
 - diff 用完整 upper 与快照比较，而不是只扫描增量；
-- 启动日志和能力字段会列出重叠挂载。
+- 启动日志和能力字段仍列出重叠挂载。
 - 非重叠挂载仍使用 lower 链增量路径。
 
-生产部署建议把状态目录放在**不会被 Agent overlay 的独立挂载点**上，例如：
+生产部署要求把状态目录放在**不会被 Agent overlay 的独立挂载点**上，例如：
 
 ```json
 {
@@ -29,7 +36,8 @@ replay journal）。当状态目录位于某个会被 Agent overlay 的挂载点
 要求：
 
 1. `/var/lib/ascout/fs-state` 位于独立挂载（如单独的 btrfs subvolume、tmpfs 或
-   专用磁盘），不要位于 `/home`、`/tmp`、`/var/tmp`、`/srv` 等工作区挂载内。
+   专用磁盘），不要位于 `/home`、`/tmp`、`/var/tmp`、`/srv` 等工作区挂载内；
+   状态目录必须在该次运行会被 overlay 的所有挂载点之外。
 2. 该目录必须与 Agent 工作区挂载点不重叠；目录本身不需要对 Agent 可见，沙箱内
    会用 `--tmpfs` + `--remount-ro` 遮蔽。
 3. 状态目录所在文件系统应支持 reflink（btrfs/XFS）或 btrfs 快照副本，以获得
@@ -48,8 +56,8 @@ replay journal）。当状态目录位于某个会被 Agent overlay 的挂载点
 3. **方案 2 + reflink**：支持 FICLONE。fork 仍需遍历 N 个目录项，数据 O(1)。
 4. **方案 2 + copy**：逐文件复制。
 
-状态目录与 workspace 不同挂载且不重叠时，fork/diff 走 lower 链增量；重叠时
-使用 flatten（O(upper)）。
+状态目录与 workspace 不同挂载且不重叠时，fork/diff 走 lower 链增量；重叠时默认
+拒绝启动，只有内部测试开关启用时才使用 flatten（O(upper)）。
 
 ## 验证
 
@@ -61,18 +69,20 @@ replay journal）。当状态目录位于某个会被 Agent overlay 的挂载点
 }
 ```
 
-空列表表示所有挂载都走 lower 链增量路径。
+空列表表示状态目录不在任何被隔离挂载内，所有挂载都走 lower 链增量路径。
 
 若看到：
 
 ```text
-filesystem: state_directory_overlaps_mount=["/home"] strategy=flatten fork_cost=O(upper) diff_cost=O(upper)
+filesystem: state_directory_overlaps_mount=["/home"] startup=refused_by_default unless internal allow_overlapping_state_directory=true; flatten fallback retained for tests/diagnostics (fork_cost=O(upper) diff_cost=O(upper))
 ```
 
-说明状态目录与 `/home` 重叠，该挂载会使用 flatten 策略，fork/diff 成本随 upper
-大小线性增长。
+说明状态目录与 `/home` 重叠。默认启动会返回错误并拒绝创建环境；应把状态目录移到
+被隔离挂载点之外，而不是打开内部测试开关。
 
 当前测试覆盖：
 
+- `overlapping_state_directory_is_rejected_by_default`
 - `overlapping_state_directory_is_reported_and_flattened`
 - `non_overlapping_state_directory_uses_lower_chain`
+- `default_config_starts_when_state_directory_is_outside_isolated_mounts`

@@ -268,7 +268,7 @@ print("ok" if data else "fail")
         drop(backend);
         let operations = root.path().join("state/metadata/operations.json");
         fs::write(&operations, b"{not-json").unwrap();
-        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        let backend = FilesystemBackend::new(overlapping_state_config(root.path().join("state"))).unwrap();
         assert!(!operations.exists(), "corrupt operations file was not moved");
         let corrupt: Vec<_> = fs::read_dir(root.path().join("state/metadata"))
             .unwrap()
@@ -298,7 +298,7 @@ print("ok" if data else "fail")
         fs::create_dir_all(&corrupt).unwrap();
         fs::write(corrupt.join("keep"), b"keep").unwrap();
 
-        let error = match FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))) {
+        let error = match FilesystemBackend::new(overlapping_state_config(root.path().join("state"))) {
             Ok(_) => panic!(
                 "corrupt operations metadata must fail closed when it cannot be isolated"
             ),
@@ -352,6 +352,56 @@ print("ok" if data else "fail")
     }
 
     #[test]
+    fn overlapping_state_directory_is_rejected_by_default() {
+        let root = btrfs_temp();
+        let state = root.path().join("state");
+        let backend = FilesystemBackend::new(FilesystemConfig::new(&state)).unwrap();
+        let overlaps = backend.state_overlap_mounts();
+        if overlaps.is_empty() {
+            eprintln!(
+                "SKIP overlapping_state_directory_is_rejected_by_default: state directory is not inside an isolated mount"
+            );
+            return;
+        }
+        let error = backend
+            .establish("root")
+            .expect_err("overlapping state directory must be rejected by default");
+        let state_path = backend.config.state_directory.display().to_string();
+        assert!(
+            error.message.contains(&state_path),
+            "error did not name the state directory {}: {}",
+            state_path,
+            error.message
+        );
+        for mount in &overlaps {
+            let mount_path = mount.display().to_string();
+            assert!(
+                error.message.contains(&mount_path),
+                "error did not name the conflicting mount {}: {}",
+                mount_path,
+                error.message
+            );
+        }
+        assert!(
+            error.message.contains("outside the isolated mounts"),
+            "error did not suggest moving the state directory: {}",
+            error.message
+        );
+        assert!(
+            !backend.paths("root").exists(),
+            "rejected establish must not create the environment root"
+        );
+        assert!(
+            !backend.environment_metadata_path("root").exists(),
+            "rejected establish must not create environment metadata"
+        );
+        assert!(
+            !state.join("environments/root").exists(),
+            "rejected establish must not create mount upper directories"
+        );
+    }
+
+    #[test]
     fn non_overlapping_state_directory_uses_lower_chain() {
         let workspace_root = btrfs_temp();
         let base = workspace_root.path().join("base");
@@ -365,6 +415,9 @@ print("ok" if data else "fail")
         };
         let mut config = FilesystemConfig::new(state.path().join("state"));
         config.force_overlay = true;
+        // The state mount itself is isolated; only the workspace mount's
+        // lower chain is under test here.
+        config.allow_overlapping_state_directory = true;
         let backend = FilesystemBackend::new(config).unwrap();
         if !backend
             .overlayable_mounts()
@@ -402,6 +455,63 @@ print("ok" if data else "fail")
         );
         backend.terminate("child").unwrap();
         backend.discard("child", &[]).unwrap();
+        backend.terminate("root").unwrap();
+        backend.cleanup("root").unwrap();
+    }
+
+    #[test]
+    fn default_config_starts_when_state_directory_is_outside_isolated_mounts() {
+        let workspace_root = btrfs_temp();
+        let base = workspace_root.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+        // Learn which mounts this sandbox can isolate, then pick a writable
+        // state directory on a mount outside that set.
+        let probe = FilesystemBackend::new(overlapping_state_config(
+            workspace_root.path().join("probe-state"),
+        ))
+        .unwrap();
+        let isolated = probe.overlayable_mounts();
+        drop(probe);
+        let state = match tempdir_outside_mounts(&base, &isolated) {
+            Some(value) => value,
+            None => {
+                eprintln!(
+                    "SKIP default_config_starts_when_state_directory_is_outside_isolated_mounts: no writable mount outside isolated mounts"
+                );
+                return;
+            }
+        };
+        let backend =
+            FilesystemBackend::new(FilesystemConfig::new(state.path().join("state"))).unwrap();
+        assert!(
+            backend.state_overlap_mounts().is_empty(),
+            "chosen state layout must not overlap: {:?}",
+            backend.state_overlap_mounts()
+        );
+        backend.establish("root").unwrap();
+        let workspace_mount = mount_for(&backend, "root", &base);
+        let launch = AgentLaunch {
+            command: "/bin/true".into(),
+            args: Vec::new(),
+            cwd: base.clone(),
+            log: base.join("agent.log"),
+            instance_id: None,
+            env: BTreeMap::new(),
+        };
+        let context = BackendContext {
+            environment_id: "root".into(),
+            ..BackendContext::default()
+        };
+        let fragment = backend
+            .launch_fragment(&context, &launch)
+            .expect("default config must start with a non-overlapping state directory");
+        assert!(
+            fragment.mounts.iter().any(|entry| matches!(
+                entry,
+                MountEntry::Overlay { target, .. } if target == &workspace_mount.target
+            )),
+            "launch fragment must overlay the workspace mount"
+        );
         backend.terminate("root").unwrap();
         backend.cleanup("root").unwrap();
     }
@@ -513,6 +623,7 @@ print("ok" if data else "fail")
         let mut config = FilesystemConfig::new(root.path().join("state"));
         config.force_overlay = true;
         config.isolate_unmanaged_mounts = false;
+        config.allow_overlapping_state_directory = true;
         let backend = FilesystemBackend::new(config).unwrap();
         assert!(backend.usable);
         backend.establish("root").unwrap();
@@ -561,7 +672,7 @@ print("ok" if data else "fail")
         fs::write(&metadata_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         drop(backend);
 
-        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        let backend = FilesystemBackend::new(overlapping_state_config(root.path().join("state"))).unwrap();
         let state = backend.lock().unwrap();
         let environment = &state.environments["root"];
         let tmp = environment
@@ -580,7 +691,7 @@ print("ok" if data else "fail")
         value["lower"] = serde_json::json!({ "workspace": ["/legacy/layer"] });
         value["workspace_root"] = serde_json::Value::Null;
         fs::write(&metadata_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-        let error = match FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))) {
+        let error = match FilesystemBackend::new(overlapping_state_config(root.path().join("state"))) {
             Ok(_) => panic!("legacy workspace metadata without workspace_root must fail"),
             Err(error) => error,
         };

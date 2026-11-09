@@ -163,6 +163,9 @@ fn cleanup_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> Vec<String> {
 fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
     let mut config = FilesystemConfig::new(&case.state);
     config.force_overlay = !case.name.starts_with("btrfs-snapshot");
+    // Benchmark layouts deliberately place the state directory under an
+    // isolated mount (including the *-flatten cases); production must not.
+    config.allow_overlapping_state_directory = true;
     let backend = FilesystemBackend::new(config).map_err(|e| e.to_string())?;
     let capabilities = backend.capabilities();
     if !capabilities.branch_environment {

@@ -69,15 +69,43 @@ impl FilesystemBackend {
 
     /// A mount whose subtree contains the backend state directory cannot use
     /// snapshot layers below that same mount as overlay lowerdirs: OverlayFS
-    /// rejects overlapping lower directories.  Such mounts are flattened at
-    /// fork (parent upper copied into child upper) and their layers are only
-    /// used as diff metadata.
-
+    /// rejects overlapping lower directories.  Such layouts are refused by
+    /// default; only the internal `allow_overlapping_state_directory` switch
+    /// keeps the flatten fallback (parent upper copied into child upper, layers
+    /// used as diff metadata only).
     pub(super) fn state_overlap_mounts(&self) -> Vec<PathBuf> {
         self.overlayable_mounts()
             .into_iter()
             .filter(|target| self.config.state_directory.starts_with(target))
             .collect()
+    }
+
+    /// Fail before any environment, upper directory, or metadata is created
+    /// when the state directory sits inside a mount that this run would
+    /// isolate.  Flattening would hide that deployment error, so it is only
+    /// allowed through the internal test/diagnostic switch.
+    pub(super) fn ensure_state_directory_outside_isolated_mounts(
+        &self,
+        targets: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<(), BackendError> {
+        let mut overlaps: Vec<PathBuf> = targets
+            .into_iter()
+            .filter(|target| self.config.state_directory.starts_with(target))
+            .collect();
+        overlaps.sort();
+        overlaps.dedup();
+        if overlaps.is_empty() || self.config.allow_overlapping_state_directory {
+            return Ok(());
+        }
+        Err(BackendError::new(format!(
+            "filesystem state directory {} is inside isolated mount {}; snapshot layers stored there cannot be lowerdirs of that same mount (Overlay directories may not overlap). Move the state directory outside the isolated mounts, for example onto a separately mounted filesystem",
+            self.config.state_directory.display(),
+            overlaps
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
     }
 
     pub(super) fn mount_uses_flattening(&self, mount: &MountUnit) -> bool {
@@ -130,6 +158,14 @@ impl FilesystemBackend {
                 "filesystem environment is not launchable",
             ));
         }
+        let mut isolated = self.overlayable_mounts();
+        isolated.extend(
+            environment
+                .mounts
+                .values()
+                .map(|mount| mount.target.clone()),
+        );
+        self.ensure_state_directory_outside_isolated_mounts(isolated)?;
         if environment.workspace_root.as_deref() != Some(launch.cwd.as_path()) {
             environment.workspace_root = Some(launch.cwd.clone());
             self.persist_environment(&environment).map_err(|error| {

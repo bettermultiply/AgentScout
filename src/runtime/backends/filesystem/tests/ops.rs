@@ -28,7 +28,7 @@ use std::os::unix::fs::FileTypeExt;
             .unwrap();
         drop(backend);
 
-        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        let backend = FilesystemBackend::new(overlapping_state_config(root.path().join("state"))).unwrap();
         assert!(backend.state("root").is_some());
         assert!(backend.state("child").is_some());
         let second = backend
@@ -94,7 +94,7 @@ use std::os::unix::fs::FileTypeExt;
     #[test]
     fn btrfs_snapshot_copy_fork_is_end_to_end() {
         let root = btrfs_temp();
-        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        let backend = FilesystemBackend::new(overlapping_state_config(root.path().join("state"))).unwrap();
         if backend.fork_cost() != ForkCost::BtrfsSnapshot || backend.mechanism() != FilesystemMechanism::Overlay {
             eprintln!(
                 "SKIP btrfs_snapshot_copy_fork_is_end_to_end: state directory is not btrfs or snapshot copies unavailable (mechanism={}, fork_cost={})",
@@ -184,7 +184,7 @@ use std::os::unix::fs::FileTypeExt;
         let orphan = layers.join(".tmp-orphan");
         fs::create_dir_all(&orphan).unwrap();
         fs::write(orphan.join("partial"), b"x").unwrap();
-        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        let backend = FilesystemBackend::new(overlapping_state_config(root.path().join("state"))).unwrap();
         assert!(!orphan.exists(), "backend start must remove orphan staging");
         drop(backend);
     }
@@ -218,6 +218,9 @@ use std::os::unix::fs::FileTypeExt;
         };
         let mut config = FilesystemConfig::new(state.path().join("state"));
         config.force_overlay = true;
+        // The state mount itself is isolated; only the workspace mount's
+        // lower chain is under test here.
+        config.allow_overlapping_state_directory = true;
         let backend = FilesystemBackend::new(config).unwrap();
         backend.establish("root").unwrap();
         let workspace_mount = mount_for(&backend, "root", &base);
@@ -497,7 +500,7 @@ use std::os::unix::fs::FileTypeExt;
     }
 
     fn round_trip(root: tempfile::TempDir, expect_btrfs: bool) {
-        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        let backend = FilesystemBackend::new(overlapping_state_config(root.path().join("state"))).unwrap();
         assert!(
             backend.usable,
             "bubblewrap overlay probe failed; filesystem tests require a working sandbox"
@@ -1004,7 +1007,7 @@ use std::os::unix::fs::FileTypeExt;
                 return;
             }
         };
-        let backend = FilesystemBackend::new(FilesystemConfig::new(state.path().join("state"))).unwrap();
+        let backend = FilesystemBackend::new(overlapping_state_config(state.path().join("state"))).unwrap();
         if backend.mechanism() != FilesystemMechanism::Overlay
             || backend.fork_cost() != ForkCost::BtrfsSnapshot
         {

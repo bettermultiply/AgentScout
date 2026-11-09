@@ -35,6 +35,39 @@ use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
         None
     }
 
+    /// Config for tests whose state directory deliberately sits inside an
+    /// isolated mount.  They exercise the retained flatten fallback; production
+    /// layouts must keep the state directory outside every isolated mount.
+    pub(super) fn overlapping_state_config(state: impl Into<PathBuf>) -> FilesystemConfig {
+        let mut config = FilesystemConfig::new(state);
+        config.allow_overlapping_state_directory = true;
+        config
+    }
+
+    /// State-directory tempdir on a writable mount that is not in `isolated`
+    /// and does not contain the workspace.  Used by tests that need the default
+    /// (non-overlapping) layout.
+    pub(super) fn tempdir_outside_mounts(
+        workspace: &Path,
+        isolated: &[PathBuf],
+    ) -> Option<tempfile::TempDir> {
+        for target in real_writable_mounts() {
+            if workspace.starts_with(&target) {
+                continue;
+            }
+            if isolated.iter().any(|mount| mount == &target) {
+                continue;
+            }
+            if let Ok(directory) = tempfile::Builder::new()
+                .prefix("ascout-state-")
+                .tempdir_in(&target)
+            {
+                return Some(directory);
+            }
+        }
+        None
+    }
+
     pub(super) fn write(root: &Path, relative: &str, content: &str) {
         let path = root.join(relative);
         if let Some(parent) = path.parent() {
@@ -48,7 +81,7 @@ use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
     }
 
     pub(super) fn new_backend(root: &Path) -> FilesystemBackend {
-        let backend = FilesystemBackend::new(FilesystemConfig::new(root.join("state"))).unwrap();
+        let backend = FilesystemBackend::new(overlapping_state_config(root.join("state"))).unwrap();
         assert!(
             backend.usable,
             "bubblewrap overlay probe failed; filesystem tests require a working sandbox"
@@ -57,7 +90,7 @@ use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
     }
 
     pub(super) fn new_overlay_backend(root: &Path) -> FilesystemBackend {
-        let mut config = FilesystemConfig::new(root.join("state"));
+        let mut config = overlapping_state_config(root.join("state"));
         config.force_overlay = true;
         let backend = FilesystemBackend::new(config).unwrap();
         assert!(backend.usable, "bubblewrap overlay probe failed");

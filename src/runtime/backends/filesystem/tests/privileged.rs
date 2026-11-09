@@ -22,7 +22,7 @@ use super::support::*;
             .prefix("priv-btrfs-")
             .tempdir_in(state_root)
             .unwrap();
-        let backend = FilesystemBackend::new(FilesystemConfig::new(root.path().join("state"))).unwrap();
+        let backend = FilesystemBackend::new(overlapping_state_config(root.path().join("state"))).unwrap();
         assert_eq!(
             backend.mechanism(),
             FilesystemMechanism::Btrfs,

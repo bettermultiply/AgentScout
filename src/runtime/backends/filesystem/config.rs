@@ -14,6 +14,12 @@ pub struct FilesystemConfig {
     pub passthrough_rw: Vec<PathBuf>,
     /// Make unmanaged writable mounts read-only inside the sandbox.
     pub isolate_unmanaged_mounts: bool,
+    /// Internal switch for tests and diagnostics only: allow the state
+    /// directory to sit inside an isolated mount and fall back to flattening.
+    /// Production deployments must keep the state directory outside every
+    /// isolated mount; `FilesystemConfig` is built in code and is not
+    /// deserialized from external configuration.
+    pub allow_overlapping_state_directory: bool,
 }
 
 impl FilesystemConfig {
@@ -25,6 +31,7 @@ impl FilesystemConfig {
             force_overlay: false,
             passthrough_rw: Vec::new(),
             isolate_unmanaged_mounts: true,
+            allow_overlapping_state_directory: false,
         }
     }
 }

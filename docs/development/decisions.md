@@ -384,3 +384,20 @@ backend 被 drop 时工作者退出，未删完的目录留在 trash 供下次�
 diff 现在只表示该环境相对其 fork 基准的变化，行为不变；accept 的 target（目标
 环境）是另一个概念，不受影响。移除前检查了 protocol contract、Filesystem
 Backend 实现与分发、测试和文档，没有调用者传入该参数。
+
+# 2026-11-10：状态目录重叠默认拒绝启动
+
+决定：Filesystem Backend 的状态目录必须位于本次要 overlay 的挂载点之外。
+`establish` 和 `launch_fragment` 在创建环境根、upper 目录或环境元数据之前检查
+状态目录是否落在被隔离挂载点内；重叠时返回明确错误，错误包含状态目录路径、
+冲突挂载点路径，以及修复建议“把状态目录放到被隔离挂载点之外，例如独立挂载的
+文件系统”。
+
+理由：此前的 flatten 降级会掩盖部署错误，并让 fork/diff/accept 退化为
+O(upper)。flatten 路径保留，但只允许通过内部开关
+`allow_overlapping_state_directory` 启用；该开关仅用于测试与诊断，默认 false，
+不属于外部配置文件。
+
+**废弃记录**：不再把“检测到重叠后自动 flatten”作为默认策略。能力字段
+`state_directory_overlaps_mount` 与启动日志保留上报，日志措辞改为说明默认拒绝
+启动、除非内部开关开启。

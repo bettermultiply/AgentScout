@@ -98,14 +98,21 @@
     target upper。rename/metacopy 才构建 source 视图。计数测试
     `accept_work_does_not_scale_with_unrelated_upper_size` 证明 5000 个无关文件
     不会增加扫描项。
-- **状态目录重叠检测**
-  - 启动时列出状态目录所在的 overlay 挂载点，写入能力字段
-    `state_directory_overlaps_mount`，并打印
-    `strategy=flatten fork_cost=O(upper) diff_cost=O(upper)`。
-  - 部署建议见 `docs/fs-backend/deployment.md`：生产环境应把状态目录放在不被
-    overlay 的独立挂载点。
-  - 测试：`overlapping_state_directory_is_reported_and_flattened`、
-    `non_overlapping_state_directory_uses_lower_chain`。
+- **状态目录重叠检测与默认拒绝启动**
+  - `establish` 与 `launch_fragment` 在创建环境根、upper 目录或环境元数据之前，
+    检查状态目录是否位于本次要 overlay 的任一挂载点内。
+  - 默认拒绝：返回 `BackendError`，错误包含状态目录路径、冲突的挂载点路径，以及
+    修复建议“把状态目录放到被隔离挂载点之外，例如独立挂载的文件系统”。拒绝时
+    不创建环境根、upper 目录或环境元数据，不留半成品。
+  - 只有内部开关 `allow_overlapping_state_directory=true`（仅测试与诊断）保留
+    flatten 降级；此时行为与之前一致：含状态目录的挂载展平，快照层只作 diff
+    元数据。该开关属于代码配置，不能由外部配置文件设置，默认 false。
+  - 能力字段 `state_directory_overlaps_mount` 仍如实上报；启动日志说明默认拒绝
+    启动，不再把 flatten 描述为正常策略。
+  - 测试：`overlapping_state_directory_is_rejected_by_default`、
+    `overlapping_state_directory_is_reported_and_flattened`、
+    `non_overlapping_state_directory_uses_lower_chain`、
+    `default_config_starts_when_state_directory_is_outside_isolated_mounts`。
 
 - **LaunchFragment / ProcessBackend**
   - FilesystemBackend 只产出 `LaunchFragment` 中的挂载条目，不再 spawn，也不
@@ -166,8 +173,9 @@
 - accept 直接写 upper / live mount 重放均非原子。
 - 并行 `clone_upper` 未实现：reflink/快照已覆盖数据拷贝，剩余主要成本是目录项
   遍历；并行目录/xattr/whiteout 写入顺序风险未在本轮引入。
-- 当前挂载含状态目录时，fork 采用“upper 展平 + 快照仅作 diff 元数据”，不再把
-  该快照层作为 lowerdir；这是为了避免 OverlayFS 的
+- 当前挂载含状态目录时，默认拒绝启动；只有内部测试开关
+  `allow_overlapping_state_directory=true` 才采用“upper 展平 + 快照仅作 diff
+  元数据”，不再把该快照层作为 lowerdir；这是为了避免 OverlayFS 的
   `Overlay directories may not overlap`。
 - 本机普通用户 `btrfs subvolume delete` 返回 EPERM，`fast_delete=false`；快照
   副本仍可启用，后台删除走 recursion fallback（已验证可删净），只是成本更高。
@@ -213,9 +221,11 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
 - **状态目录位于被 overlay 的挂载内时的实测问题**：fork 生成的快照层位于该
   挂载下，若作为 lowerdir 会得到
   `OverlayFS: Overlay directories may not overlap`。复现：cwd 与 state 都在
-  `/home`，fork 后启动子进程即报错。解决：该挂载 fork 时把父 upper **展平**
-  到 child upper，快照层只用于 diff/accept 元数据，启动时 lower 只用宿主挂载
-  点。其它挂载仍使用 lower 链。
+  `/home`，fork 后启动子进程即报错。现在默认在 `establish`/`launch_fragment`
+  创建环境根、upper 和元数据之前拒绝启动，并报告状态目录与冲突挂载点。只有内部
+  测试开关 `allow_overlapping_state_directory=true` 才保留原有降级：该挂载 fork
+  时把父 upper **展平**到 child upper，快照层只用于 diff/accept 元数据，启动时
+  lower 只用宿主挂载点；其它挂载仍使用 lower 链。
 - 嵌套挂载当前未实现。当前 bwrap 参数层做不到不等于实际做不到，之后可以另找
   实现手段；父挂载与子挂载分别 probe；现有参数无法保存子挂载 lower 后再重挂。
   失败候选会被 ro-bind，不静默直通。
@@ -228,7 +238,7 @@ live mount 重放不要求高权限，本机实际运行并通过。当前本机
 
 | 操作 | 覆盖范围 | 实现 | 验证 |
 |---|---|---|---|
-| fork | 选中（默认全部）挂载 | 每挂载复制 upper / 追加 lower；含状态目录的挂载展平 | `extra_mount_...`、`backend_overlay_...`、`overlay_fork_isolates...` |
+| fork | 选中（默认全部）挂载 | 每挂载复制 upper / 追加 lower；含状态目录的挂载展平（仅内部开关） | `extra_mount_...`、`backend_overlay_...`、`overlay_fork_isolates...` |
 | mark | 选中挂载 | 每挂载独立快照副本，记录每挂载 lower | `extra_mount_...`（mark diff） |
 | diff | 选中挂载 | 每挂载 delta 或 upper 副本比较，路径加挂载前缀 | `extra_mount_...`、`real_overlay_whiteout...` |
 | accept | 选中挂载 | 每挂载三方合并 + 目标 upper/live root 重放 | `extra_mount_...`、`live_target_accept...` |
@@ -299,7 +309,9 @@ ASCOUT_BENCH_CASES=<case> ASCOUT_BENCH_ITERS=20 ASCOUT_BENCH_SIZES=<N> \
 `reflink-flatten`：状态目录与 workspace 都在 `/home`（btrfs），`/home` 重叠 →
 flatten。`reflink-lower`：状态目录在 `/var/tmp`（btrfs），workspace 在 `/home` →
 `/home` 使用 lower 链；`/var/tmp` 自身重叠并 flatten。`tmpfs-flatten`：状态与
-workspace 都在 `/tmp` tmpfs，flatten。
+workspace 都在 `/tmp` tmpfs，flatten。所有基准用例的状态目录都位于被隔离挂载内，
+因此 `fs_bench` 显式打开内部测试开关 `allow_overlapping_state_directory`；生产
+部署默认拒绝这种布局。
 
 | case | N | operation | p50_ms | p95_ms | fork_cost | mechanism | overlaps |
 |---|---|---|---|---|---|---|---|
