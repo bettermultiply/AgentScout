@@ -4,6 +4,124 @@ use super::*;
 use super::backend_impl::{MAX_ENVIRONMENT_ID_BYTES, validate_environment_id};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::mpsc;
+
+#[test]
+fn terminate_can_interrupt_an_inflight_guest_command() {
+    use std::os::unix::net::UnixListener;
+    let root = tempfile::tempdir().unwrap();
+    let backend = Arc::new(backend(root.path(), FakeApi::new()));
+    insert_environment(&backend, "running", root.path().join("running"), EnvironmentState::Available);
+    let socket = root.path().join("guest.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    {
+        let environment = backend.environment("running").unwrap();
+        let mut environment = environment.lock().unwrap();
+        environment.vsock_socket = socket;
+        environment.child = Some(Command::new("sleep").arg("30").process_group(0).spawn().unwrap());
+    }
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let guest = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        stream.write_all(b"OK 1\n").unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        entered_tx.send(()).unwrap();
+        // Closing the mock guest represents the VM being stopped. Keep it open
+        // until we know whether terminate could enter during the command.
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    let operating = Arc::clone(&backend);
+    let command = thread::spawn(move || operating.operate("running", &["long-command".into()], &CancelHandle::default()));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let terminating = Arc::clone(&backend);
+    let (done_tx, done_rx) = mpsc::channel();
+    let terminate = thread::spawn(move || done_tx.send(terminating.terminate("running")).unwrap());
+    let completed = done_rx.recv_timeout(Duration::from_secs(1));
+    release_tx.send(()).unwrap();
+    guest.join().unwrap();
+    assert!(command.join().unwrap().is_err());
+    terminate.join().unwrap();
+    completed.expect("terminate blocked behind guest command").unwrap();
+    assert_eq!(backend.state("running"), Some(EnvironmentState::Terminated));
+    assert!(backend.environment("running").unwrap().lock().unwrap().child.is_none());
+}
+
+struct BlockingApi {
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl FirecrackerApi for BlockingApi {
+    fn request(&self, _: &str, _: &Path, _: &str, _: &Value) -> Result<(), BackendError> {
+        self.entered.send(()).unwrap();
+        self.release.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+        Ok(())
+    }
+}
+
+#[test]
+fn lifecycle_operations_on_different_ids_do_not_block_each_other() {
+    let root = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let backend = Arc::new(backend(root.path(), Arc::new(BlockingApi {
+        entered: entered_tx, release: Mutex::new(release_rx),
+    })));
+    for id in ["paused", "other"] {
+        insert_environment(&backend, id, root.path().join(id), EnvironmentState::Available);
+    }
+    let suspending = Arc::clone(&backend);
+    let suspend = thread::spawn(move || suspending.suspend("paused"));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let cleaning = Arc::clone(&backend);
+    let (done_tx, done_rx) = mpsc::channel();
+    let cleanup = thread::spawn(move || done_tx.send(cleaning.cleanup("other")).unwrap());
+    let completed = done_rx.recv_timeout(Duration::from_secs(1));
+    release_tx.send(()).unwrap();
+    suspend.join().unwrap().unwrap();
+    cleanup.join().unwrap();
+    completed.expect("unrelated cleanup blocked behind suspend").unwrap();
+    assert!(backend.environment("other").is_err());
+}
+
+#[test]
+fn same_id_cleanup_and_reuse_wait_for_lifecycle_operation() {
+    let root = tempfile::tempdir().unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let backend = Arc::new(backend(root.path(), Arc::new(BlockingApi {
+        entered: entered_tx, release: Mutex::new(release_rx),
+    })));
+    insert_environment(&backend, "env", root.path().join("env"), EnvironmentState::Available);
+    let suspending = Arc::clone(&backend);
+    let suspend = thread::spawn(move || suspending.suspend("env"));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    // Keep the lock identity through removal. Reuse must not create a new
+    // mutex while a caller still holds the old one.
+    let operation = backend.operation_lock("env").unwrap();
+    let cleaning = Arc::clone(&backend);
+    let cleanup = thread::spawn(move || cleaning.cleanup("env"));
+    assert!(operation.try_lock().is_err());
+    release_tx.send(()).unwrap();
+    suspend.join().unwrap().unwrap();
+    cleanup.join().unwrap().unwrap();
+    assert!(Arc::ptr_eq(&operation, &backend.operation_lock("env").unwrap()));
+    // Recreate a safe fixture under the same lock and ensure cleanup uses it.
+    let guard = operation.lock().unwrap();
+    insert_environment(&backend, "env", root.path().join("env"), EnvironmentState::Terminated);
+    let cleaning = Arc::clone(&backend);
+    let (done_tx, done_rx) = mpsc::channel();
+    let cleanup = thread::spawn(move || done_tx.send(cleaning.cleanup("env")).unwrap());
+    assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    drop(guard);
+    done_rx.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+    cleanup.join().unwrap();
+}
 
 struct FakeApi {
     fail_snapshot: bool,
@@ -314,6 +432,8 @@ fn cleanup_failure_keeps_environment_for_retry() {
         EnvironmentState::Terminated,
     );
 
+    backend.networks.lock().unwrap().allocate("locked").unwrap();
+
     let error = backend.cleanup("locked").unwrap_err();
     assert!(error.message.contains("failed to remove"), "{error}");
     let state = backend
@@ -327,6 +447,51 @@ fn cleanup_failure_keeps_environment_for_retry() {
         .state;
     assert_eq!(state, EnvironmentState::Terminated);
     assert!(backend.environments.lock().unwrap().contains_key("locked"));
+    assert!(backend.networks.lock().unwrap().allocation("locked").is_some());
+    fs::remove_file(&directory).unwrap();
+    backend.cleanup("locked").unwrap();
+    assert!(backend.environment("locked").is_err());
+    assert!(backend.networks.lock().unwrap().allocation("locked").is_none());
+}
+
+#[test]
+fn stop_failure_retains_child_state_and_resources_until_retry() {
+    for cleanup in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let backend = backend(root.path(), FakeApi::new());
+        let directory = backend.config.state_directory.join("running");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("owned"), b"keep").unwrap();
+        insert_environment(&backend, "running", directory.clone(), EnvironmentState::Suspended);
+        backend.networks.lock().unwrap().allocate("running").unwrap();
+        let child = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let pid = child.id() as i32;
+        let environment = backend.environment("running").unwrap();
+        environment.lock().unwrap().child = Some(child);
+        guest_ops::STOP_FAILURE.with(|failure| failure.set(true));
+        let result = if cleanup { backend.cleanup("running") } else { backend.terminate("running") };
+        guest_ops::STOP_FAILURE.with(|failure| failure.set(false));
+        // Inspect everything before asserting so a regression can still reap the child.
+        let mut environment = environment.lock().unwrap();
+        let retained = environment.child.is_some();
+        let state = environment.state;
+        if let Some(child) = environment.child.as_mut() {
+            guest_ops::kill_environment_process(child).unwrap();
+        }
+        drop(environment);
+        if !retained {
+            unsafe { libc::kill(-pid, libc::SIGKILL); libc::waitpid(pid, std::ptr::null_mut(), 0); }
+        }
+        assert!(result.unwrap_err().message.contains("injected process stop failure"));
+        assert!(retained, "process handle lost after stop failure");
+        assert_eq!(state, EnvironmentState::Suspended);
+        assert!(directory.join("owned").exists());
+        assert!(backend.networks.lock().unwrap().allocation("running").is_some());
+        backend.cleanup("running").unwrap();
+        assert!(!directory.exists());
+        assert!(backend.environment("running").is_err());
+        assert!(backend.networks.lock().unwrap().allocation("running").is_none());
+    }
 }
 
 #[test]
@@ -339,4 +504,94 @@ fn network_registry_releases_on_cleanup() {
     insert_environment(&backend, "env", directory, EnvironmentState::Terminated);
     backend.cleanup("env").unwrap();
     assert!(backend.networks.lock().unwrap().allocation("env").is_none());
+}
+
+#[test]
+fn network_cleanup_failure_keeps_directory_and_allocation_until_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let backend = backend(root.path(), FakeApi::new());
+    let directory = backend.config.state_directory.join("network");
+    fs::create_dir_all(&directory).unwrap();
+    insert_environment(&backend, "network", directory.clone(), EnvironmentState::Terminated);
+    backend.environment("network").unwrap().lock().unwrap().network.teardown_enabled = true;
+    backend.networks.lock().unwrap().allocate("network").unwrap();
+    network::NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = Some(Box::new(|_| Err(BackendError::new("injected permission denied")))));
+    let result = backend.cleanup("network");
+    network::NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = None);
+    assert!(result.unwrap_err().message.contains("injected permission denied"));
+    assert!(directory.exists());
+    assert_eq!(backend.state("network"), Some(EnvironmentState::Terminated));
+    assert!(backend.networks.lock().unwrap().allocation("network").is_some());
+    network::NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = Some(Box::new(|_| Ok(()))));
+    let result = backend.cleanup("network");
+    network::NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = None);
+    result.unwrap();
+    assert!(!directory.exists());
+    assert!(backend.environment("network").is_err());
+    assert!(backend.networks.lock().unwrap().allocation("network").is_none());
+}
+
+#[test]
+fn startup_rollback_failure_is_owned_and_cleanup_can_retry() {
+    for stop_failure in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let backend = backend(root.path(), FakeApi::new());
+        let directory = backend.config.state_directory.join("partial");
+        fs::create_dir_all(&directory).unwrap();
+        backend.networks.lock().unwrap().allocate("partial").unwrap();
+        let mut network = test_network();
+        network.teardown_enabled = true;
+        let environment = Environment {
+            state: EnvironmentState::Available,
+            child: Some(Command::new("sleep").arg("30").process_group(0).spawn().unwrap()),
+            directory: directory.clone(),
+            api_socket: directory.join("api.sock"),
+            vsock_socket: directory.join("vsock.sock"),
+            network,
+        };
+        guest_ops::STOP_FAILURE.with(|failure| failure.set(stop_failure));
+        network::NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = Some(Box::new(|_| Err(BackendError::new("injected network failure")))));
+        let failure = backend.rollback_environment_start("partial", environment, BackendError::new("original start error"));
+        guest_ops::STOP_FAILURE.with(|failure| failure.set(false));
+        network::NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = None);
+        assert!(failure.to_string().contains("original start error"));
+        assert!(!failure.cleanup_failures.is_empty());
+        assert!(directory.exists());
+        assert!(backend.networks.lock().unwrap().allocation("partial").is_some());
+        assert_eq!(backend.environment("partial").unwrap().lock().unwrap().child.is_some(), stop_failure);
+        // Creating the same id must not remove retained startup resources.
+        assert!(backend.establish("partial").is_err());
+        assert!(directory.exists());
+        network::NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = Some(Box::new(|_| Ok(()))));
+        let result = backend.cleanup("partial");
+        network::NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = None);
+        result.unwrap();
+        assert!(!directory.exists());
+        assert!(backend.networks.lock().unwrap().allocation("partial").is_none());
+    }
+}
+
+#[test]
+fn startup_rollback_directory_failure_keeps_network_ownership() {
+    let root = tempfile::tempdir().unwrap();
+    let backend = backend(root.path(), FakeApi::new());
+    let directory = backend.config.state_directory.join("partial-file");
+    fs::write(&directory, b"not a directory").unwrap();
+    backend.networks.lock().unwrap().allocate("partial-file").unwrap();
+    let environment = Environment {
+        state: EnvironmentState::Terminated,
+        child: None,
+        directory: directory.clone(),
+        api_socket: directory.join("api.sock"),
+        vsock_socket: directory.join("vsock.sock"),
+        network: test_network(),
+    };
+    let failure = backend.rollback_environment_start("partial-file", environment, BackendError::new("start failed"));
+    assert!(!failure.cleanup_failures.is_empty());
+    assert!(backend.environment("partial-file").is_ok());
+    assert!(backend.networks.lock().unwrap().allocation("partial-file").is_some());
+    fs::remove_file(&directory).unwrap();
+    backend.cleanup("partial-file").unwrap();
+    assert!(backend.environment("partial-file").is_err());
+    assert!(backend.networks.lock().unwrap().allocation("partial-file").is_none());
 }

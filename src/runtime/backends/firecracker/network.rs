@@ -131,8 +131,7 @@ fn allocation_for_index(index: usize) -> Result<NetworkAllocation, BackendError>
 }
 
 impl EnvironmentNetwork {
-    pub(super) fn create(
-        _environment_id: &str,
+    pub(super) fn new(
         allocation: &NetworkAllocation,
     ) -> Result<Self, BackendError> {
         let network = Self {
@@ -142,18 +141,14 @@ impl EnvironmentNetwork {
             upstream: upstream_interface()?,
             teardown_enabled: true,
         };
-        if let Err(failure) = network.setup() {
-            network.teardown();
-            return Err(failure);
-        }
         Ok(network)
     }
 
     pub(super) fn setup(&self) -> Result<(), BackendError> {
         let namespace = &self.namespace;
         // 清理同名残留，保证重复建立从干净状态开始。
-        let _ = privileged(&["ip", "link", "delete", &self.veth_host]);
-        let _ = privileged(&["ip", "netns", "delete", namespace]);
+        privileged_remove(&["ip", "link", "delete", &self.veth_host])?;
+        privileged_remove(&["ip", "netns", "delete", namespace])?;
         privileged(&["ip", "netns", "add", namespace])?;
         privileged_netns(
             namespace,
@@ -265,11 +260,11 @@ impl EnvironmentNetwork {
         Ok(())
     }
 
-    pub(super) fn teardown(&self) {
+    pub(super) fn teardown(&self) -> Result<(), BackendError> {
         if !self.teardown_enabled {
-            return;
+            return Ok(());
         }
-        let _ = privileged(&[
+        privileged_remove(&[
             "iptables",
             "-D",
             "FORWARD",
@@ -277,8 +272,8 @@ impl EnvironmentNetwork {
             &self.veth_subnet,
             "-j",
             "ACCEPT",
-        ]);
-        let _ = privileged(&[
+        ])?;
+        privileged_remove(&[
             "iptables",
             "-D",
             "FORWARD",
@@ -286,8 +281,8 @@ impl EnvironmentNetwork {
             &self.veth_subnet,
             "-j",
             "ACCEPT",
-        ]);
-        let _ = privileged(&[
+        ])?;
+        privileged_remove(&[
             "iptables",
             "-t",
             "nat",
@@ -299,10 +294,11 @@ impl EnvironmentNetwork {
             &self.upstream,
             "-j",
             "MASQUERADE",
-        ]);
+        ])?;
         // 删除 netns 会把其中的 veth 移回宿主，必须先删除 veth 对。
-        let _ = privileged(&["ip", "link", "delete", &self.veth_host]);
-        let _ = privileged(&["ip", "netns", "delete", &self.namespace]);
+        privileged_remove(&["ip", "link", "delete", &self.veth_host])?;
+        privileged_remove(&["ip", "netns", "delete", &self.namespace])?;
+        Ok(())
     }
 
     pub(super) fn host_ip(&self) -> String {
@@ -369,7 +365,12 @@ pub(super) fn current_group() -> String {
 }
 
 pub(super) fn privileged(args: &[&str]) -> Result<(), BackendError> {
+    #[cfg(test)]
+    if let Some(result) = NETWORK_COMMAND.with(|runner| runner.borrow_mut().as_mut().map(|runner| runner(args))) {
+        return result;
+    }
     let output = Command::new("sudo")
+        .env("LC_ALL", "C")
         .args(["-n"])
         .args(args)
         .output()
@@ -383,6 +384,36 @@ pub(super) fn privileged(args: &[&str]) -> Result<(), BackendError> {
             String::from_utf8_lossy(&output.stderr).trim()
         )))
     }
+}
+
+/// Accept only the command's specific missing-resource diagnostic, never a
+/// generic nonzero status or a permission/execution failure.
+fn privileged_remove(args: &[&str]) -> Result<(), BackendError> {
+    privileged(args).or_else(|failure| {
+        let prefix = format!("privileged command failed: sudo {}: ", args.join(" "));
+        let diagnostic = failure.message.strip_prefix(&prefix).unwrap_or("");
+        let absent = if args.first() == Some(&"iptables") {
+            let missing = "Bad rule (does a matching rule exist in that chain?).";
+            diagnostic == format!("iptables: {missing}")
+                || (diagnostic.starts_with("iptables v")
+                    && !diagnostic.contains('\n')
+                    && diagnostic.split_once(": ").is_some_and(|(_, text)| text == missing))
+        } else if args.get(1) == Some(&"link") {
+            diagnostic == format!("Cannot find device \"{}\"", args[3])
+        } else if args.get(1) == Some(&"netns") {
+            diagnostic == format!(
+                "Cannot remove namespace file \"/run/netns/{}\": No such file or directory", args[3]
+            )
+        } else {
+            false
+        };
+        if absent { Ok(()) } else { Err(failure) }
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static NETWORK_COMMAND: std::cell::RefCell<Option<Box<dyn FnMut(&[&str]) -> Result<(), BackendError>>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub(super) fn privileged_netns(namespace: &str, args: &[&str]) -> Result<(), BackendError> {
@@ -409,6 +440,26 @@ pub(super) fn upstream_interface() -> Result<String, BackendError> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn cleanup_accepts_only_specific_missing_resource_errors() {
+        for (args, diagnostic) in [
+            (vec!["iptables", "-D", "FORWARD"], "iptables: Bad rule (does a matching rule exist in that chain?)."),
+            (vec!["ip", "link", "delete", "vh-test"], "Cannot find device \"vh-test\""),
+            (vec!["ip", "netns", "delete", "fc-test"], "Cannot remove namespace file \"/run/netns/fc-test\": No such file or directory"),
+        ] {
+            NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = Some(Box::new(move |args| Err(BackendError::new(format!("privileged command failed: sudo {}: {diagnostic}", args.join(" ")))))));
+            let result = privileged_remove(&args);
+            NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = None);
+            result.unwrap();
+        }
+        for diagnostic in ["Permission denied", "Operation not permitted", "sudo: a password is required", "No such file or directory", "iptables: Permission denied (you must be root)."] {
+            NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = Some(Box::new(move |_| Err(BackendError::new(diagnostic)))));
+            let result = privileged_remove(&["iptables", "-D", "FORWARD"]);
+            NETWORK_COMMAND.with(|runner| *runner.borrow_mut() = None);
+            assert!(result.is_err(), "swallowed {diagnostic}");
+        }
+    }
 
     #[test]
     fn allocations_do_not_collide_for_many_environment_ids() {
@@ -472,4 +523,3 @@ mod tests {
         assert!(error.message.contains("already allocated"), "{error}");
     }
 }
-

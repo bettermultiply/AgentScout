@@ -188,14 +188,37 @@ pub(super) fn spawn_firecracker(
 
 /// 终止 Firecracker 进程组并回收子进程。
 ///
-/// `try_wait` 轮询有上限；超时后再次 SIGKILL 并 `wait`，避免在不可回收的
-/// 子进程上无限持锁等待。
+/// 仅有界轮询；未确认退出时由调用方保留 Child 以便重试。
 pub(super) fn kill_environment_process(child: &mut Child) -> Result<(), BackendError> {
-    let process_group = child.id() as i32;
-    unsafe {
-        libc::kill(-process_group, libc::SIGKILL);
+    #[cfg(test)]
+    if STOP_FAILURE.with(|failure| failure.get()) {
+        return Err(BackendError::new("injected process stop failure"));
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let process_group = child.id() as i32;
+    if child.try_wait().map_err(error)?.is_some() {
+        return Ok(());
+    }
+    if unsafe { libc::kill(-process_group, libc::SIGKILL) } != 0 {
+        let failure = io::Error::last_os_error();
+        if failure.raw_os_error() != Some(libc::ESRCH) {
+            return Err(BackendError::new(format!(
+                "failed to kill Firecracker process group {process_group}: {failure}"
+            )));
+        }
+        // A child may exist without its expected process group (e.g. wrapper exit).
+        if child.try_wait().map_err(error)?.is_some() {
+            return Ok(());
+        }
+        child.kill().map_err(|failure| BackendError::new(format!(
+            "failed to kill Firecracker child {process_group}: {failure}"
+        )))?;
+    }
+    wait_for_environment_exit(child, Duration::from_secs(5))
+}
+
+fn wait_for_environment_exit(child: &mut Child, timeout: Duration) -> Result<(), BackendError> {
+    let process_group = child.id();
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => return Ok(()),
@@ -203,16 +226,22 @@ pub(super) fn kill_environment_process(child: &mut Child) -> Result<(), BackendE
                 thread::sleep(Duration::from_millis(10));
             }
             Ok(None) => {
-                let _ = child.kill();
-                return child.wait().map(|_| ()).map_err(error);
+                return Err(BackendError::new(format!(
+                    "timed out waiting for Firecracker process {process_group} to exit after SIGKILL"
+                )));
             }
             Err(failure) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error(failure));
+                return Err(BackendError::new(format!(
+                    "failed to poll Firecracker process {process_group}: {failure}"
+                )));
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static STOP_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Firecracker API 响应体上限；API 响应很小，超限说明对端异常。
@@ -458,5 +487,25 @@ mod tests {
         let rootfs = Path::new("/tmp/rootfs.ext4");
         let error = debugfs_write(rootfs, Path::new("/tmp/source with space"), "/dest").unwrap_err();
         assert!(error.message.contains("cannot be passed safely"), "{error}");
+    }
+
+    #[test]
+    fn process_exit_timeout_is_bounded_and_retains_a_retryable_child() {
+        let mut child = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let start = Instant::now();
+        let result = wait_for_environment_exit(&mut child, Duration::from_millis(20));
+        let still_running = child.try_wait().unwrap().is_none();
+        kill_environment_process(&mut child).unwrap();
+        assert!(result.unwrap_err().message.contains("timed out waiting"));
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(still_running);
+        kill_environment_process(&mut child).unwrap();
+    }
+
+    #[test]
+    fn missing_process_group_falls_back_to_child_kill() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        kill_environment_process(&mut child).unwrap();
+        assert!(child.try_wait().unwrap().is_some());
     }
 }

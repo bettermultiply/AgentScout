@@ -342,3 +342,13 @@ Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义�
 用户确认：task 创建时建立树，具体投机状态归树；Controller 不持有 task 状态，可协调多棵树。Policy 为决策函数，树的方法负责合法转换和后续操作要求。消息／定时器触发同一 task 顺序处理，耗时操作异步返回。Gateway 的统一范围暂未决定。
 
 废弃实现：AgentController 持有 ControlState 和编号，及主循环每 100 毫秒扫描、同步调用 Policy／Runtime 的组织方式。此前 start_candidates、advance_candidates 与同步回调包装由树的事件处理和无状态协调替代。未经用户同意不提交。
+# 2026-11-09：物化责任边界与 Firecracker 清理
+
+控制面只报告操作间隙，Runtime 自行决定内部整理；控制面不持有物化专用语义。
+撤回 materialize 提案中控制面触发 `FilesystemMaterialize`、新增物化状态/确认
+字段、由控制面选择物化冲突策略的建议。本轮只同步文档，不实现新接口；宿主锁、
+冲突处理及环境保留仍待后续明确。
+
+Firecracker 停止未确认不标记 Terminated、不丢 Child、不拆资源；清理失败保留环境
+和网络所有权供重试，全部清理成功才释放。启动失败回滚适用同一规则。生命周期
+操作暂串行化，环境锁覆盖同环境操作，避免清理、重建与旧状态更新竞态。

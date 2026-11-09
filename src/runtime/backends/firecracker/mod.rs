@@ -8,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,8 @@ pub struct FirecrackerBackend {
     environments: Mutex<HashMap<String, Arc<Mutex<Environment>>>>,
     networks: Mutex<NetworkRegistry>,
     api: Arc<dyn FirecrackerApi>,
+    // Only protects lock lookup; lifecycle work holds per-id locks instead.
+    operations: Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
 mod backend_impl;
