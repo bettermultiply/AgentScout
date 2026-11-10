@@ -106,14 +106,14 @@ predict(predict_input) -> ProposalSet
 
 | 输入 | 是否必需 | 含义 |
 |---|---:|---|
-| `edge_context` | 是 | 当前 Chance 的 pending-result boundary、被预测结果的类型/结构，以及后续依赖点的基本描述 |
+| `chance_context` | 是 | 当前 Chance 的 pending-result boundary、被预测结果的类型/结构，以及后续依赖点的基本描述 |
 | `process_context` | 是 | 当前 Agent 过程可见的状态，包括上下文、当前阶段、已有输入和已完成结果 |
 | `assumption_set` | 是 | 当前 Branch 已携带的未决 Proposal ID 集合；预测不能假装这些 Proposal 已经被确认 |
 | `history` | 否 | 当前 Agent 或同类过程已经产生的历史轨迹、观测和结果 |
 | `policy_config` | 是 | 只传给 `predict` 函数的模型、规则、阈值、候选数量限制等算法参数；其他函数只接收各自的参数 |
 | `capability_context` | 是 | Contract/Runtime 已声明的可用能力和约束，例如相关效果是否可处理、可用预算或最大候选数 |
 
-`edge_context` 确定要预测哪个边界结果；`process_context` 和 `history` 提供生成候选所需的事实；`assumption_set` 保持未验证前提的可见性；`capability_context` 说明候选是否具备安全执行和验证的条件。来源可以是模型、规则、历史轨迹、外部系统或其他 Policy 组件，但来源不改变 Proposal 的语义。
+`chance_context` 确定要预测哪个边界结果；`process_context` 和 `history` 提供生成候选所需的事实；`assumption_set` 保持未验证前提的可见性；`capability_context` 说明候选是否具备安全执行和验证的条件。来源可以是模型、规则、历史轨迹、外部系统或其他 Policy 组件，但来源不改变 Proposal 的语义。
 
 `predict` 可以使用这些输入作出推断或规则判断，但不负责验证 Proposal 是否正确，也不负责决定 Proposal 最终能否提交。
 

@@ -75,8 +75,8 @@ def extent(data, *, policy_config, capabilities):
 | `select` | `frontier_view`、`scheduling_context` | 无 | 输入 Chance ID（字段名 `edge_id`） 的无重复有序子集 |
 | `rebalance` | `active_view`、`paused_view`、`scheduling_context` | 无 | 输入 Branch 的 `pause`／`resume`／`preempt` 动作，每 Branch 最多一次 |
 | `extent` | `process_state` | `process_state.active_time`、`process_state.resource_counters`、`process_state.result_facts`、`process_state.semantic_facts` | `stop`／`continue` |
-| `predict` | `edge_context`、`process_context`、`assumption_set`、`capability_context` | `history` | batch `ProposalSet`，每项有 `payload`，可有 `provenance` |
-| `launch` | `edge_context`、`authority_state`、`candidate_view` | `scheduling_context` | 布尔值 |
+| `predict` | `chance_context`、`process_context`、`assumption_set`、`capability_context` | `history` | batch `ProposalSet`，每项有 `payload`，可有 `provenance` |
+| `launch` | `chance_context`、`authority_state`、`candidate_view` | `scheduling_context` | 布尔值 |
 | `effect` | `effect_descriptor`、`context` | 无 | 只接受无附加参数的 `block`／`deny` 计划 |
 | `match` | `proposal`、`evidence`、`match_context` | `outcome` | 四类 verdict，不接受 score |
 | `dispose` | `branch`、`resolution`、`context` | 无 | 单个 `Discard`，或仅在 `accepted` 时单个 `Promote`；在 `indeterminate`／`error`／`extent_reached` 时可返回空动作列表 |
@@ -104,4 +104,4 @@ def extent(data, *, policy_config, capabilities):
 
 ## 实现差距：edge_id 与 Chance id
 
-设计上 `select` 的待选集合、`assumption_set` 和运行时 Decision 的作用对象都是 Chance（Edge 只是抽象模型，没有 id）。代码和 Policy 接口中的 `edge_id` 目前仍是借用 operation id，待后续改为 Chance id；观察事件里的 `edge_id`（见 `observation.md`）同理，当前 Tree 尚无 Chance 身份，该字段为 null。`edge_context` 输入类别的名称同样沿用旧称，暂未改名。
+设计上 `select` 的待选集合、`assumption_set` 和运行时 Decision 的作用对象都是 Chance（Edge 只是抽象模型，没有 id）。代码和 Policy 接口中的 `edge_id` 目前仍是借用 operation id，待后续改为 Chance id；观察事件里的 `edge_id`（见 `observation.md`）同理，当前 Tree 尚无 Chance 身份，该字段为 null。设计文档中的 `chance_context` 输入类别，代码仍用 `edge_context`/`edge_id`，暂未改名。

@@ -133,8 +133,6 @@ Agent 接入侧仍然是唯一控制 Agent 会话的地方：创建会话、克�
 
 工具通道现在由 Runtime 生成 `result` 文本（可读摘要）和 `evidence` 结构化事实；控制面只转发，不解释游戏字段。早期 `{"is_error", "observation"}` 的结果形态不再使用。
 
-仍未落实：Agent 产品的选择由控制面（用户）决定，但启动 Agent 进程属于 Runtime Adapter，路径和版本作为参数由控制面传入。Pi 接入的启动已按 2026-11-02 决策移入 Runtime Adapter（`src/runtime/adapter/agent.rs`），控制面只传入启动路径与版本。
-
 ## 2026-11-01：一次 run 只提供一个工作目录，不再按 Branch 复制目录
 
 已确认：控制面不再为每个 Branch 创建和复制工作目录，一次 run 只有一个工作目录，所有 Branch 共用。Branch 是同一执行状态的别名，不各自持有目录。
@@ -193,18 +191,6 @@ CRIU 一类进程快照同样不采用：需要特权、镜像 I/O 和 FD 重绑
 本轮连接真实投机：ToolPending 报告后让真实工具继续一次，复用既定 ParentOutcome 名称表示真实工具结果，不另引入 ToolOutcome。Candidate 使用独立目录与独立内存 SessionManager，保存共同上下文与预测 toolResult 后 continue，不以新用户提示词伪造续跑。控制面求值 admit/select/predict/launch/match/dispose，在合法 Promote 后发布缓冲输出并保持活跃 Candidate，不命中回退 Parent。未验证 Candidate 的工具调用由 AScout 的 Branch 处置控制：Pi 只等待控制命令，不按工具名或命令格式判断安全性；Runtime 能力与 Policy 决定仍需由控制面接入。默认示例不自动开启投机，新增可显式选择的 pi-tool.yaml。实测使用本地脚本模型接口加真实 Pi/bash，不能作为真实大模型效果证据。
 
 废弃 D-031-I 中“用户不可直接观察候选”的限制；保留主对话只属于权威路径、候选不建立用户对话、用户不直接裁决 Branch 的边界。只读观察明确标记候选内容未验证，不向其他 Branch 反馈这些内容。
-
-## D-026-I：抽象札记不重复维护已收敛语义
-
-2026-09-03 决定：`docs/development/spec-exec-abstraction.md` 的原 §1（Edge 生命周期与核心实体）和原 §3（Assumption DAG 组合语义）不再保留第二份规范定义。两节改为指向 `docs/design-model.md` 与 `docs/design/policy-decisions.md` 的下沉说明；该开发札记仅保留论文调研、候选方案和实现分析。同步更新 glossary 中受影响的术语引用，避免把开发札记当作语义来源。
-
-## D-027-I：效果管理规范只保留单一来源
-
-2026-09-03 决定：`spec-exec-abstraction.md` §4 保留论文对比和研究动机；EffectClass、StateDomain、效果处理模式、效果边界阻塞及审计等规范性内容以 `docs/design/effect-management.md` 和 `docs/design/policy-decisions.md` 为唯一来源，不在开发札记重复维护。同步更新 glossary 的 EffectClass/StateDomain 引用。
-
-## D-028-I：嵌套投机章节只保留调研与假设
-
-2026-09-03 决定：`spec-exec-abstraction.md` §9 不再重复定义 Edge、Branch、AssumptionSet 或父子生命周期语义；正式规则以 `docs/design-model.md`、`docs/design/policy-decisions.md` 和 `docs/design/branch-semantics.md` 为唯一来源。§9 保留论文覆盖情况、成本/收益分析、实验假设和候选实现方向；未经确认的概率公式、深度限制和接口形态不得写成通用机制约束。
 
 ## D-029-I：废弃单 Edge 即时启动与固定 frontier 策略
 
@@ -284,7 +270,7 @@ Adapter Registry 的主动环境验证延后实现，初期先检查接入接口
 
 尚未实现的内容包括完整领域 schema 和 Contract／Fidelity 检查、外部模型等能力调用、第三方库环境固定、标准库内容身份、增量预测、score 规则、多数效果与处置计划检查、异步取消、cgroup 总量统计、生产级交付认证以及状态拥有组件和端侧真实接入。未知 YAML 字段和不支持的结果会被拒绝，不静默降级或伪造成功。具体 API、运行方式、数据清单、验证与缺口见 [Policy Engine 原型](policy-engine.md)。
 
-整体方案与讨论仍保存在仓库根目录 `Discussion.md` 的 Policy DSL 小节；开始实现不表示其全部候选能力已完成。代码中实际采用的原型接口以开发文档为准，不把尚未实现的草案能力写成可用能力。
+开始实现不表示其全部候选能力已完成。代码中实际采用的原型接口以开发文档为准，不把尚未实现的草案能力写成可用能力。
 
 ## D-016-I：默认 Runtime 优先高效隔离
 
@@ -316,8 +302,6 @@ Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义�
 已确认并开始落实四层边界：控制面继续拥有 Speculative Tree、全局 Policy 和 Branch 生命周期；TypeScript 接入包承载 Agent 无关的协议类型、命令传输、命令去重、能力声明和局部执行 Policy；具体 Agent 通过 Adapter 提供会话与工具切点能力；Runtime 继续负责任务环境和工具效果约束。
 
 第一步已加入 `pi/packages/ascout-agent-access`。公共协议只使用 `branch_id`、`operation_id`、`tool_call_id` 和不透明的 `CheckpointHandle`，不暴露 Pi transcript 或 session 类型。`CheckpointHandle` 只能由产生它的 Adapter 解释，公共层只保存和转发。
-
-本步保留现有 Pi 接入主循环以保持行为不变，并让它复用公共协议、传输函数和能力类型；尚未宣称完成全部 session 编排迁移。下一步应把 `agent-access.ts` 的会话表、pending operation 和工具前置拦截逐步移入 `AgentAdapter`，再移除控制面中的 NLE 特例。
 
 ## 2026-11-02：Pi Adapter 与 Runtime 工具声明
 
@@ -498,9 +482,6 @@ Rust btrfs 测试却在 diff 断言失败、未到 accept。解析器未去掉 s
 摘要交叉核对取代。`log-3.txt` 中 4 执行/1 通过与 0/7 误判不是实际只执行了
 1 个或没有执行进程测试。
 
-此修复轮未运行 sudo/特权挂载，当时保留的三份用户日志未改；后续用户第四轮
-运行完成下述验证。历史上的“修复后待特权重跑”状态已结束。
-
 # 2026-11-10：第四轮特权验证通过与范围
 
 用户 2026-11-10 第四轮验证中 Chain、Flatten、mixed、direct-root 四测试逐项 ok，
@@ -519,7 +500,6 @@ overlay 元数据、特殊文件/ACL/ownership、偶发超时根因或物化完�
 
 废弃的 `priv_btrfs_fork_diff_accept_discard` 已由 Chain/Flatten/mixed 三项替代，
 不再作为当前测试名单；先前失败与修复过程留在本文件，正式状态以第四轮证据为准。
-该次仅同步文档，不改代码、不重跑 Rust/特权测试、不提交；当时用户日志保留。
 
 # 2026-11-10：删除用户日志与 FS 状态文档复查
 
@@ -533,7 +513,6 @@ Flatten 只避免追加当前层，不会压平全部继承层，搬移状态目
 ProcessBackend 已承担启动、冻结、终止及 namespace 记录，不再将这些现成功能
 列在未实现清单；跨 Backend 编排进一步统一与逃出进程组的后代仍保留为真实边界。
 信号驱动 trash、元数据隔离失败关闭、diff 比较目标移除的既有决定保持不变。
-本次只删除四份指定日志、修改文档，不改生产代码、不运行 cargo 测试、不提交。
 # 2026-11-10：观察事件与增量读取
 
 按已确认设计，弃用 `GET /api/run-view` 整体轮询及 `ui.rs` 每次 `state.tree = tree.clone()` 的整体替换。内部 SpeculativeTree 不再作为外部序列化模型；原始 Agent/Runtime/Ledger 消息不进入公共观察流。AScoutRunView 仅为从公共事件折叠的本地 TUI 视图；对话通过独立读取接口取得。现有简易页面改为首次事件快照 + SSE，后续 React + React Flow 前端尚未实现。具体接口与差距见 observation.md。

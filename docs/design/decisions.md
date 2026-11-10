@@ -286,11 +286,11 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-041：authority 决策槽并入 launch
 
-**选择**：撤销独立的 `authority` 决策槽。当前决策面为 `S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)`；后来增加的 `select` 与 `rebalance` 均与 authority 无关。权威值来自谁是这条 Edge 的固有事实（`u` 是谁、真实结果就由谁产生），不是 Policy 可替换的决策；Policy 通过 `launch(input) -> bool` 决定该权威值当前是否取得。Eager、Absent 和 Lazy 只是系统提供的快捷定义。恒定返回 `false` 的函数允许策略放弃天然存在的权威值（如用户输入）而只靠 validator 或可接受性判断，是否允许由 Fidelity 契约校验。validator 不是权威值来源，归属 `match` 的可接受性判断。
+**选择**：撤销独立的 `authority` 决策槽。当前决策面为 `S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)`；后来增加的 `select` 与 `rebalance` 均与 authority 无关。权威值来自谁是这个投机过程（Edge 模型）的固有事实（`u` 是谁、真实结果就由谁产生），不是 Policy 可替换的决策；Policy 通过 `launch(input) -> bool` 决定该权威值当前是否取得。Eager、Absent 和 Lazy 只是系统提供的快捷定义。恒定返回 `false` 的函数允许策略放弃天然存在的权威值（如用户输入）而只靠 validator 或可接受性判断，是否允许由 Fidelity 契约校验。validator 不是权威值来源，归属 `match` 的可接受性判断。
 
 **废弃的旧表述**：`authority` 作为独立决策槽的语义（“验证依据的真实来源选择”）、以及将 validator 列为 authority 来源之一的做法。语义权威见 `design-model.md` §3.1 与 `policy-decisions.md` §2.4。
 
-**原因**：launch 的取值已经完整决定权威值的取得方式（是否取、何时取）；来源本身由 Edge 决定，不构成独立策略选择，拆槽造成职责重叠与表述混淆。
+**原因**：launch 的取值已经完整决定权威值的取得方式（是否取、何时取）；来源本身由 Edge 模型决定，不构成独立策略选择，拆槽造成职责重叠与表述混淆。
 
 ## D-042：父 Proposal 确认后的后代 Branch 重新挂载
 
@@ -304,11 +304,11 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **选择**：`admit` 只决定投机机会是否进入待选集合，不决定立即启动。其粗判识别可能的投机入口，精判决定机会是否值得登记和保留；通过精判后不在 `select` 前重复精判。控制面 Speculation Coordinator 拥有待选集合并维护机会有效性。
 
-新增独立的 `select(frontier_view, scheduling_context)` Policy Decision。一个 task / AScoutAgent 绑定的 Policy 在该 task 内所有仍有效的待选 Edge 之间进行全局权衡，直接选择当前希望启动的有序子集，可以选择一个、多个或暂时不选。未被选择的机会继续保留，直到后来被选择或因 pending result 到达、任务结束、祖先依赖否定等客观原因失效；不需要额外的主动放弃接口。
+新增独立的 `select(frontier_view, scheduling_context)` Policy Decision。一个 task / AScoutAgent 绑定的 Policy 在该 task 内所有仍有效的待选 Chance 之间进行全局权衡，直接选择当前希望启动的有序子集，可以选择一个、多个或暂时不选。未被选择的机会继续保留，直到后来被选择或因 pending result 到达、任务结束、祖先依赖否定等客观原因失效；不需要额外的主动放弃接口。
 
-**机制边界**：Speculation Coordinator 向 Policy 提供集合快照和可观察调度事实，并在资源、Contract 与正确性硬约束内落实选择。启动前只做有效性与硬约束复核，不进行第二次 Policy 精判，也不使用固定价值公式替代 Policy 的跨 Edge 排序。best-first、具体排序公式、浅层分叉、深层单链和 breadth/depth 分配均为可选 Policy，不能成为 AScout 固定规则。`select` 只处理尚未启动的机会，不负责已经运行工作的状态调整。
+**机制边界**：Speculation Coordinator 向 Policy 提供集合快照和可观察调度事实，并在资源、Contract 与正确性硬约束内落实选择。启动前只做有效性与硬约束复核，不进行第二次 Policy 精判，也不使用固定价值公式替代 Policy 的跨 Chance 排序。best-first、具体排序公式、浅层分叉、深层单链和 breadth/depth 分配均为可选 Policy，不能成为 AScout 固定规则。`select` 只处理尚未启动的机会，不负责已经运行工作的状态调整。
 
-**原因**：单 Edge 的独立“现在是否启动”无法表达多个机会竞争同一资源时的整体取舍，也会永久丢弃暂时不能启动但稍后仍有价值的机会。把登记、全局选择与机制复核分开，可以保留机会并让策略控制调度，同时不把队列状态或资源所有权交给 Policy。
+**原因**：单个 Chance 的独立“现在是否启动”无法表达多个机会竞争同一资源时的整体取舍，也会永久丢弃暂时不能启动但稍后仍有价值的机会。把登记、全局选择与机制复核分开，可以保留机会并让策略控制调度，同时不把队列状态或资源所有权交给 Policy。
 
 ## D-044：已启动投机工作由 rebalance 决定暂停、恢复和抢占
 

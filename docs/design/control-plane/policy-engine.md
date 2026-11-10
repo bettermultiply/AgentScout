@@ -70,7 +70,7 @@ Policy Engine 解析 Policy DSL，展开快捷写法，并检查生成的九类 
 
 Policy Engine 返回的只是本次 Policy Decision，不是已经完成的状态变化。把 Policy Decision 应用到 Branch、Speculative Tree、外部效果或 Runtime 不属于 Policy Engine，而由相应状态的拥有组件完成。
 
-例如，Policy Engine 为 `select` 作出决定后只返回 Policy 选择的 Edge；这些 Edge 是否仍然有效、能否启动以及启动后的状态变化，均由 Speculation Coordinator 处理。
+例如，Policy Engine 为 `select` 作出决定后只返回 Policy 选择的 Chance；这些 Chance 是否仍然有效、能否启动以及启动后的状态变化，均由 Speculation Coordinator 处理。
 
 ## 4. 跨侧运行与组件边界
 
