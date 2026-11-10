@@ -13,6 +13,7 @@ import '@xyflow/react/dist/style.css'
 import {
   authorityPath,
   branchTokenTotal,
+  isActiveCandidate,
   latestModel,
   roleLabel,
   speculationKindLabel,
@@ -23,168 +24,154 @@ import {
 import { formatTokens } from '../format'
 import { LatestIcon } from '../icons'
 import { useAppStore } from '../store'
-import { BranchNode, type BranchFlowNode } from './BranchNode'
+import {
+  HEADER_SIZE,
+  LANE_WIDTH,
+  LEAF_SIZE,
+  TRUNK_WIDTH,
+  groupBranchEvents,
+  layoutTree,
+  leafDetailLines,
+  leafKindLabel,
+  type BranchGeometry,
+} from '../treeLayout'
+import { BranchNode, type BranchHeaderFlowNode } from './BranchNode'
+import { BranchTrunk, type BranchTrunkFlowNode } from './BranchTrunk'
+import { LeafNode, type LeafFlowNode } from './LeafNode'
 
-const LANE_WIDTH = 104
-const ROW_HEIGHT = 44
-
-const nodeTypes: NodeTypes = { branchEvent: BranchNode }
-
-interface LanePoint {
-  id: string
-  sequence: number
+const nodeTypes: NodeTypes = {
+  branchHeader: BranchNode,
+  branchTrunk: BranchTrunk,
+  leaf: LeafNode,
 }
 
-interface BranchChain {
-  nodes: BranchFlowNode[]
-  edges: Edge[]
-  points: LanePoint[]
-  first: LanePoint | null
-  last: LanePoint | null
-}
+type TreeFlowNode = BranchHeaderFlowNode | BranchTrunkFlowNode | LeafFlowNode
 
 interface TreeGraph {
-  nodes: BranchFlowNode[]
+  nodes: TreeFlowNode[]
   edges: Edge[]
   latestNodeId: string | null
 }
 
-function edgeStyle(authority: boolean) {
-  return {
-    stroke: authority ? 'var(--accent)' : 'var(--tree-edge)',
-    strokeWidth: authority ? 2.8 : 1.4,
-    strokeDasharray: authority ? undefined : '4 4',
-  }
+function isAbandoned(status: BranchState['status']): boolean {
+  return status === 'discarded' || status === 'cleaned'
 }
 
-// Branch objects are immutable: a Branch gets a new object only when one of its
-// own events arrives. Reusing chains for untouched Branches keeps the React
-// Flow update local when the stream grows.
-const chainCache = new WeakMap<BranchState, Map<string, BranchChain>>()
-
-function buildChain(
-  branch: BranchState,
-  lane: number,
-  authority: boolean,
-): BranchChain {
-  const cacheKey = `${lane}:${authority ? 1 : 0}`
-  let entries = chainCache.get(branch)
-  if (!entries) {
-    entries = new Map()
-    chainCache.set(branch, entries)
-  }
-  const cached = entries.get(cacheKey)
-  if (cached) return cached
-
-  const nodes: BranchFlowNode[] = []
-  const edges: Edge[] = []
-  const points: LanePoint[] = []
-  let previous: LanePoint | null = null
-  // A streamed reply emits one conversation_updated per chunk. Chunks are one
-  // continuous conversation step, not one tree node each: keep the existing
-  // node and update it in place until another event type separates the run.
-  let previousWasConversation = false
-
-  for (const event of branch.events) {
-    const conversation = event.event === 'conversation_updated'
-    if (conversation && previousWasConversation && nodes.length > 0) {
-      const latest = nodes[nodes.length - 1]
-      nodes[nodes.length - 1] = {
-        ...latest,
-        data: { ...latest.data, event },
-      }
-      continue
-    }
-
-    const id = `${branch.branchId}::${event.sequence}`
-    const point = { id, sequence: event.sequence }
-    points.push(point)
-    nodes.push({
-      id,
-      type: 'branchEvent',
-      position: { x: lane * LANE_WIDTH, y: event.sequence * ROW_HEIGHT },
-      data: {
-        branch,
-        event,
-        isAuthorityPath: authority,
-        isLatest: event.sequence === branch.lastEventSequence,
-      },
-      draggable: false,
-      selectable: false,
-      focusable: true,
-    })
-    if (previous) {
-      edges.push({
-        id: `branch:${branch.branchId}:${event.sequence}`,
-        source: previous.id,
-        target: id,
-        type: 'smoothstep',
-        style: edgeStyle(authority),
-      })
-    }
-    previous = point
-    previousWasConversation = conversation
-  }
-
-  if (nodes.length > 0) {
-    const last = nodes[nodes.length - 1]
-    nodes[nodes.length - 1] = {
-      ...last,
-      data: { ...last.data, isLatest: true },
+function forkStyle(branch: BranchState, authority: boolean) {
+  if (isAbandoned(branch.status)) {
+    return {
+      stroke: 'var(--muted)',
+      strokeWidth: 1.4,
+      strokeDasharray: '4 4',
+      opacity: 0.55,
     }
   }
-
-  const chain: BranchChain = {
-    nodes,
-    edges,
-    points,
-    first: points[0] ?? null,
-    last: points.at(-1) ?? null,
+  if (authority) {
+    return { stroke: 'var(--accent)', strokeWidth: 3 }
   }
-  entries.set(cacheKey, chain)
-  return chain
+  return {
+    stroke: 'var(--accent)',
+    strokeWidth: 1.5,
+    strokeDasharray: '5 4',
+    opacity: 0.8,
+  }
 }
 
 function buildTree(task: TaskState | null): TreeGraph {
   if (!task) return { nodes: [], edges: [], latestNodeId: null }
   const path = authorityPath(task)
-  const chains = new Map<string, BranchChain>()
-  const nodes: BranchFlowNode[] = []
+  const geometry = layoutTree(task)
+  const nodes: TreeFlowNode[] = []
   const edges: Edge[] = []
   let latestNodeId: string | null = null
   let latestSequence = -1
 
   task.branchOrder.forEach((branchId, lane) => {
     const branch = task.branches[branchId]
-    if (!branch) return
-    const inPath = path.has(branchId)
-    const chain = buildChain(branch, lane, inPath)
-    chains.set(branchId, chain)
-    nodes.push(...chain.nodes)
-    edges.push(...chain.edges)
-    if (chain.last && branch.lastEventSequence > latestSequence) {
+    const layout: BranchGeometry | undefined = geometry.get(branchId)
+    if (!branch || !layout) return
+
+    const authority = path.has(branchId)
+    const live = isActiveCandidate(branch)
+    const laneX = lane * LANE_WIDTH + LANE_WIDTH / 2
+
+    nodes.push({
+      id: `header:${branchId}`,
+      type: 'branchHeader',
+      position: { x: laneX - HEADER_SIZE / 2, y: layout.headerY },
+      data: {
+        branch,
+        isAuthorityPath: authority,
+        isLive: live,
+        leafCount: layout.groups.length,
+      },
+      draggable: false,
+      selectable: false,
+      focusable: true,
+      zIndex: 20,
+    })
+
+    nodes.push({
+      id: `trunk:${branchId}`,
+      type: 'branchTrunk',
+      position: { x: laneX - TRUNK_WIDTH / 2, y: layout.trunkTop },
+      data: {
+        branch,
+        isAuthorityPath: authority,
+        isLive: live,
+        height: layout.trunkHeight,
+        forks: [...layout.forks].map(([childId, offset]) => ({
+          childId,
+          offset,
+        })),
+      },
+      draggable: false,
+      selectable: false,
+      focusable: false,
+      zIndex: 5,
+    })
+
+    layout.groups.forEach((group, index) => {
+      nodes.push({
+        id: group.id,
+        type: 'leaf',
+        position: {
+          x: laneX - LEAF_SIZE / 2,
+          y: layout.leafCenters[index] - LEAF_SIZE / 2,
+        },
+        data: {
+          branch,
+          group,
+          isAuthorityPath: authority,
+        },
+        draggable: false,
+        selectable: false,
+        focusable: true,
+        zIndex: 10,
+      })
+    })
+
+    if (branch.lastEventSequence > latestSequence) {
       latestSequence = branch.lastEventSequence
-      latestNodeId = chain.last.id
+      latestNodeId =
+        layout.groups.length > 0
+          ? layout.groups[layout.groups.length - 1].id
+          : `header:${branchId}`
     }
   })
 
   for (const branchId of task.branchOrder) {
     const branch = task.branches[branchId]
     if (!branch?.parentBranchId) continue
-    const parent = chains.get(branch.parentBranchId)
-    const target = chains.get(branchId)?.first
-    if (!parent?.points.length || !target) continue
-    const source =
-      [...parent.points]
-        .reverse()
-        .find((point) => point.sequence <= branch.createdAtSequence) ??
-      parent.points[0]
+    if (!task.branches[branch.parentBranchId]) continue
     edges.push({
       id: `fork:${branchId}`,
-      source: source.id,
-      target: target.id,
-      type: 'smoothstep',
-      style: edgeStyle(path.has(branch.parentBranchId) && path.has(branchId)),
+      source: `trunk:${branch.parentBranchId}`,
+      sourceHandle: `fork:${branchId}`,
+      target: `header:${branchId}`,
+      targetHandle: 'header-in',
+      type: 'default',
+      style: forkStyle(branch, path.has(branchId)),
     })
   }
 
@@ -197,7 +184,7 @@ function NodeHoverCard({
   y,
   below,
 }: {
-  node: BranchFlowNode
+  node: TreeFlowNode
   x: number
   y: number
   below: boolean
@@ -205,6 +192,7 @@ function NodeHoverCard({
   const branch = node.data.branch
   const tokens = branchTokenTotal(branch)
   const model = latestModel(branch)
+
   return (
     <div
       className={`node-tooltip node-tooltip-float${below ? ' tooltip-below' : ''}`}
@@ -220,9 +208,30 @@ function NodeHoverCard({
         token：{tokens.known ? formatTokens(tokens.value) : '未上报'}
         {tokens.known && !tokens.complete ? '（部分）' : ''}
       </span>
-      <span>
-        事件 #{node.data.event.sequence} · {speculationKindLabel(branch.speculationKind)}
-      </span>
+      {node.type === 'leaf' ? (
+        <>
+          <span className="node-tooltip-section">
+            {leafKindLabel(node.data.group.kind)}
+            {node.data.group.events.length > 1
+              ? ` · 连续 ${node.data.group.events.length} 条`
+              : ''}
+          </span>
+          <span>
+            事件 #{node.data.group.firstSequence}
+            {node.data.group.lastSequence !== node.data.group.firstSequence
+              ? `–#${node.data.group.lastSequence}`
+              : ''}
+          </span>
+          {leafDetailLines(node.data.group).map((line) => (
+            <span key={line}>{line}</span>
+          ))}
+        </>
+      ) : (
+        <span className="node-tooltip-section">
+          {groupBranchEvents(branch).length} 个叶子 · {branch.events.length} 个事件
+        </span>
+      )}
+      <span>投机：{speculationKindLabel(branch.speculationKind)}</span>
       <span className="node-tooltip-hint">点击查看分支详情</span>
     </div>
   )
@@ -230,10 +239,10 @@ function NodeHoverCard({
 
 function TreeCanvas({ graph }: { graph: TreeGraph }) {
   const openBranch = useAppStore((store) => store.openBranch)
-  const { fitView } = useReactFlow<BranchFlowNode, Edge>()
+  const { fitView } = useReactFlow<TreeFlowNode, Edge>()
   const canvas = useRef<HTMLDivElement>(null)
   const [hover, setHover] = useState<{
-    node: BranchFlowNode
+    node: TreeFlowNode
     x: number
     y: number
     below: boolean
@@ -241,7 +250,7 @@ function TreeCanvas({ graph }: { graph: TreeGraph }) {
 
   return (
     <div className="tree-canvas" ref={canvas}>
-      <ReactFlow<BranchFlowNode, Edge>
+      <ReactFlow<TreeFlowNode, Edge>
         nodes={graph.nodes}
         edges={graph.edges}
         nodeTypes={nodeTypes}
@@ -322,7 +331,7 @@ export function SpeculationTree({ task }: { task: TaskState | null }) {
       <div className="tree-empty">
         <h3>还没有 Branch 事件</h3>
         <p>控制面创建 Branch 后，投机树会在这里自上而下生长。</p>
-        <p className="muted">点击节点可以查看该 Branch 的只读详情。</p>
+        <p className="muted">点击树枝头部或叶子可以查看该 Branch 的只读详情。</p>
       </div>
     )
   }

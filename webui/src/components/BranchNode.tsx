@@ -9,27 +9,22 @@ import {
 } from '../fold'
 import { ReasonIcon, StatusIcon } from '../icons'
 import { useAppStore } from '../store'
-import type { BranchObservationEvent } from '../types'
 
-export interface BranchNodeData extends Record<string, unknown> {
+export interface BranchHeaderData extends Record<string, unknown> {
   branch: BranchState
-  event: BranchObservationEvent
   isAuthorityPath: boolean
-  isLatest: boolean
+  isLive: boolean
+  leafCount: number
 }
 
-export type BranchFlowNode = Node<BranchNodeData, 'branchEvent'>
+export type BranchHeaderFlowNode = Node<BranchHeaderData, 'branchHeader'>
 
-function isLive(status: BranchState['status']): boolean {
-  return (
-    status === 'running' ||
-    status === 'awaiting_validation' ||
-    status === 'promoting'
-  )
+function isAbandoned(status: BranchState['status']): boolean {
+  return status === 'discarded' || status === 'cleaned'
 }
 
-function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
-  const { branch, isAuthorityPath, isLatest } = data
+function BranchNodeView({ data }: NodeProps<BranchHeaderFlowNode>) {
+  const { branch, isAuthorityPath, isLive } = data
   const role = roleLabel(branch.role)
   const reason = speculationKindLabel(branch.speculationKind)
   const open = () => useAppStore.getState().openBranch(branch.branchId)
@@ -37,19 +32,16 @@ function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
   return (
     <div
       className={[
-        'tree-node',
-        isAuthorityPath ? 'node-authority' : 'node-candidate',
-        `status-${branch.status}`,
-        branch.status === 'discarded' || branch.status === 'cleaned'
-          ? 'node-abandoned'
-          : '',
-        isLatest && isLive(branch.status) ? 'node-live' : '',
+        'branch-head',
+        isAuthorityPath ? 'head-authority' : 'head-candidate',
+        isAbandoned(branch.status) ? 'head-abandoned' : '',
+        isLive ? 'head-live' : '',
       ]
         .filter(Boolean)
         .join(' ')}
       tabIndex={0}
       role="button"
-      aria-label={`分支 ${branch.branchId}，${role}，${statusLabel(branch.status)}，投机原因 ${reason}`}
+      aria-label={`分支 ${branch.branchId}，${role}，${statusLabel(branch.status)}，投机原因 ${reason}，${data.leafCount} 个叶子`}
       onKeyDown={(keyboard) => {
         if (keyboard.key === 'Enter' || keyboard.key === ' ') {
           keyboard.preventDefault()
@@ -57,14 +49,18 @@ function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
         }
       }}
     >
-      <Handle type="target" position={Position.Top} className="tree-handle" />
-      <span className="node-status" aria-hidden="true">
-        <StatusIcon status={branch.status} size={16} />
+      <Handle
+        type="target"
+        position={Position.Top}
+        id="header-in"
+        className="tree-handle"
+      />
+      <span className="head-status" aria-hidden="true">
+        <StatusIcon status={branch.status} size={24} />
       </span>
-      <span className="node-reason" aria-hidden="true">
-        <ReasonIcon reason={speculationReason(branch.speculationKind)} size={11} />
+      <span className="head-reason" aria-hidden="true">
+        <ReasonIcon reason={speculationReason(branch.speculationKind)} size={18} />
       </span>
-      <Handle type="source" position={Position.Bottom} className="tree-handle" />
     </div>
   )
 }

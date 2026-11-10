@@ -25,6 +25,8 @@
   --warning: #7a5200;
   --tree-edge: #93a6b8;
   --tree-grid: #d9e3ec;
+  --leaf-neutral: #4d6478;
+  --leaf-info: #2f6f9f;
   --shadow: 0 12px 32px rgb(22 33 44 / 12%);
   --radius: 12px;
 }
@@ -51,6 +53,8 @@
     --warning: #ffd58a;
     --tree-edge: #52697e;
     --tree-grid: #223040;
+    --leaf-neutral: #a4b7c9;
+    --leaf-info: #7cb8e8;
     --shadow: 0 14px 38px rgb(0 0 0 / 48%);
   }
 }
@@ -363,12 +367,17 @@ select {
 }
 
 .badge-status-running,
-.badge-status-awaiting_validation,
+.badge-status-finished,
 .badge-status-promoting,
 .badge-status-discarding,
 .badge-status-cleaning {
   background: var(--accent-soft);
   color: var(--accent-strong);
+}
+
+.badge-status-blocked {
+  background: var(--surface-sunken);
+  color: var(--warning);
 }
 
 .badge-status-promoted {
@@ -960,7 +969,9 @@ select {
   right: 0;
   top: calc(100% + 6px);
   z-index: 60;
-  width: min(320px, 78vw);
+  width: min(360px, 84vw);
+  max-height: min(72vh, 620px);
+  overflow-y: auto;
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1046,6 +1057,78 @@ select {
   opacity: 0.55;
 }
 
+.legend-trunk {
+  flex: none;
+  width: 9px;
+  height: 26px;
+  border-radius: 999px;
+}
+
+.legend-trunk-authority {
+  width: 12px;
+  background: var(--accent);
+  border: 2px solid var(--accent);
+}
+
+.legend-trunk-candidate {
+  background: var(--surface);
+  border: 2px solid var(--accent);
+}
+
+.legend-trunk-abandoned {
+  background: var(--surface);
+  border: 2px solid var(--muted);
+  opacity: 0.5;
+}
+
+.legend-head {
+  position: relative;
+  flex: none;
+  width: 23px;
+  height: 23px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+}
+
+.legend-head-reason {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  background: var(--surface-raised);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+}
+
+.legend-leaf {
+  width: 18px;
+  height: 18px;
+}
+
+.legend-leaf .leaf-shape {
+  width: 10px;
+  height: 10px;
+}
+
+.legend-leaf.leaf-authority .leaf-shape {
+  width: 11px;
+  height: 11px;
+}
+
+.legend-leaf-note {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
 .panel-content {
   min-height: 0;
   overflow: auto;
@@ -1097,12 +1180,12 @@ select {
   display: none;
 }
 
-.tree-node {
+.branch-head {
   position: relative;
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
-  border: 1.6px solid var(--accent);
+  border: 2.5px solid var(--accent);
   background: var(--surface);
   color: var(--accent);
   display: grid;
@@ -1116,64 +1199,232 @@ select {
     box-shadow 0.2s ease;
 }
 
-.tree-node:hover,
-.tree-node:focus-visible {
+.branch-head:hover,
+.branch-head:focus-visible {
   box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
-.node-authority {
+.head-authority {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-contrast);
 }
 
-.node-candidate {
-  background: var(--surface);
-  color: var(--accent);
-}
-
-.node-abandoned {
+.head-abandoned {
   color: var(--muted);
   border-color: var(--muted);
   opacity: 0.5;
 }
 
-.node-authority.node-abandoned {
+.head-authority.head-abandoned {
   background: var(--muted);
+  border-color: var(--muted);
   color: var(--surface);
 }
 
-.node-live::after {
+.head-live::after {
   content: '';
   position: absolute;
-  inset: -5px;
+  inset: -6px;
   border-radius: 50%;
   border: 1.5px solid var(--accent);
   animation: node-pulse 2s ease-out infinite;
   pointer-events: none;
 }
 
-.node-status {
+.head-status {
   display: grid;
   place-items: center;
 }
 
-.node-reason {
+.head-reason {
   position: absolute;
-  right: -6px;
-  top: -6px;
-  width: 16px;
-  height: 16px;
+  right: -11px;
+  bottom: -8px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   display: grid;
   place-items: center;
+  border: 1.5px solid var(--accent);
+  background: var(--surface-raised);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgb(22 33 44 / 16%);
+}
+
+.head-abandoned .head-reason {
+  border-color: var(--muted);
+  color: var(--muted);
+}
+
+.tree-trunk {
+  position: relative;
+  width: 16px;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.tree-trunk-capsule {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition:
+    width 0.32s ease,
+    background-color 0.32s ease,
+    border-color 0.32s ease,
+    opacity 0.32s ease,
+    box-shadow 0.28s ease;
+}
+
+.trunk-authority {
+  width: 14px;
+  background: var(--accent);
+  border: 2px solid var(--accent);
+}
+
+.trunk-candidate {
+  width: 10px;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+}
+
+.trunk-abandoned {
+  background: var(--surface);
+  border-color: var(--muted);
+  opacity: 0.5;
+}
+
+.trunk-authority.trunk-abandoned {
+  background: var(--muted);
+  border-color: var(--muted);
+}
+
+.trunk-live {
+  animation: trunk-pulse 2.6s ease-in-out infinite;
+}
+
+.tree-leaf {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  filter: drop-shadow(0 0 1px var(--surface)) drop-shadow(0 0 1px var(--surface));
+  transition:
+    transform 0.16s ease,
+    opacity 0.32s ease;
+}
+
+.tree-leaf:hover,
+.tree-leaf:focus-visible {
+  transform: scale(1.35);
+  outline: none;
+}
+
+.leaf-count {
+  position: absolute;
+  left: 15px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 3px;
+  border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--surface-raised);
+  color: var(--text-soft);
+  font-size: 8.5px;
+  line-height: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.leaf-shape {
+  display: block;
+  width: 10px;
+  height: 10px;
+  background: currentColor;
+}
+
+.leaf-conversation .leaf-shape {
+  border-radius: 50%;
+}
+
+.leaf-tool .leaf-shape {
+  border-radius: 2px;
+}
+
+.leaf-model .leaf-shape {
+  clip-path: polygon(50% 0, 95% 25%, 95% 75%, 50% 100%, 5% 75%, 5% 25%);
+}
+
+.leaf-status .leaf-shape {
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+
+.leaf-environment .leaf-shape {
+  clip-path: polygon(50% 4%, 96% 96%, 4% 96%);
+}
+
+.leaf-settlement .leaf-shape {
+  width: 12px;
+  height: 12px;
+  clip-path: polygon(
+    50% 0%,
+    61% 35%,
+    98% 35%,
+    68% 57%,
+    79% 91%,
+    50% 70%,
+    21% 91%,
+    32% 57%,
+    2% 35%,
+    39% 35%
+  );
+}
+
+.leaf-authority .leaf-shape {
+  width: 11px;
+  height: 11px;
+  border: 2.5px solid currentColor;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.tone-neutral {
+  color: var(--leaf-neutral);
+}
+
+.tone-accent {
   color: var(--accent);
 }
 
-.node-abandoned .node-reason {
+.tone-success {
+  color: var(--success);
+}
+
+.tone-danger {
+  color: var(--danger);
+}
+
+.tone-warning {
+  color: var(--warning);
+}
+
+.tone-info {
+  color: var(--leaf-info);
+}
+
+.tone-muted {
   color: var(--muted);
+}
+
+.leaf-abandoned {
+  color: var(--muted);
+  opacity: 0.45;
 }
 
 .tree-handle {
@@ -1219,6 +1470,14 @@ select {
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.node-tooltip-section {
+  margin-top: 3px;
+  padding-top: 3px;
+  border-top: 1px solid var(--border);
+  color: var(--accent-strong);
+  font-size: 10.5px;
 }
 
 .node-tooltip-hint {
@@ -1451,6 +1710,16 @@ select {
   100% {
     transform: scale(1.32);
     opacity: 0;
+  }
+}
+
+@keyframes trunk-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
   }
 }
 
