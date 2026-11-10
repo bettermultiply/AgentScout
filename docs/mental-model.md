@@ -36,7 +36,7 @@ Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面
 
 AScout 用三个支撑模型承接不同投机执行策略在预测、验证、拓扑和处置等方面的差异：
 
-- **投机过程与 Policy Decisions**：Edge 表示描述投机如何进行的一套过程/阶段，是 Policy 的作用对象；Branch 承载某次具体执行，Candidate 只是 Branch 角色。开发者可以根据任务、上下文、资源和 Runtime 能力，通过组合 Edge 上的 Policy Decision 设计可替换的决策 Policy，并处理多次投机的组合与嵌套。
+- **投机过程与 Policy Decisions**：Edge 是描述投机如何进行的抽象模型，九类 Policy Decision 定义在它之上；其具体实例 Chance（被 admit 接纳的投机机会）是运行时 Decision 的作用对象；Branch 承载某次具体执行，Candidate 只是 Branch 角色。开发者可以根据任务、上下文、资源和 Runtime 能力，通过组合 Policy Decision 设计可替换的决策 Policy，并处理多次投机的组合与嵌套。
 - **状态与效果**：把投机执行过程中需要保护的文件、进程、输入、结果和外部服务交互放入统一的管理框架。Agent Session 内部状态由接入侧管理；Runtime 提供动作承载和效果边界，根据需要组合隔离、暂存、延迟、阻塞、补偿或清理能力。
 - **Speculation Contract**：约束 Policy、控制面与 Runtime 之间语义对齐的契约；Runtime Adapter 负责把 Runtime 的能力、结果和事件接入这条可检查、可执行的路径，并让拒绝或降级原因可见。
 

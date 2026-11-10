@@ -114,7 +114,7 @@ interface Salvageable<P> {
 
 **问题**：组合性问题 —— 投机 work 能不能依赖另一个未确认的投机 work？（11 篇没有一篇给出通用语义）
 
-**选择**：每个 SpecTask 携带 provenance（AssumptionSet）：`Assumption = (edge_id, proposal_id)`；`AssumptionSet = frozenset[Assumption]`。
+**选择**：每个 SpecTask 携带 provenance（AssumptionSet）：`Assumption = (chance_id, proposal_id)`；`AssumptionSet = frozenset[Assumption]`。
 
 规则：`AssumptionSet == ∅` ⟺ 权威工作；某 assumption **confirm** → 从所有 task 的 set 移除，变空的可以 commit；**refute** → 依赖它的整个子图进入 Salvage → Discard；投机 task 之间可互相依赖，set 做并集。
 
@@ -201,7 +201,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 **选择**：
 
 1. **成本是速率界，不是组合界** —— 分支只在投机或真实调用返回时才延伸、不一致子树立即剪枝 ⟹ 系统最多领先 `a/b` 步，活跃分支数与视界 `T` 无关。真正的约束是"权威路径还剩多少 wall-clock ÷ 投机器延迟"。
-2. **机制提供 task 内待选集合** —— 嵌套 Edge 通过 `admit` 后可以暂存而不立即启动，由该 task / AScoutAgent 绑定的 Policy 通过 `select` 与 task 内其他待选 Edge 一起权衡。AScout 维护机会有效性并在硬约束内执行选择。
+2. **机制提供 task 内待选集合** —— 嵌套 Chance 通过 `admit` 后可以暂存而不立即启动，由该 task / AScoutAgent 绑定的 Policy 通过 `select` 与 task 内其他待选 Chance 一起权衡。AScout 维护机会有效性并在硬约束内执行选择。
 3. **树形扩展方式属于 Policy** —— best-first、`P(存活) × 期望延迟节省 / 资源成本` 排序、浅层分叉后沿单链深入以及显式 depth 都是可选策略。AScout 必须能够承载这些策略，但不固定其中任何一种。
 4. **已启动工作的调整另行决策** —— `rebalance` 在同一 task 内决定投机 Branch 的暂停、恢复与抢占，不扩大 `select` 的职责；抢占后的处置继续由 `dispose` 决定。
 
@@ -245,7 +245,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **问题**：负责假设 DAG 的组件叫什么、语义是什么？
 
-**选择**：**Speculation Coordinator** —— 全系统的全局投机视图与控制循环核心。它维护 Speculative Tree、Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系；假设关系与实例树是同一份控制状态的不同索引（`by_assumption` / `by_instance`）。它协调匹配、处置、调度和 semantic operation 的执行，不是被动的数据结构。
+**选择**：**Speculation Coordinator** —— 全系统的全局投机视图与控制循环核心。它维护 Speculative Tree、Chance、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系；假设关系与实例树是同一份控制状态的不同索引（`by_assumption` / `by_instance`）。它协调匹配、处置、调度和 semantic operation 的执行，不是被动的数据结构。
 
 **内部强制的不变量**（集中在一处，调用者无法违反）：`A == ∅ ⟺ role == Authority`；refute 沿依赖闭包级联；AssumptionSet 非空的数据不得流向空容器。
 
@@ -259,7 +259,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **选择**：控制面负责全局投机视图和裁决，Runtime 负责动作承载及效果边界，各有一个理由：
 
-- **resolve 不独立成组件，住在 Speculation Coordinator 里** —— 它的状态（待决 Edge/Proposal 依赖）就是全局控制视图的一部分；`resolve()` 是对该视图执行确认、否定和处置推进的控制流程，不是独立的数据结构。体系结构对应：`Speculation Coordinator + resolve` 统一持有投机状态并负责 retire/squash，同时在同一视图上承载 issue/dispatch 所需的调度事实。
+- **resolve 不独立成组件，住在 Speculation Coordinator 里** —— 它的状态（待决 Chance/Proposal 依赖）就是全局控制视图的一部分；`resolve()` 是对该视图执行确认、否定和处置推进的控制流程，不是独立的数据结构。体系结构对应：`Speculation Coordinator + resolve` 统一持有投机状态并负责 retire/squash，同时在同一视图上承载 issue/dispatch 所需的调度事实。
 - **不再设置独立 Scheduler** —— `select` 和 `rebalance` 仍由 Policy 决定，待选机会、运行状态和预算事实由 Speculation Coordinator 维护并在硬约束内执行。这样调度与依赖传播使用同一份全局视图，避免两个状态中心之间产生不一致。
 - **Effect Coordinator 属于 Runtime 整体** —— Runtime 内部可以持有 Effect Catalog、效果分类、效果执行状态与协调计划，并负责外部效果的实际处理；服务级 `simulate` 通过可注册插件扩展。控制面仍拥有全局 Tree 和裁决状态，不能用控制面记录代替 Runtime 的实际效果处理。效果状态不属于 Assumption DAG，且失败模式不同：图错了损失性能，Effect 错了真的发出一封邮件。效果边界仍必须能够单独审计。
 

@@ -10,7 +10,7 @@
 
 | 底座术语 | Speculative Tree 视角 | 关系 |
 |---|---|---|
-| 在 Edge 启动 SpecTask | `branch`（创建 candidate） | 同一操作的两种表述 |
+| 在 Chance 上启动 SpecTask | `branch`（创建 candidate） | 同一操作的两种表述 |
 | `commit` / `commit request` | candidate 显式提交 subtree | 同一提交语义 |
 | Reuse / Promote | `accept`（resolution = accepted）的两种落实：Reuse 交结果，Promote 替换主延续 | 层间映射 |
 | Discard / Preempt | `discard`（含 live-child discard） | 层间映射 |
@@ -45,10 +45,11 @@
 - **Instance**：由 Runtime 承载 Branch Root 执行活动的执行单元；多个 Branch 可以共享、复制或独立承载所需状态，也可以在恢复或重建后继续。逻辑 Branch 可以在建立 Instance 前先存在并推进。（`../mental-model.md` §4.2）
 - **Proposal** `î`：具有全局唯一 `ProposalId` 的投机候选输入；候选 Branch 基于其 payload 提前执行后续步骤。（`../design-model.md` §3.1；`policy-decisions.md` §2.3）
 - **AssumptionSet**：Instance/SpecTask 携带的未决 Proposal ID 集合（`frozenset[ProposalId]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`../design-model.md` §3.1；`policy-decisions.md` §4.2）
-- **Edge**：描述投机如何进行的一套过程或阶段，是 Policy 的作用对象；某次具体执行由 Branch 承载，Candidate 只是 Branch 的角色。同一条 Edge 上可以有多个 Proposal。（`../design-model.md` §3.1；`policy-decisions.md`）
+- **Edge**：描述投机如何进行的通用过程形状的抽象模型（`u --i--> v`，以 Proposal 替代 `i` 提前启动 `v^n`），九类 Policy Decision 的语义定义在它之上。Edge 不是运行时对象，没有 id；它的具体实例是 Chance。（`../design-model.md` §3.1；`policy-decisions.md`）
+- **Chance**：Edge 模型的一个具体实例，即被 `admit` 接纳的投机机会。从 `admit` 通过起拥有 id，直到被验证后接受或抛弃、整个过程收敛为止；其下可有多个 Proposal 和多个 Branch，但每个 Proposal/Branch 只对应一个 Chance。`select` 的待选集合、AssumptionSet 中的引用以及运行时 Decision 的作用对象都是 Chance。`admit` 之前的机会发现阶段没有 id，不属于 Chance。Branch 仍是具体执行，Proposal 仍是不可变候选输入，Candidate 仍只是 Branch 的角色。（`../design-model.md` §3.1；`policy-decisions.md`）
 - **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；控制面在此从共同 execution base 登记多个逻辑 Branch，Runtime 按需建立其执行承载（共享或独立环境）。（`branch-semantics.md`；`decisions.md` D-024；术语收敛）
 - **SpecTask**：基于 Proposal 启动的投机工作单元，运行在隔离域中，携带 AssumptionSet。对应 candidate Branch。（`../design-model.md` §3.1；`policy-decisions.md` §4）
-- **Authority** `A_u`：提供真实输入、结果或外部权威判断的可选来源（主生成流、真实环境、用户/人或远程服务）；`Authority` 可以为空。它对应 parent（producer lane）与真实 operation，不等同于 validator。权威值来自谁是 Edge 的固有事实，不是可替换的决策槽；是否取得、何时取得由 `launch(input) -> bool` 决定，Eager、Absent 和 Lazy 只是系统提供的快捷定义。（`../design-model.md` §3.1；`policy-decisions.md` §2.4）
+- **Authority** `A_u`：提供真实输入、结果或外部权威判断的可选来源（主生成流、真实环境、用户/人或远程服务）；`Authority` 可以为空。它对应 parent（producer lane）与真实 operation，不等同于 validator。权威值来自谁是 Chance 的固有事实，不是可替换的决策槽；是否取得、何时取得由 `launch(input) -> bool` 决定，Eager、Absent 和 Lazy 只是系统提供的快捷定义。（`../design-model.md` §3.1；`policy-decisions.md` §2.4）
 - **validator**：独立的验证器；在有 Authority 时可辅助判断 Proposal 是否兼容，在 Authority 为空时可依据结果或约束直接作可接受性判断。validator 不是 Authority 的一种。（`spec-exec-abstraction.md` §2 轴 4、轴 5）
 - **Predictor** `S_u`：`u` 的廉价实现，产出 Proposal；由 `predict` decision 表达。（`policy-decisions.md` §2.3）
 - **Reconciliation**：权威值到达时判定 `î ≈ i` 并选择处置的过程；对应 Resolution barrier 的验证部分。（`policy-decisions.md` §2.6–§2.7；术语收敛）
@@ -83,7 +84,7 @@
 - **PolicyDefinition**：Policy 作者使用 Policy DSL 编写的具体 Policy，由声明部分及其引用的独立算法源码共同组成；展开并编译后，九类 Policy Decision 均具有明确的决策行为。（`control-plane/policy-engine.md` §2）
 - **Policy DSL**：PolicyDefinition 的唯一入口，规定其结构、九类 Decision 各自的输入与输出、可读取事实、可使用能力及组合约束。（`control-plane/policy-engine.md` §2）
 - **Policy Engine**：Policy 进入 AScout 的固定入口，只有两项职责：编译 Policy，以及根据规定输入对已编译的 Policy Decision 求值、作出本次 Policy Decision。作出 Policy Decision 不等于落实 Policy Decision；它不负责把 Policy Decision 应用到 Branch、Speculative Tree、外部效果或 Runtime，也不负责选择运行位置或向 Agent 接入侧交付编译结果。（`control-plane/policy-engine.md`）
-- **Speculation Coordinator**：控制面内全局投机视图与控制循环的协调核心；维护 Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系，激活受影响的 Policy Decision，协调 semantic operation，经 Runtime 接入边界执行并根据结果和事件更新视图。（`control-plane.md` §2.4）
+- **Speculation Coordinator**：控制面内全局投机视图与控制循环的协调核心；维护 Chance、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系，激活受影响的 Policy Decision，协调 semantic operation，经 Runtime 接入边界执行并根据结果和事件更新视图。（`control-plane.md` §2.4）
 - **Effect Coordinator**：Runtime 内部可采用的效果协调机制；处理由 Agent 造成且可能影响全局的效果，例如调用外部 API。它可通过服务效果插件生成模拟响应，也可拒绝、阻塞、暂存、转换、提交、取消、清理或补偿效果。控制面负责全局 Tree 和最终裁决，Runtime 负责实际效果边界。（`effect-management.md`）
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），唯一保存观察事件日志并提供状态事件集及按序号补发的只读接口，用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期，不要求据观察日志恢复整棵树。（`control-plane.md` §2.6；`speculation-contract.md` §3）
 - **ASC-Proxy**：Agent 接入侧与控制面之间的受管通信代理，负责会话、身份确认以及 request、fact、result 和 event 的双向传递；不拥有全局控制状态。（`agent-integration.md` §2.2）

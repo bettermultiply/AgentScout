@@ -72,7 +72,7 @@ def extent(data, *, policy_config, capabilities):
 |---|---|---|---|
 | `admit.opportunity_pass` | `op` | 无 | 布尔值 |
 | `admit.feasibility_pass` | `op`、`state`、`contract_context` | 无 | 布尔值 |
-| `select` | `frontier_view`、`scheduling_context` | 无 | 输入 Edge ID 的无重复有序子集 |
+| `select` | `frontier_view`、`scheduling_context` | 无 | 输入 Chance ID（字段名 `edge_id`） 的无重复有序子集 |
 | `rebalance` | `active_view`、`paused_view`、`scheduling_context` | 无 | 输入 Branch 的 `pause`／`resume`／`preempt` 动作，每 Branch 最多一次 |
 | `extent` | `process_state` | `process_state.active_time`、`process_state.resource_counters`、`process_state.result_facts`、`process_state.semantic_facts` | `stop`／`continue` |
 | `predict` | `edge_context`、`process_context`、`assumption_set`、`capability_context` | `history` | batch `ProposalSet`，每项有 `payload`，可有 `provenance` |
@@ -101,3 +101,7 @@ def extent(data, *, policy_config, capabilities):
 2026-10-23 在当前 Linux 主机上完成真实示例验证：九类 Decision 的十个入口均执行 Python；改变 YAML 参数影响结果；原始源码被修改、YAML 被移除后，固定产物仍可求值；重复键、全局参数、别名、缺失 Decision、越界路径、不支持能力和 Fidelity 被拒绝；文件、网络和进程访问探针受限；`print` 不破坏结果管道；无限循环被 CPU 限制终止，长时间 sleep 被 wall time 限制终止；声明的包和文本资源可实际导入及读取。这些不是完整安全审计或性能结论。
 
 实际遇到 bubblewrap 不支持 `--preserve-fds` 的兼容性问题后，新增 `tests/policy.rs`，先复现失败，再改为借标准输出传递结果管道、由可信 bootstrap 分离协议与诊断。测试使用真实 bubblewrap 和 Python，不替换 backend。
+
+## 实现差距：edge_id 与 Chance id
+
+设计上 `select` 的待选集合、`assumption_set` 和运行时 Decision 的作用对象都是 Chance（Edge 只是抽象模型，没有 id）。代码和 Policy 接口中的 `edge_id` 目前仍是借用 operation id，待后续改为 Chance id；观察事件里的 `edge_id`（见 `observation.md`）同理，当前 Tree 尚无 Chance 身份，该字段为 null。`edge_context` 输入类别的名称同样沿用旧称，暂未改名。

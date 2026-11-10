@@ -1,12 +1,12 @@
 # Policy Decisions
 
-Policy Decision 是 Policy 针对投机执行作出的可替换选择。Edge 表示投机如何进行的一套过程/阶段，Branch 承载某次具体执行；单条 Edge 上的局部决策、跨 Edge 的启动选择与运行调整共同构成以下九类 decision：
+Policy Decision 是 Policy 针对投机执行作出的可替换选择。Edge 是描述投机如何进行的抽象模型，九类 decision 的语义定义在它之上；运行时它们作用于被接纳的投机机会 Chance，Branch 承载某次具体执行。单个 Chance 上的局部决策、跨 Chance 的启动选择与运行调整共同构成以下九类 decision：
 
 ```text
 S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)
 ```
 
-这九类 decision 属于同一个决策面，但不要求按固定顺序调用。其中 `select` 面向多个已经准入但尚未启动的 Edge，`rebalance` 面向已经运行或暂停的投机工作，其他 decision 主要作用于单条 Edge。一次执行仍可按“机会发现、待选准入、启动选择、预测生成、过程执行、验证、处置与提交”理解；决策面表达的是 Policy 在这些阶段中可以选择什么，而不是另一条固定流程。
+这九类 decision 属于同一个决策面，但不要求按固定顺序调用。其中 `select` 面向多个已经准入但尚未启动的 Chance，`rebalance` 面向已经运行或暂停的投机工作，其他 decision 主要作用于单条 Chance。一次执行仍可按“机会发现、待选准入、启动选择、预测生成、过程执行、验证、处置与提交”理解；决策面表达的是 Policy 在这些阶段中可以选择什么，而不是另一条固定流程。
 
 | Decision | Policy 决定什么 | 主要阶段 |
 |---|---|---|
@@ -15,7 +15,7 @@ S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)
 | `rebalance` | 在已经运行或暂停的投机工作之间决定暂停、恢复或抢占 | 过程执行 |
 | `extent` | 已开启的投机执行在内部推进到哪里，以及暂停等待裁决的时机 | 过程执行 |
 | `predict` | 预测对象与 Proposal 生成数量与方式 | 预测生成 |
-| `launch` | 是否取得这条 Edge 的权威值以及何时取得 | 启动选择、权威路径启动 |
+| `launch` | 是否取得这条 Chance 的权威值以及何时取得 | 启动选择、权威路径启动 |
 | `effect` | 投机过程中产生的外部效果采用的处理纪律 | 过程执行、处置与提交 |
 | `match` | Proposal 与验证依据被视为兼容或可接受的时机 | 验证 |
 | `dispose` | 命中、未命中、取消或停止后投机工作的处置 | 处置与提交 |
@@ -81,7 +81,7 @@ extent(process_state) -> stop | continue
 
 除 `steps_completed` 和 `phase` 外，字段可以按领域扩展，但必须保持为可观察事实；具体事件格式由下层接口文档定义。
 
-`extent` 与嵌套深度不同，`extent` 仅约束当前 Edge 对应的单个投机过程已经推进多少，每个嵌套 Edge 的子过程拥有独立的 step 计数，子过程的 step 默认不计入父过程。
+`extent` 与嵌套深度不同，`extent` 仅约束当前 Chance 对应的单个投机过程已经推进多少，每个嵌套 Chance 的子过程拥有独立的 step 计数，子过程的 step 默认不计入父过程。
 
 `extent` 的停止条件收敛为三类 Policy 可动态评估的谓词：
 
@@ -102,11 +102,11 @@ semantic_stop(process_state) -> true | false  # 根据任务或过程语义判�
 predict(predict_input) -> ProposalSet
 ```
 
-`predict` 将当前 Edge 和执行上下文中的事实映射为一个或多个 Proposal。`predict_input` 当前层确定包括以下输入类别：
+`predict` 将当前 Chance 和执行上下文中的事实映射为一个或多个 Proposal。`predict_input` 当前层确定包括以下输入类别：
 
 | 输入 | 是否必需 | 含义 |
 |---|---:|---|
-| `edge_context` | 是 | 当前 Edge 的 pending-result boundary、被预测结果的类型/结构，以及后续依赖点的基本描述 |
+| `edge_context` | 是 | 当前 Chance 的 pending-result boundary、被预测结果的类型/结构，以及后续依赖点的基本描述 |
 | `process_context` | 是 | 当前 Agent 过程可见的状态，包括上下文、当前阶段、已有输入和已完成结果 |
 | `assumption_set` | 是 | 当前 Branch 已携带的未决 Proposal ID 集合；预测不能假装这些 Proposal 已经被确认 |
 | `history` | 否 | 当前 Agent 或同类过程已经产生的历史轨迹、观测和结果 |
@@ -126,7 +126,7 @@ ProposalSet = {
 }
 ```
 
-每个 `Proposal` 至少包含一个当前 Edge 边界的候选输入：
+每个 `Proposal` 至少包含一个当前 Chance 边界的候选输入：
 
 ```text
 Proposal = {
@@ -137,7 +137,7 @@ Proposal = {
 
 `payload` 可以是原子值或结构化值；`provenance` 可选，用于记录候选来自模型、规则、历史轨迹或外部系统等来源。结构化计划仍只是边界上的候选输入，实际展开由 candidate Branch 完成。输出可以是单候选、有限候选集、带 Policy 元数据的候选集，或增量生成的候选序列。
 
-同一个 Edge 可以有多个 Proposal，每个 Proposal 可以派生出一个候选 Branch。Policy 可以根据自己的配置和已观察事实选择固定或动态的数量，但候选 Branch 仍必须遵守隔离、AssumptionSet 和 single-winner 约束。候选数量决定了投机的宽度 breadth；breadth 是 `predict` 的取值结果。每个已发出的 Proposal 必须不可变；如果 Policy 无法生成有效候选，应回退到普通/权威路径或结束本次投机入口。
+同一个 Chance 可以有多个 Proposal，每个 Proposal 可以派生出一个候选 Branch。Policy 可以根据自己的配置和已观察事实选择固定或动态的数量，但候选 Branch 仍必须遵守隔离、AssumptionSet 和 single-winner 约束。候选数量决定了投机的宽度 breadth；breadth 是 `predict` 的取值结果。每个已发出的 Proposal 必须不可变；如果 Policy 无法生成有效候选，应回退到普通/权威路径或结束本次投机入口。
 
 预测对象不局限于某种 Agent 行为。它可以是 action、observation、工具调用、命令、远程请求、用户输入或它们组成的计划，只要后续工作可以暂时依赖该 Proposal，并且存在验证或接受它的依据。
 
@@ -147,9 +147,9 @@ Proposal = {
 launch(input) -> bool
 ```
 
-`launch` 决定这条 Edge 当前是否启动取得权威值的路径。返回 `true` 表示启动权威路径，返回 `false` 表示当前不启动。权威值是该 Edge 真实结果 `i` 的可靠来源——真实执行、主生成流、用户输入、环境反馈或远程服务——只有拿到它，`match` 才能与 Proposal 对照；拿不到时只能依赖 validator 或其他可接受性判断。
+`launch` 决定这条 Chance 当前是否启动取得权威值的路径。返回 `true` 表示启动权威路径，返回 `false` 表示当前不启动。权威值是该 Chance 真实结果 `i` 的可靠来源——真实执行、主生成流、用户输入、环境反馈或远程服务——只有拿到它，`match` 才能与 Proposal 对照；拿不到时只能依赖 validator 或其他可接受性判断。
 
-“权威值来自谁”不是 Policy 可以替换的选项，而是这条 Edge 的固有事实：`u` 是谁，真实结果就由谁产生。例如 `u` 是一条命令时真值来自真实执行，`u` 在等待用户输入时真值来自用户。Policy 能决定的只有“是否取得、何时取得”，即 `launch` 函数在当前输入下的返回值。系统可以提供常用快捷定义：
+“权威值来自谁”不是 Policy 可以替换的选项，而是这条 Chance 的固有事实：`u` 是谁，真实结果就由谁产生。例如 `u` 是一条命令时真值来自真实执行，`u` 在等待用户输入时真值来自用户。Policy 能决定的只有“是否取得、何时取得”，即 `launch` 函数在当前输入下的返回值。系统可以提供常用快捷定义：
 
 | 快捷定义 | 等价的函数行为 |
 |---|---|
@@ -209,7 +209,7 @@ MatchResult = {
 }
 ```
 
-`score` 是可选的。严格相等或确定性 predicate 可以直接产生 `verdict`，不需要分数；模糊匹配、相似度匹配或带容差的语义判断可以返回分数，再依据 Policy 声明的阈值得出 `verdict`。分数的含义、计算函数、范围、方向和阈值全部由用户/Policy 定义，AScout 只提供承载、记录和在同一 Edge 的相同匹配规则上下文内进行比较的机制。分数不是 AScout 推断的正确概率，也不在不同 matcher、版本或 scale 之间比较。
+`score` 是可选的。严格相等或确定性 predicate 可以直接产生 `verdict`，不需要分数；模糊匹配、相似度匹配或带容差的语义判断可以返回分数，再依据 Policy 声明的阈值得出 `verdict`。分数的含义、计算函数、范围、方向和阈值全部由用户/Policy 定义，AScout 只提供承载、记录和在同一 Chance 的相同匹配规则上下文内进行比较的机制。分数不是 AScout 推断的正确概率，也不在不同 matcher、版本或 scale 之间比较。
 
 匹配关系至少应明确以下内容：
 
@@ -218,7 +218,7 @@ MatchResult = {
 - 判断失败、不确定或 validator 出错时如何处理；
 - 该关系允许的 Fidelity 上界。
 
-放宽匹配关系可能使结果不再与串行执行完全一致，不能对声明为严格 trajectory-equivalent 的策略静默采用。`indeterminate` 和 `error` 不能被静默当成 `compatible`；后续如何暂停、重试、降级、重新执行或丢弃，由 `dispose` 和运行控制处理。分数只能支持兼容判断或同一 Edge 内的候选排序，不能绕过 Fidelity、效果边界或 single-winner 约束。
+放宽匹配关系可能使结果不再与串行执行完全一致，不能对声明为严格 trajectory-equivalent 的策略静默采用。`indeterminate` 和 `error` 不能被静默当成 `compatible`；后续如何暂停、重试、降级、重新执行或丢弃，由 `dispose` 和运行控制处理。分数只能支持兼容判断或同一 Chance 内的候选排序，不能绕过 Fidelity、效果边界或 single-winner 约束。
 
 ### 2.7 `dispose` - 处置投机工作
 
@@ -248,10 +248,10 @@ dispose(branch, resolution, context) -> DispositionPlan
 ### 2.8 `select` - 从待选集合中选择启动机会
 
 ```text
-select(frontier_view, scheduling_context) -> ordered subset[EdgeId]
+select(frontier_view, scheduling_context) -> ordered subset[ChanceId]
 ```
 
-`frontier_view` 是 AScout 当前维护的、同一 task / AScoutAgent 中已经通过 `admit` 且仍然有效的全部待选 Edge 快照，而不是单个机会或固定容量窗口。`scheduling_context` 提供可观察的预算、资源压力、机会等待时间、依赖与成本事实。该 task 绑定的 Policy 直接返回现在希望启动的有序 Edge 子集；可以选择一个、多个或暂时一个都不选。排序公式、best-first、浅层优先、深层优先以及 breadth/depth 分配都属于具体 Policy，不是 AScout 的固定规则。
+`frontier_view` 是 AScout 当前维护的、同一 task / AScoutAgent 中已经通过 `admit` 且仍然有效的全部待选 Chance 快照，而不是单个机会或固定容量窗口。`scheduling_context` 提供可观察的预算、资源压力、机会等待时间、依赖与成本事实。该 task 绑定的 Policy 直接返回现在希望启动的有序 Chance 子集；可以选择一个、多个或暂时一个都不选。排序公式、best-first、浅层优先、深层优先以及 breadth/depth 分配都属于具体 Policy，不是 AScout 的固定规则。
 
 未被选择的机会继续留在待选集合，之后可以随新的资源和执行事实再次参与选择。AScout 拥有并维护该集合，而 Policy 不拥有可变队列状态。等待期间，如果 pending result 已到达、所属任务结束、祖先依赖被否定或其他必要前提失效，AScout 将机会移出集合；启动前 Speculation Coordinator 还必须复核机会有效性、Contract 与资源硬约束。
 
@@ -280,7 +280,7 @@ rebalance(active_view, paused_view, scheduling_context)
 |---|---|---|
 | 机会发现 | `admit` | admit 判断该操作是否可能成为投机入口（粗筛），Mechanism 识别并规范化 operation 及其结果未到达的等待边界。 |
 | 待选准入 | `admit` | admit 精判机会是否值得登记并保留；通过后进入 AScout 维护的待选集合 |
-| 启动选择 | `select`、`launch` | select 在全部待选机会间决定现在启动哪些；launch 决定相应 Edge 的权威值是否取得、何时取得 |
+| 启动选择 | `select`、`launch` | select 在全部待选机会间决定现在启动哪些；launch 决定相应 Chance 的权威值是否取得、何时取得 |
 | 预测生成 | `predict` | 生成一个或多个 Proposal |
 | 过程执行 | `extent`、`effect`、`rebalance` | 限制单个过程推进、管理每个 step 的外部效果，并在多个已启动工作之间暂停、恢复或抢占 |
 | 验证 | `match` | 获得验证依据并判断 Proposal 是否兼容或可接受；权威值是否可取由 launch 决定 |
@@ -292,10 +292,10 @@ rebalance(active_view, paused_view, scheduling_context)
 
 ### 4.1 组合
 
-同一 Edge 上的多个 Proposal/Branch 是并行候选关系，主要由 `predict` 的候选数量、Branch 隔离和 single-winner 约束决定，不引入额外的组合语义：
+同一 Chance 上的多个 Proposal/Branch 是并行候选关系，主要由 `predict` 的候选数量、Branch 隔离和 single-winner 约束决定，不引入额外的组合语义：
 
 ```text
-Edge E
+Chance E
 ├── Proposal p1 -> Branch B1
 ├── Proposal p2 -> Branch B2
 └── Proposal p3 -> Branch B3
@@ -305,12 +305,12 @@ Edge E
 
 ### 4.2 嵌套
 
-候选 Branch 被创建后会像普通执行一样继续运行，因此也可能遇到新的 pending-result boundary。嵌套是某个 Branch 在继续执行时遇到新的 Edge，并再次调用 `admit`；通过后，该 Edge 与其他已准入机会共同等待 `select`：
+候选 Branch 被创建后会像普通执行一样继续运行，因此也可能遇到新的 pending-result boundary。嵌套是某个 Branch 在继续执行时遇到新的 Chance，并再次调用 `admit`；通过后，该 Chance 与其他已准入机会共同等待 `select`：
 
 ```text
-Edge E1
+Chance E1
 └── Proposal p1 -> Branch B1
-    └── Edge E2
+    └── Chance E2
         └── Proposal p2 -> Branch B2
 ```
 
@@ -319,7 +319,7 @@ AssumptionSet(B1) = {p1}
 AssumptionSet(B2) = {p1, p2}
 ```
 
-新 Edge 仍按照当前 task 已绑定的同一 Policy 执行既有 decision，并分别使用该 Policy 中对应函数的配置；当前不因嵌套深度切换到另一套 Policy。新 Edge 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Edge 的 `extent` 和 step 计数独立于父 Edge。未来按嵌套深度或其他上下文切换 Policy，属于独立扩展。
+新 Chance 仍按照当前 task 已绑定的同一 Policy 执行既有 decision，并分别使用该 Policy 中对应函数的配置；当前不因嵌套深度切换到另一套 Policy。新 Chance 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Chance 的 `extent` 和 step 计数独立于父 Chance。未来按嵌套深度或其他上下文切换 Policy，属于独立扩展。
 
 每个候选 Branch 携带其路径上的未决 Proposal ID 集合：`AssumptionSet = frozenset[ProposalId]`
 
@@ -336,7 +336,7 @@ AssumptionSet(B2) = {p1, p2}
 Fidelity 不是独立的 Policy Decision，而是由决策组合、Runtime 能力和 Policy 声明共同形成的契约。它至少受到以下因素影响：
 
 - `launch` 是否取得权威值（始终返回 `false` 意味着放弃真实依据，只能走可接受性裁决）；
-- Edge 的权威来源本身是否定义正确性（固有事实，Policy 不能改变）；
+- Chance 的权威来源本身是否定义正确性（固有事实，Policy 不能改变）；
 - `match` 采用的等价或可接受关系；
 - `effect` 是否在验证前释放外部效果；
 - `dispose` 是否允许重执行、补偿或其他有损处置；
@@ -388,6 +388,6 @@ Policy 决定“希望采用哪种策略”，Mechanism 保证该策略在正确
 - 它解决的独立策略问题；
 - 所属阶段、输入和输出；
 - 与现有九类 decision 的依赖或区别；
-- 对 Edge、Proposal、Branch、未决 Proposal 依赖、single-winner、commit/discard/accept、obligation 和 cleanup 语义的影响。
+- 对 Chance、Proposal、Branch、未决 Proposal 依赖、single-winner、commit/discard/accept、obligation 和 cleanup 语义的影响。
 
 如果新增内容只是某一 decision 的取值、实现方式或运行时优化，不应新增为独立 decision。`breadth`、嵌套 `depth` 和 Fidelity 已属于这种情况。
