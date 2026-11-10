@@ -53,8 +53,14 @@ impl SpeculativeTree {
             parent_action_id,
         )?;
         let actions = ControlActions::default();
+        // A Chance may be admitted on any Branch that still exists in the
+        // speculation, not only on the current authority: the nested Chance's
+        // authority value is that Branch's own real execution result.
+        let branch_live = self.branches.get(&branch_id).is_some_and(|branch| {
+            branch.status.is_live_authority() || branch.status.is_live_candidate()
+        });
         if self.stopping
-            || !self.can_invoke_tool(&branch_id)
+            || !branch_live
             || self.branches[&branch_id]
                 .pending_operations
                 .iter()
@@ -407,6 +413,18 @@ impl SpeculativeTree {
                 "Validation accepted; Runtime promotion requested",
             )?;
             self.schedule(ControlOperation::Promote(candidate, record), actions);
+        } else if compatible && self.ancestor_assumptions_unresolved(self.branch(&candidate)?) {
+            // The nested Proposal matches, but the Branch still depends on an
+            // unconfirmed ancestor Proposal. Keep it alive without commit
+            // eligibility; `progress` will validate it again after the
+            // ancestor resolves.
+            actions.records.push(json!({
+                "branch_id": candidate,
+                "hypothesis": self.branch_proposal(&candidate).map(|proposal| &proposal.payload),
+                "verdict": verdict,
+                "disposition": "Wait",
+                "reason": "ancestor Proposal is not confirmed"
+            }));
         } else {
             let why = if error.is_some() {
                 DiscardedReason::Failed

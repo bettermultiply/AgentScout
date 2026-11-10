@@ -21,6 +21,9 @@ impl SpeculativeTree {
         }
         branch.status = status;
         self.epoch += 1;
+        if matches!(status, BranchStatus::Discarding | BranchStatus::Discarded) {
+            self.invalidate_chances_on_branch(id, reason)?;
+        }
         self.pending_observations.push(
             crate::control_plane::observation::ObservationContent::StatusChanged {
                 branch_id: id.into(),

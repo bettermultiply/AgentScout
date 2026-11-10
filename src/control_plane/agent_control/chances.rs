@@ -128,15 +128,18 @@ impl SpeculativeTree {
             .collect()
     }
 
-    /// Chance 的权威等待点是否仍然成立：父 Branch 仍在权威路径上（暂时被
-    /// extent、effect 或 rebalance 停住不算失效），且该 operation 仍在等待结果。
+    /// Chance 的权威等待点是否仍然成立：父 Branch 仍然存活（权威或候选，
+    /// 暂时被 extent、effect 或 rebalance 停住不算失效），且该 operation
+    /// 仍在等待结果。权威值始终由父 Branch 自己的真实执行产生；父 Branch
+    /// 不必是全局权威，因此嵌套 Chance 与根 Branch 上的 Chance 使用同一条件。
     pub(crate) fn chance_waiting_live(&self, chance: &ChanceRecord) -> bool {
         !self.stopping
-            && self.authority_branch_id.as_deref() == Some(chance.parent_branch_id.as_str())
             && self
                 .branches
                 .get(&chance.parent_branch_id)
-                .is_some_and(|branch| branch.status.is_live_authority())
+                .is_some_and(|branch| {
+                    branch.status.is_live_authority() || branch.status.is_live_candidate()
+                })
             && self.branches[&chance.parent_branch_id]
                 .pending_operations
                 .iter()
@@ -144,6 +147,44 @@ impl SpeculativeTree {
                     op.operation_id == chance.operation_id
                         && op.status == OperationStatus::Requested
                 })
+    }
+
+    /// Branch 除自身 Proposal 外，仍携带至少一个祖先 Chance 的未确认
+    /// Proposal。`AssumptionSet` 清空前该 Branch 没有提交资格；这里不新增
+    /// 依赖机制，只根据现有引用与 Chance 阶段判断。
+    pub(crate) fn ancestor_assumptions_unresolved(&self, branch: &BranchRecord) -> bool {
+        branch.assumption_set.iter().any(|assumption| {
+            Some(&assumption.chance_id) != branch.chance_id.as_ref()
+                && !self
+                    .chances
+                    .get(&assumption.chance_id)
+                    .is_some_and(|chance| matches!(chance.stage, ChanceStage::Accepted(_)))
+        })
+    }
+
+    /// Branch 不再存活时，它上面等待结果的 Chance 不能再收敛为接受。
+    /// 这是嵌套 Chance 失效的唯一传播入口：Branch 进入 Discarding/Discarded
+    /// 后，它以该 Branch 为父的全部未收敛 Chance 记为 `AncestorInvalidated`。
+    pub(crate) fn invalidate_chances_on_branch(
+        &mut self,
+        branch_id: &str,
+        reason: &str,
+    ) -> io::Result<()> {
+        let ids: Vec<String> = self
+            .chances
+            .values()
+            .filter(|chance| chance.parent_branch_id == branch_id && !chance.stage.is_terminal())
+            .map(|chance| chance.chance_id.clone())
+            .collect();
+        for id in ids {
+            self.change_authority_state(&id, AuthorityState::Unavailable)?;
+            self.change_chance_stage(
+                &id,
+                ChanceStage::Discarded(DiscardedReason::AncestorInvalidated),
+                reason,
+            )?;
+        }
+        Ok(())
     }
 
     /// 这个 Chance 上，Branch 自己携带的 Proposal 引用。

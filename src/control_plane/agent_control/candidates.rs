@@ -13,17 +13,15 @@ impl SpeculativeTree {
     ) -> io::Result<AgentCommand> {
         let chance = self.chance(chance_id)?.clone();
         let parent = chance.parent_branch_id.as_str();
-        if self.authority_branch_id.as_deref() != Some(parent) {
-            return Err(invalid_input(
-                "candidate parent is not the current authority",
-            ));
-        }
         let sequence = self.next_generation;
         let branch_id = format!("candidate-{sequence}");
         let transcript_index = self.branch(parent)?.execution_position.transcript_index;
         let parent_assumptions = self.branch(parent)?.assumption_set.clone();
         let parent_status = self.branch(parent)?.status;
-        if parent_status != BranchStatus::Created && !parent_status.is_live_authority() {
+        // The Chance's authority value is produced by its parent Branch itself,
+        // so a nested Chance on a live candidate is created like one on the
+        // authority. AssumptionSet still blocks commit until ancestors resolve.
+        if !parent_status.is_live_authority() && !parent_status.is_live_candidate() {
             return Err(invalid_input("parent branch cannot create a candidate"));
         }
         let proposal_id = format!("proposal-{branch_id}");
@@ -166,6 +164,7 @@ impl SpeculativeTree {
                 branch.role == BranchRole::Candidate
                     && branch.status.is_decidable()
                     && branch.parent_branch_id == self.authority_branch_id
+                    && !self.ancestor_assumptions_unresolved(branch)
                     && !self.authority_advanced_past(branch)
             })
             && !self
@@ -273,6 +272,11 @@ impl SpeculativeTree {
             .clone();
         if candidate.role != BranchRole::Candidate || !candidate.status.is_decidable() {
             return Err(invalid_input("branch is not a decidable candidate"));
+        }
+        if self.ancestor_assumptions_unresolved(&candidate) {
+            return Err(invalid_input(
+                "candidate has unconfirmed ancestor proposals",
+            ));
         }
         let old_authority = self
             .authority_branch_id
