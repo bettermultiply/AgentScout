@@ -151,7 +151,8 @@ impl SpeculativeTree {
             .expect("live waiting branch")
             .execution_state
             .phase = BranchPhase::Predict;
-        let launch_unsupported = matches!(&result, Ok(ControlResult::PredictionsWithoutAuthority(_)));
+        let launch_unsupported =
+            matches!(&result, Ok(ControlResult::PredictionsWithoutAuthority(_)));
         // An empty prediction set is not a failed speculation: it means this
         // boundary has no hypothesis to test. Execute the tool as an ordinary
         // authority action instead of leaving the adapter's tool call waiting
@@ -184,17 +185,12 @@ impl SpeculativeTree {
                     true,
                 )?;
             }
-            Err(error) => actions.records.push(
-                json!({"message":"policy_error", "branch_id":branch, "reason":error}),
-            ),
+            Err(error) => actions
+                .records
+                .push(json!({"message":"policy_error", "branch_id":branch, "reason":error})),
             _ => unreachable!(),
         }
-        self.finish_predict_waiting_point(
-            tool,
-            direct_invocation,
-            launch_unsupported,
-            actions,
-        );
+        self.finish_predict_waiting_point(tool, direct_invocation, launch_unsupported, actions);
         Ok(())
     }
 
@@ -285,9 +281,11 @@ impl SpeculativeTree {
             Err(reason) => {
                 self.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
                 actions.records.push(json!({"message":"runtime_operation_failed","branch_id":branch,"reason":reason}));
-                actions
-                    .commands
-                    .extend(self.resolve_candidate(branch, false)?);
+                actions.commands.extend(self.resolve_candidate_with_reason(
+                    branch,
+                    false,
+                    &format!("Runtime environment establishment failed: {reason}"),
+                )?);
             }
             _ => unreachable!(),
         }
@@ -307,28 +305,20 @@ impl SpeculativeTree {
             launch: _,
             ..
         } = tool;
-        let (outcome, evidence) = result
-            .map_err(io::Error::other)
-            .and_then(|value| match value {
-                ControlResult::Outcome(outcome, evidence) => Ok((outcome, evidence)),
-                _ => unreachable!(),
-            })?;
-        self.record_candidate_outcome(
-            &branch_id,
-            &operation_id,
-            outcome.clone(),
-            Some(evidence),
-        )?;
+        let (outcome, evidence) =
+            result
+                .map_err(io::Error::other)
+                .and_then(|value| match value {
+                    ControlResult::Outcome(outcome, evidence) => Ok((outcome, evidence)),
+                    _ => unreachable!(),
+                })?;
+        self.record_candidate_outcome(&branch_id, &operation_id, outcome.clone(), Some(evidence))?;
         self.branches
             .get_mut(&branch_id)
             .expect("candidate parent exists")
             .execution_state
             .phase = BranchPhase::Effect;
-        self.complete_operation(
-            &branch_id,
-            Some(&operation_id),
-            OperationStatus::Succeeded,
-        )?;
+        self.complete_operation(&branch_id, Some(&operation_id), OperationStatus::Succeeded)?;
         if live {
             actions
                 .commands
@@ -364,12 +354,21 @@ impl SpeculativeTree {
         let record = json!({"branch_id":candidate, "hypothesis":proposal.payload, "verdict":verdict, "policy_error":error});
         if self.can_promote(&candidate, compatible) {
             self.record_runtime_state(&candidate, RuntimeExecutionState::PromotionRequested)?;
-            self.branches.get_mut(&candidate).unwrap().status = BranchStatus::Promoting;
+            self.change_status(
+                &candidate,
+                BranchStatus::Promoting,
+                "Validation accepted; Runtime promotion requested",
+            )?;
             self.schedule(ControlOperation::Promote(candidate, record), actions);
         } else {
-            actions
-                .commands
-                .extend(self.resolve_candidate(&candidate, false)?);
+            actions.commands.extend(self.resolve_candidate_with_reason(
+                &candidate,
+                false,
+                &format!(
+                    "Validation disposition: {verdict}; {}",
+                    error.as_deref().unwrap_or("no policy error")
+                ),
+            )?);
             let mut record = record;
             record["disposition"] = json!("Discard");
             actions.records.push(record);
@@ -477,9 +476,11 @@ impl SpeculativeTree {
                             .phase = BranchPhase::Match;
                         self.schedule(ControlOperation::Validate(candidate), &mut actions);
                     } else {
-                        actions
-                            .commands
-                            .extend(self.resolve_candidate(&candidate, false)?);
+                        actions.commands.extend(self.resolve_candidate_with_reason(
+                            &candidate,
+                            false,
+                            "Candidate validation deadline expired",
+                        )?);
                         actions.records.push(json!({"branch_id":candidate,"disposition":"Discard","verdict":"timeout"}));
                     }
                 }

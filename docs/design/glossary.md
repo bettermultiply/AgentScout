@@ -85,7 +85,7 @@
 - **Policy Engine**：Policy 进入 AScout 的固定入口，只有两项职责：编译 Policy，以及根据规定输入对已编译的 Policy Decision 求值、作出本次 Policy Decision。作出 Policy Decision 不等于落实 Policy Decision；它不负责把 Policy Decision 应用到 Branch、Speculative Tree、外部效果或 Runtime，也不负责选择运行位置或向 Agent 接入侧交付编译结果。（`control-plane/policy-engine.md`）
 - **Speculation Coordinator**：控制面内全局投机视图与控制循环的协调核心；维护 Edge、Branch、Proposal、`AssumptionSet`、待选机会和调度状态之间的关系，激活受影响的 Policy Decision，协调 semantic operation，经 Runtime 接入边界执行并根据结果和事件更新视图。（`control-plane.md` §2.4）
 - **Effect Coordinator**：Runtime 内部可采用的效果协调机制；处理由 Agent 造成且可能影响全局的效果，例如调用外部 API。它可通过服务效果插件生成模拟响应，也可拒绝、阻塞、暂存、转换、提交、取消、清理或补偿效果。控制面负责全局 Tree 和最终裁决，Runtime 负责实际效果边界。（`effect-management.md`）
-- **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期。（`control-plane.md` §2.6；`speculation-contract.md` §3）
+- **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），唯一保存观察事件日志并提供状态事件集及按序号补发的只读接口，用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期，不要求据观察日志恢复整棵树。（`control-plane.md` §2.6；`speculation-contract.md` §3）
 - **ASC-Proxy**：Agent 接入侧与控制面之间的受管通信代理，负责会话、身份确认以及 request、fact、result 和 event 的双向传递；不拥有全局控制状态。（`agent-integration.md` §2.2）
 - **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 求值和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）
 - **Agent Control Gateway**：控制面面向 Agent 接入侧的受管通信边界；管理 Task 启动、Agent 接入侧会话、已编译的本地 Decision、本地 Decision 结果、decision log 与受管控制请求的双向传递。Runtime 创建 Branch 执行环境后，它在该环境内创建并启动 Agent 接入侧；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态。（`control-plane.md` §2.1）

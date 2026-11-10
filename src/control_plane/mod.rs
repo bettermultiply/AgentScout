@@ -3,5 +3,6 @@
 pub mod agent_control;
 pub mod coordination;
 pub mod ledger;
+pub mod observation;
 pub mod policy;
 pub mod session;

@@ -16,7 +16,7 @@ struct Task<'a> {
     stream: &'a mut UnixStream,
     interface: &'a ui::Interface,
     capabilities: &'a RuntimeCapabilities,
-    ledger: Ledger,
+    ledger: &'a mut Ledger,
     notice: String,
     started: Instant,
     draining: bool,
@@ -28,9 +28,10 @@ impl Task<'_> {
         self.ledger.record(value.clone())?;
         if value["message"] == "candidate_created" {
             self.interface.fork(
+                self.ledger,
                 value["parent"].as_str().unwrap(),
                 value["branch_id"].as_str().unwrap(),
-            );
+            )?;
         }
         Ok(())
     }
@@ -73,7 +74,8 @@ impl Task<'_> {
                     } else {
                         self.tree.handle_message(message.clone())?
                     };
-                self.interface.message(&message);
+                self.flush_observations()?;
+                self.interface.message(self.ledger, &message)?;
                 if !matches!(message, AgentMessage::Output { .. }) {
                     let mut fact = serde_json::to_value(&message)?;
                     fact["source"] = json!("agent_adapter");
@@ -94,7 +96,6 @@ impl Task<'_> {
         {
             return Err(io::Error::other(reason.to_string()));
         }
-        self.publish();
         let progress = self.tree.progress(self.capabilities)?;
         actions.commands.extend(progress.commands);
         actions.operations.extend(progress.operations);
@@ -102,13 +103,27 @@ impl Task<'_> {
         Ok(Some(actions))
     }
 
-    fn publish(&self) {
+    fn flush_observations(&mut self) -> io::Result<()> {
+        let mut failure = None;
+        for content in self.tree.drain_observations() {
+            if let Err(error) = self
+                .ledger
+                .append_observation(&self.tree.execution_id, content)
+            {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    fn publish(&mut self) -> io::Result<()> {
+        self.flush_observations()?;
         self.interface.publish(
-            self.tree,
+            self.ledger,
             self.tree.authority_ready(),
             self.tree.authority_running(),
             &self.notice,
-        );
+        )
     }
 }
 
@@ -119,10 +134,10 @@ pub fn run(
     runtime: &ControlSession,
     capabilities: &RuntimeCapabilities,
     interface: &ui::Interface,
+    ledger: &mut Ledger,
     channel: (mpsc::Sender<Event>, mpsc::Receiver<Event>),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (events, receiver) = channel;
-    let ledger = Ledger::open(&tree.workspace_root.join("events.jsonl"))?;
     let mut reader = stream.try_clone()?;
     let close_reader = stream.try_clone()?;
     let (mut signal_reader, mut signal_writer) = UnixStream::pair()?;
@@ -160,9 +175,9 @@ pub fn run(
         if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
             let _ = events.send(Event::Request(ui::Request::Shutdown));
         }
-        task.publish();
         let mut failure = None;
         let result = (|| -> io::Result<()> {
+            task.publish()?;
             loop {
                 let event = match task.tree.next_deadline() {
                     Some(deadline) => match receiver
@@ -182,7 +197,7 @@ pub fn run(
                     Ok(Some(actions)) => actions,
                     Ok(None) => break,
                     Err(error) if !task.tree.is_stopping() => {
-                        task.publish();
+                        task.publish()?;
                         failure = Some(error);
                         ControlActions {
                             commands: task.tree.begin_shutdown()?,
@@ -190,7 +205,7 @@ pub fn run(
                         }
                     }
                     Err(error) => {
-                        task.publish();
+                        task.publish()?;
                         return Err(error);
                     }
                 };
@@ -199,20 +214,20 @@ pub fn run(
                         json!({"source":"runtime","message":"runtime_event","event":event}),
                     )?;
                 }
+                task.publish()?;
                 for command in actions.commands {
                     send(task.stream, command)?;
                 }
-                task.publish();
                 for record in actions.records {
                     task.record(record)?;
                 }
                 for (id, operation) in actions.operations {
-                    let snapshot = task.tree.clone();
+                    let tree_state = task.tree.clone();
                     let sender = events.clone();
                     scope.spawn(move || {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             AgentController.perform(
-                                &snapshot,
+                                &tree_state,
                                 policy,
                                 runtime,
                                 capabilities,
@@ -223,7 +238,6 @@ pub fn run(
                         let _ = sender.send(Event::Completed(id, result));
                     });
                 }
-                task.publish();
                 loop {
                     let ids = task.tree.evictable_branches();
                     if ids.is_empty() {
@@ -250,7 +264,7 @@ pub fn run(
                     "Ready"
                 }
                 .into();
-                task.publish();
+                task.publish()?;
             }
             failure.map_or(Ok(()), Err)
         })();
@@ -259,7 +273,8 @@ pub fn run(
         let _ = close_reader.shutdown(std::net::Shutdown::Read);
         result
     });
-    interface.publish(task.tree, false, false, "Stopped");
+    task.flush_observations()?;
+    interface.publish(task.ledger, false, false, "Stopped")?;
     let unarchived: Vec<_> = task.ledger.unarchived().collect();
     if !unarchived.is_empty() {
         return Err(format!(

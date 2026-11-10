@@ -137,7 +137,11 @@ impl SpeculativeTree {
         let mut commands = Vec::new();
         for candidate in self.pending_candidates() {
             if self.pending_candidates().contains(&candidate) {
-                commands.extend(self.resolve_candidate(&candidate, false)?);
+                commands.extend(self.resolve_candidate_with_reason(
+                    &candidate,
+                    false,
+                    "User interrupted execution",
+                )?);
             }
         }
         // A switch already in flight cannot be assumed rejected. Abort the
@@ -256,7 +260,51 @@ impl SpeculativeTree {
         branch_id: &str,
         state: RuntimeExecutionState,
     ) -> io::Result<()> {
+        if self.branch(branch_id)?.execution_state.runtime == state {
+            return Ok(());
+        }
         self.branch_mut(branch_id)?.execution_state.runtime = state;
+        self.emit_environment(branch_id, state)?;
+        Ok(())
+    }
+
+    pub(super) fn emit_environment(
+        &mut self,
+        branch_id: &str,
+        state: RuntimeExecutionState,
+    ) -> io::Result<()> {
+        use crate::control_plane::observation::ObservationContent;
+        let shared = self
+            .capability_view
+            .as_ref()
+            .and_then(|v| v["shared_environment"].as_bool());
+        let independent_instance = match state {
+            RuntimeExecutionState::Unknown
+            | RuntimeExecutionState::EnvironmentRequested
+            | RuntimeExecutionState::Failed => None,
+            RuntimeExecutionState::Cleaned => Some(false),
+            _ => shared.map(|s| !s),
+        };
+        let mut configuration = BTreeMap::new();
+        if let Some(shared) = shared {
+            configuration.insert("shared_environment".into(), Value::Bool(shared));
+        }
+        self.pending_observations
+            .push(ObservationContent::EnvironmentChanged {
+                branch_id: branch_id.into(),
+                state,
+                independent_instance,
+                parent_environment: None,
+                configuration,
+            });
+        if state == RuntimeExecutionState::Cleaned {
+            self.pending_observations
+                .push(ObservationContent::EnvironmentCleaned {
+                    branch_id: branch_id.into(),
+                    succeeded: true,
+                    reason: Some("Runtime environment cleanup confirmed".into()),
+                });
+        }
         Ok(())
     }
 
@@ -265,7 +313,11 @@ impl SpeculativeTree {
     pub fn begin_cleanup(&mut self, branch_id: &str) -> io::Result<AgentCommand> {
         self.branch(branch_id)?;
         let command = self.make_cleanup_command(branch_id)?;
-        self.branch_mut(branch_id)?.status = BranchStatus::Cleaning;
+        self.change_status(
+            branch_id,
+            BranchStatus::Cleaning,
+            "Agent session cleanup requested",
+        )?;
         Ok(command)
     }
 
@@ -309,8 +361,9 @@ impl SpeculativeTree {
             None,
             BranchRole::Authority,
             BranchStatus::Created,
+            None,
         )?;
-        self.authority_branch_id = Some(branch_id.clone());
+        self.change_authority(&branch_id)?;
         self.history_root_branch_id = Some(branch_id.clone());
         self.branch_mut(&branch_id)?.execution_state.agent = AgentExecutionState::StartRequested;
         let prompt = prompt.into();
@@ -323,5 +376,4 @@ impl SpeculativeTree {
             prompt,
         })
     }
-
 }

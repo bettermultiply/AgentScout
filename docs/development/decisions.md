@@ -533,3 +533,8 @@ ProcessBackend 已承担启动、冻结、终止及 namespace 记录，不再将
 # 2026-11-10：观察事件与增量读取
 
 按已确认设计，弃用 `GET /api/run-view` 整体轮询及 `ui.rs` 每次 `state.tree = tree.clone()` 的整体替换。内部 SpeculativeTree 不再作为外部序列化模型；原始 Agent/Runtime/Ledger 消息不进入公共观察流。AScoutRunView 仅为从公共事件折叠的本地 TUI 视图；对话通过独立读取接口取得。现有简易页面改为首次事件快照 + SSE，后续 React + React Flow 前端尚未实现。具体接口与差距见 observation.md。
+## 2026-11-10：状态事件集、Ledger 观察日志与 Tree 转换入口
+
+废弃观察接口的 snapshot / “快照”命名、`GET /api/observation/snapshot` 和 `ObservationSnapshot`：它们读取的是完整有序事件，不是被保存的状态。当前统一称状态事件集，英文直译为 `StateEventSet`，路径为 `/api/observation/state-event-set`。
+
+废弃 ui.rs 独立保存观察日志及通过 Tree 前后差异推断事件的做法。Ledger 在 events.jsonl 中以 `message: observation` 区分观察记录，直接提供只读句柄；Tree 在创建、生命周期、Authority 和环境转换入口产生待发事实，控制循环交给 Ledger 追加。保留同一次处理内的中间状态与入口明确给出的原因。观察日志不承担崩溃恢复整棵树的要求，不逐次保存完整树，也不实现折叠缓存。

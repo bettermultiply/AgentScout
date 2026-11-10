@@ -1,10 +1,11 @@
-//! Loopback-only browser transport. Both facts and actions use the UI interface.
+//! Loopback-only browser transport. Observation reads go directly to Ledger.
 use super::ui::{Interface, Request};
+use ascout::control_plane::ledger::LedgerReader;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-pub fn start(address: &str, interface: Interface) -> io::Result<()> {
+pub fn start(address: &str, interface: Interface, reader: LedgerReader) -> io::Result<()> {
     let address: std::net::SocketAddr = address
         .parse()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -23,16 +24,22 @@ pub fn start(address: &str, interface: Interface) -> io::Result<()> {
                 break;
             };
             let interface = interface.clone();
+            let reader = reader.clone();
             let host = address.to_string();
             std::thread::spawn(move || {
-                let _ = serve(&mut stream, &interface, &host);
+                let _ = serve(&mut stream, &interface, &reader, &host);
             });
         }
     });
     Ok(())
 }
 
-fn serve(stream: &mut TcpStream, interface: &Interface, host: &str) -> io::Result<()> {
+fn serve(
+    stream: &mut TcpStream,
+    interface: &Interface,
+    reader: &LedgerReader,
+    host: &str,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut bytes = Vec::new();
@@ -74,8 +81,8 @@ fn serve(stream: &mut TcpStream, interface: &Interface, host: &str) -> io::Resul
             "text/html; charset=utf-8",
             include_bytes!("web/index.html"),
         ),
-        ["GET", "/api/observation/snapshot", _] => {
-            let body = serde_json::to_vec(&interface.snapshot())?;
+        ["GET", "/api/observation/state-event-set", _] => {
+            let body = serde_json::to_vec(&reader.state_event_set())?;
             reply(stream, "200 OK", "application/json", &body)
         }
         ["GET", path, _] if path.starts_with("/api/observation/events") => {
@@ -97,12 +104,12 @@ fn serve(stream: &mut TcpStream, interface: &Interface, host: &str) -> io::Resul
             let Ok(mut sequence) = sequence else {
                 return reply(stream, "400 Bad Request", "text/plain", b"Invalid sequence");
             };
-            if sequence > interface.sequence() {
+            if sequence > reader.sequence() {
                 return reply(
                     stream,
                     "409 Conflict",
                     "text/plain",
-                    b"Sequence ahead of this run; reload snapshot",
+                    b"Sequence ahead of this run; reload state event set",
                 );
             }
             write!(
@@ -110,7 +117,7 @@ fn serve(stream: &mut TcpStream, interface: &Interface, host: &str) -> io::Resul
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
             )?;
             loop {
-                let events = interface.events_after(sequence).map_err(io::Error::other)?;
+                let events = reader.events_after(sequence).map_err(io::Error::other)?;
                 for event in events {
                     sequence = event.sequence;
                     writeln!(
@@ -121,7 +128,7 @@ fn serve(stream: &mut TcpStream, interface: &Interface, host: &str) -> io::Resul
                 }
                 stream.write_all(b": keep-alive\n\n")?;
                 stream.flush()?;
-                if !interface.connected() && sequence == interface.sequence() {
+                if !reader.connected() && sequence == reader.sequence() {
                     return Ok(());
                 }
             }

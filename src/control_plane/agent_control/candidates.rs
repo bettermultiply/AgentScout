@@ -31,6 +31,10 @@ impl SpeculativeTree {
             Some(parent.to_string()),
             BranchRole::Candidate,
             BranchStatus::Created,
+            self.active_actions
+                .get(parent)
+                .and_then(|actions| actions.get(operation_id))
+                .map(|action| action.action_kind),
         )?;
         self.record_candidate_context(
             &branch_id,
@@ -42,8 +46,8 @@ impl SpeculativeTree {
         self.mark_operation_requested(&branch_id, operation_id, OperationKind::StartCandidate)?;
         let branch = self.branch_mut(&branch_id)?;
         branch.pending_operations.last_mut().unwrap().tool_name = Some(tool_name.to_string());
-        branch.execution_state.runtime = RuntimeExecutionState::EnvironmentRequested;
         branch.execution_state.turn_active = true;
+        self.record_runtime_state(&branch_id, RuntimeExecutionState::EnvironmentRequested)?;
         Ok(AgentCommand::StartCandidate {
             branch_id: branch_id.clone(),
             parent_branch_id: parent.to_string(),
@@ -281,6 +285,23 @@ impl SpeculativeTree {
         branch_id: &str,
         compatible: bool,
     ) -> io::Result<Vec<AgentCommand>> {
+        self.resolve_candidate_with_reason(
+            branch_id,
+            compatible,
+            if compatible {
+                "Candidate accepted"
+            } else {
+                "Candidate rejected"
+            },
+        )
+    }
+
+    pub(crate) fn resolve_candidate_with_reason(
+        &mut self,
+        branch_id: &str,
+        compatible: bool,
+        reason: &str,
+    ) -> io::Result<Vec<AgentCommand>> {
         let candidate = self
             .branches
             .get(branch_id)
@@ -319,7 +340,7 @@ impl SpeculativeTree {
                         | BranchStatus::Running
                         | BranchStatus::AwaitingValidation
                 ) {
-                    self.branch_mut(&id)?.status = BranchStatus::Discarding;
+                    self.change_status(&id, BranchStatus::Discarding, reason)?;
                     commands.push(self.make_discard_command(&id)?);
                 }
             }
@@ -348,9 +369,11 @@ impl SpeculativeTree {
         ) {
             return Err(invalid_input("current authority is not live"));
         }
-        let promoted = self.branch_mut(branch_id)?;
-        promoted.status = BranchStatus::Promoting;
+        self.change_status(
+            branch_id,
+            BranchStatus::Promoting,
+            "Candidate accepted; promotion requested",
+        )?;
         Ok(vec![self.make_promote_command(branch_id)?])
     }
-
 }

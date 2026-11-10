@@ -340,11 +340,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let (events, receiver) = mpsc::channel();
     let requests = events.clone();
-    let interface = ui::Interface::new(&tree, move |request| {
-        requests
-            .send(execution::Event::Request(request))
-            .map_err(|_| "Control plane disconnected".into())
-    });
+    let mut ledger = Ledger::open(&run_dir.join("events.jsonl"))?;
+    let interface =
+        ui::Interface::new(tree.execution_id.clone(), ledger.reader(), move |request| {
+            requests
+                .send(execution::Event::Request(request))
+                .map_err(|_| "Control plane disconnected".into())
+        });
     let mut tui_thread = None;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         runtime_call(&session, "authority", Operation::EstablishEnvironment)?;
@@ -409,12 +411,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )?;
         send(&mut stream, command)?;
-        interface.publish(&tree, false, false, "Starting Agent session…");
+        let mut observation_error = None;
+        for content in tree.drain_observations() {
+            if let Err(error) = ledger.append_observation(&tree.execution_id, content) {
+                observation_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = observation_error {
+            return Err(error.into());
+        }
+        interface.publish(&mut ledger, false, false, "Starting Agent session…")?;
         tui_thread = if let Some(address) = &web_address {
-            web::start(address, interface.clone())?;
+            web::start(address, interface.clone(), ledger.reader())?;
             None
         } else {
-            Some(tui::start(interface.clone())?)
+            Some(tui::start(interface.clone(), ledger.reader())?)
         };
         let result = execution::run(
             &mut stream,
@@ -423,6 +434,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &session,
             &runtime_capabilities,
             &interface,
+            &mut ledger,
             (events, receiver),
         );
         result
@@ -497,14 +509,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Ok(())
     })();
-    interface.publish(&tree, false, false, "Stopped");
-    interface.disconnect();
+    let observation_result = (|| -> io::Result<()> {
+        let mut failure = None;
+        for content in tree.drain_observations() {
+            if let Err(error) = ledger.append_observation(&tree.execution_id, content) {
+                failure.get_or_insert(error);
+            }
+        }
+        if let Err(error) = interface.publish(&mut ledger, false, false, "Stopped") {
+            failure.get_or_insert(error);
+        }
+        if let Err(error) = interface.disconnect(&mut ledger) {
+            failure.get_or_insert(error);
+        }
+        failure.map_or(Ok(()), Err)
+    })();
     if let Some(thread) = tui_thread {
         let _ = thread.join();
     }
     // Cleanup failure must not skip closing the cloned reader socket or
     // reaping the Adapter. Preserve every failure instead of hiding one.
     let mut errors = Vec::new();
+    if let Err(error) = observation_result {
+        errors.push(format!("Observation history incomplete: {error}"));
+    }
     if let Err(error) = result {
         errors.push(format!("Agent execution/shutdown: {error}"));
     }

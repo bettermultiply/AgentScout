@@ -3,6 +3,51 @@
 use super::*;
 
 impl SpeculativeTree {
+    pub fn drain_observations(
+        &mut self,
+    ) -> Vec<crate::control_plane::observation::ObservationContent> {
+        std::mem::take(&mut self.pending_observations)
+    }
+
+    pub(crate) fn change_status(
+        &mut self,
+        id: &str,
+        status: BranchStatus,
+        reason: &str,
+    ) -> io::Result<()> {
+        let branch = self.branch_mut(id)?;
+        if branch.status == status {
+            return Ok(());
+        }
+        branch.status = status;
+        self.pending_observations.push(
+            crate::control_plane::observation::ObservationContent::StatusChanged {
+                branch_id: id.into(),
+                status,
+                reason: Some(reason.into()),
+            },
+        );
+        Ok(())
+    }
+
+    pub(super) fn change_authority(&mut self, id: &str) -> io::Result<()> {
+        self.branch(id)?;
+        if self.authority_branch_id.as_deref() == Some(id) {
+            return Ok(());
+        }
+        let previous = self.authority_branch_id.replace(id.into());
+        if let Some(old) = &previous {
+            self.branch_mut(old)?.role = BranchRole::Candidate;
+        }
+        self.branch_mut(id)?.role = BranchRole::Authority;
+        self.pending_observations.push(
+            crate::control_plane::observation::ObservationContent::AuthorityChanged {
+                branch_id: id.into(),
+                previous_authority: previous,
+            },
+        );
+        Ok(())
+    }
     pub fn with_workspace(
         agent_id: impl Into<String>,
         root: impl Into<PathBuf>,
@@ -77,6 +122,7 @@ impl SpeculativeTree {
         parent_branch_id: Option<String>,
         role: BranchRole,
         status: BranchStatus,
+        speculation_kind: Option<ActionKind>,
     ) -> io::Result<()> {
         if self.branches.contains_key(branch_id) {
             return Err(invalid_input("branch id already exists"));
@@ -101,6 +147,23 @@ impl SpeculativeTree {
                 execution_state: Default::default(),
             },
         );
+        self.pending_observations.push(
+            crate::control_plane::observation::ObservationContent::BranchCreated {
+                branch_id: branch_id.into(),
+                parent_branch_id: self.branch(branch_id)?.parent_branch_id.clone(),
+                role,
+                edge_id: None,
+                speculation_kind,
+            },
+        );
+        self.pending_observations.push(
+            crate::control_plane::observation::ObservationContent::StatusChanged {
+                branch_id: branch_id.into(),
+                status,
+                reason: Some("Branch created".into()),
+            },
+        );
+        self.emit_environment(branch_id, RuntimeExecutionState::Unknown)?;
         Ok(())
     }
 

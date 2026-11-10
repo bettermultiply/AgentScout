@@ -262,7 +262,7 @@ pub struct BranchExecutionState {
 }
 
 /// 一个 Agent 的完整投机树视图。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeculativeTree {
     pub agent_id: String,
     #[serde(default)]
@@ -307,6 +307,8 @@ pub struct SpeculativeTree {
     next_generation: u64,
     #[serde(default = "first_id")]
     next_command_id: u64,
+    #[serde(skip)]
+    pending_observations: Vec<crate::control_plane::observation::ObservationContent>,
 }
 
 impl SpeculativeTree {
@@ -333,6 +335,7 @@ impl SpeculativeTree {
             shutdown_deadline: None,
             next_generation: 1,
             next_command_id: 1,
+            pending_observations: Vec::new(),
         }
     }
 
@@ -596,7 +599,6 @@ struct PendingCommand {
     operation_id: Option<String>,
     generation: u64,
 }
-
 
 fn operation_name(operation: CommandOperation) -> &'static str {
     match operation {

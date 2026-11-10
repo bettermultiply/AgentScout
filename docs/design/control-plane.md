@@ -74,6 +74,8 @@ Coordinator 不使用固定价值公式替代 Policy 的跨 Edge 权衡，也不
 
 Ledger 以异步旁路记录控制面需要保留的运行事实，包括 Policy 决策、Branch 与 Proposal 状态变化、验证依据、效果与 obligation 处理结果、资源使用、取消与清理结果、Adapter 映射结果与 Runtime 失败。它用于状态对齐、问题定位、shadow/replay 和契约校验；它不从记录中重新决定生命周期，也不代替 Runtime 持有执行状态。
 
+Ledger 是观察事件日志的唯一保存者，在追加时分配同一运行内连续递增的序号，并直接提供状态事件集和按序号补发的只读接口。读取完整历史不得阻塞追加。Tree 在创建 Branch、切换 Authority、改变生命周期和环境状态的统一入口产生事件，由协调循环取走并交给 Ledger；事件记录实际转换及其原因，保留同一次处理中连续经过的中间状态。观察日志只承担观察和事实记录，不要求据此在崩溃后重建整棵树，也不为恢复逐次记录完整树状态。
+
 已经退出活动控制范围、移交 Ledger 的 Branch 由 Ledger 承担保存责任。写入失败时 Ledger 继续持有该记录，并报告这次运行的历史不完整；不得在返回错误的同时静默释放它，也不因此把 Branch 重新放回活动 Tree。记录成功写出的判定不包含强制 `flush`，Ledger 不对已失败的文件内容作回滚或去重承诺。
 
 ## 3. 失败处理：回到"Branch 从未创建"
@@ -88,7 +90,7 @@ Ledger 以异步旁路记录控制面需要保留的运行事实，包括 Policy
 
 ## 5. 只读观察
 
-控制面对外提供受限的观察事件，不直接公开 Speculative Tree、控制命令、checkpoint 或 Runtime 内部对象。首次读取取得完整事件快照及其对应的最新序号；之后通过 SSE 持续接收增量，断线后携带最后收到的序号补发。快照是观察事件从头累积的结果，不维护另一套独立的树事实。每个事件包含全局递增序号、记录时刻和所属 task；序号在同一控制面运行内覆盖所有观察事件。
+控制面对外提供受限的观察事件，不直接公开 Speculative Tree、控制命令、checkpoint 或 Runtime 内部对象。首次读取取得状态事件集及其对应的最新序号；状态事件集是从第 1 号到该序号的完整有序事件读取，客户端自行折叠得到展示状态。之后通过 SSE 持续接收增量，断线后携带最后收到的序号补发，不维护另一套独立的树事实。每个事件包含全局递增序号、记录时刻和所属 task；序号在同一控制面运行内覆盖所有观察事件。
 
 树结构事件描述 Branch 创建（identity、Parent、Authority/Candidate、所属 Edge、投机对象类型）与权威切换（新旧 Authority）。生命周期事件使用 `BranchStatus` 的 Created、Running、AwaitingValidation、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned，记录新状态与已知原因。环境事件描述已确认的执行承载、独立 Instance、隔离环境嵌套及关键配置摘要，并区分环境清理结果。未知事实保持未知，命令已发送不表示环境已建立或清理成功。
 

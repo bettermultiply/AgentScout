@@ -3,6 +3,7 @@ use super::{
     ui::{Interface, Request},
     view,
 };
+use ascout::control_plane::ledger::LedgerReader;
 use std::io::{self, Read, Write};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -19,7 +20,7 @@ impl Drop for Terminal {
     }
 }
 
-pub fn start(interface: Interface) -> io::Result<JoinHandle<()>> {
+pub fn start(interface: Interface, reader: LedgerReader) -> io::Result<JoinHandle<()>> {
     let mut original = std::mem::MaybeUninit::uninit();
     if unsafe { libc::tcgetattr(0, original.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
@@ -36,14 +37,14 @@ pub fn start(interface: Interface) -> io::Result<JoinHandle<()>> {
     io::stdout().flush()?;
     Ok(std::thread::spawn(move || {
         let _terminal = Terminal(original);
-        if let Err(error) = run(&interface) {
+        if let Err(error) = run(&interface, &reader) {
             eprintln!("TUI: {error}");
             let _ = interface.request(Request::Shutdown);
         }
     }))
 }
 
-fn run(interface: &Interface) -> io::Result<()> {
+fn run(interface: &Interface, reader: &LedgerReader) -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for byte in io::stdin().lock().bytes() {
@@ -58,7 +59,7 @@ fn run(interface: &Interface) -> io::Result<()> {
     let (mut scroll, mut previous) = (0usize, String::new());
     let mut hint = String::new();
     loop {
-        let state = interface.run_view();
+        let state = super::ui::run_view(reader.state_event_set());
         if !state.connected {
             break;
         }

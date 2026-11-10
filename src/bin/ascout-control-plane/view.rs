@@ -86,49 +86,28 @@ pub fn structured(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ascout::control_plane::agent_control::{
-        BranchRecord, BranchRole, BranchStatus, SpeculativeTree,
-    };
+    use ascout::control_plane::agent_control::{BranchRole, BranchStatus};
     #[test]
     fn invalid_selection_is_explicit_and_valid_selection_is_read_only() {
-        let branch = BranchRecord {
+        let branch = ObservedBranch {
             branch_id: "authority".into(),
             parent_branch_id: None,
             role: BranchRole::Authority,
             status: BranchStatus::Running,
-            generation: 1,
-            execution_position: Default::default(),
-            proposal_id: None,
-            assumption_set: Vec::new(),
-            pending_operations: Vec::new(),
-            execution_state: Default::default(),
+            runtime: None,
+            reason: None,
         };
-        let mut tree = SpeculativeTree::new("agent".into());
+        let mut tree = ObservedTree::default();
         tree.authority_branch_id = Some("authority".into());
-        tree.history_root_branch_id = Some("authority".into());
         tree.branches.insert("authority".into(), branch);
         for input in ["0", "2", "abc", "", "-1"] {
             assert!(
-                select_branch(
-                    &super::super::ui::Interface::new(&tree, |_| Ok(()))
-                        .run_view()
-                        .tree,
-                    input
-                )
-                .unwrap_err()
-                .contains("无效 Branch 编号")
+                select_branch(&tree, input)
+                    .unwrap_err()
+                    .contains("无效 Branch 编号")
             );
         }
-        assert_eq!(
-            select_branch(
-                &super::super::ui::Interface::new(&tree, |_| Ok(()))
-                    .run_view()
-                    .tree,
-                "1"
-            )
-            .unwrap(),
-            "authority"
-        );
+        assert_eq!(select_branch(&tree, "1").unwrap(), "authority");
         assert_eq!(tree.authority_branch_id.as_deref(), Some("authority"));
     }
 }
