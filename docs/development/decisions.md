@@ -451,7 +451,8 @@ lower 深度上限、内部允许状态目录重叠开关。父目录变化保�
 diff；测试必须精确计入对应数据面会报告的目录。
 
 **验证边界**：用户第三轮 `log-3.txt` 已进入真实 btrfs Chain/Flatten/mixed，但
-Chain/mixed 因 EXDEV、Flatten 因缺父目录预期失败；当前修复后仍需重跑特权脚本。
+Chain/mixed 因 EXDEV、Flatten 因缺父目录预期失败；第四轮 `log-4.txt` 已验证修复后
+三项成功路径，详见下方第四轮记录。
 
 **废弃记录**：`FilesystemBackend::mount_uses_flattening` 及“flatten 只由状态目录
 重叠决定”的规则被删除；`launch_lowers` 不再因该判断忽略 lower 层，始终使用
@@ -459,6 +460,14 @@ Chain/mixed 因 EXDEV、Flatten 因缺父目录预期失败；当前修复后仍
 显式判断，不再有对挂载恒定的辅助函数。
 
 # 2026-11-10：第三轮特权失败修复与证据
+
+此前 send dump 修复历史：基线 `a37e75c` 的 `log.txt` 中宿主原始能力检查通过，
+Rust btrfs 测试却在 diff 断言失败、未到 accept。解析器未去掉 stream snapshot
+根（实际 `./upper/`）、只接受箭头 rename 而非真实 `dest=`、输出 `modify` 而非
+契约 `change`。修复按 snapshot 根和 inode 路径生成最终增量，临时创建/rename
+不产生伪删除；真实目录 rename 只扫描目标子树补足未修改子项。真实 dump 格式
+回归先失败后通过，accept 共用增量视图同步修复。随后 `log-2.txt` 319–324 行的
+两个旧特权测试通过，仅覆盖当时 Flatten 与 direct-root，不外推其它布局。
 
 - btrfs 挂载存储使用父 volume 子卷，内部含 upper/work。OverlayFS copy-up 的
   work→upper rename 必须位于同一子卷；普通用户真实回归已复现旧布局 errno 18，
@@ -485,5 +494,25 @@ Chain/mixed 因 EXDEV、Flatten 因缺父目录预期失败；当前修复后仍
 摘要交叉核对取代。`log-3.txt` 中 4 执行/1 通过与 0/7 误判不是实际只执行了
 1 个或没有执行进程测试。
 
-本轮无 sudo/特权挂载，用户日志三份保留；修复后的 btrfs send/receive、accept 与
-严格删除端到端仍待用户运行 `scripts/priv-check.sh`。不提交不推送，由主助手审查。
+此修复轮未运行 sudo/特权挂载，当时保留的三份用户日志未改；后续用户第四轮
+运行完成下述验证。历史上的“修复后待特权重跑”状态已结束。
+
+# 2026-11-10：第四轮特权验证通过与范围
+
+用户 `log-4.txt` 784–787 行为 Chain、Flatten、mixed、direct-root 四测试逐项 ok，
+816 行为 4 passed、0 failed、0 ignored；三项 btrfs 场景均选中真实 btrfs，
+`incremental_diff=true fast_delete=true`。状态目录位于根 btrfs 挂载，workspace 在
+独立 `/tmp` tmpfs，默认非重叠布局成立。7 项进程测试全通过、0 failed、0 ignored，
+自动机制为 cgroup，强制 process_group fallback 也通过。原始子卷创建、只读快照、
+增量 send dump、严格删除及初始 userns 直接 lower=/ 均通过；脚本 830 行退出 0，
+835–848 行全部 PASS，最终 `ALL PRIVILEGED CHECKS PASSED`。
+
+亲读 `tests/privileged.rs` 与 `tests/support.rs` 确认：Chain/Flatten 检查实际布局、
+真实进程修改/删除/新建、含父目录的精确 diff、accept 发布及后续真实视图与清理；
+mixed 检查两代 Chain→Flatten、accept 回 child1 且 root 不变及清理。accept 传入
+`target_mount_pid=None`，不是运行中 live-target 重放验收；不外推全部内核生成的
+overlay 元数据、特殊文件/ACL/ownership、偶发超时根因或物化完成。
+
+废弃的 `priv_btrfs_fork_diff_accept_discard` 已由 Chain/Flatten/mixed 三项替代，
+不再作为当前测试名单；先前失败与修复过程留在本文件，正式状态以第四轮证据为准。
+本次仅同步文档，不改代码、不重跑 Rust/特权测试、不提交；所有用户 `log*.txt` 保留。

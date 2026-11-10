@@ -76,16 +76,17 @@
   - 父 upper/lower 和挂载不变。
   - 链布局下 accept 优先走 `delta_since`（子 upper 只含本分支改动）；只有
     Flatten 才用 `btrfs_delta`（拿 S 全量与子 upper 比较）。否则 Chain 会把
-    父内容全部误判为删除。用户 `log-3.txt` 已执行两种布局与 mixed 测试，但失败
-    于写入或 diff 预期；修复后的成功路径仍需特权重跑，见下文。
+     父内容全部误判为删除。用户 `log-4.txt` 已验证两种布局与 mixed 的成功路径，
+     包括真实进程写入、精确 diff、accept 后真实视图及 discard 清理。
   - btrfs 只有在 `incremental_diff=true` 时才被选为数据面；探测真实执行
     `btrfs send -p <snapshot> <snapshot> | btrfs receive --dump`。失败则降级
     overlay 并在日志/能力中说明。btrfs diff/accept 已实现：diff 解析 send dump，
     accept 用同一 dump 构建增量视图后走 live-mount/openat2 重放。增量 diff 快照
     父 volume，dump 排除内部 work 和 volume 元数据，只解释 upper 子树并保留
-    其中父目录变化。本机没有 send 权限，完整 btrfs 测试会 SKIP；无特权真实
-    create/snapshot/rename/mark/reload 与 dump 解析已有回归。用户第三轮已执行
-    Chain/Flatten/mixed，修复后仍需重跑 `scripts/priv-check.sh` 才能验证 accept。
+     其中父目录变化。普通用户无 send 权限时会 SKIP 完整 btrfs 测试；无特权真实
+     create/snapshot/rename/mark/reload 与 dump 解析已有回归。用户第四轮特权运行
+     已验证 Chain/Flatten/mixed 的 fork/diff/accept/discard，能力为
+     `incremental_diff=true`、`fast_delete=true`。
 - **btrfs 快照副本（overlay 方案 2）**
   - 探测 `probe_btrfs_snapshot_copies`：建子卷、写文件、只读快照、把快照作为
     overlay lower 真实 bwrap 挂载，再走 btrfs-aware 递归删除路径确认能删净。
@@ -212,9 +213,8 @@
 
 - overlay fork 的副本不是冻结快照：并发写时各文件可能来自不同时刻；是否冻结
   由 BaseRuntime/ProcessBackend 在操作窗口内负责。
-- btrfs 低权限下通常不满足 `incremental_diff`，会降级 overlay；用户第三轮特权
-  日志已选中 btrfs，Chain/mixed 在写入时报 EXDEV，Flatten 在 diff 预期失败，
-  修复后的端到端尚未重跑。
+- btrfs 低权限下通常不满足 `incremental_diff`，会降级 overlay；用户第四轮特权
+  日志已选中真实 btrfs，并通过 Chain/Flatten/mixed 的端到端场景。
 - accept 直接写 upper / live mount 重放均非原子。
 - 并行 `clone_upper` 未实现：reflink/快照已覆盖数据拷贝，剩余主要成本是目录项
   遍历；并行目录/xattr/whiteout 写入顺序风险未在本轮引入。
@@ -232,9 +232,6 @@
   目录；btrfs Flatten/mixed 的 send dump 也报告父目录元数据变化。生产 diff 保留
   这些目录；测试按数据面和布局精确期待文件及父目录，重复、额外项或异常 old_path
   都失败。overlay Flatten 的既有目录比较行为未改。
-- **btrfs 数据面修复后成功路径尚待特权验证**。无特权回归能验证真实子卷建立、
-  快照、同子卷 rename、mark、恢复和 dump 解析，不能替代 send/receive 与完整
-  Chain/Flatten/mixed accept、严格删除验证。
 - live-target 的偶发超时尚未复现、原因未确定。测试增加“目标已看到 x”的标记和
   spawn/观察/发布/退出计时，共用原有 30 秒期限，未延长等待。一次定向运行约
   37/37/57/107ms；这不能证明或排除高负载假设。status pipe 首行仍为无超时阻塞
@@ -242,19 +239,32 @@
 - 本机普通用户 `btrfs subvolume delete` 返回 EPERM，`fast_delete=false`；快照
   副本仍可启用，后台删除走 recursion fallback（已验证可删净），只是成本更高。
 
-## 未验证 / 需高权限
+## 特权验证结果与剩余边界
 
-- **btrfs fork/diff/accept 成功路径**：用户 `log-3.txt` 已执行四项特权测试，
-  direct-root 通过，Chain/mixed 写入 EXDEV，Flatten diff 缺父目录预期。当前
-  修复后完整 accept 路径仍待用户重跑 `scripts/priv-check.sh`，见
-  `docs/fs-backend/priv-check.md`。
-- **btrfs 数据面的 Chain/Flatten/mixed**：`in_lower` 时走 `delta_since`，否则走
-  `btrfs_delta`。`priv_btrfs_chain_layout` 与 `priv_btrfs_flatten_layout` 分别在
-  `fork_flatten_entry_limit=0` / `usize::MAX` 下验证 Chain 与 Flatten 的
-  fork/diff/accept，`priv_btrfs_mixed_generations` 验证大 Chain + 小 Flatten
-  两代混合；三者的修复后真实 btrfs 成功路径尚未通过。
-- **严格 btrfs subvolume delete ioctl**：本机 `fast_delete=false`；fallback 的
-  O(文件数) 后台删除未做大数据量性能验证。
+用户第四轮 `log-4.txt` 已通过 `scripts/priv-check.sh`：784–787 行四个指定测试
+逐项 ok，816 行为 4 passed、0 failed、0 ignored；830 行退出 0，835–848 行全部
+检查 PASS。状态目录在根 btrfs 挂载，workspace 在独立 `/tmp` tmpfs 挂载，默认
+非重叠配置；三项 btrfs 测试均为 `incremental_diff=true`、`fast_delete=true`。
+
+- `priv_btrfs_chain_layout` / `priv_btrfs_flatten_layout`：分别强制 Chain / Flatten，
+  断言 lower/upper 布局，真实进程修改、删除、新建文件，精确 diff 含父目录、无
+  重复或异常 old_path；accept 无冲突且 published，随后启动的真实进程看到结果。
+  discard 后环境、快照、层及 trash 清空。
+- `priv_btrfs_mixed_generations`：阈值 32，大 root upper Chain、小 child upper
+  Flatten；grandchild 真实视图和精确 diff 正确，accept 回 child1 后可见且 root
+  视图不变；discard 后环境、快照与 trash 清空。
+- `priv_direct_root_overlay_is_available_in_initial_userns`：初始 user namespace
+  下 root + `unshare --mount` 的直接 `lower=/` bwrap 命令成功。
+- 原始 btrfs create、只读 snapshot、增量 send dump、严格 subvolume delete 均通过。
+  7 项进程测试全部通过、0 ignored：自动选择 cgroup，强制 `process_group` fallback
+  也通过。详细名单与运行入口见 `docs/fs-backend/priv-check.md`。
+
+剩余边界：
+
+- 上述 accept 调用的 `target_mount_pid=None`，验证直接写目标 upper 后的真实视图，
+  不代表本轮验证了运行中 live target 的重放或偶发超时根因。
+- `fast_delete=true` 与严格删除已在此次特权环境验证；普通用户仍可能为 false。
+  fallback 的 O(文件数) 后台删除未做大数据量性能验证。
 - 真实内核生成的 redirect/opaque/metacopy 只用合成 xattr 测试；whiteout 字符
   设备已在真实 bwrap 测试中验证。
 - live replay 的 `openat2` 符号链接逃逸测试覆盖了绝对符号链接；其它特殊文件/
@@ -267,12 +277,10 @@
 runtime::backends::filesystem::tests::privileged::priv_ --show-output
 --format=pretty --color=never --test-threads=1` 的 4 个测试。
 状态目录必须位于后端隔离的挂载之外，脚本和测试都会断言这一点。live mount
-重放不要求高权限，本机实际运行并通过。当前本机 btrfs 测试会打印 SKIP，因为
-没有 btrfs send/receive 权限；本轮未运行 sudo 或特权挂载，不能宣称特权通过。
+重放不要求高权限，本机实际运行并通过。普通用户缺少 btrfs send/receive 权限时
+会打印 SKIP，不作为特权通过证据；特权通过证据来自用户 `log-4.txt`。
 
-第三轮脚本证据：两个进程测试命令成功，但测试内日志打断结果行，脚本误报 0/7
-执行后仍打印该组 PASS；特权测试实际 4 执行、1 通过、3 失败，却把通过数当执行数。
-当前 `check-test-output.py` 交叉核对精确发现名单、命令退出码、逐项结果和摘要，
+`check-test-output.py` 交叉核对精确发现名单、命令退出码、逐项结果和摘要，
 执行数、通过数、ignored 分开汇总，任何 SKIP 或组内错误均不打印该组 PASS。
 `scripts/test-priv-check.py` 保留假命令失败场景，增加真实 libtest 交错输出回归，
 共 24 场景；交错场景已先 red 后 green。
@@ -769,7 +777,7 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | 相邻挂载同时 overlay | **实测**：bwrap 同时 overlay /home 与 /tmp，exit 0 |
 | 嵌套挂载在原始 mount 实验中可同时 overlay（先保存 child lower，再 parent，再 child） | **实测**：父子 tmpfs overlay 后两个文件都可见；当前 bwrap 参数实现未接入 |
 | 逐挂载 overlay 的挂载数/元数据成本 | **实测**：13 个可写挂载；200 次 mount+umount ~634ms；stat +34% |
-| btrfs fork/diff/accept 端到端 | **尚未通过**：`log-3.txt` 已执行 Chain/Flatten/mixed，Chain/mixed 写入 EXDEV，Flatten diff 缺父目录预期；修复后完整 accept/严格清理仍待特权重跑 |
+| btrfs fork/diff/accept/discard 端到端 | **用户实测**：`log-4.txt` Chain/Flatten/mixed 全通过，真实 btrfs `incremental_diff=true fast_delete=true`；accept 无 live target，随后真实启动确认视图，含清理断言 |
 | upper/work 同 btrfs 子卷 | **实测**：旧创建路径 work→upper rename 稳定 errno 18，修复后真实 create/snapshot/rename/mark/reload 回归通过；恢复拒绝不兼容布局并保留数据 |
 | 测试结果校验不受日志交错影响 | **实测**：真实 libtest 交错输出先 red 后 green；24 个脚本场景覆盖非零退出、精确名单、逐项结果、摘要、ignored、SKIP |
 | 全部 overlay 目标就绪 | **实测**：`readiness_requires_every_overlay_and_decodes_mount_paths` 先 red 后 green；不延长轮询期限 |

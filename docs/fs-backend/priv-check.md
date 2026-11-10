@@ -211,13 +211,29 @@ python3 scripts/test-priv-check.py
 
 每个失败场景都断言不出现 `ALL PRIVILEGED CHECKS PASSED`。
 
+## 已验证结果（2026-11-10，用户 `log-4.txt`）
+
+- 784–787 行四项特权测试逐项 ok；816 行为 4 passed、0 failed、0 ignored。
+  三项 btrfs 测试均选中真实 btrfs 数据面，`incremental_diff=true`、
+  `fast_delete=true`；状态目录位于根 btrfs 挂载，workspace 位于 `/tmp` tmpfs，
+  默认配置的非重叠布局检查通过。
+- Chain、Flatten 均完成上文的布局断言、真实进程修改/删除/新建、精确 diff、
+  accept 后真实视图检查和 discard 清理。mixed 使用阈值 32 验证 Chain → Flatten
+  两代视图、accept 回 child1 且 root 不变，以及环境/快照/trash 清空。
+- 原始 btrfs create、只读 snapshot、增量 send dump、严格子卷删除，以及脚本与
+  Rust 的初始 user namespace 直接 `lower=/` 检查均通过。
+- 7 项进程测试全部通过、0 failed、0 ignored（591、617 行）；自动机制为 cgroup，
+  强制 `process_group` fallback 测试也通过（610 行）。
+- 脚本退出 0（830 行），汇总全部 PASS（835–848 行），最终为
+  `ALL PRIVILEGED CHECKS PASSED`；不是只列出测试、SKIP 或仅编译成功。
+
 ## 已知边界
 
 - 脚本不会自动安装 btrfs-progs / bubblewrap / sudo。
 - 需要 root 的步骤失败时会明确标为 `FAIL` 或 `NEEDS_ROOT`，不会伪装成 `PASS`。
 - 普通用户无法在没有 sudo 的情况下把状态目录放到 `/`；此时脚本明确失败并
   说明需要什么。
-- 用户 `log-3.txt` 已实际执行四项特权测试：direct-root 通过，Chain/mixed 写入
-  EXDEV，Flatten 的预期缺父目录。修复后的同子卷 upper/work、send 路径与
-  Chain/Flatten/mixed accept/严格清理尚需用户重新运行脚本。本机无特权回归只验证
-  真实 create/snapshot/rename/mark/reload 与 dump 解析，不声称完整特权通过。
+- 三项 btrfs 场景的 accept 使用 `target_mount_pid=None`，直接写目标 upper，随后
+  真实启动确认结果；不等于运行中 live target 的 accept 验证，也不确定其偶发超时根因。
+- 本次不覆盖全部内核生成的 redirect/opaque/metacopy、特殊文件/ACL/ownership，
+  不代表物化已实现；这些边界见 `current-state.md`。
