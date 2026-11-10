@@ -106,8 +106,8 @@ def extent(data, *, policy_config, capabilities):
 
 `admit` 通过时 Tree 创建 Chance 并生成 `chance-<n>` 不透明 id；`select` 的 `frontier_view`、`predict` 的 `assumption_set`、`launch`/`predict` 的 `chance_context` 以及观察事件中的 `chance_id` 都使用这个 id。`branch_created` 携带 Branch 所属 Chance；初始权威 Branch 为 null。控制面不再用 operation id 冒充 Chance id。
 
-`extent` 与 `effect` 目前由 Agent 接入侧在真实执行边界按同一编译 Policy 求值，并通过 `branch_suspended` 的原因让控制面记录 Blocked；`rebalance` 由控制面在 Tree 版本变化后求值并下发 pause/resume/preempt。控制面不重复求值 extent/effect，因此没有其它接入形式的实现时，这两类 Decision 不会在控制面侧单独生效。
+`extent` 与 `effect` 由 Agent 接入侧的通用层在真实执行边界按同一编译 Policy 求值，并通过 `branch_suspended` 的原因让控制面记录 Blocked；`rebalance` 由控制面在 Tree 版本变化后求值并下发 pause/resume/preempt。控制面不重复求值 extent/effect，因此没有其它接入形式的实现时，这两类 Decision 不会在控制面侧单独生效。
 
-当前是最小接线：extent 只在 Pi 的工具 Hook 边界按 Hook 次数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolved_pending` 或取消释放；effect 只处理接入侧对 candidate 外部工具效果求值的 `block`/`deny` 计划，模型推理作为 PURE 步骤不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。
+当前是最小接线：extent 在 Pi 接入的工具执行点按 action 计数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolved_pending` 或取消释放；effect 只处理接入侧对 candidate 外部工具效果求值的 `block`/`deny` 计划，模型推理作为 PURE 步骤不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。
 
-嵌套 Chance 还没有完整接通：Chance 的权威等待点目前要求父 Branch 是当前权威。候选 Branch 在继续执行时再次 `admit` 得到的 Chance 会在下一次清理检查中被视为等待点失效并按 `Discarded(Failed)` 收敛，因此当前只支持从权威 Branch 产生的单层投机。设计中的嵌套关系已保存在 Chance 的 `parent_chance_id` 上，接入嵌套需要单独调整等待点有效性判断与 Runtime 承载。
+嵌套 Chance 已按 Chance 语义接通：权威等待点只要求父 Branch 仍存活（当前权威或候选），父 Branch 不是全局权威不再使 Chance 失效，候选 Branch 上再次 `admit` 的 Chance 与根 Branch 上的 Chance 一样走 Pending、Running、Resolving、Accepted/Discarded。嵌套候选 Branch 的 `AssumptionSet` 携带祖先未确认的 Proposal；祖先 Chance 未 Accepted 前它没有提交资格，match 成功也停留到可提交时再按同一 Promote 流程处置。父 Branch 进入 Discarding/Discarded 时，其上未收敛的 Chance 以 `Discarded(AncestorInvalidated)` 收敛，这是嵌套失效的唯一传播路径；候选 Branch 的外部效果仍受 effect 闸门约束。尚未覆盖的是 Runtime 侧的嵌套执行承载和候选状态重新挂载，当前只保证控制面状态、提交资格与失效传播。

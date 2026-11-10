@@ -2,6 +2,14 @@
 
 本文记录已接受的实现架构与验证决策。目标语义归 `docs/design/` 所有。
 
+## 2026-11-10：嵌套 Chance 接通与提交资格
+
+废弃“Chance 的权威等待点要求父 Branch 是当前权威”的实现限制。Chance 的权威值来自父 Branch 自己的真实执行，只要父 Branch 仍存活（权威或候选），等待点就成立；候选 Branch 上再次 `admit` 的嵌套 Chance 与根 Branch 上的 Chance 使用同一套 `ChanceStage`、验证和失效规则。嵌套候选 Branch 的 `AssumptionSet` 含祖先未确认的 Proposal，祖先 Chance 未 Accepted 前没有提交资格；match 成功但尚不可提交时保留在 Resolving，待祖先确认后再按同一 Promote 流程处置。父 Branch 进入 Discarding/Discarded 时，其上未收敛的 Chance 以 `Discarded(AncestorInvalidated)` 收敛，这是嵌套失效的唯一传播路径。候选 Branch 的外部效果仍受 effect 闸门约束。
+
+## 2026-11-10：Agent 接入侧通用层与 Pi 适配分离
+
+Agent 接入侧的通用逻辑迁到 `agent-access/core/`：本地 Policy 求值调用、`extent` 计数与求值、`effect` 闸门、`branch_suspended` / `branch_resumed` 上报和等待控制面处置的 hold。`agent-access/pi/main.ts` 只做 Pi 执行点接入并调用通用层，行为不变；产品专有的消息、checkpoint、session 和 SDK 细节不进入通用层。`extent` 与 `effect` 由通用接入层求值，Product Integration 不求值；控制面代码不新增求值。接口、覆盖范围与限制见 `docs/development/agent-access.md`。
+
 ## 2026-11-10：Chance 状态与 BranchStatus 合并，废弃 BranchPhase 等旧实现
 
 Chance 现在是 Tree 中 `admit` 通过时创建、拥有不透明 id 并持有 Proposal、关联 Branch、权威值状态与验证依据的记录；Branch 只保存 `chance_id`。`select` 的输入是全部 Pending Chance 的 `frontier_view`（字段 `chance_id`），不再只处理单个机会；`predict` 不再接收或猜测 NLE 专有的 `action` 字段。`AssumptionSet` 改为 `(chance_id, proposal_id)` 引用。

@@ -53,6 +53,8 @@ AssumptionSet = frozenset[Assumption]
 
 Chance 具有与 Branch 不同的状态语义。`ChanceStage` 表达投机机会从待选到收敛的过程：Pending 表示已 `admit`、等待 `select`；Running 表示已被选中，正在预测、执行或取得权威值；Resolving 表示权威值已到，正在 `match` 与处置；Accepted(proposal_id) 表示某个 Proposal 对应的结果成为权威延续；Discarded(reason) 表示机会收敛为抛弃，原因取 MatchRejected、NotSelected、AncestorInvalidated、BudgetExhausted 或 Failed。与 Chance 并行，`AuthorityState` 表达权威值是否被请求与取得：NotRequested、Fetching、Arrived、Unavailable；`launch` 为 false 只表示暂不取权威值，不取消已创建的 Proposal 或 Branch。
 
+Chance 的权威值由它所依附的父 Branch 自己的真实执行产生。父 Branch 不必是整棵 Tree 的当前权威，只要仍作为权威或候选存活；因此候选 Branch 上再次 `admit` 的嵌套 Chance 与根 Branch 上的 Chance 使用同一套状态、验证、提交和失效规则。嵌套候选 Branch 的 `AssumptionSet` 同时携带祖先未确认的 Proposal；祖先 Proposal 未确认前它没有提交资格。父 Proposal 被否定、承载它的 Branch 被抛弃时，该 Branch 上所有未收敛的 Chance 以 `AncestorInvalidated` 收敛，依赖它们的后代 Branch 随 Branch 抛弃流程取消和清理。
+
 Branch 自身的 `BranchStatus` 合并生命周期与运行状态：Created、Running、Blocked(reason)、Finished、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned。Blocked 的原因取 ExtentReached、Rebalanced 或 EffectGate，同一时刻只保留最近一次挡住它的 Decision；Finished 表示执行已跑完、等待裁决。Blocked 与 Running 可以随对应 Decision 来回切换，但 Blocked 不使 Branch 失效。
 
 Branch 的 capabilities 规定控制面可以代表哪些主体执行相关生命周期操作，以及哪些受控主体可以获得未来的协作权限。当前生命周期 authority 由控制面依据 Policy、task 配置和 Branch 状态维护；Evaluator/resolver 是控制面编排中的角色，不是另一种世界实体。未来显式 Agent 感知时，Agent-facing capability 也只能表达受控意图，不能替代控制面固定的生命周期、Policy 校验和执行承载约束。

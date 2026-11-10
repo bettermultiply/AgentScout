@@ -28,6 +28,8 @@ Product Integration 是面向具体 Agent product 的产品适配组件，负责
 
 Product Integration 从被拦截步骤的原调用返回路径自动取得成功、失败或取消结果，并将其交给 Agent 接入侧形成 outcome。它不修改 Agent 的业务逻辑，也不要求 Agent 主动调用 AScout API；具体产品适配可以了解其内部执行结构，但应将改造限制在观察和控制所需的接入范围内。只有产品确实提供真实的执行前接缝时才能声明支持该类 action；SDK 的输出观察事件（例如 `message_start`）本身不是推理前 Hook，不能冒称为此能力。
 
+`extent` 与 `effect` 属于 Agent 接入侧在本地范围内求值的 Decision，由与具体产品无关的通用接入层统一完成；Product Integration 只把产品的执行点交给通用接入侧，并执行其返回的继续、阻止、暂停或使用提供结果的处置，不自行求值 `extent` 或 `effect`。产品专有的消息、checkpoint、session 和 SDK 细节留在 Product Integration，不进入通用求值逻辑。
+
 ### 2.2 ASC-Proxy
 
 ASC-Proxy 是 Agent 接入侧与控制面之间的受管通信代理。它可以由控制面随 Agent 一起启动的进程内组件、本地 IPC 客户端、网络客户端或独立进程实现，不要求用户手工启动或直接管理。它与控制面建立通信会话，并在会话建立过程中确认通信双方的身份；在后续通信中，它通过通信凭证证明消息来自对应的 Agent 接入侧，避免信息伪造。
