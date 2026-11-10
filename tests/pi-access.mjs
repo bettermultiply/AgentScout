@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 
-for (const shutdownAt of ['completed', 'tool_wait', 'candidate_gate']) {
+for (const shutdownAt of ['completed', 'tool_wait', 'candidate_gate', 'admission']) {
 test(`runtime result commands and graceful shutdown at ${shutdownAt}`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'ascout-pi-'));
     const socketPath = join(root, 'agent.sock');
@@ -120,12 +120,23 @@ export async function createAgentSession(options) {
         cancelCompletion: true,
         toolResultInjection: true,
     });
+    if (shutdownAt === 'admission') {
+        const runner = 'import sys\npayload=b"true"\nsys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n';
+        send({command:'local_policy',branch_id:'authority',policy_digest:'test-policy',decisions:{
+            'admit.opportunity_pass':runner,'admit.feasibility_pass':runner,'extent':runner}});
+    }
     send({command:'start_branch',branch_id:'authority',workspace:root,prompt:''});
     await expectMessage(m => m.message === 'branch_started');
     send({command:'prompt',branch_id:'authority',prompt:'one tool call'});
     const inference = await expectMessage(m => m.message === 'action_started' && m.action_kind === 'model_inference' && m.branch_id === 'authority');
     const inferred = await expectMessage(m => m.message === 'action_finished' && m.action_id === inference.action_id);
     assert.equal(inferred.status, 'succeeded');
+    if (shutdownAt === 'admission') {
+        const admission = await expectMessage(m => m.message === 'speculative_admission_request');
+        assert.equal(admission.policy_digest, 'test-policy');
+        assert.equal(typeof admission.timestamp_ms, 'number');
+        return finish(['authority']);
+    }
     const pending = await expectMessage(m => m.message === 'action_started' && m.action_kind === 'tool_execution');
     assert.equal(pending.action_id, 'operation-1');
     assert.equal(pending.result_pending, true);

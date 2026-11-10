@@ -2,6 +2,10 @@
 
 本文记录已接受的实现架构与验证决策。目标语义归 `docs/design/` 所有。
 
+## 2026-11-10：对话观察移除 unverified 字段
+
+废弃 `GET /api/branches/{branch_id}/conversation` 响应与 `conversation_updated` 事件中的 `unverified` 字段，以及“候选内容必须明确标记为未验证”的旧表述。候选是否属于投机由 Branch 的角色（Authority/Candidate）与状态完整表达；对话接口改为返回该 Branch 当前的 `role` 与 `status`，前端据此显示投机身份。旧字段名仅保留在本记录。Agent Adapter 能力验证语境中的“未验证”是另一件事，含义不变。
+
 ## 2026-11-07：首版通用文件系统 Backend
 
 文件系统隔离实现为独立 Backend，仅拥有 Overlay upper/work 生命周期和 Agent

@@ -48,7 +48,6 @@ pub enum ObservationContent {
     },
     ConversationUpdated {
         branch_id: String,
-        unverified: bool,
     },
     ModelUsage {
         branch_id: String,
@@ -66,6 +65,7 @@ pub enum ObservationContent {
         branch_id: String,
         action_id: String,
         status: ActionStatus,
+        duration_ms: Option<u64>,
     },
     Settlement {
         branch_id: String,

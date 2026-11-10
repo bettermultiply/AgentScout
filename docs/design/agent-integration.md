@@ -26,7 +26,7 @@ Product Integration 是面向具体 Agent product 的产品适配组件，负责
 
 当 Agent 即将执行可管理步骤时，Product Integration 将该步骤交给 Agent 接入侧，并等待 Agent 接入侧返回处置结果。返回继续时，Product Integration 允许产品按原有路径执行该步骤；返回跳过时，Product Integration 不执行原步骤，并在需要时让当前调用沿产品原有的完成路径使用 Agent 接入侧提供的结果结束。暂停通过等待处置结果体现，不需要额外的暂停机制。
 
-Product Integration 从被拦截步骤的原调用返回路径自动取得成功、失败或取消结果，并将其交给 Agent 接入侧形成 outcome。它不修改 Agent 的业务逻辑，也不要求 Agent 主动调用 AScout API；具体产品适配可以了解其内部执行结构，但应将改造限制在观察和控制所需的接入范围内。只有产品确实提供真实的执行前接缝时才能声明支持该类 action；SDK 的输出观察事件（例如 `message_start`）不是推理前 Hook，不能冒称为此能力。
+Product Integration 从被拦截步骤的原调用返回路径自动取得成功、失败或取消结果，并将其交给 Agent 接入侧形成 outcome。它不修改 Agent 的业务逻辑，也不要求 Agent 主动调用 AScout API；具体产品适配可以了解其内部执行结构，但应将改造限制在观察和控制所需的接入范围内。只有产品确实提供真实的执行前接缝时才能声明支持该类 action；SDK 的输出观察事件（例如 `message_start`）本身不是推理前 Hook，不能冒称为此能力。
 
 ### 2.2 ASC-Proxy
 
@@ -42,7 +42,9 @@ Agent 接入协议围绕 action，而非工具或 Branch 角色组织。action �
 
 `ActionStarted` 登记 action 生命周期；`result_pending=true` 明确表示接入侧停在真实执行之前的等待边界，不能据此断言真实 action 已经执行。普通 action 事实与投机准入请求分开；普通执行无需等待控制面投机决策。`ActionFinished` 报告成功、失败、取消或超时，并携带 result 和可选 evidence；取消请求不等于已取消，控制面等待期限届满也不等于 Agent 已停止。相同 action 的结果必须与开始事实配对。
 
-当前通用协议提供显式的 `SpeculativeAdmissionRequest` 路径，只有接入侧本地 Decision 产生该请求时，控制面才会进入投机准入和预测。Pi 的工具执行前 Hook 已接入下发的 Policy artifact，并按其 `admit` 结果区分普通 action 与投机准入请求；模型推理前和 sub-agent 启动前仍没有真实 Hook，不能宣称支持这两类 action。
+`ActionStarted`、`ActionFinished` 与 `SpeculativeAdmissionRequest` 各自携带接入侧测量的 Unix 毫秒 `timestamp_ms`，该时刻由接入侧在事件发生时测量，不使用控制面收到消息的时刻。投机开始以 `SpeculativeAdmissionRequest` 的 `timestamp_ms` 为准；权威路径真实结果到达的时刻以对应 `ActionFinished` 的 `timestamp_ms` 为准。`Usage` 必须关联 `action_id`，并报告接入侧测得的模型请求开始与结束时间；控制面由此得到源侧耗时，而不是用自身记录时刻冒充执行耗时。
+
+当前通用协议提供显式的 `SpeculativeAdmissionRequest` 路径，只有接入侧本地 Decision 产生该请求时，控制面才会进入投机准入和预测。Pi 的工具执行前 Hook 已接入下发的 Policy artifact，并按其 `admit` 结果区分普通 action 与投机准入请求；模型推理前已有真实 Hook，位于 Pi 分支的 `sdk.ts`，在请求发出前执行，可延迟请求或抛错阻止。sub-agent 启动前目前仍无统一 Hook，Pi 接入声明 `subagentPreExecutionInterception: false`，暂不支持该边界。Pi 的缓存预热等后台模型调用不经过该 Hook，不得宣称所有模型请求都被拦截。
 
 Agent 连接、就绪、断开、失败、释放，以及 Branch 创建、开始、就绪、暂停、恢复、失败、释放，属于各自主体的元事件。Agent session 释放、Branch 执行释放和 Runtime 环境清理分别表达。Agent 不能报告 Tree 已 Promote/Discard，也不能代替 Runtime 确认环境清理。
 
@@ -60,7 +62,7 @@ Interposer 还负责在 Branch-local 状态或受纳管 Effect 发生前识别�
 
 用户交互入口与后端 Agent 执行实体分离：用户始终使用同一 AScoutAgent 视图，接入实现依据控制面已确认的权威执行处理输入、输出和中断路由。Promote 不要求用户重新连接、加载另一个 session 或等待候选会话结束，也不为路由变化取消或重启候选正在进行的执行。已展示内容不可撤回，未获接受的候选内容不得作为正式回复提前发布；切换时必须保持输入归属及输出顺序，旧主路径失去发布权后仍按生命周期规则停止和清理。运行能力不满足时应拒绝该接替路径，不能以路由切换伪造接受或效果处理完成。
 
-用户可通过独立的只读观察查看候选状态及内容，内容必须明确标记为未验证并与主对话分开。接入侧按 Branch 报告实际模型、工具和执行活动；控制面提供预测、比较、处置与生命周期事实。界面应区分请求已发送、实际开始、执行结束和清理确认，不能把未知状态显示为已完成。只读观察不使候选获得用户对话或裁决权限，也不把其内容注入其他 Branch 的上下文。
+用户可通过独立的只读观察查看候选状态及内容，候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份。接入侧按 Branch 报告实际模型、工具和执行活动；控制面提供预测、比较、处置与生命周期事实。界面应区分请求已发送、实际开始、执行结束和清理确认，不能把未知状态显示为已完成。只读观察不使候选获得用户对话或裁决权限，也不把其内容注入其他 Branch 的上下文。
 
 AScout 管理显示区域、Tree、窗口选择和控制事实，并将用户输入和中断交给相应接入实现。接入侧通过产品公开 SDK 报告消息、思考、工具调用、结果和会话事件；AScout 的 UI 负责排版这些事实，不嵌入或修改产品的终端画面，也不调用产品内部展示组件。浏览器 UI 与 TUI 通过共同的事实和操作接口工作，彼此不依赖绘制实现。窗口切换不等于会话切换或重启；候选观察保持只读。对应产品的交互能力按实际接入范围整合，未支持的能力明确说明，不承诺不同产品的全部交互完全一致。
 

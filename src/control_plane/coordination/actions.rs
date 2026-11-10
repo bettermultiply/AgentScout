@@ -32,6 +32,7 @@ impl SpeculativeTree {
             task_id,
             action_kind,
             parent_action_id,
+            timestamp_ms,
         } = message
         else {
             return Err(io::Error::new(
@@ -61,6 +62,7 @@ impl SpeculativeTree {
             name: tool_name.clone(),
             arguments: arguments.clone(),
             checkpoint: checkpoint.clone(),
+            timestamp_ms,
         };
         self.handle_message(fact)?;
         let mut actions = ControlActions::default();

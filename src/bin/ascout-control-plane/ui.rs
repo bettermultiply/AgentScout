@@ -10,12 +10,25 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Default, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct Conversation {
     pub inherited: Vec<Value>,
     pub messages: Vec<Value>,
     pub streaming: String,
-    pub unverified: bool,
+    pub role: BranchRole,
+    pub status: BranchStatus,
+}
+
+impl Default for Conversation {
+    fn default() -> Self {
+        Self {
+            inherited: Vec::new(),
+            messages: Vec::new(),
+            streaming: String::new(),
+            role: BranchRole::Authority,
+            status: BranchStatus::Created,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -132,6 +145,7 @@ pub enum Request {
 pub struct Interface {
     task_id: String,
     conversations: Arc<Mutex<BTreeMap<String, Conversation>>>,
+    action_starts: Arc<Mutex<BTreeMap<(String, String), u64>>>,
     reader: LedgerReader,
     requests: Arc<dyn Fn(Request) -> Result<(), String> + Send + Sync>,
 }
@@ -145,6 +159,7 @@ impl Interface {
         Self {
             task_id,
             conversations: Default::default(),
+            action_starts: Default::default(),
             reader,
             requests: Arc::new(requests),
         }
@@ -159,7 +174,8 @@ impl Interface {
             .get(&branch.branch_id)
             .cloned()
             .unwrap_or_default();
-        conversation.unverified = branch.role == BranchRole::Candidate;
+        conversation.role = branch.role;
+        conversation.status = branch.status;
         Some(conversation)
     }
     pub fn request(&self, request: Request) -> Result<(), String> {
@@ -217,7 +233,6 @@ impl Interface {
             &self.task_id,
             ObservationContent::ConversationUpdated {
                 branch_id: child.into(),
-                unverified: true,
             },
         )
     }
@@ -233,10 +248,8 @@ impl Interface {
                     .or_default()
                     .streaming
                     .push_str(text);
-                let unverified = self.conversation(branch_id).is_none_or(|c| c.unverified);
                 Some(ObservationContent::ConversationUpdated {
                     branch_id: branch_id.clone(),
-                    unverified,
                 })
             }
             AgentMessage::Transcript {
@@ -249,21 +262,33 @@ impl Interface {
                 }
                 conversation.messages.push(entry.clone());
                 drop(conversations);
-                let unverified = self.conversation(branch_id).is_none_or(|c| c.unverified);
                 Some(ObservationContent::ConversationUpdated {
                     branch_id: branch_id.clone(),
-                    unverified,
                 })
+            }
+            AgentMessage::ActionStarted {
+                branch_id,
+                action_id,
+                timestamp_ms,
+                ..
+            } => {
+                self.action_starts
+                    .lock()
+                    .unwrap()
+                    .insert((branch_id.clone(), action_id.clone()), *timestamp_ms);
+                None
             }
             AgentMessage::Usage {
                 branch_id,
                 action_id,
                 model,
                 usage,
+                started_at_ms,
+                finished_at_ms,
                 ..
             } => Some(ObservationContent::ModelUsage {
                 branch_id: branch_id.clone(),
-                action_id: action_id.clone(),
+                action_id: Some(action_id.clone()),
                 model: model.clone(),
                 input_tokens: usage["input"].as_u64(),
                 output_tokens: usage["output"].as_u64(),
@@ -271,19 +296,39 @@ impl Interface {
                 cache_write_tokens: usage["cacheWrite"].as_u64(),
                 total_tokens: usage["totalTokens"].as_u64(),
                 cost: usage["cost"]["total"].as_f64(),
-                duration_ms: None,
+                duration_ms: finished_at_ms.checked_sub(*started_at_ms),
             }),
             AgentMessage::ActionFinished {
                 branch_id,
                 action_id,
                 action_kind: ActionKind::ToolExecution,
                 status,
+                timestamp_ms,
                 ..
-            } => Some(ObservationContent::ToolFinished {
-                branch_id: branch_id.clone(),
-                action_id: action_id.clone(),
-                status: *status,
-            }),
+            } => {
+                let started = self
+                    .action_starts
+                    .lock()
+                    .unwrap()
+                    .remove(&(branch_id.clone(), action_id.clone()));
+                Some(ObservationContent::ToolFinished {
+                    branch_id: branch_id.clone(),
+                    action_id: action_id.clone(),
+                    status: *status,
+                    duration_ms: started.and_then(|start| timestamp_ms.checked_sub(start)),
+                })
+            }
+            AgentMessage::ActionFinished {
+                branch_id,
+                action_id,
+                ..
+            } => {
+                self.action_starts
+                    .lock()
+                    .unwrap()
+                    .remove(&(branch_id.clone(), action_id.clone()));
+                None
+            }
             _ => None,
         };
         if let Some(content) = content {

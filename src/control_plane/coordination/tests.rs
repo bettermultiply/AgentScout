@@ -37,6 +37,7 @@ use super::*;
             name: "tool".into(),
             arguments: json!({}),
             checkpoint: None,
+            timestamp_ms: 0,
         }
     }
 
@@ -94,6 +95,7 @@ use super::*;
             name: tool_name,
             arguments,
             checkpoint,
+            timestamp_ms: 0,
         })
         .unwrap();
         let actions = tree

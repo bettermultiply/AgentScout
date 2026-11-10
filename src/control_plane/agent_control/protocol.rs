@@ -41,6 +41,7 @@ impl SpeculativeTree {
                 action_kind,
                 status,
                 evidence,
+                timestamp_ms: _,
             } => self.handle_action_finished(
                 &task_id,
                 &branch_id,

@@ -3,6 +3,7 @@ use super::{
     ui::{Interface, Request},
     view,
 };
+use ascout::control_plane::agent_control::BranchRole;
 use ascout::control_plane::ledger::LedgerReader;
 use std::io::{self, Read, Write};
 use std::sync::mpsc;
@@ -96,7 +97,7 @@ fn run(interface: &Interface, reader: &LedgerReader) -> io::Result<()> {
                 content.push_str(&view::branch_details(
                     branch,
                     &state.tree,
-                    "运行事实见 Tab 事件视图；候选内容未验证",
+                    "运行事实见 Tab 事件视图；候选身份见角色与状态",
                 ));
             }
             if facts {
@@ -104,8 +105,8 @@ fn run(interface: &Interface, reader: &LedgerReader) -> io::Result<()> {
                     content.push_str(&view::structured(event));
                 }
             } else if let Some(conversation) = interface.conversation(id) {
-                if conversation.unverified {
-                    content.push_str("\n候选内容未验证；查看不代表接受。\n");
+                if conversation.role == BranchRole::Candidate {
+                    content.push_str("\n候选内容；查看不代表接受。\n");
                 }
                 if !conversation.inherited.is_empty() {
                     content.push_str("\n── 继承上下文 ──\n");

@@ -413,6 +413,7 @@ use super::support::*;
             name: "model".into(),
             arguments: Value::Null,
             checkpoint: None,
+            timestamp_ms: 0,
         })
         .unwrap();
         tree.handle_message(AgentMessage::ActionFinished {
@@ -423,6 +424,7 @@ use super::support::*;
             status: ActionStatus::Succeeded,
             result: Value::Null,
             evidence: None,
+            timestamp_ms: 0,
         })
         .unwrap();
         assert_eq!(

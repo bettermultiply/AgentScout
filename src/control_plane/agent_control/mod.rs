@@ -484,6 +484,8 @@ pub enum AgentMessage {
         arguments: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint: Option<Value>,
+        /// 接入侧测量的事件时刻（Unix 毫秒），不是控制面收到消息的时刻。
+        timestamp_ms: u64,
     },
     /// Explicit request from the adapter's local decision path. An ordinary
     /// ActionStarted is only an execution fact and never admits speculation.
@@ -499,6 +501,8 @@ pub enum AgentMessage {
         arguments: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint: Option<Value>,
+        /// 投机开始的接入侧测量时刻（Unix 毫秒）。
+        timestamp_ms: u64,
     },
     Transcript {
         branch_id: String,
@@ -532,15 +536,19 @@ pub enum AgentMessage {
         result: Value,
         #[serde(default)]
         evidence: Option<Value>,
+        /// 接入侧观察到的结果到达时刻（Unix 毫秒）。
+        timestamp_ms: u64,
     },
     Usage {
         branch_id: String,
-        #[serde(default)]
-        action_id: Option<String>,
+        action_id: String,
         model: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking_level: Option<String>,
         usage: Value,
+        /// 接入侧测量的模型请求开始与结束时刻（Unix 毫秒）。
+        started_at_ms: u64,
+        finished_at_ms: u64,
     },
     BranchFailed {
         branch_id: String,
