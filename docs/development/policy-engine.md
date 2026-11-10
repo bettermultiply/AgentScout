@@ -109,3 +109,5 @@ def extent(data, *, policy_config, capabilities):
 `extent` 与 `effect` 目前由 Agent 接入侧在真实执行边界按同一编译 Policy 求值，并通过 `branch_suspended` 的原因让控制面记录 Blocked；`rebalance` 由控制面在 Tree 版本变化后求值并下发 pause/resume/preempt。控制面不重复求值 extent/effect，因此没有其它接入形式的实现时，这两类 Decision 不会在控制面侧单独生效。
 
 当前是最小接线：extent 只在 Pi 的工具 Hook 边界按 Hook 次数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolved_pending` 或取消释放；effect 只处理接入侧对 candidate 外部工具效果求值的 `block`/`deny` 计划，模型推理作为 PURE 步骤不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。
+
+嵌套 Chance 还没有完整接通：Chance 的权威等待点目前要求父 Branch 是当前权威。候选 Branch 在继续执行时再次 `admit` 得到的 Chance 会在下一次清理检查中被视为等待点失效并按 `Discarded(Failed)` 收敛，因此当前只支持从权威 Branch 产生的单层投机。设计中的嵌套关系已保存在 Chance 的 `parent_chance_id` 上，接入嵌套需要单独调整等待点有效性判断与 Runtime 承载。
