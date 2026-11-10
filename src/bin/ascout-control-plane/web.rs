@@ -5,6 +5,13 @@ use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
+// The Vite build is committed under webui/dist and embedded here so `cargo
+// build` does not need Node or a separate asset step.
+const INDEX_HTML: &[u8] = include_bytes!("../../../webui/dist/index.html");
+const APP_JS: &[u8] = include_bytes!("../../../webui/dist/assets/app.js");
+const APP_CSS: &[u8] = include_bytes!("../../../webui/dist/assets/app.css");
+const FAVICON_SVG: &[u8] = include_bytes!("../../../webui/dist/favicon.svg");
+
 pub fn start(address: &str, interface: Interface, reader: LedgerReader) -> io::Result<()> {
     let address: std::net::SocketAddr = address
         .parse()
@@ -75,12 +82,16 @@ fn serve(
         return reply(stream, "403 Forbidden", "text/plain", b"Invalid host");
     }
     match fields.as_slice() {
-        ["GET", "/", _] => reply(
-            stream,
-            "200 OK",
-            "text/html; charset=utf-8",
-            include_bytes!("web/index.html"),
-        ),
+        ["GET", "/", _] | ["GET", "/index.html", _] => {
+            reply(stream, "200 OK", "text/html; charset=utf-8", INDEX_HTML)
+        }
+        ["GET", "/assets/app.js", _] => {
+            reply(stream, "200 OK", "text/javascript; charset=utf-8", APP_JS)
+        }
+        ["GET", "/assets/app.css", _] => {
+            reply(stream, "200 OK", "text/css; charset=utf-8", APP_CSS)
+        }
+        ["GET", "/favicon.svg", _] => reply(stream, "200 OK", "image/svg+xml", FAVICON_SVG),
         ["GET", "/api/observation/state-event-set", _] => {
             let body = serde_json::to_vec(&reader.state_event_set())?;
             reply(stream, "200 OK", "application/json", &body)
@@ -237,7 +248,7 @@ fn decode_segment(value: &str) -> Option<String> {
 fn reply(stream: &mut TcpStream, status: &str, kind: &str, body: &[u8]) -> io::Result<()> {
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; object-src 'none'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)

@@ -550,3 +550,11 @@ ProcessBackend 已承担启动、冻结、终止及 namespace 记录，不再将
 ## 2026-11-10：结算的实测/估计分离与未命中时间语义
 
 废弃 `settlement` 每个维度的 `{value, measured}` 形状（一个带符号数字加一个布尔标记），以及“未命中时间 = −(候选从投机起点到被丢弃的存活时长)”的语义。当前 `time_ms`、`money` 都是 `{measured, estimated}`：实测与估计各自独立，永远不相加，也不用其中一部分填充另一部分；未命中只记投机给整场运行（权威路径）造成的额外延迟的负值，不记候选存活时长或快速模型自身的“白耗”，没有可靠测量时对应部分为空。目标语义见 `docs/design/control-plane.md` §5，实现与数据缺口见 `docs/development/observation.md`。
+
+## 2026-11-10：控制面 WebUI 的构建与嵌入
+
+废弃 `src/bin/ascout-control-plane/web/index.html` 手写单页。浏览器界面改由仓库根目录 `webui/` 的 React + React Flow 应用实现，Vite 构建产物提交在 `webui/dist/`，由 `web.rs` 用 `include_bytes!` 嵌入二进制；`cargo build` 不依赖 Node，前端源码变化时重新构建并提交 `dist/`。控制面静态资源路由固定为 `/`、`/assets/app.js`、`/assets/app.css` 和 `/favicon.svg`；CSP 的脚本来源改为 `'self'`，不再需要内联脚本。界面只展示权威窗口对话，投机面板只读，结算的实测与估计分别显示；连续 `conversation_updated` 流式块在投机树中合并为一个就地更新的节点。实现说明见 `docs/development/web-ui.md`。
+
+## 2026-11-10：Edge 改为抽象模型，由 Chance 取代“有 id 的机会对象”
+
+废弃“Edge 是有 id、可枚举、被 `select` 选择、出现在 AssumptionSet（`Assumption=(edge_id, proposal_id)`）里的对象”以及“Edge 即投机机会”“嵌套 Edge 有自己的 Proposal、Branch 和过程状态”等表述。Edge 现在只是描述投机如何进行的抽象模型，不是运行时对象；其具体实例称为 Chance（被 `admit` 接纳的投机机会），从 `admit` 通过起拥有 id，直到被验证后接受或抛弃为止。待选集合、AssumptionSet 引用和运行时 Decision 作用对象均为 Chance。

@@ -45,6 +45,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 4. [Runtime Adapter 接入指南](development/runtime-adapter.md)：Runtime 文件系统/进程 Backend 现状、接入责任、实现建议与尚待定义的接口事项。
 5. [Policy Engine 原型](development/policy-engine.md)：实际 YAML 编译、Python 求值接口、示例与当前限制。
 6. [Runtime 生命周期协议](development/runtime-discussion.md)：Runtime 生命周期操作、请求/环境身份、多 Backend 组合下的顺序、部分失败、状态聚合与清理责任。
+7. [控制面 WebUI](development/web-ui.md)：React + React Flow 界面的行为、开发代理、构建产物嵌入与当前缺口。
 
 ## 状态术语
 

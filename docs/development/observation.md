@@ -1,6 +1,6 @@
 # 控制面观察接口（2026-11-10）
 
-本阶段只实现后端及现有页面/TUI 的兼容接线。前端已选择 React + React Flow、Vite 构建、产物嵌入 Rust 二进制、开发代理；该前端尚未实施。
+本阶段已实现后端观察接口、TUI 兼容接线与正式 WebUI。WebUI 使用 React + React Flow、Vite 构建、轻量状态管理，构建产物嵌入 Rust 二进制，开发时通过 Vite 代理访问控制面 API；启动、开发与构建说明见 [控制面 WebUI](web-ui.md)。
 
 ## 当前接口
 

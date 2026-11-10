@@ -29,9 +29,9 @@ ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
 cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi --web 127.0.0.1:8080
 ```
 
-浏览器 UI 只绑定 loopback；打开控制面输出的地址即可。TUI 与浏览器 UI 不共享绘制代码，只通过控制面提供的 AScoutRunView 和操作请求接口工作。
+浏览器 UI 只绑定 loopback；打开控制面输出的地址即可。左侧是权威窗口对话，右侧是可隐藏的投机面板（投机树与分支详情）；候选内容始终只读。TUI 与浏览器 UI 不共享绘制代码，只通过控制面提供的 AScoutRunView 和操作请求接口工作。界面的开发代理、构建与嵌入方式见 [控制面 WebUI](docs/development/web-ui.md)。
 
-第一个参数是本次运行目录，第二个参数是 Pi 源码路径。运行目录、Agent 日志和事件记录都由调用方持有。Runtime Adapter 在环境内启动 Agent 接入进程，控制面只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供相同的 Tree、消息、事实和事件查看能力。Ctrl-C 请求中断，Ctrl-D 退出，TUI 中 ↑/↓ 滚动。运行目录及 `agent.log` 保留用于检查。
+第一个参数是本次运行目录，第二个参数是 Pi 源码路径。运行目录、Agent 日志和事件记录都由调用方持有。Runtime Adapter 在环境内启动 Agent 接入进程，控制面只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。Ctrl-C 请求中断，Ctrl-D 退出，TUI 中 ↑/↓ 滚动。运行目录及 `agent.log` 保留用于检查。
 
 已接通真实工具等待点：Candidate 从共同消息上下文与预测工具结果续跑；Parent 工具执行一次，真实结果返回后由 Policy 比较并 Promote 或 Discard。Promote 保留候选会话和在飞输出，用户仍使用同一个主对话；不命中则 Parent 使用真实结果继续。默认 Policy 禁用候选；可显式启用字符串枚举预测示例：
 
