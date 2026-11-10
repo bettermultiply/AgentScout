@@ -2,6 +2,19 @@
 
 本文记录已接受的实现架构与验证决策。目标语义归 `docs/design/` 所有。
 
+## 2026-11-10：Chance 状态与 BranchStatus 合并，废弃 BranchPhase 等旧实现
+
+Chance 现在是 Tree 中 `admit` 通过时创建、拥有不透明 id 并持有 Proposal、关联 Branch、权威值状态与验证依据的记录；Branch 只保存 `chance_id`。`select` 的输入是全部 Pending Chance 的 `frontier_view`（字段 `chance_id`），不再只处理单个机会；`predict` 不再接收或猜测 NLE 专有的 `action` 字段。`AssumptionSet` 改为 `(chance_id, proposal_id)` 引用。
+
+由此废弃以下旧实现与表述，正式文档不再保留：
+
+- `BranchPhase` 枚举及 Branch 执行状态上的 `phase` 字段、phase 相关观察/展示。控制面实际推进到哪一步不再由 Branch 上的阶段表示；Decision 历史由 Ledger 和观察事件记录。
+- `BranchStatus::AwaitingValidation`。已跑完、等待裁决的状态由 `BranchStatus::Finished` 表示。
+- “`launch=false` 等于不创建候选”。现在 `launch` 只决定是否暂不取得权威值，Proposal 与 candidate Branch 仍按 `predict` 创建。
+- “`select` 只收单机会”。现在 `select` 接收全部 Pending Chance 的有序子集；未被选中的 Chance 保持待选，并在权威值返回后按 `NotSelected` 收敛。
+- Proposal 内嵌在 `BranchRecord` 中。Proposal 现在属于 `ChanceRecord`，Branch 只保存不可变候选执行与 `chance_id`。
+- 验证依据借存于 `StartCandidate` 的 pending operation。权威结果与 Runtime 证据现在挂在 Chance 上，`PendingOperation` 只保存操作身份和状态。
+
 ## 2026-11-10：模型用量不得静默丢弃，`action_id` 可为 null
 
 真实 NLE 运行中模型已被调用，但控制面没有收到任何 `model_usage`。根因是 Pi 在 `message_end` 之前先用 `stream.result()` 结算模型流并执行 `beforeModelInference` 的完成回调；该回调把 action 从配对队列中移除，随后 `message_end` 找不到配对项，旧实现直接丢弃 `Usage`。修复后完成回调只结束 action 生命周期，`message_start` 标记对应的 action，`message_end` 才取走并发送 `Usage`；只有没有产生消息的请求才在完成回调中移除。

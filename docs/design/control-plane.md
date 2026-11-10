@@ -90,9 +90,9 @@ Ledger 是观察事件日志的唯一保存者，在追加时分配同一运行�
 
 ## 5. 只读观察
 
-控制面对外提供受限的观察事件，不直接公开 Speculative Tree、控制命令、checkpoint 或 Runtime 内部对象。首次读取取得状态事件集及其对应的最新序号；状态事件集是从第 1 号到该序号的完整有序事件读取，客户端自行折叠得到展示状态。之后通过 SSE 持续接收增量，断线后携带最后收到的序号补发，不维护另一套独立的树事实。每个事件包含全局递增序号、记录时刻和所属 task；序号在同一控制面运行内覆盖所有观察事件。
+控制面对外提供受限的观察事件，不直接公开 Speculative Tree、控制命令、checkpoint 或 Runtime 内部对象。首次读取取得状态事件集及其对应的最新序号；状态事件集是从第 1 号到该序号的完整有序事件读取，同时给出由这些事件折叠出的 Chance 当前列表（id、父 Branch/父 Chance、operation、tool、阶段、权威值状态、Proposal 与关联 Branch），客户端自行折叠得到展示状态。之后通过 SSE 持续接收增量，断线后携带最后收到的序号补发，不维护另一套独立的树事实。每个事件包含全局递增序号、记录时刻和所属 task；序号在同一控制面运行内覆盖所有观察事件。
 
-树结构事件描述 Branch 创建（identity、Parent、Authority/Candidate、所属 Chance、投机对象类型）与权威切换（新旧 Authority）。生命周期事件使用 `BranchStatus` 的 Created、Running、AwaitingValidation、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned，记录新状态与已知原因。环境事件描述已确认的执行承载、独立 Instance、隔离环境嵌套及关键配置摘要，并区分环境清理结果。未知事实保持未知，命令已发送不表示环境已建立或清理成功。
+树结构事件描述 Branch 创建（identity、Parent、Authority/Candidate、所属 Chance、投机对象类型）、Chance 创建与阶段变化、权威值取得状态以及权威切换（新旧 Authority）。Branch 生命周期事件使用 `BranchStatus` 的 Created、Running、Blocked(reason)、Finished、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned，记录新状态与已知原因；`Blocked` 的原因取 ExtentReached、Rebalanced 或 EffectGate，同一时刻只记最近一次挡住它的 Decision，`Blocked` 与 Running 可以随对应 Decision 来回切换。Chance 阶段使用 `ChanceStage` 的 Pending、Running、Resolving、Accepted(proposal_id)、Discarded(reason)，抛弃原因取 MatchRejected、NotSelected、AncestorInvalidated、BudgetExhausted 或 Failed；权威值取得状态使用属于 Chance 的 `AuthorityState` 的 NotRequested、Fetching、Arrived、Unavailable，与 Chance 的 Running 并行。环境事件描述已确认的执行承载、独立 Instance、隔离环境嵌套及关键配置摘要，并区分环境清理结果。未知事实保持未知，命令已发送不表示环境已建立或清理成功。
 
 对话事件仅提示某 Branch 的消息发生变化；内容通过独立的按 Branch 只读接口按需取得，响应同时给出该 Branch 当前的角色与状态。候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份；选择观察对象不改变权威路由或生命周期裁决。
 

@@ -8,6 +8,8 @@ S = (admit, select, rebalance, extent, predict, launch, effect, match, dispose)
 
 这九类 decision 属于同一个决策面，但不要求按固定顺序调用。其中 `select` 面向多个已经准入但尚未启动的 Chance，`rebalance` 面向已经运行或暂停的投机工作，其他 decision 主要作用于单条 Chance。一次执行仍可按“机会发现、待选准入、启动选择、预测生成、过程执行、验证、处置与提交”理解；决策面表达的是 Policy 在这些阶段中可以选择什么，而不是另一条固定流程。
 
+Decision 作用的状态对象区分 Chance 与 Branch。Chance 使用 `ChanceStage`（Pending、Running、Resolving、Accepted(proposal_id)、Discarded(reason)，抛弃原因取 MatchRejected、NotSelected、AncestorInvalidated、BudgetExhausted、Failed），其权威值的取得状态由并行的 `AuthorityState`（NotRequested、Fetching、Arrived、Unavailable）表达。Branch 使用 `BranchStatus`（Created、Running、Blocked(reason)、Finished、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned），Blocked 原因取 ExtentReached、Rebalanced 或 EffectGate。`extent`、`effect` 与 `rebalance` 可以暂时把 Branch 置为 Blocked，并在放行后回到 Running；`launch=false` 只推迟权威值取得，不取消 Chance 上已经产生的 Proposal 和 Branch。
+
 | Decision | Policy 决定什么 | 主要阶段 |
 |---|---|---|
 | `admit` | 该操作是否值得作为投机入口并进入待选集合（同一决策内的两级判断） | 待选准入 |
@@ -108,7 +110,7 @@ predict(predict_input) -> ProposalSet
 |---|---:|---|
 | `chance_context` | 是 | 当前 Chance 的 pending-result boundary、被预测结果的类型/结构，以及后续依赖点的基本描述 |
 | `process_context` | 是 | 当前 Agent 过程可见的状态，包括上下文、当前阶段、已有输入和已完成结果 |
-| `assumption_set` | 是 | 当前 Branch 已携带的未决 Proposal ID 集合；预测不能假装这些 Proposal 已经被确认 |
+| `assumption_set` | 是 | 当前 Branch 已携带的未决 `(chance_id, proposal_id)` 引用集合；预测不能假装这些 Proposal 已经被确认 |
 | `history` | 否 | 当前 Agent 或同类过程已经产生的历史轨迹、观测和结果 |
 | `policy_config` | 是 | 只传给 `predict` 函数的模型、规则、阈值、候选数量限制等算法参数；其他函数只接收各自的参数 |
 | `capability_context` | 是 | Contract/Runtime 已声明的可用能力和约束，例如相关效果是否可处理、可用预算或最大候选数 |
@@ -147,7 +149,7 @@ Proposal = {
 launch(input) -> bool
 ```
 
-`launch` 决定这条 Chance 当前是否启动取得权威值的路径。返回 `true` 表示启动权威路径，返回 `false` 表示当前不启动。权威值是该 Chance 真实结果 `i` 的可靠来源——真实执行、主生成流、用户输入、环境反馈或远程服务——只有拿到它，`match` 才能与 Proposal 对照；拿不到时只能依赖 validator 或其他可接受性判断。
+`launch` 决定这条 Chance 当前是否启动取得权威值的路径。返回 `true` 表示启动权威路径，返回 `false` 表示当前不启动；`false` 只让 Chance 的 `AuthorityState` 保持 NotRequested，不取消已经由 `predict` 产生的 Proposal 或 candidate Branch。权威值是该 Chance 真实结果 `i` 的可靠来源——真实执行、主生成流、用户输入、环境反馈或远程服务——只有拿到它，`match` 才能与 Proposal 对照；拿不到时只能依赖 validator 或其他可接受性判断。
 
 “权威值来自谁”不是 Policy 可以替换的选项，而是这条 Chance 的固有事实：`u` 是谁，真实结果就由谁产生。例如 `u` 是一条命令时真值来自真实执行，`u` 在等待用户输入时真值来自用户。Policy 能决定的只有“是否取得、何时取得”，即 `launch` 函数在当前输入下的返回值。系统可以提供常用快捷定义：
 
@@ -315,15 +317,15 @@ Chance E1
 ```
 
 ```text
-AssumptionSet(B1) = {p1}
-AssumptionSet(B2) = {p1, p2}
+AssumptionSet(B1) = {(E1, p1)}
+AssumptionSet(B2) = {(E1, p1), (E2, p2)}
 ```
 
 新 Chance 仍按照当前 task 已绑定的同一 Policy 执行既有 decision，并分别使用该 Policy 中对应函数的配置；当前不因嵌套深度切换到另一套 Policy。新 Chance 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Chance 的 `extent` 和 step 计数独立于父 Chance。未来按嵌套深度或其他上下文切换 Policy，属于独立扩展。
 
-每个候选 Branch 携带其路径上的未决 Proposal ID 集合：`AssumptionSet = frozenset[ProposalId]`
+每个候选 Branch 携带其路径上的未决 Proposal 引用集合：`AssumptionSet = frozenset[(chance_id, proposal_id)]`
 
-`AssumptionSet == ∅` 表示工作单元是权威工作。Proposal 被确认时，从依赖它的工作单元中移除其 ID；集合变空的工作单元才具备提交条件。若父 Proposal 被确认，原父 Branch 结束其投机身份，其执行延续成为权威路径；仍携带其他未决 Proposal 的后代 Branch 保留原有身份、隔离环境和执行进展，仅将结构上的父级改挂到该权威执行延续之下，不创建新的 Branch，也不迁移 Runtime 状态。后代 Branch 仍须等自身 `AssumptionSet` 清空后，才具备将结果和效果纳入权威状态的资格。Proposal 被否定时，依赖它的后续子图失效；控制面向受影响的 Branch 直接发送取消命令，各 Branch 作为独立执行个体停止自身工作并完成本地及受管效果清理，不要求一个集中式机制统一遍历和回收整棵子树。只有父 Branch 进入 `Salvage` 时，后代 Branch 的部分进展才可作为该父 Branch salvage 的输入，不能脱离父 Branch 独立 salvage。非空 `AssumptionSet` 产生的数据只能流向同样携带未决 Proposal ID 的容器，不能直接进入权威上下文。
+`AssumptionSet == ∅` 表示工作单元是权威工作。Proposal 被确认时，从依赖它的工作单元中移除对应引用；集合变空的工作单元才具备提交条件。若父 Proposal 被确认，原父 Branch 结束其投机身份，其执行延续成为权威路径；仍携带其他未决 Proposal 的后代 Branch 保留原有身份、隔离环境和执行进展，仅将结构上的父级改挂到该权威执行延续之下，不创建新的 Branch，也不迁移 Runtime 状态。后代 Branch 仍须等自身 `AssumptionSet` 清空后，才具备将结果和效果纳入权威状态的资格。Proposal 被否定时，依赖它的后续子图失效；控制面向受影响的 Branch 直接发送取消命令，各 Branch 作为独立执行个体停止自身工作并完成本地及受管效果清理，不要求一个集中式机制统一遍历和回收整棵子树。只有父 Branch 进入 `Salvage` 时，后代 Branch 的部分进展才可作为该父 Branch salvage 的输入，不能脱离父 Branch 独立 salvage。非空 `AssumptionSet` 产生的数据只能流向同样携带未决 Proposal ID 的容器，不能直接进入权威上下文。
 
 组合与嵌套通过四类连接共同实现：树结构归属、假设依赖、用户输入传播和生命周期控制。
 

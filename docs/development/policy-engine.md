@@ -72,7 +72,7 @@ def extent(data, *, policy_config, capabilities):
 |---|---|---|---|
 | `admit.opportunity_pass` | `op` | 无 | 布尔值 |
 | `admit.feasibility_pass` | `op`、`state`、`contract_context` | 无 | 布尔值 |
-| `select` | `frontier_view`、`scheduling_context` | 无 | 输入 Chance ID（字段名 `edge_id`） 的无重复有序子集 |
+| `select` | `frontier_view`、`scheduling_context` | 无 | 输入 Chance ID（字段名 `chance_id`） 的无重复有序子集 |
 | `rebalance` | `active_view`、`paused_view`、`scheduling_context` | 无 | 输入 Branch 的 `pause`／`resume`／`preempt` 动作，每 Branch 最多一次 |
 | `extent` | `process_state` | `process_state.active_time`、`process_state.resource_counters`、`process_state.result_facts`、`process_state.semantic_facts` | `stop`／`continue` |
 | `predict` | `chance_context`、`process_context`、`assumption_set`、`capability_context` | `history` | batch `ProposalSet`，每项有 `payload`，可有 `provenance` |
@@ -81,7 +81,7 @@ def extent(data, *, policy_config, capabilities):
 | `match` | `proposal`、`evidence`、`match_context` | `outcome` | 四类 verdict，不接受 score |
 | `dispose` | `branch`、`resolution`、`context` | 无 | 单个 `Discard`，或仅在 `accepted` 时单个 `Promote`；在 `indeterminate`／`error`／`extent_reached` 时可返回空动作列表 |
 
-`op` 包含 `kind`、`produces_result`、`result_pending`、`has_predictor`；后三者是布尔值。`process_state` 至少包含非负整数 `steps_completed` 和字符串 `phase`。`frontier_view` 每项有 `edge_id`；active／paused 视图每项有 `branch_id`，集合不得重叠。`assumption_set` 是无重复字符串数组。
+`op` 包含 `kind`、`produces_result`、`result_pending`、`has_predictor`；后三者是布尔值。`process_state` 至少包含非负整数 `steps_completed` 和字符串 `phase`。`frontier_view` 每项有 `chance_id`；active／paused 视图每项有 `branch_id`，集合不得重叠。`assumption_set` 是无重复的 `(chance_id, proposal_id)` 引用数组。
 
 表中未支持的合法目标能力不会被替换为另一种结果：增量预测、score 规则及阈值检查、其他效果模式、Reuse／Salvage 等交接计划会明确失败。这些是原型缺口，不是修改九类 Decision 的正式值域。本轮已补齐 `Promote` 的意图检查和 Pi 单候选会话接替，真实运行见 [首要验证 Workload](reference-workload.md)。Engine 只检查意图格式及 accepted 前提，不证明 Branch 已被接受；实际会话接替与清理由 Pi 接入调用方落实。`Reuse` 仍保留为后续深度嵌套投机所需的结果／受管状态交接能力。系统应用前的状态有效性、预算、Contract、依赖、Fidelity 和 single-winner 复核仍由状态拥有者完成，目前未接入完整 Speculation Coordinator。
 
@@ -102,6 +102,10 @@ def extent(data, *, policy_config, capabilities):
 
 实际遇到 bubblewrap 不支持 `--preserve-fds` 的兼容性问题后，新增 `tests/policy.rs`，先复现失败，再改为借标准输出传递结果管道、由可信 bootstrap 分离协议与诊断。测试使用真实 bubblewrap 和 Python，不替换 backend。
 
-## 实现差距：edge_id 与 Chance id
+## Chance id 的当前实现
 
-设计上 `select` 的待选集合、`assumption_set` 和运行时 Decision 的作用对象都是 Chance（Edge 只是抽象模型，没有 id）。代码和 Policy 接口中的 `edge_id` 目前仍是借用 operation id，待后续改为 Chance id；观察事件里的 `edge_id`（见 `observation.md`）同理，当前 Tree 尚无 Chance 身份，该字段为 null。设计文档中的 `chance_context` 输入类别，代码仍用 `edge_context`/`edge_id`，暂未改名。
+`admit` 通过时 Tree 创建 Chance 并生成 `chance-<n>` 不透明 id；`select` 的 `frontier_view`、`predict` 的 `assumption_set`、`launch`/`predict` 的 `chance_context` 以及观察事件中的 `chance_id` 都使用这个 id。`branch_created` 携带 Branch 所属 Chance；初始权威 Branch 为 null。控制面不再用 operation id 冒充 Chance id。
+
+`extent` 与 `effect` 目前由 Agent 接入侧在真实执行边界按同一编译 Policy 求值，并通过 `branch_suspended` 的原因让控制面记录 Blocked；`rebalance` 由控制面在 Tree 版本变化后求值并下发 pause/resume/preempt。控制面不重复求值 extent/effect，因此没有其它接入形式的实现时，这两类 Decision 不会在控制面侧单独生效。
+
+当前是最小接线：extent 只在 Pi 的工具 Hook 边界按 Hook 次数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolved_pending` 或取消释放；effect 只处理接入侧对 candidate 外部工具效果求值的 `block`/`deny` 计划，模型推理作为 PURE 步骤不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。

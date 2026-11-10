@@ -44,7 +44,7 @@
 - **Branch Root**：Branch 对应的根节点，具有稳定 identity 并直接拥有该根的 local state；表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
 - **Instance**：由 Runtime 承载 Branch Root 执行活动的执行单元；多个 Branch 可以共享、复制或独立承载所需状态，也可以在恢复或重建后继续。逻辑 Branch 可以在建立 Instance 前先存在并推进。（`../mental-model.md` §4.2）
 - **Proposal** `î`：具有全局唯一 `ProposalId` 的投机候选输入；候选 Branch 基于其 payload 提前执行后续步骤。（`../design-model.md` §3.1；`policy-decisions.md` §2.3）
-- **AssumptionSet**：Instance/SpecTask 携带的未决 Proposal ID 集合（`frozenset[ProposalId]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`../design-model.md` §3.1；`policy-decisions.md` §4.2）
+- **AssumptionSet**：Instance/SpecTask 携带的未决 Proposal 引用集合（`frozenset[(chance_id, proposal_id)]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`../design-model.md` §3.1；`policy-decisions.md` §4.2）
 - **Edge**：描述投机如何进行的通用过程形状的抽象模型（`u --i--> v`，以 Proposal 替代 `i` 提前启动 `v^n`），九类 Policy Decision 的语义定义在它之上。Edge 不是运行时对象，没有 id；它的具体实例是 Chance。（`../design-model.md` §3.1；`policy-decisions.md`）
 - **Chance**：Edge 模型的一个具体实例，即被 `admit` 接纳的投机机会。从 `admit` 通过起拥有 id，直到被验证后接受或抛弃、整个过程收敛为止；其下可有多个 Proposal 和多个 Branch，但每个 Proposal/Branch 只对应一个 Chance。`select` 的待选集合、AssumptionSet 中的引用以及运行时 Decision 的作用对象都是 Chance。`admit` 之前的机会发现阶段没有 id，不属于 Chance。Branch 仍是具体执行，Proposal 仍是不可变候选输入，Candidate 仍只是 Branch 的角色。（`../design-model.md` §3.1；`policy-decisions.md`）
 - **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；控制面在此从共同 execution base 登记多个逻辑 Branch，Runtime 按需建立其执行承载（共享或独立环境）。（`branch-semantics.md`；`decisions.md` D-024；术语收敛）
@@ -93,9 +93,12 @@
 
 ## 状态与生命周期
 
+- **BranchStatus**：Branch 生命周期与运行状态的合并枚举：Created、Running、Blocked(reason)、Finished、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned。Blocked 的原因取 ExtentReached、Rebalanced 或 EffectGate，同一时刻只记最近一次挡住它的 Decision；Finished 表示已跑完、等待裁决。（`branch-semantics.md` §2；`control-plane.md` §5）
+- **ChanceStage**：Chance 的阶段与结果枚举：Pending、Running、Resolving、Accepted(proposal_id)、Discarded(reason)。Pending 为已 `admit`、等待 `select`；Running 为已被选中；Resolving 为权威值已到、正在 `match` 与处置；Discarded 的原因取 MatchRejected、NotSelected、AncestorInvalidated、BudgetExhausted 或 Failed。（`branch-semantics.md` §2；`control-plane.md` §5）
+- **AuthorityState**：属于 Chance 的权威值取得状态，与 Chance 的 Running 并行，由 `launch` 改变：NotRequested、Fetching、Arrived、Unavailable。`launch=false` 只表示暂不请求权威值。（`branch-semantics.md` §2；`policy-decisions.md` §2.4）
 - **role**：`Authority | Speculative(d)`。这里的 Authority 是实例角色，不等同于可选的 Authority 输入来源；它不是静态标签，而是 `AssumptionSet == ∅` 的函数；promote 就是这个谓词翻转。（`spec-exec-abstraction.md` §10.1）
 - **grain**：`own-env | shared-env`；shared-env 仅对 PURE 效果开放，隔离粒度由 EffectClass 决定。（`spec-exec-abstraction.md` §10.1）
-- **lifecycle**：`Forked → Running → Resolving → {Reused, Promoted, Discarded, Preempted, Salvaged}`。（`spec-exec-abstraction.md` §10.1）
+- **lifecycle**：Branch 的生命周期与运行状态由 `BranchStatus` 表达，Chance 的阶段与结果由 `ChanceStage` 表达；`Accepted` 与 `Discarded` 等结果落在 Chance 上，Branch 的 Promote、Discard、Cleanup 等动作决定 BranchStatus。（`spec-exec-abstraction.md` §10.1；`branch-semantics.md` §2）
 - **obligation**：未验证前提随 subtree 保留的义务；在验证前不能 Accept。Proposal 仍在 `AssumptionSet` 中即表示相应依赖尚未确认。（`branch-semantics.md`；`decisions.md` D-025）
 - **capability**：resolver / validator 等授权能力；direct children 的 resolver capability 默认由 parent 持有，可显式委托给控制面。（`branch-semantics.md`；`decisions.md` D-022）
 

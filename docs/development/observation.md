@@ -6,7 +6,7 @@
 
 仅绑定 loopback，继续校验 Host。所有观察接口只读；`POST /api/request` 的 Prompt、Interrupt、Shutdown 以及同源 JSON 校验保持原样。
 
-- `GET /api/observation/state-event-set`：`{sequence, events}`。events 是从第 1 号到 sequence 的完整有序公共事件读取，称为状态事件集；客户端自行折叠得到展示状态，不包含对话正文。
+- `GET /api/observation/state-event-set`：`{sequence, chances, events}`。events 是从第 1 号到 sequence 的完整有序公共事件读取，称为状态事件集；`chances` 是由这些事件折叠出的 Chance 当前视图（id、父 Branch/父 Chance、operation、tool、stage、authority_state、proposal_ids、branch_ids），客户端可据此直接显示机会状态。客户端自行折叠 events 得到展示状态，不包含对话正文。
 - `GET /api/observation/events?after=N`：SSE，只补发 `sequence > N` 的事件，再持续等待新事件；`id` 与事件 sequence 相同，`data` 是事件 JSON。自动重连的 `Last-Event-ID` 优先于初始 after 参数。缺省从 0 开始；非法序号返回 400，超前序号返回 409，需重新取得状态事件集。15 秒空闲发送注释心跳。每个连接独立线程，不占住其他请求。
 - `GET /api/branches/{branch_id}/conversation`：Branch id 按 URL segment 编码；未知 Branch 返回 404。响应 `{inherited, messages, streaming, role, status}`；`role` 与 `status` 是该 Branch 当前的 Branch 角色和生命周期状态，前端据此显示候选的投机身份，不再依赖单独的标志字段。已归档 Branch 的历史仍可读取。
 
@@ -14,9 +14,13 @@
 
 事件名与内容：
 
-- `branch_created`：branch_id、parent_branch_id、role、edge_id（待改为 Chance id）、speculation_kind、speculation_started_at_ms。speculation_started_at_ms 只对由准入请求创建的投机候选填写，值为对应准入请求的接入侧时间戳，表示投机起点；其他 Branch 为 null。
+- `branch_created`：branch_id、parent_branch_id、role、chance_id、speculation_kind、speculation_started_at_ms。chance_id 是这个 Branch 所属 Chance；初始权威 Branch 为 null。speculation_started_at_ms 只对由准入请求创建的投机候选填写，值为对应准入请求的接入侧时间戳，表示投机起点；其他 Branch 为 null。
+- `chance_created`：chance_id、parent_branch_id、parent_chance_id、operation_id、tool_name、stage、authority_state。`admit` 通过时产生，此时 stage 为 `pending`、authority_state 为 `not_requested`。
+- `chance_stage_changed`：chance_id、stage、reason。stage 取 `pending`、`running`、`resolving`、`{"accepted": proposal_id}` 或 `{"discarded": reason}`；reason 为描述性文字。
+- `authority_state_changed`：chance_id、state。state 取 `not_requested`、`fetching`、`arrived`、`unavailable`。
+- `proposal_added`：chance_id、proposal_id、payload。每次 `predict` 生成一个 Proposal 时发布。
 - `authority_changed`：branch_id、previous_authority。
-- `status_changed`：branch_id、status、reason。
+- `status_changed`：branch_id、status、reason。status 取 `created`、`running`、`{"blocked": reason}`、`finished`、`promoting`、`promoted`、`discarding`、`discarded`、`cleaning`、`cleaned`；Blocked 的 reason 取 `extent_reached`、`rebalanced` 或 `effect_gate`，同一时刻只记最近一次挡住它的 Decision。
 - `environment_changed`：branch_id、state、independent_instance、parent_environment、configuration。
 - `environment_cleaned`：branch_id、succeeded、reason。
 - `conversation_updated`：branch_id，不含正文。
@@ -74,7 +78,7 @@ Pi 接入在每个 Branch 内保存模型 action 队列：模型推理前把 `ac
 
 当前已知限制（属于原型实现，不是目标语义）：权威路径在工具 Hook 处可能需要等待一次本地 Policy 求值；该求值在沙箱内启动 Python 子进程，所有报告共用 Pi 接入侧的一条串行发送队列，控制面读取较慢时会拖住后续报告。对话正文仍由事件实时带来，Ledger 不保存对话正文；Branch 对应的 session id、路径和继承分界尚未记录，留待后续讨论。
 
-Tree 尚无 Chance identity，代码现状借用 operation id 的 `edge_id` 待改为 Chance id，目前为 null；speculation_kind 在创建入口按父 action 的现有 ActionKind 填写，无法关联时为 null。没有 Runtime 嵌套身份报告，parent_environment 为 null，不能拿逻辑 Parent 冒充环境嵌套。configuration 仅公开 shared_environment 能力摘要，不公开本地配置文件路径或凭据。Failed 不足以判断独立 Instance 是否仍存在，返回 null；Cleaned 表示该 Branch 已不拥有独立 Instance。
+Tree 在 `admit` 通过时创建 Chance；`branch_created` 的 `chance_id` 与 `chance_created` 使用同一个不透明 id，初始权威 Branch 为 null。speculation_kind 在创建入口按父 action 的现有 ActionKind 填写，无法关联时为 null。没有 Runtime 嵌套身份报告，parent_environment 为 null，不能拿逻辑 Parent 冒充环境嵌套。configuration 仅公开 shared_environment 能力摘要，不公开本地配置文件路径或凭据。Failed 不足以判断独立 Instance 是否仍存在，返回 null；Cleaned 表示该 Branch 已不拥有独立 Instance。
 
 Tree 的 insert_branch、change_status、change_authority、record_runtime_state / emit_environment 是创建、生命周期、角色与环境事件入口。入口修改状态时将事实放入 Tree 的 pending_observations，控制循环通过 drain_observations 取走并交给 Ledger，不依赖 HTTP 或文件格式。状态转换入口提供原因；Discard Applied 后依次记录 Discarded、Cleaning，不遗漏同一次处理内的中间状态。对话提示、模型用量、工具完成与 run_status 保持原有来源，通过 Ledger 追加。清理成功来自 Runtime Cleaned；Runtime Failed 只发布失败状态，尚不能从现有状态区分 terminate、cleanup 或其他操作失败，不伪造 environment_cleaned 失败结果。
 

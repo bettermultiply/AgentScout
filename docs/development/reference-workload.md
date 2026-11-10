@@ -30,7 +30,7 @@ Rust 协议、控制循环与 Pi 接入同步切换为 `ActionStarted` / `Action
 
 ### Coordinator 状态与操作收敛（2026-11-03）
 
-活动控制事实集中在 `SpeculativeTree`：Branch 保存回合是否仍在进行、失败原因、Proposal、操作请求与时限；Tree 保存命令回执身份与待执行用户输入。外围循环只转交事件、执行 Controller 发起的 Runtime 请求并发布界面／Ledger 记录，不再维护第二套候选集合、就绪和执行完成标记。
+活动控制事实集中在 `SpeculativeTree`：Chance 保存 Proposal、关联 Branch、权威值取得状态与验证依据；Branch 保存所属 `chance_id`、回合是否仍在进行、失败原因、操作请求与时限；Tree 保存命令回执身份与待执行用户输入。外围循环只转交事件、执行 Controller 发起的 Runtime 请求并发布界面／Ledger 记录，不再维护第二套候选集合、就绪和执行完成标记。
 
 Candidate 创建通过一次入口登记完整控制上下文。Policy 预测、结果比较和处置由 Controller 协调。Runtime 晋级确认与 Agent 权威切换确认分开记录；仅 Agent Promote Applied 后切换 Authority，并丢弃旧 Parent 与其他候选的依赖子树。晋级等待中不发送下一条用户输入；确认后按新 Authority 的回合事实决定是否续跑。Agent 清理确认后才回收独立环境；共享环境仍由整个 run 退出清理。
 
