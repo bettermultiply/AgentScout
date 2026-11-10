@@ -317,7 +317,10 @@ await report({message:'agent_ready',agent_id:agentId});
 let buffer=Buffer.alloc(0);const tasks=new Set();
 let commandQueue: Promise<unknown>=Promise.resolve();
 try{
-    for await(const chunk of socket){
+    // Do not let the async iterator's clean EOF destroy the socket with a
+    // synthetic AbortError while the writable half is still ending. Keep the
+    // explicit half-close below as the only shutdown path.
+    for await(const chunk of socket.iterator({destroyOnReturn:false})){
         buffer=Buffer.concat([buffer,chunk]);
         while(buffer.length>=4){const length=buffer.readUInt32BE(0);if(length>16777216)throw Error('Protocol frame too large');if(buffer.length<length+4)break;
             const wire=JSON.parse(buffer.subarray(4,length+4).toString());buffer=buffer.subarray(length+4);if(wire.kind!=='command')throw Error('Unexpected message direction');
@@ -341,5 +344,10 @@ try{
     await report({message:'agent_released',agent_id:agentId});
     await outgoing;
     if(!socket.destroyed)await new Promise(resolve=>socket.end(resolve));
+    // An aborted local-policy evaluation can leave the evaluator child's stdio
+    // handles open after it rejects; those handles would otherwise keep this
+    // adapter alive even though every report is flushed and the socket is
+    // closed. Shutdown is complete here, so terminate explicitly.
+    if(transportError)console.error('Agent control connection failed:',transportError);
+    process.exit(transportError?1:0);
 }
-if(transportError){console.error('Agent control connection failed:',transportError);process.exitCode=1}

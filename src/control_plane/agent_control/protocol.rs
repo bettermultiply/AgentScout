@@ -41,7 +41,7 @@ impl SpeculativeTree {
                 action_kind,
                 status,
                 evidence,
-                timestamp_ms: _,
+                timestamp_ms,
             } => self.handle_action_finished(
                 &task_id,
                 &branch_id,
@@ -50,6 +50,7 @@ impl SpeculativeTree {
                 action_kind,
                 status,
                 evidence,
+                timestamp_ms,
             ),
             AgentMessage::TurnCompleted { branch_id } => {
                 self.branch_mut(&branch_id)?.execution_state.turn_active = false;
@@ -62,9 +63,30 @@ impl SpeculativeTree {
                 Ok(vec![])
             }
             AgentMessage::Output { branch_id, .. }
-            | AgentMessage::Usage { branch_id, .. }
             | AgentMessage::AdapterCapabilityGap { branch_id, .. } => {
                 self.branch(&branch_id)?;
+                Ok(vec![])
+            }
+            AgentMessage::Usage {
+                branch_id,
+                action_id,
+                model,
+                usage,
+                started_at_ms,
+                finished_at_ms,
+                ..
+            } => {
+                self.branch(&branch_id)?;
+                self.model_usage.entry(branch_id).or_default().insert(
+                    action_id,
+                    ModelUsageFact {
+                        model,
+                        started_at_ms,
+                        finished_at_ms,
+                        duration_ms: finished_at_ms.checked_sub(started_at_ms),
+                        cost: usage["cost"]["total"].as_f64(),
+                    },
+                );
                 Ok(vec![])
             }
             AgentMessage::ActionStarted {
@@ -175,6 +197,7 @@ impl SpeculativeTree {
         action_kind: ActionKind,
         status: ActionStatus,
         evidence: Option<Value>,
+        timestamp_ms: u64,
     ) -> io::Result<Vec<AgentCommand>> {
         if task_id != self.execution_id {
             return Err(invalid_input("action task does not match tree"));
@@ -209,6 +232,12 @@ impl SpeculativeTree {
             }
             return Ok(vec![]);
         }
+        // 命中结算需要权威侧工具结果真实的接入侧到达时刻。这里只保留
+        // 已完成 action 的时刻，不改变 action 的生命周期。
+        self.tool_finished_at_ms
+            .entry(branch_id.to_string())
+            .or_default()
+            .insert(operation_id.to_string(), timestamp_ms);
         self.complete_operation(
             branch_id,
             Some(operation_id),

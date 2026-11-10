@@ -27,6 +27,11 @@ impl SpeculativeTree {
                 reason: Some(reason.into()),
             },
         );
+        if status == BranchStatus::Promoted {
+            self.queue_settlement(id, true)?;
+        } else if status == BranchStatus::Discarded {
+            self.queue_settlement(id, false)?;
+        }
         Ok(())
     }
 
@@ -158,6 +163,16 @@ impl SpeculativeTree {
                 speculation_started_at_ms,
             },
         );
+        if let Some(started_at_ms) = speculation_started_at_ms {
+            self.speculations.insert(
+                branch_id.to_string(),
+                SpeculationRecord {
+                    started_at_ms,
+                    kind: speculation_kind,
+                    settled: false,
+                },
+            );
+        }
         self.pending_observations.push(
             crate::control_plane::observation::ObservationContent::StatusChanged {
                 branch_id: branch_id.into(),

@@ -277,6 +277,9 @@ impl SpeculativeTree {
             return Err(invalid_input("branch is not safe to archive"));
         }
         self.active_actions.remove(branch_id);
+        self.speculations.remove(branch_id);
+        self.model_usage.remove(branch_id);
+        self.tool_finished_at_ms.remove(branch_id);
         self.branches
             .remove(branch_id)
             .ok_or_else(|| invalid_input("branch does not exist"))

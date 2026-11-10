@@ -6,6 +6,7 @@
 mod candidates;
 mod commands;
 mod protocol;
+mod settlement;
 mod tree;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -242,6 +243,26 @@ pub struct PendingOperation {
     pub tool_name: Option<String>,
 }
 
+/// 一次已准入投机的内部记录。结算只需要投机起点、类型和是否已经结算；
+/// 它不进入公共事件，BranchRemoved 时随之释放。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SpeculationRecord {
+    pub started_at_ms: u64,
+    pub kind: Option<ActionKind>,
+    pub settled: bool,
+}
+
+/// 一次模型调用在控制面侧保留的用量事实。用于结算比较；公共展示仍由
+/// `model_usage` 观察事件表达。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ModelUsageFact {
+    pub model: String,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub duration_ms: Option<u64>,
+    pub cost: Option<f64>,
+}
+
 /// Branch 对应的 Agent 与 Runtime 实际事实。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BranchExecutionState {
@@ -297,6 +318,15 @@ pub struct SpeculativeTree {
     pub(crate) pending_work: BTreeMap<u64, crate::control_plane::coordination::ControlOperation>,
     #[serde(default)]
     pub(crate) tool_invocations: Vec<crate::control_plane::coordination::ToolPending>,
+    /// 已准入投机的内部事实，按 Branch 保存；不进入 Branch 归档。
+    #[serde(default)]
+    pub(crate) speculations: BTreeMap<String, SpeculationRecord>,
+    /// 模型用量事实，按 Branch 和 action 保存，供结算比较。
+    #[serde(default)]
+    pub(crate) model_usage: BTreeMap<String, BTreeMap<String, ModelUsageFact>>,
+    /// 工具 `ActionFinished` 的接入侧时刻，按 Branch 和 action 保存。
+    #[serde(default)]
+    pub(crate) tool_finished_at_ms: BTreeMap<String, BTreeMap<String, u64>>,
     #[serde(default)]
     pub(crate) next_work: u64,
     #[serde(default)]
@@ -330,6 +360,9 @@ impl SpeculativeTree {
             workspace_root: PathBuf::new(),
             pending_work: BTreeMap::new(),
             tool_invocations: Vec::new(),
+            speculations: BTreeMap::new(),
+            model_usage: BTreeMap::new(),
+            tool_finished_at_ms: BTreeMap::new(),
             next_work: 1,
             stopping: false,
             shutdown_deadline: None,

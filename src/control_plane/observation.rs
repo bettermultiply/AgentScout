@@ -81,7 +81,8 @@ pub enum ObservationContent {
         hit: bool,
         time_ms: ObservationAmount,
         money: ObservationAmount,
-        currency: String,
+        /// 金钱维度的币种；该维度没有数据时为 null，不猜测。
+        currency: Option<String>,
     },
     RunStatus {
         ready: bool,
@@ -91,10 +92,14 @@ pub enum ObservationContent {
     },
 }
 
+/// 结算的一个维度。实测与估计是两个独立部分：没有可靠测量时 `measured`
+/// 为 null，没有估计依据时 `estimated` 为 null；两者都不与对方相加或互相填充。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ObservationAmount {
-    pub value: f64,
-    pub measured: bool,
+    /// 实测部分，带符号；没有可靠测量时为 null，不补零。
+    pub measured: Option<f64>,
+    /// 估计部分，带符号；没有估计依据时为 null，不补零。
+    pub estimated: Option<f64>,
 }
 
 #[derive(Serialize)]

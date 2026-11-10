@@ -546,3 +546,7 @@ ProcessBackend 已承担启动、冻结、终止及 namespace 记录，不再将
 ## 2026-11-10：投机起点与工具开始分离
 
 废弃“用 `SpeculativeAdmissionRequest.timestamp_ms` 合成 `ActionStarted` 作为工具开始时间”的做法：准入请求只登记 action 身份并表达投机起点，工具开始时间只来自接入侧真实的 `ActionStarted`。某 action 只有准入请求而尚无 `ActionStarted` 时，`tool_finished.started_at_ms` 为 null，耗时在起点和终点都可得时才计算。被准入投机的起点由 `branch_created.speculation_started_at_ms` 表达，取自对应准入请求的接入侧时刻；事件公共 `timestamp_ms` 仍是控制面记录时刻。`model_usage` 与 `tool_finished` 增加源侧 `started_at_ms` / `finished_at_ms`；`model_usage.action_id` 由可空改为必填字符串。
+
+## 2026-11-10：结算的实测/估计分离与未命中时间语义
+
+废弃 `settlement` 每个维度的 `{value, measured}` 形状（一个带符号数字加一个布尔标记），以及“未命中时间 = −(候选从投机起点到被丢弃的存活时长)”的语义。当前 `time_ms`、`money` 都是 `{measured, estimated}`：实测与估计各自独立，永远不相加，也不用其中一部分填充另一部分；未命中只记投机给整场运行（权威路径）造成的额外延迟的负值，不记候选存活时长或快速模型自身的“白耗”，没有可靠测量时对应部分为空。目标语义见 `docs/design/control-plane.md` §5，实现与数据缺口见 `docs/development/observation.md`。
