@@ -7,6 +7,7 @@ import { connect } from 'node:net';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { evaluatePolicyArtifact } from '../../../pi/packages/ascout-agent-access/src/local-policy.ts';
+import { createAgentAccess } from '../core/index.ts';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
@@ -36,15 +37,11 @@ if (modelPattern) {
     model = resolved.model;
 }
 const sessions = new Map(), checkpoints = new Map(), results = new Map(), waiters = new Map(), resultWaiters = new Map();
-const cancelled = new Set(), gates = new Map(), generations = new Map(), commands = new Map();
+const cancelled = new Set(), generations = new Map(), commands = new Map();
 const activeActions = new Map(), reportedActions = new Set();
 const aborting = new Set();
-const policies = new Map(), hookCounts = new Map(), countedHooks = new Set(), stopGates = new Map(), pauseGates = new Map();
 const modelActions = new Map();
 const runtimeTools = JSON.parse(process.env.ASCOUT_RUNTIME_TOOLS ?? '[]');
-async function evaluatePolicy(artifact, decision, data, signal) {
-    return evaluatePolicyArtifact(artifact, decision, data, signal);
-}
 const capabilities = {
     preExecutionInterception:true,
     localDecisionEvaluation:true,
@@ -73,6 +70,7 @@ const report = payload => {
     })).catch(error=>{transportError=error;socket.destroy()});
     return outgoing;
 };
+const access = createAgentAccess({taskId,report,evaluate:evaluatePolicyArtifact});
 const key = (branch, operation) => JSON.stringify([branch,operation]);
 const text = value => typeof value==='string'?value:JSON.stringify(value);
 async function finishActions(branch,status) {
@@ -94,25 +92,23 @@ function tools(branch) {
         return {content:[{type:'text',text:text(value)}],details:undefined};
     }}));
 }
-async function localDecision(branch, operationId, toolCallId, toolName, args, checkpoint, signal) {
-    const artifact = policies.get(branch);
-    if (!artifact) return {kind:'allow'};
-    const input={op:{kind:toolName,produces_result:true,result_pending:true,has_predictor:true},state:{},contract_context:{arguments:args,runtime_capabilities:runtimeTools}};
-    const opportunity=await evaluatePolicy(artifact,'admit.opportunity_pass',{op:input.op},signal);
-    if (opportunity !== true) return {kind:'allow'};
-    const feasibility=await evaluatePolicy(artifact,'admit.feasibility_pass',input,signal);
-    return feasibility === true ? {kind:'admit_speculation'} : {kind:'allow'};
-}
 async function beforeModelInference(branch, modelValue, context, signal) {
-    // Model inference is a PURE step; only external effects need the effect gate.
-    await waitPause(branch,signal);
+    // Model inference is a PURE step: the generic layer evaluates `admit` but
+    // never applies the effect gate, reports an admission, or counts extent.
     if(closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
-    const artifact=policies.get(branch);
-    if(artifact){
-        const op={kind:'model_inference',produces_result:true,result_pending:true,has_predictor:false};
-        const opportunity=await evaluatePolicy(artifact,'admit.opportunity_pass',{op},signal);
-        if(opportunity===true)await evaluatePolicy(artifact,'admit.feasibility_pass',{op,state:{},contract_context:{model:`${modelValue.provider}/${modelValue.id}`,message_count:context.messages.length,runtime_capabilities:runtimeTools}},signal);
-    }
+    const op={kind:'model_inference',produces_result:true,result_pending:true,has_predictor:false};
+    await access.beforeAction({
+        branch,
+        actionId:'model',
+        actionKind:'model_inference',
+        name:'model',
+        arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length},
+        op,
+        contractContext:{model:`${modelValue.provider}/${modelValue.id}`,message_count:context.messages.length,runtime_capabilities:runtimeTools},
+        admit:true,
+        signal,
+    });
+    if(closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
     const actionId=`model-${nextAction++}`, startedAt=Date.now();
     const queue=modelActions.get(branch)??[];
     const action={action_id:actionId,started_at_ms:startedAt,seen_message:false};
@@ -133,76 +129,34 @@ async function beforeModelInference(branch, modelValue, context, signal) {
         await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',status:status??(signal?.aborted?'cancelled':'succeeded'),result:null,timestamp_ms:Date.now()});
     };
 }
-// A Branch that has not been accepted yet may not produce effects. The `effect`
-// Decision is evaluated at the boundary; while the gate holds, the Branch is
-// reported as blocked by the effect gate.
-async function effectGate(branch, descriptor, message, signal) {
-    const gate=gates.get(branch);
-    if(!gate)return;
-    const artifact=policies.get(branch);
-    if(artifact){
-        const plan=await evaluatePolicy(artifact,'effect',{effect_descriptor:descriptor,context:{branch_id:branch}},signal);
-        if(plan?.mode==='deny')throw Error('Effect denied by Policy');
-    }
-    await report({message:'branch_suspended',branch_id:branch,reason:'effect_gate'});
-    await new Promise((resolve,reject)=>{
-        const abort=()=>reject(Error(message));
-        gate.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
-        signal?.addEventListener('abort',abort,{once:true});
-        if(signal?.aborted)abort();
-    });
-    await report({message:'branch_resumed',branch_id:branch});
-}
-// `rebalance` pause: hold the Branch at its next boundary until resumed.
-async function waitPause(branch, signal) {
-    const gate=pauseGates.get(branch);
-    if(!gate)return;
-    await report({message:'branch_suspended',branch_id:branch,reason:'rebalanced'});
-    await new Promise((resolve,reject)=>{
-        const abort=()=>reject(Error('Branch cancelled while paused'));
-        gate.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
-        signal?.addEventListener('abort',abort,{once:true});
-        if(signal?.aborted)abort();
-    });
-    await report({message:'branch_resumed',branch_id:branch});
-}
-async function waitStop(branch, signal) {
-    const gate=stopGates.get(branch);
-    if (!gate) return;
-    await new Promise((resolve,reject)=>{
-        const abort=()=>reject(Error('Extent stop cancelled'));
-        gate.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
-        signal?.addEventListener('abort',abort,{once:true});
-        if(signal?.aborted)abort();
-    });
-}
 function install(session,branch) {
     const before=session.agent.beforeToolCall, after=session.agent.afterToolCall;
     session.agent.beforeToolCall=async(context,signal)=>{
-        await effectGate(branch,{kind:'tool_execution',tool:context.toolCall.name,arguments:context.args},'Candidate cancelled',signal);
-        await waitPause(branch,signal);
         const previous=await before?.(context,signal);
-        if(previous?.block||signal?.aborted||branch!==authority)return previous;
-        const saved=structuredClone(session.messages.filter(m=>m.role!=='custom'));
-        const checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${context.toolCall.id}:${saved.length}`};
-        checkpoints.set(key(branch,context.toolCall.id),{saved,checkpoint});
-        const eventKey=key(branch,context.toolCall.id);
-        if(!countedHooks.has(eventKey)){
-            countedHooks.add(eventKey);
-            hookCounts.set(branch,(hookCounts.get(branch)??0)+1);
-        }
-        const decision=await localDecision(branch,context.toolCall.id,context.toolCall.id,context.toolCall.name,context.args,checkpoint,signal);
-        const admitted=decision.kind==='admit_speculation',policy=policies.get(branch);
-        if(admitted&&policy)await report({message:'speculative_admission_request',task_id:taskId,policy_digest:policy.digest,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint,timestamp_ms:Date.now()});
-        if(admitted&&policy){
-            const extent=await evaluatePolicy(policy,'extent',{process_state:{steps_completed:hookCounts.get(branch)??0,hook_count:hookCounts.get(branch)??0,phase:'tool_execution'}},signal);
-            if(extent==='stop'){
-                let release;const promise=new Promise(resolve=>release=resolve);stopGates.set(branch,{promise,release});
-                await report({message:'branch_suspended',branch_id:branch,reason:'extent_reached'});
-                await waitStop(branch,signal);
-            }
-        }
-        await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',result_pending:true,name:context.toolCall.name,arguments:context.args,checkpoint,timestamp_ms:Date.now()});
+        if(previous?.block||signal?.aborted)return previous;
+        let saved, checkpoint;
+        const prepareCheckpoint=()=>{
+            if(checkpoint)return checkpoint;
+            saved=structuredClone(session.messages.filter(m=>m.role!=='custom'));
+            checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${context.toolCall.id}:${saved.length}`};
+            checkpoints.set(key(branch,context.toolCall.id),{saved,checkpoint});
+            return checkpoint;
+        };
+        await access.beforeAction({
+            branch,
+            actionId:context.toolCall.id,
+            actionKind:'tool_execution',
+            name:context.toolCall.name,
+            arguments:context.args,
+            op:{kind:context.toolCall.name,produces_result:true,result_pending:true,has_predictor:true},
+            contractContext:{arguments:context.args,runtime_capabilities:runtimeTools},
+            admit:()=>branch===authority,
+            admissionFacts:()=>({checkpoint:prepareCheckpoint()}),
+            signal,
+        });
+        if(signal?.aborted||branch!==authority)return previous;
+        const toolCheckpoint=prepareCheckpoint();
+        await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',result_pending:true,name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
         return previous;
     };
     session.agent.afterToolCall=async(context,signal)=>{
@@ -259,10 +213,11 @@ function executeTurn(session,branch,operation) {
 }
 async function handle(command) {
     const branch=command.branch_id;
+    // Hold bookkeeping (local Policy, effect/pause/extent gates) belongs to the
+    // generic access layer; each product only connects its own execution points.
+    if(command.command!=='start_candidate')await access.control(command);
     switch(command.command){
         case 'local_policy':
-            if(typeof command.policy_digest!=='string'||!command.decisions||typeof command.decisions!=='object')throw Error('Invalid local Policy artifact');
-            policies.set(branch,{digest:command.policy_digest,decisions:command.decisions});
             return;
         case 'start_branch': {
             const {session}=await createAgentSession({cwd:command.workspace,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
@@ -280,8 +235,6 @@ async function handle(command) {
             executeTurn(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));return;
         }
         case 'start_candidate': {
-            const parentPolicy=policies.get(command.parent_branch_id);
-            if(parentPolicy)policies.set(branch,parentPolicy);
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
             const messages=structuredClone(checkpoint.saved),last=messages.at(-1);
@@ -304,7 +257,7 @@ async function handle(command) {
             }
             const manager=SessionManager.inMemory(command.workspace);
             for(const message of [...messages,...paired])manager.appendMessage(message);
-            let release;const promise=new Promise(resolve=>release=resolve);gates.set(branch,{promise,release});
+            await access.control(command);
             const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){session.dispose();return}
             sessions.set(branch,session);install(session,branch);
@@ -315,29 +268,25 @@ async function handle(command) {
             await report({message:'branch_ready',branch_id:branch});
             executeTurn(session,branch,()=>session.continue());return;
         }
-        case 'pause': {
-            if(!pauseGates.has(branch)){let release;const promise=new Promise(resolve=>release=resolve);pauseGates.set(branch,{promise,release});}
-            return;
-        }
+        case 'pause':
         case 'resume':
-            pauseGates.get(branch)?.release();pauseGates.delete(branch);return;
+            return;
         case 'resolve_pending': {
-            stopGates.get(branch)?.release();stopGates.delete(branch);
-            if(command.outcome===undefined){await report({message:'branch_resumed',branch_id:branch});return;}
-            if(command.outcome!==undefined){const id=key(branch,command.operation_id),waiter=waiters.get(id);if(waiter){waiters.delete(id);waiter(command.outcome)}else results.set(id,command.outcome)}
+            if(command.outcome===undefined)return;
+            const id=key(branch,command.operation_id),waiter=waiters.get(id);if(waiter){waiters.delete(id);waiter(command.outcome)}else results.set(id,command.outcome);
             return;
         }
         case 'promote':
             if(cancelled.has(branch)||!sessions.has(branch))throw Error('Branch unavailable');
-            authority=branch;gates.get(branch)?.release();gates.delete(branch);stopGates.get(branch)?.release();stopGates.delete(branch);return;
+            authority=branch;return;
         case 'abort':
             aborting.add(branch);
             try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled'); }
             finally { aborting.delete(branch); }
             return;
-        case 'discard': cancelled.add(branch);stopGates.get(branch)?.release();stopGates.delete(branch);pauseGates.get(branch)?.release();pauseGates.delete(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');return;
+        case 'discard': cancelled.add(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');return;
         case 'cleanup':
-            cancelled.add(branch);stopGates.get(branch)?.release();stopGates.delete(branch);pauseGates.get(branch)?.release();pauseGates.delete(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);gates.delete(branch);policies.delete(branch);hookCounts.delete(branch);modelActions.delete(branch);
+            cancelled.add(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);modelActions.delete(branch);
             await finishActions(branch,'cancelled');
             for(const id of checkpoints.keys())if(JSON.parse(id)[0]===branch)checkpoints.delete(id);
             await report({message:'agent_session_released',branch_id:branch});
@@ -383,7 +332,7 @@ try{
 }catch(error){
     transportError??=error;
 }finally{
-    closing=true;for(const gate of gates.values())gate.release();for(const gate of stopGates.values())gate.release();for(const gate of pauseGates.values())gate.release();
+    closing=true;access.releaseAll();
     await commandQueue.catch(()=>{});
     await Promise.allSettled([...sessions.values()].map(s=>s.abort()));
     await Promise.allSettled(tasks);for(const session of sessions.values())session.dispose();
