@@ -13,6 +13,7 @@ export function SpeculationPanel() {
   const selectedTaskId = useAppStore((store) => store.selectedTaskId)
   const panelView = useAppStore((store) => store.panelView)
   const selectedBranchId = useAppStore((store) => store.selectedBranchId)
+  const detailAnchor = useAppStore((store) => store.detailAnchor)
   const showTree = useAppStore((store) => store.showTree)
   const setPanelOpen = useAppStore((store) => store.setPanelOpen)
 
@@ -75,7 +76,11 @@ export function SpeculationPanel() {
       </div>
       <div className={detailBranch ? 'panel-content panel-content-detail' : 'panel-content'}>
         {detailBranch ? (
-          <BranchDetails branch={detailBranch} chance={detailChance} />
+          <BranchDetails
+            branch={detailBranch}
+            chance={detailChance}
+            anchor={detailAnchor}
+          />
         ) : (
           <SpeculationTree task={task} />
         )}

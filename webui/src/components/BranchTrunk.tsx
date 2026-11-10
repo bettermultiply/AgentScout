@@ -13,6 +13,8 @@ export interface BranchTrunkData extends Record<string, unknown> {
   isAuthorityPath: boolean
   isLive: boolean
   height: number
+  /** Horizontal drift of the trunk bottom; candidates lean outward. */
+  dx: number
   forks: TrunkFork[]
 }
 
@@ -23,7 +25,8 @@ function isAbandoned(status: BranchState['status']): boolean {
 }
 
 function BranchTrunkView({ data }: NodeProps<BranchTrunkFlowNode>) {
-  const { branch, isAuthorityPath, isLive, height, forks } = data
+  const { branch, isAuthorityPath, isLive, height, dx, forks } = data
+  const angle = height > 0 ? (Math.atan2(dx, height) * 180) / Math.PI : 0
 
   return (
     <div className="tree-trunk" style={{ height }} aria-hidden="true">
@@ -36,17 +39,19 @@ function BranchTrunkView({ data }: NodeProps<BranchTrunkFlowNode>) {
         ]
           .filter(Boolean)
           .join(' ')}
-      />
-      {forks.map((fork) => (
-        <Handle
-          key={fork.childId}
-          type="source"
-          position={Position.Right}
-          id={`fork:${fork.childId}`}
-          className="tree-handle tree-fork-handle"
-          style={{ top: fork.offset }}
-        />
-      ))}
+        style={{ height, transform: `rotate(${angle}deg)` }}
+      >
+        {forks.map((fork) => (
+          <Handle
+            key={fork.childId}
+            type="source"
+            position={Position.Top}
+            id={`fork:${fork.childId}`}
+            className="tree-handle tree-fork-handle"
+            style={{ top: fork.offset, left: '50%' }}
+          />
+        ))}
+      </span>
     </div>
   )
 }

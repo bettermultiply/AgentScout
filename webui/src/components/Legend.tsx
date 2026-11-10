@@ -1,15 +1,13 @@
 import { ReasonIcon, StatusIcon } from '../icons'
-import { leafKindLabel, type LeafKind, type LeafTone } from '../treeLayout'
 
-const leafSamples: Array<{ kind: LeafKind; tone: LeafTone; note: string }> = [
-  { kind: 'conversation', tone: 'neutral', note: '流式回复逐块上报；连续更新合并' },
-  { kind: 'model', tone: 'accent', note: '一次模型调用的 token 与费用' },
-  { kind: 'tool', tone: 'success', note: '成功为绿色，失败为红色' },
-  { kind: 'status', tone: 'warning', note: '生命周期状态变化' },
-  { kind: 'environment', tone: 'info', note: '独立环境或清理结果' },
-  { kind: 'settlement', tone: 'success', note: '命中；未命中为红色' },
-  { kind: 'authority', tone: 'accent', note: '权威窗口切换' },
-]
+function TwigSample() {
+  return (
+    <span className="legend-twig" aria-hidden="true">
+      <span className="legend-twig-line" />
+      <span className="legend-twig-leaf" />
+    </span>
+  )
+}
 
 export function Legend() {
   return (
@@ -17,9 +15,9 @@ export function Legend() {
       <summary>图例</summary>
       <div className="legend-body">
         <section>
-          <h4>树枝</h4>
+          <h4>树枝（一个 Branch）</h4>
           <p className="legend-note">
-            一个 Branch 是一根纵向树枝；纵向只表示事件顺序，长度不代表时间。分支名不显示。
+            权威路径是居中的主干；投机候选从主干或父候选分叉，按子树大小分配到左右两侧斜向下生长。纵向只表示调用顺序，长度不代表时间；分支名不显示。
           </p>
           <ul>
             <li>
@@ -41,38 +39,80 @@ export function Legend() {
                   <ReasonIcon reason="tool" size={11} />
                 </span>
               </span>
-              树枝头部：状态图标 + 投机原因；点击进入分支详情
+              树枝头部：生命周期状态 + 投机原因；点击进入详情顶部
+            </li>
+            <li>
+              <span
+                className="legend-settlement legend-settlement-hit"
+                aria-hidden="true"
+              >
+                ✓
+              </span>
+              头部旁的结算标记：命中；未命中为红色 ✕
             </li>
           </ul>
         </section>
         <section>
-          <h4>叶子（Branch 内的事件）</h4>
+          <h4>小枝条（模型调用）</h4>
           <ul>
-            {leafSamples.map((sample) => (
-              <li key={sample.kind}>
-                <span
-                  className={`legend-leaf tree-leaf leaf-${sample.kind} tone-${sample.tone}`}
-                  aria-hidden="true"
-                >
-                  <span className="leaf-shape" />
-                </span>
-                <span>
-                  {leafKindLabel(sample.kind)}
-                  <span className="legend-leaf-note">{sample.note}</span>
-                </span>
-              </li>
-            ))}
+            <li>
+              <TwigSample />
+              每次模型调用一根小枝条，末端小叶表示结果；比叶子大、比树枝细
+            </li>
           </ul>
           <p className="legend-note">
-            连续且呈现信息相同的同类事件合并为一个叶子；悬停显示条数与详情，点击叶子进入该分支详情。
+            悬停显示模型名、token、耗时与费用；缺失字段显示“未上报”。连续同模型调用合并为一条并带计数，悬停展开完整列表。点击定位到详情中的这次调用。
           </p>
         </section>
         <section>
-          <h4>投机阶段与原因</h4>
+          <h4>叶子（工具调用）</h4>
+          <ul>
+            <li>
+              <span
+                className="legend-leaf tree-leaf leaf-tool tone-success"
+                aria-hidden="true"
+              >
+                <span className="leaf-shape" />
+              </span>
+              成功：绿色方形叶子
+            </li>
+            <li>
+              <span
+                className="legend-leaf tree-leaf leaf-tool tone-danger"
+                aria-hidden="true"
+              >
+                <span className="leaf-shape" />
+              </span>
+              失败：红色；取消为灰色，超时为黄色
+            </li>
+          </ul>
           <p className="legend-note">
-            Chance 阶段来自 <code>chance_stage_changed</code>，抛弃原因和阻塞原因分别来自
-            <code>ChanceStage::Discarded</code> 与 <code>BranchStatus::Blocked</code>。
+            沿树枝的每次工具调用是一片叶子，悬停显示工具名、状态与耗时。连续同名且同结果的调用合并为一片并带计数，悬停展开完整列表。点击定位到详情中的这次调用。
           </p>
+        </section>
+        <section>
+          <h4>投机原因与 Chance</h4>
+          <p className="legend-note">
+            头部原因徽标来自 <code>branch_created.speculation_kind</code>；Chance
+            字段来自 <code>chance_created</code> 与后续阶段事件。
+          </p>
+          <ul>
+            <li>
+              <ReasonIcon reason="tool" size={13} /> 工具执行 ·{' '}
+              <ReasonIcon reason="model" size={13} /> 模型推理 ·{' '}
+              <ReasonIcon reason="other" size={13} /> 其他 / 未上报
+            </li>
+            <li>
+              <code>chance_id</code> 区分这是哪一次投机；初始权威为 null
+            </li>
+            <li>
+              <code>chance_created.tool_name</code> 是发起投机的工具名；缺失显示“未上报”
+            </li>
+            <li>
+              <code>parent_chance_id</code> 表示嵌套投机；null 显示“未上报”
+            </li>
+          </ul>
+          <p className="legend-note">Chance 阶段</p>
           <ul>
             <li>
               <code>pending</code> 待选 · <code>running</code> 运行中 ·{' '}
@@ -81,6 +121,13 @@ export function Legend() {
             <li>
               <code>accepted</code> 已接受某个 Proposal；<code>discarded</code>{' '}
               已抛弃
+            </li>
+          </ul>
+          <p className="legend-note">权威状态</p>
+          <ul>
+            <li>
+              <code>not_requested</code> 未请求 · <code>fetching</code> 正在取得 ·{' '}
+              <code>arrived</code> 已到达 · <code>unavailable</code> 不可用
             </li>
           </ul>
           <p className="legend-note">抛弃原因</p>

@@ -1107,6 +1107,51 @@ select {
   place-items: center;
 }
 
+.legend-twig {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 12px;
+  color: var(--accent);
+}
+
+.legend-twig-line {
+  position: absolute;
+  left: 0;
+  top: 5px;
+  width: 26px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.legend-twig-leaf {
+  position: absolute;
+  left: 26px;
+  top: 2px;
+  width: 8px;
+  height: 8px;
+  background: currentColor;
+  clip-path: polygon(50% 0, 95% 25%, 95% 75%, 50% 100%, 5% 75%, 5% 25%);
+}
+
+.legend-settlement {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--surface-raised);
+}
+
+.legend-settlement-hit {
+  border: 1.5px solid var(--success);
+  color: var(--success);
+}
+
 .legend-leaf {
   width: 18px;
   height: 18px;
@@ -1115,11 +1160,6 @@ select {
 .legend-leaf .leaf-shape {
   width: 10px;
   height: 10px;
-}
-
-.legend-leaf.leaf-authority .leaf-shape {
-  width: 11px;
-  height: 11px;
 }
 
 .legend-leaf-note {
@@ -1257,25 +1297,65 @@ select {
   color: var(--muted);
 }
 
+.head-reason-unreported {
+  color: var(--muted);
+  border-color: var(--muted);
+}
+
+.head-settlement {
+  position: absolute;
+  left: -10px;
+  bottom: -8px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  background: var(--surface-raised);
+  box-shadow: 0 1px 3px rgb(22 33 44 / 16%);
+  pointer-events: none;
+}
+
+.head-settlement-hit {
+  border: 1.5px solid var(--success);
+  color: var(--success);
+}
+
+.head-settlement-miss {
+  border: 1.5px solid var(--danger);
+  color: var(--danger);
+}
+
+.head-abandoned .head-settlement {
+  border-color: var(--muted);
+  color: var(--muted);
+}
+
 .tree-trunk {
   position: relative;
   width: 16px;
   height: 100%;
   display: flex;
   justify-content: center;
-  cursor: pointer;
+  cursor: default;
 }
 
 .tree-trunk-capsule {
+  position: relative;
   display: block;
   height: 100%;
   border-radius: 999px;
+  transform-origin: top center;
   transition:
     width 0.32s ease,
     background-color 0.32s ease,
     border-color 0.32s ease,
     opacity 0.32s ease,
-    box-shadow 0.28s ease;
+    box-shadow 0.28s ease,
+    transform 0.32s ease;
 }
 
 .trunk-authority {
@@ -1307,8 +1387,8 @@ select {
 
 .tree-leaf {
   position: relative;
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -1320,13 +1400,13 @@ select {
 
 .tree-leaf:hover,
 .tree-leaf:focus-visible {
-  transform: scale(1.35);
+  transform: scale(1.4);
   outline: none;
 }
 
 .leaf-count {
   position: absolute;
-  left: 15px;
+  left: 19px;
   top: 50%;
   transform: translateY(-50%);
   padding: 0 3px;
@@ -1341,6 +1421,11 @@ select {
   pointer-events: none;
 }
 
+.leaf-side-left .leaf-count {
+  left: auto;
+  right: 19px;
+}
+
 .leaf-shape {
   display: block;
   width: 10px;
@@ -1348,50 +1433,81 @@ select {
   background: currentColor;
 }
 
-.leaf-conversation .leaf-shape {
-  border-radius: 50%;
-}
-
 .leaf-tool .leaf-shape {
   border-radius: 2px;
 }
 
-.leaf-model .leaf-shape {
+/* A model call is a small twig: a thin line plus a tiny hexagon result leaf. */
+.tree-twig {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  color: var(--accent);
+  cursor: pointer;
+  transition:
+    transform 0.16s ease,
+    opacity 0.32s ease;
+}
+
+.tree-twig:hover,
+.tree-twig:focus-visible {
+  transform: scale(1.15);
+  outline: none;
+}
+
+.twig-line {
+  position: absolute;
+  top: 9px;
+  height: 2px;
+  width: 26px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.twig-right .twig-line {
+  left: 0;
+}
+
+.twig-left .twig-line {
+  left: 8px;
+}
+
+.twig-leaf {
+  position: absolute;
+  top: 6px;
+  width: 8px;
+  height: 8px;
+  background: currentColor;
   clip-path: polygon(50% 0, 95% 25%, 95% 75%, 50% 100%, 5% 75%, 5% 25%);
 }
 
-.leaf-status .leaf-shape {
-  border-radius: 1px;
-  transform: rotate(45deg);
+.twig-right .twig-leaf {
+  left: 26px;
 }
 
-.leaf-environment .leaf-shape {
-  clip-path: polygon(50% 4%, 96% 96%, 4% 96%);
+.twig-left .twig-leaf {
+  left: 0;
 }
 
-.leaf-settlement .leaf-shape {
-  width: 12px;
-  height: 12px;
-  clip-path: polygon(
-    50% 0%,
-    61% 35%,
-    98% 35%,
-    68% 57%,
-    79% 91%,
-    50% 70%,
-    21% 91%,
-    32% 57%,
-    2% 35%,
-    39% 35%
-  );
+.twig-count {
+  position: absolute;
+  left: 12px;
+  top: -7px;
+  padding: 0 3px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  font-size: 8.5px;
+  line-height: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
-.leaf-authority .leaf-shape {
-  width: 11px;
-  height: 11px;
-  border: 2.5px solid currentColor;
-  border-radius: 50%;
-  background: transparent;
+.twig-abandoned {
+  color: var(--muted);
+  opacity: 0.45;
 }
 
 .tone-neutral {
@@ -1441,7 +1557,7 @@ select {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  max-width: 280px;
+  max-width: 300px;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1450,18 +1566,37 @@ select {
   color: var(--text);
   font-size: 11px;
   line-height: 1.45;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .node-tooltip-float {
   position: fixed;
   z-index: 80;
   transform: translate(-50%, calc(-100% - 14px));
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .node-tooltip-float.tooltip-below {
   transform: translate(-50%, 16px);
+}
+
+.node-tooltip-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  margin: 4px 0 2px;
+  padding-right: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.node-tooltip-call {
+  display: block;
+  color: var(--text-soft);
+  font-size: 10.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .node-tooltip-id {
@@ -1638,6 +1773,27 @@ select {
 
 .usage-table tr:last-child td {
   border-bottom: 0;
+}
+
+.usage-table tr.usage-row-anchor td {
+  background: var(--accent-soft);
+}
+
+.usage-table tr.usage-row-anchor td:first-child {
+  box-shadow: inset 3px 0 var(--accent);
+}
+
+.usage-table tr.usage-row-anchor td {
+  animation: usage-flash 1.6s ease-out 1;
+}
+
+@keyframes usage-flash {
+  0% {
+    background: var(--accent);
+  }
+  100% {
+    background: var(--accent-soft);
+  }
 }
 
 .usage-table code {

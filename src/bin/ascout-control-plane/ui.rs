@@ -145,7 +145,9 @@ pub enum Request {
 pub struct Interface {
     task_id: String,
     conversations: Arc<Mutex<BTreeMap<String, Conversation>>>,
-    action_starts: Arc<Mutex<BTreeMap<(String, String), u64>>>,
+    /// 每个工具 action 的开始时刻与工具名；工具名来自同一 action 的
+    /// `ActionStarted.name`，没有 ActionStarted 时两者都不存在。
+    action_starts: Arc<Mutex<BTreeMap<(String, String), (u64, String)>>>,
     reader: LedgerReader,
     requests: Arc<dyn Fn(Request) -> Result<(), String> + Send + Sync>,
 }
@@ -269,13 +271,14 @@ impl Interface {
             AgentMessage::ActionStarted {
                 branch_id,
                 action_id,
+                name,
                 timestamp_ms,
                 ..
             } => {
-                self.action_starts
-                    .lock()
-                    .unwrap()
-                    .insert((branch_id.clone(), action_id.clone()), *timestamp_ms);
+                self.action_starts.lock().unwrap().insert(
+                    (branch_id.clone(), action_id.clone()),
+                    (*timestamp_ms, name.clone()),
+                );
                 None
             }
             AgentMessage::Usage {
@@ -308,18 +311,21 @@ impl Interface {
                 timestamp_ms,
                 ..
             } => {
-                let started = self
+                let start = self
                     .action_starts
                     .lock()
                     .unwrap()
                     .remove(&(branch_id.clone(), action_id.clone()));
+                let started_at_ms = start.as_ref().map(|(timestamp, _)| *timestamp);
+                let tool_name = start.map(|(_, name)| name);
                 Some(ObservationContent::ToolFinished {
                     branch_id: branch_id.clone(),
                     action_id: action_id.clone(),
+                    tool_name,
                     status: *status,
-                    started_at_ms: started,
+                    started_at_ms,
                     finished_at_ms: Some(*timestamp_ms),
-                    duration_ms: started.and_then(|start| timestamp_ms.checked_sub(start)),
+                    duration_ms: started_at_ms.and_then(|start| timestamp_ms.checked_sub(start)),
                 })
             }
             AgentMessage::ActionFinished {

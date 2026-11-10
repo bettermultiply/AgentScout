@@ -13,6 +13,17 @@ export type ConnectionState =
   | 'closed'
   | 'error'
 
+/**
+ * Where to land inside the Branch detail after clicking a call node.
+ * `sequences` are the event sequences of the clicked group; the detail uses
+ * them to scroll and highlight, and `actionId` is the anchor when present.
+ */
+export interface DetailAnchor {
+  kind: 'tool' | 'model'
+  actionId: string | null
+  sequences: number[]
+}
+
 interface AppStore {
   state: RunState
   eventCount: number
@@ -24,6 +35,7 @@ interface AppStore {
   panelOpen: boolean
   panelView: 'tree' | 'detail'
   selectedBranchId: string | null
+  detailAnchor: DetailAnchor | null
   conversationVersions: Record<string, number>
   ingestEvent: (event: ObservationEvent) => void
   start: () => Promise<void>
@@ -32,7 +44,7 @@ interface AppStore {
   selectTask: (taskId: string) => void
   selectAuthorityWindow: (branchId: string | null) => void
   setPanelOpen: (open: boolean) => void
-  openBranch: (branchId: string) => void
+  openBranch: (branchId: string, anchor?: DetailAnchor | null) => void
   showTree: () => void
   dismissError: () => void
 }
@@ -149,6 +161,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     panelOpen: readPanelOpen(),
     panelView: 'tree',
     selectedBranchId: null,
+    detailAnchor: null,
     conversationVersions: {},
 
     async start() {
@@ -229,11 +242,16 @@ export const useAppStore = create<AppStore>((set, get) => {
       set(
         open
           ? { panelOpen: true }
-          : { panelOpen: false, panelView: 'tree', selectedBranchId: null },
+          : {
+              panelOpen: false,
+              panelView: 'tree',
+              selectedBranchId: null,
+              detailAnchor: null,
+            },
       )
     },
 
-    openBranch(branchId) {
+    openBranch(branchId, anchor = null) {
       try {
         window.localStorage.setItem('ascout.panel', 'open')
       } catch {
@@ -243,11 +261,12 @@ export const useAppStore = create<AppStore>((set, get) => {
         selectedBranchId: branchId,
         panelView: 'detail',
         panelOpen: true,
+        detailAnchor: anchor,
       })
     },
 
     showTree() {
-      set({ panelView: 'tree', selectedBranchId: null })
+      set({ panelView: 'tree', selectedBranchId: null, detailAnchor: null })
     },
 
     dismissError() {

@@ -6,15 +6,18 @@ import {
   speculationReason,
   statusLabel,
   type BranchState,
+  type ChanceState,
 } from '../fold'
 import { ReasonIcon, StatusIcon } from '../icons'
+import { settlementSummary } from '../treeLayout'
 import { useAppStore } from '../store'
 
 export interface BranchHeaderData extends Record<string, unknown> {
   branch: BranchState
+  chance: ChanceState | null
   isAuthorityPath: boolean
   isLive: boolean
-  leafCount: number
+  callCount: number
 }
 
 export type BranchHeaderFlowNode = Node<BranchHeaderData, 'branchHeader'>
@@ -24,9 +27,10 @@ function isAbandoned(status: BranchState['status']): boolean {
 }
 
 function BranchNodeView({ data }: NodeProps<BranchHeaderFlowNode>) {
-  const { branch, isAuthorityPath, isLive } = data
+  const { branch, chance, isAuthorityPath, isLive } = data
   const role = roleLabel(branch.role)
   const reason = speculationKindLabel(branch.speculationKind)
+  const settlement = settlementSummary(branch)
   const open = () => useAppStore.getState().openBranch(branch.branchId)
 
   return (
@@ -41,7 +45,9 @@ function BranchNodeView({ data }: NodeProps<BranchHeaderFlowNode>) {
         .join(' ')}
       tabIndex={0}
       role="button"
-      aria-label={`分支 ${branch.branchId}，${role}，${statusLabel(branch.status)}，投机原因 ${reason}，${data.leafCount} 个叶子`}
+      aria-label={`分支 ${branch.branchId}，${role}，${statusLabel(branch.status)}，投机原因 ${reason}，${data.callCount} 次调用${
+        settlement ? `，${settlement}` : ''
+      }${chance?.toolName ? `，Chance 工具 ${chance.toolName}` : ''}`}
       onKeyDown={(keyboard) => {
         if (keyboard.key === 'Enter' || keyboard.key === ' ') {
           keyboard.preventDefault()
@@ -58,9 +64,29 @@ function BranchNodeView({ data }: NodeProps<BranchHeaderFlowNode>) {
       <span className="head-status" aria-hidden="true">
         <StatusIcon status={branch.status} size={24} />
       </span>
-      <span className="head-reason" aria-hidden="true">
-        <ReasonIcon reason={speculationReason(branch.speculationKind)} size={18} />
+      <span
+        className={`head-reason${
+          branch.speculationKind === null ? ' head-reason-unreported' : ''
+        }`}
+        aria-hidden="true"
+        title={`投机原因：${reason}`}
+      >
+        <ReasonIcon
+          reason={speculationReason(branch.speculationKind)}
+          size={16}
+        />
       </span>
+      {settlement ? (
+        <span
+          className={`head-settlement head-settlement-${
+            branch.settlements.at(-1)?.hit ? 'hit' : 'miss'
+          }`}
+          aria-hidden="true"
+          title={`结算：${settlement}`}
+        >
+          {branch.settlements.at(-1)?.hit ? '✓' : '✕'}
+        </span>
+      ) : null}
     </div>
   )
 }

@@ -98,6 +98,9 @@ pub enum ObservationContent {
     ToolFinished {
         branch_id: String,
         action_id: String,
+        /// 工具名来自同一 action 的 `ActionStarted.name`；没有 ActionStarted
+        /// （例如只有准入请求）时为 null，不推测。
+        tool_name: Option<String>,
         status: ActionStatus,
         /// 工具真正开始时刻来自 ActionStarted；只有准入请求时为 null。
         started_at_ms: Option<u64>,

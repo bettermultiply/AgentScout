@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import {
   actionStatusLabel,
   authorityStateLabel,
@@ -19,7 +20,9 @@ import {
   formatTimestamp,
   formatTokens,
 } from '../format'
+import { toolName } from '../treeLayout'
 import { useConversation, useNow } from '../useConversation'
+import type { DetailAnchor } from '../store'
 import { ConversationView } from './ConversationView'
 
 function Field({
@@ -70,15 +73,48 @@ function modelTokenText(usage: BranchState['modelUsages'][number]): string {
 export function BranchDetails({
   branch,
   chance,
+  anchor,
 }: {
   branch: BranchState
   chance: ChanceState | null
+  anchor: DetailAnchor | null
 }) {
   const active = !isTerminalStatus(branch.status)
   const now = useNow(active && branch.speculationStartedAtMs !== null)
   const conversation = useConversation(branch.branchId, true)
   const tokens = branchTokenTotal(branch)
   const model = latestModel(branch)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const highlighted = new Set(anchor?.sequences ?? [])
+
+  useEffect(() => {
+    const root = rootRef.current
+    if (!root) return
+    if (!anchor) {
+      const scroller = root.closest('.panel-content')
+      if (scroller instanceof HTMLElement) {
+        scroller.scrollTo({ top: 0, behavior: 'smooth' })
+      }
+      return
+    }
+    const rows = Array.from(
+      root.querySelectorAll<HTMLElement>(
+        `[data-call-kind="${anchor.kind}"]`,
+      ),
+    )
+    const target =
+      (anchor.actionId
+        ? rows.find((row) => row.dataset.callAction === anchor.actionId)
+        : undefined) ??
+      rows.find((row) =>
+        anchor.sequences.includes(Number(row.dataset.callSequence)),
+      )
+    if (!target) return
+    const frame = window.requestAnimationFrame(() => {
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [branch.branchId, anchor])
 
   const survival =
     branch.speculationStartedAtMs === null
@@ -92,7 +128,7 @@ export function BranchDetails({
         )
 
   return (
-    <div className="branch-details">
+    <div className="branch-details" ref={rootRef}>
       <div className={`branch-banner banner-${branch.role}`}>
         <span className={`badge badge-role-${branch.role}`}>{roleLabel(branch.role)}</span>
         <span
@@ -226,9 +262,23 @@ export function BranchDetails({
               </thead>
               <tbody>
                 {branch.modelUsages.map((usage) => (
-                  <tr key={`${usage.action_id}:${usage.sequence}`}>
+                  <tr
+                    key={usage.sequence}
+                    data-call-sequence={usage.sequence}
+                    data-call-kind="model"
+                    data-call-action={usage.action_id ?? ''}
+                    className={
+                      highlighted.has(usage.sequence)
+                        ? 'usage-row-anchor'
+                        : undefined
+                    }
+                  >
                     <td>
-                      <code>{usage.action_id}</code>
+                      {usage.action_id === null ? (
+                        <span className="muted">未配对</span>
+                      ) : (
+                        <code>{usage.action_id}</code>
+                      )}
                     </td>
                     <td>{usage.model}</td>
                     <td>
@@ -267,16 +317,32 @@ export function BranchDetails({
               <thead>
                 <tr>
                   <th>动作</th>
+                  <th>工具</th>
                   <th>状态</th>
                   <th>耗时</th>
                 </tr>
               </thead>
               <tbody>
                 {branch.tools.map((tool) => (
-                  <tr key={`${tool.action_id}:${tool.sequence}`}>
+                  <tr
+                    key={tool.sequence}
+                    data-call-sequence={tool.sequence}
+                    data-call-kind="tool"
+                    data-call-action={tool.action_id ?? ''}
+                    className={
+                      highlighted.has(tool.sequence)
+                        ? 'usage-row-anchor'
+                        : undefined
+                    }
+                  >
                     <td>
-                      <code>{tool.action_id}</code>
+                      {tool.action_id === null ? (
+                        <span className="muted">未配对</span>
+                      ) : (
+                        <code>{tool.action_id}</code>
+                      )}
                     </td>
+                    <td>{toolName(tool)}</td>
                     <td>{actionStatusLabel(tool.status)}</td>
                     <td>
                       {tool.duration_ms === null ? (
