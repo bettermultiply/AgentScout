@@ -51,10 +51,7 @@ impl LedgerReader {
             let index = self.index.0.lock().unwrap();
             (index.sequence, index.head.clone())
         };
-        StateEventSet {
-            sequence,
-            events: Self::collect(head, 0),
-        }
+        StateEventSet::new(sequence, Self::collect(head, 0))
     }
     fn collect(mut head: Option<Arc<ObservationBlock>>, after: u64) -> Vec<ObservationEvent> {
         let mut events = Vec::new();

@@ -30,26 +30,25 @@ impl SpeculativeTree {
                 self.branch(&branch_id)?;
                 Ok(vec![])
             }
-            AgentMessage::BranchSuspended { branch_id } => self.handle_branch_suspended(&branch_id),
+            AgentMessage::BranchSuspended { branch_id, reason } => {
+                self.handle_branch_suspended(&branch_id, reason)
+            }
             AgentMessage::BranchResumed { branch_id } => self.handle_branch_resumed(&branch_id),
             AgentMessage::BranchStarted { branch_id } => self.handle_branch_started(&branch_id),
             AgentMessage::ActionFinished {
                 task_id,
                 branch_id,
                 action_id,
-                result,
                 action_kind,
                 status,
-                evidence,
                 timestamp_ms,
+                ..
             } => self.handle_action_finished(
                 &task_id,
                 &branch_id,
                 &action_id,
-                result,
                 action_kind,
                 status,
-                evidence,
                 timestamp_ms,
             ),
             AgentMessage::TurnCompleted { branch_id } => {
@@ -140,13 +139,27 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    fn handle_branch_suspended(&mut self, branch_id: &str) -> io::Result<Vec<AgentCommand>> {
+    /// The Agent Adapter reports that it actually holds this Branch at a
+    /// boundary. Only the latest blocking Decision is recorded.
+    fn handle_branch_suspended(
+        &mut self,
+        branch_id: &str,
+        reason: BlockedReason,
+    ) -> io::Result<Vec<AgentCommand>> {
         let branch = self.branch_mut(branch_id)?;
         if matches!(
             branch.status,
-            BranchStatus::Running | BranchStatus::Promoted | BranchStatus::AwaitingValidation
+            BranchStatus::Running
+                | BranchStatus::Promoted
+                | BranchStatus::Finished
+                | BranchStatus::Blocked(_)
         ) {
             branch.execution_state.agent = AgentExecutionState::Stopped;
+            self.change_status(
+                branch_id,
+                BranchStatus::Blocked(reason),
+                &format!("Blocked: {reason:?}"),
+            )?;
         }
         Ok(vec![])
     }
@@ -155,9 +168,15 @@ impl SpeculativeTree {
         let branch = self.branch_mut(branch_id)?;
         if matches!(
             branch.status,
-            BranchStatus::Running | BranchStatus::Promoted | BranchStatus::AwaitingValidation
+            BranchStatus::Running
+                | BranchStatus::Promoted
+                | BranchStatus::Finished
+                | BranchStatus::Blocked(_)
         ) {
             branch.execution_state.agent = AgentExecutionState::Running;
+            if matches!(branch.status, BranchStatus::Blocked(_)) {
+                self.change_status(branch_id, BranchStatus::Running, "Block released")?;
+            }
         }
         Ok(vec![])
     }
@@ -191,10 +210,8 @@ impl SpeculativeTree {
         task_id: &str,
         branch_id: &str,
         operation_id: &str,
-        outcome: Value,
         action_kind: ActionKind,
         status: ActionStatus,
-        evidence: Option<Value>,
         timestamp_ms: u64,
     ) -> io::Result<Vec<AgentCommand>> {
         if task_id != self.execution_id {
@@ -224,7 +241,7 @@ impl SpeculativeTree {
             {
                 self.change_status(
                     branch_id,
-                    BranchStatus::AwaitingValidation,
+                    BranchStatus::Finished,
                     "Candidate model inference succeeded",
                 )?;
             }
@@ -245,23 +262,6 @@ impl SpeculativeTree {
                 OperationStatus::Failed
             },
         )?;
-        for branch in self
-            .branches
-            .values_mut()
-            .filter(|branch| branch.parent_branch_id.as_deref() == Some(branch_id))
-        {
-            for operation in &mut branch.pending_operations {
-                // Runtime evidence is authoritative; an Agent's textual
-                // rendering of that result must not overwrite it.
-                if operation.kind == OperationKind::StartCandidate
-                    && operation.operation_id == operation_id
-                    && operation.evidence.is_none()
-                {
-                    operation.outcome = Some(outcome.clone());
-                    operation.evidence = evidence.clone();
-                }
-            }
-        }
         Ok(vec![])
     }
 
@@ -364,9 +364,9 @@ impl SpeculativeTree {
         if branch.status == BranchStatus::Promoting {
             return Ok(vec![]);
         }
-        self.resolve_candidate_with_reason(
+        self.discard_candidate(
             branch_id,
-            false,
+            DiscardedReason::Failed,
             &format!("Agent Branch failed: {reason}"),
         )
     }
@@ -452,6 +452,15 @@ impl SpeculativeTree {
         }
         self.change_authority(branch_id)?;
         self.change_status(branch_id, BranchStatus::Promoted, "Agent promotion applied")?;
+        if let Some(chance_id) = self.branch(branch_id)?.chance_id.clone()
+            && let Some(assumption) = self.own_assumption(self.branch(branch_id)?).cloned()
+        {
+            self.change_chance_stage(
+                &chance_id,
+                ChanceStage::Accepted(assumption.proposal_id),
+                "Promotion applied",
+            )?;
+        }
         // A model failure that arrived while Promote was in flight is now a
         // failure of the new authority, not a reason to discard the candidate.
         self.change_status(
@@ -469,9 +478,9 @@ impl SpeculativeTree {
             .collect();
         for id in obsolete {
             if self.pending_candidates().contains(&id) {
-                commands.extend(self.resolve_candidate_with_reason(
+                commands.extend(self.discard_candidate(
                     &id,
-                    false,
+                    DiscardedReason::AncestorInvalidated,
                     "Sibling authority promotion confirmed",
                 )?);
             }
@@ -485,6 +494,7 @@ impl SpeculativeTree {
         reason: &str,
     ) -> io::Result<Vec<AgentCommand>> {
         self.change_status(branch_id, BranchStatus::Discarding, reason)?;
+        self.settle_branch_chance(branch_id, reason)?;
         Ok(vec![self.make_discard_command(branch_id)?])
     }
 
@@ -537,6 +547,7 @@ impl SpeculativeTree {
                 BranchStatus::Discarding,
                 "Runtime promotion failed",
             )?;
+            self.settle_branch_chance(candidate, "Runtime promotion failed")?;
             Ok(vec![self.make_discard_command(candidate)?])
         }
     }

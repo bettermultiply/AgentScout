@@ -19,6 +19,8 @@ export function SpeculationPanel() {
   const task = selectedTaskId ? state.tasks[selectedTaskId] ?? null : null
   const branch = selectedBranchId ? task?.branches[selectedBranchId] ?? null : null
   const detailBranch = panelView === 'detail' ? branch : null
+  const detailChance =
+    detailBranch?.chanceId ? task?.chances[detailBranch.chanceId] ?? null : null
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -73,7 +75,7 @@ export function SpeculationPanel() {
       </div>
       <div className={detailBranch ? 'panel-content panel-content-detail' : 'panel-content'}>
         {detailBranch ? (
-          <BranchDetails branch={detailBranch} />
+          <BranchDetails branch={detailBranch} chance={detailChance} />
         ) : (
           <SpeculationTree task={task} />
         )}

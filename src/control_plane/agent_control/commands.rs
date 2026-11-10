@@ -122,7 +122,6 @@ impl SpeculativeTree {
     /// Cancellation affects all pending candidates; their subtrees are discarded by resolve_candidate.
     pub fn interrupt(&mut self) -> io::Result<Vec<AgentCommand>> {
         self.queued_prompts.clear();
-        self.tool_invocations.clear();
         for operation in self
             .branches
             .values_mut()
@@ -137,9 +136,9 @@ impl SpeculativeTree {
         let mut commands = Vec::new();
         for candidate in self.pending_candidates() {
             if self.pending_candidates().contains(&candidate) {
-                commands.extend(self.resolve_candidate_with_reason(
+                commands.extend(self.discard_candidate(
                     &candidate,
-                    false,
+                    DiscardedReason::Failed,
                     "User interrupted execution",
                 )?);
             }
@@ -167,7 +166,6 @@ impl SpeculativeTree {
         }
         self.stopping = true;
         self.shutdown_deadline = Some(now_ms() + 10_000);
-        self.tool_invocations.clear();
         self.queued_prompts.clear();
         let ids: Vec<_> = self
             .branches
@@ -243,11 +241,8 @@ impl SpeculativeTree {
                 branch_id: branch_id.to_string(),
                 kind,
                 status: OperationStatus::Requested,
-                outcome: None,
-                evidence: None,
                 requested_at: Some(now_ms()),
                 deadline_at: Some(now_ms() + 120_000),
-                tool_name: None,
             });
         }
         Ok(())
@@ -362,7 +357,7 @@ impl SpeculativeTree {
             BranchRole::Authority,
             BranchStatus::Created,
             None,
-            None,
+            (None, None),
         )?;
         self.change_authority(&branch_id)?;
         self.history_root_branch_id = Some(branch_id.clone());

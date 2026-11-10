@@ -4,6 +4,7 @@
 //! 自己的对象保存或裁决 Speculative Tree。
 
 mod candidates;
+mod chances;
 mod commands;
 mod protocol;
 mod settlement;
@@ -25,13 +26,23 @@ pub enum BranchRole {
     Candidate,
 }
 
-/// 控制面已知的 Branch 生命周期。
+/// Branch 暂时不能前进的原因，同一时刻只记最近挡住它的 Decision。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockedReason {
+    ExtentReached,
+    Rebalanced,
+    EffectGate,
+}
+
+/// 控制面已知的 Branch 生命周期与运行状态。`Finished` 表示已经跑完、等待裁决。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchStatus {
     Created,
     Running,
-    AwaitingValidation,
+    Blocked(BlockedReason),
+    Finished,
     Promoting,
     Promoted,
     Discarding,
@@ -40,21 +51,78 @@ pub enum BranchStatus {
     Cleaned,
 }
 
-/// The latest decision phase actually reached by this Branch.  This is an
-/// observation of progress, not a permission, quota, or required ordering.
+impl BranchStatus {
+    /// Candidate 仍在参与投机：尚未进入晋级、丢弃或清理。
+    pub fn is_live_candidate(self) -> bool {
+        matches!(
+            self,
+            Self::Created | Self::Running | Self::Blocked(_) | Self::Finished
+        )
+    }
+
+    /// Candidate 可以被裁决接受：没有被 extent 或 rebalance 挡住。
+    pub fn is_decidable(self) -> bool {
+        matches!(
+            self,
+            Self::Running | Self::Finished | Self::Blocked(BlockedReason::EffectGate)
+        )
+    }
+
+    /// 权威 Branch 仍持有权威路径；`Blocked` 只是暂时停住它的下一步，
+    /// 不是它失效。
+    pub fn is_live_authority(self) -> bool {
+        matches!(self, Self::Running | Self::Promoted | Self::Blocked(_))
+    }
+
+    /// 已经进入丢弃或之后的阶段。
+    pub fn is_discarding_or_later(self) -> bool {
+        matches!(
+            self,
+            Self::Discarding | Self::Discarded | Self::Cleaning | Self::Cleaned
+        )
+    }
+}
+
+/// Chance 的阶段与结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChanceStage {
+    /// 已 `admit`，等待 `select`。
+    Pending,
+    /// 已被选中：预测、执行或取权威值中。
+    Running,
+    /// 权威值已到，`match` 与处置中。
+    Resolving,
+    /// 某个 Proposal 被接受。
+    Accepted(String),
+    Discarded(DiscardedReason),
+}
+
+impl ChanceStage {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Accepted(_) | Self::Discarded(_))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscardedReason {
+    MatchRejected,
+    NotSelected,
+    AncestorInvalidated,
+    BudgetExhausted,
+    Failed,
+}
+
+/// 权威值的取得状态，属于 Chance，与 `Running` 并行，由 `launch` 改变。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum BranchPhase {
+pub enum AuthorityState {
     #[default]
-    Idle,
-    Select,
-    Rebalance,
-    Extent,
-    Predict,
-    Launch,
-    Effect,
-    Match,
-    Dispose,
+    NotRequested,
+    Fetching,
+    Arrived,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,12 +239,13 @@ pub struct BranchRecord {
     pub generation: u64,
     #[serde(default)]
     pub execution_position: ExecutionPosition,
+    /// 这个 Branch 所属的 Chance；Proposal 内容和验证依据都在 Chance 上。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proposal_id: Option<String>,
-    /// Unresolved Proposal IDs carried by this Branch. The prototype currently
-    /// creates one direct Proposal per candidate, but preserves this boundary.
+    pub chance_id: Option<String>,
+    /// 这个 Branch 携带的未确认前提，含祖先路径上的前提；自身的前提是
+    /// `chance_id` 对应的那一项。
     #[serde(default)]
-    pub assumption_set: Vec<String>,
+    pub assumption_set: Vec<Assumption>,
     #[serde(default)]
     pub pending_operations: Vec<PendingOperation>,
     #[serde(default)]
@@ -193,12 +262,51 @@ pub struct ExecutionPosition {
     pub transcript_index: usize,
 }
 
-/// Candidate 携带的预测。
+/// AssumptionSet 的一项：引用某个 Chance 上的某个 Proposal。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Assumption {
+    pub chance_id: String,
+    pub proposal_id: String,
+}
+
+/// Chance 上不可变的候选输入。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposalRecord {
     pub proposal_id: String,
-    pub operation_id: String,
     pub payload: Value,
+}
+
+/// 被 `admit` 接纳的投机机会，从创建到收敛一直由控制面持有。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChanceRecord {
+    pub chance_id: String,
+    /// 等待结果的 Branch 与它的 operation。
+    pub parent_branch_id: String,
+    /// 父 Branch 自身所属的 Chance（嵌套关系）；父是初始权威时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_chance_id: Option<String>,
+    pub operation_id: String,
+    pub tool_name: String,
+    pub arguments: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<Value>,
+    pub stage: ChanceStage,
+    pub authority: AuthorityState,
+    pub proposals: Vec<ProposalRecord>,
+    pub branch_ids: Vec<String>,
+    /// 验证依据：权威侧真实结果和 Runtime 证据，属于 Chance，不属于任何 Branch。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_outcome: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_evidence: Option<Value>,
+    /// 产生这次投机的准入请求时刻。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculation_started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculation_kind: Option<ActionKind>,
+    /// 最近一次 `launch` 求值时的 Tree 版本；版本不变就不重复求值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_epoch: Option<u64>,
 }
 
 /// Capabilities declared by an Agent Adapter during the wire handshake.
@@ -232,15 +340,9 @@ pub struct PendingOperation {
     pub kind: OperationKind,
     pub status: OperationStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
 }
 
 /// 一次已准入投机的内部记录。结算只需要投机起点、类型和是否已经结算；
@@ -273,14 +375,6 @@ pub struct BranchExecutionState {
     pub runtime: RuntimeExecutionState,
     #[serde(default)]
     pub turn_active: bool,
-    #[serde(default)]
-    pub phase: BranchPhase,
-    /// Validation facts belong to the Branch execution record, not to the
-    /// command used to start a candidate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validation_outcome: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validation_evidence: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
 }
@@ -296,9 +390,9 @@ pub struct SpeculativeTree {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority_branch_id: Option<String>,
     pub branches: BTreeMap<String, BranchRecord>,
-    /// Immutable Proposal records, indexed independently from Branch state.
+    /// 尚未收敛的 Chance；Proposal 和验证依据都挂在这里。
     #[serde(default)]
-    pub proposals: BTreeMap<String, ProposalRecord>,
+    pub chances: BTreeMap<String, ChanceRecord>,
     /// Only live actions are retained; completed facts belong to the Ledger.
     #[serde(default)]
     pub active_actions: BTreeMap<String, BTreeMap<String, ActionRecord>>,
@@ -319,8 +413,6 @@ pub struct SpeculativeTree {
     pub workspace_root: PathBuf,
     #[serde(default)]
     pub(crate) pending_work: BTreeMap<u64, crate::control_plane::coordination::ControlOperation>,
-    #[serde(default)]
-    pub(crate) tool_invocations: Vec<crate::control_plane::coordination::ToolPending>,
     /// 已准入投机的内部事实，按 Branch 保存；不进入 Branch 归档。
     #[serde(default)]
     pub(crate) speculations: BTreeMap<String, SpeculationRecord>,
@@ -333,6 +425,14 @@ pub struct SpeculativeTree {
     pub(crate) tool_finished_at_ms: BTreeMap<String, BTreeMap<String, u64>>,
     #[serde(default)]
     pub(crate) next_work: u64,
+    #[serde(default = "first_id")]
+    next_chance: u64,
+    /// 每次 Branch 或 Chance 状态变化加一；`launch`、`rebalance` 只在版本
+    /// 变化后重新求值，避免空转。
+    #[serde(default)]
+    pub(crate) epoch: u64,
+    #[serde(default)]
+    pub(crate) rebalance_epoch: Option<u64>,
     #[serde(default)]
     pub(crate) stopping: bool,
     #[serde(default)]
@@ -353,7 +453,7 @@ impl SpeculativeTree {
             history_root_branch_id: None,
             authority_branch_id: None,
             branches: BTreeMap::new(),
-            proposals: BTreeMap::new(),
+            chances: BTreeMap::new(),
             active_actions: BTreeMap::new(),
             policy_binding: None,
             runtime_binding: None,
@@ -363,11 +463,13 @@ impl SpeculativeTree {
             queued_prompts: VecDeque::new(),
             workspace_root: PathBuf::new(),
             pending_work: BTreeMap::new(),
-            tool_invocations: Vec::new(),
             speculations: BTreeMap::new(),
             model_usage: BTreeMap::new(),
             tool_finished_at_ms: BTreeMap::new(),
             next_work: 1,
+            next_chance: 1,
+            epoch: 0,
+            rebalance_epoch: None,
             stopping: false,
             shutdown_deadline: None,
             next_generation: 1,
@@ -438,6 +540,15 @@ pub enum AgentCommand {
         prompt: String,
     },
     Abort {
+        branch_id: String,
+    },
+    /// `rebalance` 的 `pause`：Agent Adapter 在下一个边界停住该 Branch，
+    /// 并以 `branch_suspended` 报告。
+    Pause {
+        branch_id: String,
+    },
+    /// `rebalance` 的 `resume`：放行被停住的 Branch，并以 `branch_resumed` 报告。
+    Resume {
         branch_id: String,
     },
     StartCandidate {
@@ -615,6 +726,7 @@ pub enum AgentMessage {
     },
     BranchSuspended {
         branch_id: String,
+        reason: BlockedReason,
     },
     BranchResumed {
         branch_id: String,

@@ -15,7 +15,7 @@ use super::support::*;
                 status: BranchStatus::Running,
                 generation: 1,
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
@@ -31,14 +31,14 @@ use super::support::*;
                 generation: 2,
 
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
             },
         );
         tree.authority_branch_id = Some("parent".into());
-        let command = tree.resolve_candidate("candidate", true).unwrap().remove(0);
+        let command = tree.accept_candidate("candidate").unwrap().remove(0);
         let (command_id, generation) = match command {
             AgentCommand::Promote {
                 command_id,

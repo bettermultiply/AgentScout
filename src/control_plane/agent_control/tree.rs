@@ -20,6 +20,7 @@ impl SpeculativeTree {
             return Ok(());
         }
         branch.status = status;
+        self.epoch += 1;
         self.pending_observations.push(
             crate::control_plane::observation::ObservationContent::StatusChanged {
                 branch_id: id.into(),
@@ -72,10 +73,8 @@ impl SpeculativeTree {
     pub fn can_invoke_tool(&self, branch_id: &str) -> bool {
         self.authority_branch_id.as_deref() == Some(branch_id)
             && self.branches.get(branch_id).is_some_and(|branch| {
-                matches!(
-                    branch.status,
-                    BranchStatus::Running | BranchStatus::Promoted
-                ) && branch.execution_state.agent == AgentExecutionState::Running
+                branch.status.is_live_authority()
+                    && branch.execution_state.agent == AgentExecutionState::Running
             })
     }
 
@@ -112,7 +111,7 @@ impl SpeculativeTree {
                         && !self
                             .pending_work
                             .values()
-                            .any(|work| work.branch() == op.branch_id)
+                            .any(|work| work.branch() == Some(op.branch_id.as_str()))
                 } else {
                     op.status == OperationStatus::Requested
                 }
@@ -127,8 +126,8 @@ impl SpeculativeTree {
         parent_branch_id: Option<String>,
         role: BranchRole,
         status: BranchStatus,
-        speculation_kind: Option<ActionKind>,
-        speculation_started_at_ms: Option<u64>,
+        chance_id: Option<String>,
+        (speculation_kind, speculation_started_at_ms): (Option<ActionKind>, Option<u64>),
     ) -> io::Result<()> {
         if self.branches.contains_key(branch_id) {
             return Err(invalid_input("branch id already exists"));
@@ -147,7 +146,7 @@ impl SpeculativeTree {
                 status,
                 generation,
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: chance_id.clone(),
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
@@ -158,7 +157,7 @@ impl SpeculativeTree {
                 branch_id: branch_id.into(),
                 parent_branch_id: self.branch(branch_id)?.parent_branch_id.clone(),
                 role,
-                edge_id: None,
+                chance_id,
                 speculation_kind,
                 speculation_started_at_ms,
             },
@@ -173,6 +172,7 @@ impl SpeculativeTree {
                 },
             );
         }
+        self.epoch += 1;
         self.pending_observations.push(
             crate::control_plane::observation::ObservationContent::StatusChanged {
                 branch_id: branch_id.into(),
@@ -184,7 +184,7 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    pub(super) fn branch(&self, branch_id: &str) -> io::Result<&BranchRecord> {
+    pub(crate) fn branch(&self, branch_id: &str) -> io::Result<&BranchRecord> {
         self.branches
             .get(branch_id)
             .ok_or_else(|| invalid_input("branch does not exist"))

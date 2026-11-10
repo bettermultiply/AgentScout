@@ -10,17 +10,6 @@ impl SpeculativeTree {
         actions.operations.push((id, operation));
     }
 
-    pub(super) fn waiting_point_live(&self, tool: &ToolPending) -> bool {
-        !self.stopping
-            && self.can_invoke_tool(&tool.branch_id)
-            && self.branches[&tool.branch_id]
-                .pending_operations
-                .iter()
-                .any(|op| {
-                    op.operation_id == tool.operation_id && op.status == OperationStatus::Requested
-                })
-    }
-
     pub fn speculative_admission(&mut self, message: AgentMessage) -> io::Result<ControlActions> {
         let AgentMessage::SpeculativeAdmissionRequest {
             branch_id,
@@ -63,7 +52,7 @@ impl SpeculativeTree {
             tool_name.clone(),
             parent_action_id,
         )?;
-        let mut actions = ControlActions::default();
+        let actions = ControlActions::default();
         if self.stopping
             || !self.can_invoke_tool(&branch_id)
             || self.branches[&branch_id]
@@ -74,26 +63,17 @@ impl SpeculativeTree {
             return Ok(actions);
         }
         // Admission was decided by the adapter that sent this explicit request.
-        // The control-plane phase starts at selection; it does not re-run or
-        // claim ownership of the local admission decision.
-        self.branches
-            .get_mut(&branch_id)
-            .expect("admission branch exists")
-            .execution_state
-            .phase = BranchPhase::Select;
+        // The control plane does not re-run it; it only records the accepted
+        // opportunity as a Pending Chance. `select` runs from `progress`.
         self.mark_operation_requested(&branch_id, &operation_id, OperationKind::Tool)?;
-        self.schedule(
-            ControlOperation::Predict(ToolPending {
-                branch_id,
-                operation_id,
-                tool_name,
-                arguments,
-                checkpoint,
-                launch: true,
-                speculation_started_at_ms: Some(timestamp_ms),
-            }),
-            &mut actions,
-        );
+        self.admit_chance(
+            &branch_id,
+            &operation_id,
+            &tool_name,
+            arguments,
+            checkpoint,
+            Some(timestamp_ms),
+        )?;
         Ok(actions)
     }
 
@@ -106,13 +86,22 @@ impl SpeculativeTree {
         let Some(work) = self.pending_work.remove(&id) else {
             return Ok(actions);
         };
-        let branch = work.branch().to_string();
+        let branch = work.branch().map(str::to_string);
         match work {
+            ControlOperation::Select(ids) => {
+                self.complete_select(ids, result, &mut actions)?;
+            }
             ControlOperation::Predict(tool) => {
-                self.complete_predict(tool, result, &mut actions, &branch)?;
+                self.complete_predict(tool, result, &mut actions)?;
+            }
+            ControlOperation::Launch(tool) => {
+                self.complete_launch(tool, result, &mut actions)?;
+            }
+            ControlOperation::Rebalance => {
+                self.complete_rebalance(result, &mut actions)?;
             }
             ControlOperation::Establish(command) => {
-                self.complete_establish(command, result, &mut actions, &branch)?;
+                self.complete_establish(command, result, &mut actions, &branch.unwrap())?;
             }
             ControlOperation::Invoke(tool) => {
                 self.complete_invoke(tool, result, &mut actions)?;
@@ -124,10 +113,69 @@ impl SpeculativeTree {
                 self.complete_promote(candidate, record, result, &mut actions)?;
             }
             work @ (ControlOperation::Terminate(_) | ControlOperation::Cleanup(_)) => {
-                self.complete_terminate_or_cleanup(work, result, &mut actions, &branch)?;
+                self.complete_terminate_or_cleanup(work, result, &mut actions, &branch.unwrap())?;
             }
         }
         Ok(actions)
+    }
+
+    fn tool_pending(&self, chance_id: &str) -> io::Result<ToolPending> {
+        let chance = self.chance(chance_id)?;
+        Ok(ToolPending {
+            chance_id: chance.chance_id.clone(),
+            branch_id: chance.parent_branch_id.clone(),
+            operation_id: chance.operation_id.clone(),
+            tool_name: chance.tool_name.clone(),
+            arguments: chance.arguments.clone(),
+        })
+    }
+
+    fn chance_is(&self, chance_id: &str, stage: &ChanceStage) -> bool {
+        self.chances
+            .get(chance_id)
+            .is_some_and(|chance| &chance.stage == stage && self.chance_waiting_live(chance))
+    }
+
+    /// Chances `select` leaves out stay Pending, but the Agent's pending tool
+    /// call still needs its real result: the authority value is fetched
+    /// without speculation.
+    fn complete_select(
+        &mut self,
+        ids: Vec<String>,
+        result: Result<ControlResult, String>,
+        actions: &mut ControlActions,
+    ) -> io::Result<()> {
+        let selected = match result {
+            Ok(ControlResult::Selected(selected)) => selected,
+            Err(error) => {
+                for id in ids {
+                    if self.chance_is(&id, &ChanceStage::Pending) {
+                        actions.records.push(json!({"message":"policy_error", "chance_id":id, "reason":error}));
+                        self.change_chance_stage(
+                            &id,
+                            ChanceStage::Discarded(DiscardedReason::Failed),
+                            "select failed",
+                        )?;
+                        self.change_authority_state(&id, AuthorityState::Fetching)?;
+                    }
+                }
+                return Ok(());
+            }
+            _ => unreachable!(),
+        };
+        for id in &selected {
+            if self.chance_is(id, &ChanceStage::Pending) {
+                self.change_chance_stage(id, ChanceStage::Running, "Selected")?;
+                let tool = self.tool_pending(id)?;
+                self.schedule(ControlOperation::Predict(tool), actions);
+            }
+        }
+        for id in ids.iter().filter(|id| !selected.contains(id)) {
+            if self.chance_is(id, &ChanceStage::Pending) {
+                self.change_authority_state(id, AuthorityState::Fetching)?;
+            }
+        }
+        Ok(())
     }
 
     fn complete_predict(
@@ -135,137 +183,114 @@ impl SpeculativeTree {
         tool: ToolPending,
         result: Result<ControlResult, String>,
         actions: &mut ControlActions,
-        branch: &str,
     ) -> io::Result<()> {
-        let ToolPending {
-            branch_id,
-            operation_id,
-            tool_name,
-            checkpoint,
-            speculation_started_at_ms,
-            ..
-        } = &tool;
-        if !self.waiting_point_live(&tool) {
+        let chance_id = tool.chance_id.as_str();
+        if !self.chance_is(chance_id, &ChanceStage::Running) {
             return Ok(());
         }
-        self.branches
-            .get_mut(branch_id)
-            .expect("live waiting branch")
-            .execution_state
-            .phase = BranchPhase::Predict;
-        let launch_unsupported =
-            matches!(&result, Ok(ControlResult::PredictionsWithoutAuthority(_)));
-        // An empty prediction set is not a failed speculation: it means this
-        // boundary has no hypothesis to test. Execute the tool as an ordinary
-        // authority action instead of leaving the adapter's tool call waiting
-        // for a result that will never arrive.
-        let mut direct_invocation = false;
         match result {
+            // An empty prediction set is not a failed speculation: this
+            // boundary has no hypothesis to test. The authority value is
+            // fetched as an ordinary action so the Agent's call is answered.
             Ok(ControlResult::Predictions(predictions)) if predictions.is_empty() => {
-                direct_invocation = true;
-                self.tool_invocations.push(tool.clone());
+                self.change_authority_state(chance_id, AuthorityState::Fetching)?;
             }
             Ok(ControlResult::Predictions(predictions)) => {
-                self.start_candidates(
-                    branch_id,
-                    operation_id,
-                    tool_name,
-                    predictions,
-                    checkpoint.clone(),
-                    *speculation_started_at_ms,
-                    actions,
-                    false,
-                )?;
+                for prediction in predictions {
+                    let command = self.start_candidate(chance_id, prediction)?;
+                    let child = match &command {
+                        AgentCommand::StartCandidate { branch_id, .. } => branch_id.clone(),
+                        _ => unreachable!(),
+                    };
+                    actions.records.push(json!({
+                        "message": "candidate_created",
+                        "branch_id": child,
+                        "parent": tool.branch_id,
+                        "chance_id": chance_id,
+                        "fork_at": self.branches[&child].execution_position.transcript_index
+                    }));
+                    self.schedule(ControlOperation::Establish(command), actions);
+                }
             }
-            Ok(ControlResult::PredictionsWithoutAuthority(predictions)) => {
-                self.start_candidates(
-                    branch_id,
-                    operation_id,
-                    tool_name,
-                    predictions,
-                    checkpoint.clone(),
-                    *speculation_started_at_ms,
-                    actions,
-                    true,
+            Err(error) => {
+                actions.records.push(json!({"message":"policy_error", "chance_id":chance_id, "reason":error}));
+                self.change_chance_stage(
+                    chance_id,
+                    ChanceStage::Discarded(DiscardedReason::Failed),
+                    "predict failed",
                 )?;
+                self.change_authority_state(chance_id, AuthorityState::Fetching)?;
             }
-            Err(error) => actions
-                .records
-                .push(json!({"message":"policy_error", "branch_id":branch, "reason":error})),
             _ => unreachable!(),
         }
-        self.finish_predict_waiting_point(tool, direct_invocation, launch_unsupported, actions);
         Ok(())
     }
 
-    /// An empty prediction set includes the truthful launch=false prototype
-    /// result: the Proposal is not cancelled, but validator/evidence-only
-    /// execution is unsupported. Do not retry the same point forever.
-    fn finish_predict_waiting_point(
+    /// `launch=true` starts fetching the authority value; `false` only defers
+    /// it, leaving the Chance's authority state at `NotRequested`.
+    fn complete_launch(
         &mut self,
         tool: ToolPending,
-        direct_invocation: bool,
-        launch_unsupported: bool,
+        result: Result<ControlResult, String>,
         actions: &mut ControlActions,
-    ) {
-        let ToolPending {
-            branch_id,
-            operation_id,
-            ..
-        } = &tool;
-        if !direct_invocation
-            && !launch_unsupported
-            && !self.branches.values().any(|candidate| {
-                candidate.parent_branch_id.as_deref() == Some(branch_id)
-                    && candidate.proposal_id.is_some()
-            })
-        {
-            actions.records.push(json!({
-                "message": "launch_not_started",
-                "branch_id": branch_id,
-                "operation_id": operation_id,
-                "status": "unsupported",
-                "reason": "validator/evidence-only path is unsupported; Proposal retained outside Branch execution"
-            }));
-        } else if !direct_invocation && !launch_unsupported {
-            // Retain the waiting point until all child environments exist.
-            self.tool_invocations.push(tool);
+    ) -> io::Result<()> {
+        let chance_id = tool.chance_id.as_str();
+        let still_waiting = self.chance_is(chance_id, &ChanceStage::Running)
+            && self.chance(chance_id)?.authority == AuthorityState::NotRequested;
+        match result {
+            Ok(ControlResult::Launch(true)) if still_waiting => {
+                self.change_authority_state(chance_id, AuthorityState::Fetching)?;
+            }
+            Ok(ControlResult::Launch(_)) => {}
+            Err(error) => actions.records.push(
+                json!({"message":"policy_error", "chance_id":chance_id, "reason":error}),
+            ),
+            _ => unreachable!(),
         }
+        Ok(())
     }
 
-    fn start_candidates(
+    /// `rebalance` pauses, resumes or preempts started candidate work. Pause
+    /// and resume are commands; the Branch becomes `Blocked(Rebalanced)` only
+    /// when the Agent Adapter reports that it actually holds the Branch.
+    fn complete_rebalance(
         &mut self,
-        branch_id: &str,
-        operation_id: &str,
-        tool_name: &str,
-        predictions: Vec<Value>,
-        checkpoint: Option<Value>,
-        speculation_started_at_ms: Option<u64>,
+        result: Result<ControlResult, String>,
         actions: &mut ControlActions,
-        unsupported: bool,
     ) -> io::Result<()> {
-        for prediction in predictions {
-            let command = self.start_candidate(
-                branch_id,
-                operation_id,
-                tool_name,
-                prediction,
-                checkpoint.clone(),
-                speculation_started_at_ms,
-            )?;
-            let child = match &command {
-                AgentCommand::StartCandidate { branch_id, .. } => branch_id,
-                _ => unreachable!(),
-            };
-            if unsupported {
-                actions.records.push(json!({"message":"candidate_created", "branch_id":child, "parent":branch_id, "launch":"unsupported"}));
-            } else {
-                actions.records.push(json!({"message":"candidate_created", "branch_id":child, "parent":branch_id, "fork_at":self.branches[child].execution_position.transcript_index}));
+        let rebalance = match result {
+            Ok(ControlResult::Rebalance(rebalance)) => rebalance,
+            Err(error) => {
+                actions
+                    .records
+                    .push(json!({"message":"policy_error", "decision":"rebalance", "reason":error}));
+                return Ok(());
             }
-            self.schedule(ControlOperation::Establish(command), actions);
+            _ => unreachable!(),
+        };
+        if self.stopping {
+            return Ok(());
         }
-        if unsupported {
-            actions.records.push(json!({"message":"launch_not_started", "branch_id":branch_id, "operation_id":operation_id, "status":"unsupported", "reason":"validator/evidence-only path is unsupported"}));
+        for (branch_id, action) in rebalance {
+            let Some(status) = self.branches.get(&branch_id).map(|branch| branch.status) else {
+                continue;
+            };
+            match (action.as_str(), status) {
+                ("pause", BranchStatus::Running) => {
+                    actions.commands.push(AgentCommand::Pause { branch_id })
+                }
+                ("resume", BranchStatus::Blocked(BlockedReason::Rebalanced)) => {
+                    actions.commands.push(AgentCommand::Resume { branch_id })
+                }
+                ("preempt", status) if status.is_live_candidate() => {
+                    actions.commands.extend(self.discard_candidate(
+                        &branch_id,
+                        DiscardedReason::BudgetExhausted,
+                        "Rebalance preempted this candidate",
+                    )?)
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -287,9 +312,9 @@ impl SpeculativeTree {
             Err(reason) => {
                 self.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
                 actions.records.push(json!({"message":"runtime_operation_failed","branch_id":branch,"reason":reason}));
-                actions.commands.extend(self.resolve_candidate_with_reason(
+                actions.commands.extend(self.discard_candidate(
                     branch,
-                    false,
+                    DiscardedReason::Failed,
                     &format!("Runtime environment establishment failed: {reason}"),
                 )?);
             }
@@ -304,28 +329,51 @@ impl SpeculativeTree {
         result: Result<ControlResult, String>,
         actions: &mut ControlActions,
     ) -> io::Result<()> {
-        let live = self.waiting_point_live(&tool);
         let ToolPending {
+            chance_id,
             branch_id,
             operation_id,
-            launch: _,
             ..
         } = tool;
-        let (outcome, evidence) =
-            result
-                .map_err(io::Error::other)
-                .and_then(|value| match value {
-                    ControlResult::Outcome(outcome, evidence) => Ok((outcome, evidence)),
-                    _ => unreachable!(),
-                })?;
-        self.record_candidate_outcome(&branch_id, &operation_id, outcome.clone(), Some(evidence))?;
-        self.branches
-            .get_mut(&branch_id)
-            .expect("candidate parent exists")
-            .execution_state
-            .phase = BranchPhase::Effect;
+        let live = self
+            .chances
+            .get(&chance_id)
+            .is_some_and(|chance| self.chance_waiting_live(chance));
+        let (outcome, evidence) = match result {
+            Ok(ControlResult::Outcome(outcome, evidence)) => (outcome, evidence),
+            Err(error) => {
+                self.change_authority_state(&chance_id, AuthorityState::Unavailable)?;
+                self.change_chance_stage(
+                    &chance_id,
+                    ChanceStage::Discarded(DiscardedReason::Failed),
+                    "Authority value unavailable",
+                )?;
+                return Err(io::Error::other(error));
+            }
+            _ => unreachable!(),
+        };
+        self.record_authority_outcome(&chance_id, outcome.clone(), Some(evidence))?;
+        if self.chance(&chance_id)?.branch_ids.is_empty() {
+            // No Proposal was tested; nothing was speculated on this Chance.
+            self.change_chance_stage(
+                &chance_id,
+                ChanceStage::Discarded(DiscardedReason::NotSelected),
+                "Authority value arrived without a candidate",
+            )?;
+        } else {
+            self.change_chance_stage(
+                &chance_id,
+                ChanceStage::Resolving,
+                "Authority value arrived",
+            )?;
+        }
         self.complete_operation(&branch_id, Some(&operation_id), OperationStatus::Succeeded)?;
         if live {
+            // The extent hold ends once the authority value is handed back.
+            if self.branch(&branch_id)?.status == BranchStatus::Blocked(BlockedReason::ExtentReached)
+            {
+                self.change_status(&branch_id, BranchStatus::Running, "Authority value delivered")?;
+            }
             actions
                 .commands
                 .push(self.resolve_pending(&branch_id, &operation_id, outcome)?);
@@ -342,20 +390,13 @@ impl SpeculativeTree {
         if self.stopping || !self.candidate_due(&candidate) {
             return Ok(());
         }
-        self.branches
-            .get_mut(&candidate)
-            .expect("candidate exists")
-            .execution_state
-            .phase = BranchPhase::Dispose;
         let (compatible, verdict, error) = match result {
             Ok(ControlResult::Disposition(compatible, verdict)) => (compatible, verdict, None),
             Err(error) => (false, "error".into(), Some(error)),
             _ => unreachable!(),
         };
-        let proposal = self.branches[&candidate]
-            .proposal_id
-            .as_ref()
-            .and_then(|id| self.proposals.get(id))
+        let proposal = self
+            .branch_proposal(&candidate)
             .ok_or_else(|| io::Error::other("candidate Proposal is missing"))?;
         let record = json!({"branch_id":candidate, "hypothesis":proposal.payload, "verdict":verdict, "policy_error":error});
         if self.can_promote(&candidate, compatible) {
@@ -367,9 +408,14 @@ impl SpeculativeTree {
             )?;
             self.schedule(ControlOperation::Promote(candidate, record), actions);
         } else {
-            actions.commands.extend(self.resolve_candidate_with_reason(
+            let why = if error.is_some() {
+                DiscardedReason::Failed
+            } else {
+                DiscardedReason::MatchRejected
+            };
+            actions.commands.extend(self.discard_candidate(
                 &candidate,
-                false,
+                why,
                 &format!(
                     "Validation disposition: {verdict}; {}",
                     error.as_deref().unwrap_or("no policy error")
@@ -432,6 +478,70 @@ impl SpeculativeTree {
         Ok(())
     }
 
+    /// Drive each Chance forward: `select` over the Pending ones, `launch`
+    /// for those waiting to fetch the authority value, and the authority
+    /// fetch itself once its candidate environments exist.
+    fn progress_chances(
+        &mut self,
+        capabilities: &RuntimeCapabilities,
+        actions: &mut ControlActions,
+    ) -> io::Result<()> {
+        let selectable = self.selectable_chances();
+        if !selectable.is_empty()
+            && !self
+                .pending_work
+                .values()
+                .any(|work| matches!(work, ControlOperation::Select(_)))
+        {
+            self.schedule(ControlOperation::Select(selectable), actions);
+        }
+        let ids: Vec<String> = self.chances.keys().cloned().collect();
+        for id in ids {
+            let chance = self.chance(&id)?;
+            if !self.chance_waiting_live(chance)
+                || self
+                    .pending_work
+                    .values()
+                    .any(|work| work.chance_id() == Some(id.as_str()))
+            {
+                continue;
+            }
+            if chance.authority == AuthorityState::NotRequested && chance.stage.is_terminal() {
+                // Every candidate is gone, but the Agent's call still needs
+                // its real result.
+                self.change_authority_state(&id, AuthorityState::Fetching)?;
+            }
+            let chance = self.chance(&id)?;
+            match chance.authority {
+                AuthorityState::NotRequested
+                    if chance.stage == ChanceStage::Running
+                        && chance.launch_epoch != Some(self.epoch) =>
+                {
+                    let tool = self.tool_pending(&id)?;
+                    self.chance_mut(&id)?.launch_epoch = Some(self.epoch);
+                    self.schedule(ControlOperation::Launch(tool), actions);
+                }
+                AuthorityState::Fetching => {
+                    let establishing = self.pending_work.values().any(|work| {
+                        matches!(work, ControlOperation::Establish(AgentCommand::StartCandidate { branch_id, .. })
+                            if chance.branch_ids.contains(branch_id))
+                    });
+                    if !establishing
+                        && capabilities
+                            .tools
+                            .iter()
+                            .any(|declared| declared.name == chance.tool_name)
+                    {
+                        let tool = self.tool_pending(&id)?;
+                        self.schedule(ControlOperation::Invoke(tool), actions);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn pending_work(&self) -> bool {
         !self.pending_work.is_empty()
     }
@@ -439,57 +549,43 @@ impl SpeculativeTree {
     pub fn progress(&mut self, capabilities: &RuntimeCapabilities) -> io::Result<ControlActions> {
         let mut actions = ControlActions::default();
         self.check_command_deadlines()?;
+        self.sweep_chances()?;
         if !self.stopping {
-            for tool in std::mem::take(&mut self.tool_invocations) {
-                let waiting = self.pending_work.values().any(|work| matches!(work, ControlOperation::Establish(AgentCommand::StartCandidate {parent_branch_id, operation_id, ..}) if parent_branch_id == &tool.branch_id && operation_id == &tool.operation_id));
-                if waiting {
-                    self.tool_invocations.push(tool);
-                } else if self.waiting_point_live(&tool)
-                    && capabilities
-                        .tools
-                        .iter()
-                        .any(|declared| declared.name == tool.tool_name)
-                {
-                    if tool.launch {
-                        if let Some(branch) = self.branches.get_mut(&tool.branch_id) {
-                            branch.execution_state.phase = BranchPhase::Launch;
-                        }
-                        self.schedule(ControlOperation::Invoke(tool), &mut actions);
-                    } else {
-                        actions.records.push(json!({
-                            "message": "authority_launch_not_started",
-                            "branch_id": tool.branch_id,
-                            "operation_id": tool.operation_id,
-                            "reason": "policy launch=false; validator/evidence-only path unsupported"
-                        }));
-                        // launch=false is handled at prediction time and is
-                        // never converted into an authority Invoke.
-                    }
-                }
-            }
+            self.progress_chances(capabilities, &mut actions)?;
             for candidate in self.pending_candidates() {
                 if self.candidate_due(&candidate)
                     && !self
                         .pending_work
                         .values()
-                        .any(|work| work.branch() == candidate)
+                        .any(|work| work.branch() == Some(candidate.as_str()))
                 {
                     if self.candidate_outcome(&candidate).is_some() {
-                        self.branches
-                            .get_mut(&candidate)
-                            .expect("candidate exists")
-                            .execution_state
-                            .phase = BranchPhase::Match;
                         self.schedule(ControlOperation::Validate(candidate), &mut actions);
                     } else {
-                        actions.commands.extend(self.resolve_candidate_with_reason(
+                        actions.commands.extend(self.discard_candidate(
                             &candidate,
-                            false,
+                            DiscardedReason::Failed,
                             "Candidate validation deadline expired",
                         )?);
                         actions.records.push(json!({"branch_id":candidate,"disposition":"Discard","verdict":"timeout"}));
                     }
                 }
+            }
+            if self.rebalance_epoch != Some(self.epoch)
+                && !self
+                    .pending_work
+                    .values()
+                    .any(|work| matches!(work, ControlOperation::Rebalance))
+                && self.branches.values().any(|branch| {
+                    branch.role == BranchRole::Candidate
+                        && matches!(
+                            branch.status,
+                            BranchStatus::Running | BranchStatus::Blocked(BlockedReason::Rebalanced)
+                        )
+                })
+            {
+                self.rebalance_epoch = Some(self.epoch);
+                self.schedule(ControlOperation::Rebalance, &mut actions);
             }
             if let Some(command) = self.next_prompt()? {
                 actions.commands.push(command);
@@ -509,7 +605,7 @@ impl SpeculativeTree {
                         && !self
                             .pending_work
                             .values()
-                            .any(|work| work.branch() == branch.branch_id)
+                            .any(|work| work.branch() == Some(branch.branch_id.as_str()))
                 })
                 .map(|branch| branch.branch_id.clone())
                 .collect();

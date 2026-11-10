@@ -15,7 +15,7 @@ use super::support::*;
                 status: BranchStatus::Running,
                 generation: 1,
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
@@ -31,14 +31,14 @@ use super::support::*;
                 generation: 2,
 
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
             },
         );
         tree.authority_branch_id = Some("parent".into());
-        let commands = tree.resolve_candidate("candidate", true).unwrap();
+        let commands = tree.accept_candidate("candidate").unwrap();
         assert!(
             commands
                 .iter()
@@ -88,7 +88,7 @@ use super::support::*;
                 status: BranchStatus::Running,
                 generation: 1,
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
@@ -104,14 +104,14 @@ use super::support::*;
                 generation: 2,
 
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
             },
         );
         tree.authority_branch_id = Some("parent".into());
-        let commands = tree.resolve_candidate("candidate", false).unwrap();
+        let commands = tree.discard_candidate("candidate", DiscardedReason::MatchRejected, "test").unwrap();
         assert!(
             commands
                 .iter()
@@ -175,7 +175,7 @@ use super::support::*;
                 status: BranchStatus::Running,
                 generation: 1,
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
@@ -191,14 +191,14 @@ use super::support::*;
                 generation: 2,
 
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
             },
         );
         tree.authority_branch_id = Some("parent".into());
-        let command = tree.resolve_candidate("candidate", true).unwrap().remove(0);
+        let command = tree.accept_candidate("candidate").unwrap().remove(0);
         let (command_id, generation) = match command {
             AgentCommand::Promote {
                 command_id,
@@ -239,7 +239,7 @@ use super::support::*;
                 status: BranchStatus::Running,
                 generation: 1,
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
@@ -255,14 +255,14 @@ use super::support::*;
                 generation: 2,
 
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
             },
         );
         tree.authority_branch_id = Some("parent".into());
-        let command = tree.resolve_candidate("candidate", true).unwrap().remove(0);
+        let command = tree.accept_candidate("candidate").unwrap().remove(0);
         let (command_id, generation) = match command {
             AgentCommand::Promote {
                 command_id,
@@ -317,7 +317,7 @@ use super::support::*;
                 status: BranchStatus::Running,
                 generation: 1,
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
@@ -333,14 +333,14 @@ use super::support::*;
                 generation: 2,
 
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
             },
         );
         tree.authority_branch_id = Some("parent".into());
-        let command = tree.resolve_candidate("candidate", true).unwrap().remove(0);
+        let command = tree.accept_candidate("candidate").unwrap().remove(0);
         let (command_id, generation) = match command {
             AgentCommand::Promote {
                 command_id,
@@ -397,7 +397,7 @@ use super::support::*;
                 status: BranchStatus::Running,
                 generation: 1,
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
@@ -429,7 +429,7 @@ use super::support::*;
         .unwrap();
         assert_eq!(
             tree.branches["candidate"].status,
-            BranchStatus::AwaitingValidation
+            BranchStatus::Finished
         );
         tree.branches.get_mut("candidate").unwrap().status = BranchStatus::Cleaning;
         let command = tree.make_cleanup_command("candidate").unwrap();

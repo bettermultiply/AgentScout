@@ -2,16 +2,39 @@
 
 export type BranchRole = 'authority' | 'candidate'
 
+export type BlockedReason = 'extent_reached' | 'rebalanced' | 'effect_gate'
+
 export type BranchStatus =
   | 'created'
   | 'running'
-  | 'awaiting_validation'
+  | { blocked: BlockedReason }
+  | 'finished'
   | 'promoting'
   | 'promoted'
   | 'discarding'
   | 'discarded'
   | 'cleaning'
   | 'cleaned'
+
+export type DiscardedReason =
+  | 'match_rejected'
+  | 'not_selected'
+  | 'ancestor_invalidated'
+  | 'budget_exhausted'
+  | 'failed'
+
+export type ChanceStage =
+  | 'pending'
+  | 'running'
+  | 'resolving'
+  | { accepted: string }
+  | { discarded: DiscardedReason }
+
+export type AuthorityState =
+  | 'not_requested'
+  | 'fetching'
+  | 'arrived'
+  | 'unavailable'
 
 export type ActionKind =
   | 'model_inference'
@@ -55,9 +78,40 @@ export interface BranchCreatedEvent extends EventBase {
   branch_id: string
   parent_branch_id: string | null
   role: BranchRole
-  edge_id: string | null
+  chance_id: string | null
   speculation_kind: ActionKind | null
   speculation_started_at_ms: number | null
+}
+
+export interface ChanceCreatedEvent extends EventBase {
+  event: 'chance_created'
+  chance_id: string
+  parent_branch_id: string
+  parent_chance_id: string | null
+  operation_id: string
+  tool_name: string
+  stage: ChanceStage
+  authority_state: AuthorityState
+}
+
+export interface ChanceStageChangedEvent extends EventBase {
+  event: 'chance_stage_changed'
+  chance_id: string
+  stage: ChanceStage
+  reason: string | null
+}
+
+export interface AuthorityStateChangedEvent extends EventBase {
+  event: 'authority_state_changed'
+  chance_id: string
+  state: AuthorityState
+}
+
+export interface ProposalAddedEvent extends EventBase {
+  event: 'proposal_added'
+  chance_id: string
+  proposal_id: string
+  payload: unknown
 }
 
 export interface AuthorityChangedEvent extends EventBase {
@@ -97,7 +151,7 @@ export interface ConversationUpdatedEvent extends EventBase {
 export interface ModelUsageEvent extends EventBase {
   event: 'model_usage'
   branch_id: string
-  action_id: string
+  action_id: string | null
   model: string
   input_tokens: number | null
   output_tokens: number | null
@@ -148,10 +202,32 @@ export type BranchObservationEvent =
   | ToolFinishedEvent
   | SettlementEvent
 
-export type ObservationEvent = BranchObservationEvent | RunStatusEvent
+export type ChanceObservationEvent =
+  | ChanceCreatedEvent
+  | ChanceStageChangedEvent
+  | AuthorityStateChangedEvent
+  | ProposalAddedEvent
+
+export type ObservationEvent =
+  | BranchObservationEvent
+  | ChanceObservationEvent
+  | RunStatusEvent
+
+export interface ObservedChance {
+  chance_id: string
+  parent_branch_id: string
+  parent_chance_id: string | null
+  operation_id: string
+  tool_name: string
+  stage: ChanceStage
+  authority_state: AuthorityState
+  proposal_ids: string[]
+  branch_ids: string[]
+}
 
 export interface StateEventSet {
   sequence: number
+  chances: ObservedChance[]
   events: ObservationEvent[]
 }
 
@@ -179,5 +255,14 @@ export type Request =
   | { action: 'shutdown' }
 
 export function hasBranchId(event: ObservationEvent): event is BranchObservationEvent {
-  return event.event !== 'run_status'
+  return 'branch_id' in event
+}
+
+export function isChanceEvent(event: ObservationEvent): event is ChanceObservationEvent {
+  return (
+    event.event === 'chance_created' ||
+    event.event === 'chance_stage_changed' ||
+    event.event === 'authority_state_changed' ||
+    event.event === 'proposal_added'
+  )
 }

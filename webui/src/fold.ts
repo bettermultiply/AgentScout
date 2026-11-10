@@ -1,9 +1,14 @@
+import { isChanceEvent } from './types'
 import type {
   ActionKind,
   ActionStatus,
+  AuthorityState,
+  BlockedReason,
   BranchObservationEvent,
   BranchRole,
   BranchStatus,
+  ChanceStage,
+  DiscardedReason,
   EnvironmentChangedEvent,
   ObservationEvent,
   RunStatus,
@@ -28,13 +33,26 @@ export interface EnvironmentCleanState {
   sequence: number
 }
 
+export interface ChanceState {
+  chanceId: string
+  parentBranchId: string
+  parentChanceId: string | null
+  operationId: string
+  toolName: string
+  stage: ChanceStage
+  authorityState: AuthorityState
+  proposalIds: string[]
+  branchIds: string[]
+  lastEventSequence: number
+}
+
 export interface BranchState {
   branchId: string
   parentBranchId: string | null
   role: BranchRole
   status: BranchStatus
   statusReason: string | null
-  edgeId: string | null
+  chanceId: string | null
   speculationKind: ActionKind | null
   speculationStartedAtMs: number | null
   createdAtSequence: number
@@ -57,6 +75,8 @@ export interface TaskState {
   taskId: string
   branches: Record<string, BranchState>
   branchOrder: string[]
+  chances: Record<string, ChanceState>
+  chanceOrder: string[]
   authority: string | null
   authorityHistory: string[]
   lastSequence: number
@@ -86,6 +106,8 @@ function newTask(taskId: string, sequence: number, timestampMs: number): TaskSta
     taskId,
     branches: {},
     branchOrder: [],
+    chances: {},
+    chanceOrder: [],
     authority: null,
     authorityHistory: [],
     lastSequence: sequence,
@@ -104,7 +126,7 @@ function newBranch(
     role: 'candidate',
     status: 'created',
     statusReason: null,
-    edgeId: null,
+    chanceId: null,
     speculationKind: null,
     speculationStartedAtMs: null,
     createdAtSequence: sequence,
@@ -120,6 +142,21 @@ function newBranch(
     conversationUpdatedSequence: null,
     authorityChangedAtMs: null,
     terminalAtMs: null,
+  }
+}
+
+function newChance(chanceId: string, sequence: number): ChanceState {
+  return {
+    chanceId,
+    parentBranchId: '',
+    parentChanceId: null,
+    operationId: '',
+    toolName: '',
+    stage: 'pending',
+    authorityState: 'not_requested',
+    proposalIds: [],
+    branchIds: [],
+    lastEventSequence: sequence,
   }
 }
 
@@ -174,6 +211,37 @@ export function applyEvent(state: RunState, event: ObservationEvent): RunState {
       connected: event.connected,
     }
     runStatusSequence = event.sequence
+  } else if (isChanceEvent(event)) {
+    const chances = { ...task.chances }
+    const chance: ChanceState =
+      chances[event.chance_id] !== undefined
+        ? { ...chances[event.chance_id] }
+        : newChance(event.chance_id, event.sequence)
+    if (chances[event.chance_id] === undefined) {
+      task.chanceOrder = [...task.chanceOrder, event.chance_id]
+    }
+    chance.lastEventSequence = event.sequence
+    switch (event.event) {
+      case 'chance_created':
+        chance.parentBranchId = event.parent_branch_id
+        chance.parentChanceId = event.parent_chance_id
+        chance.operationId = event.operation_id
+        chance.toolName = event.tool_name
+        chance.stage = event.stage
+        chance.authorityState = event.authority_state
+        break
+      case 'chance_stage_changed':
+        chance.stage = event.stage
+        break
+      case 'authority_state_changed':
+        chance.authorityState = event.state
+        break
+      case 'proposal_added':
+        chance.proposalIds = appendUnique(chance.proposalIds, event.proposal_id)
+        break
+    }
+    chances[event.chance_id] = chance
+    task.chances = chances
   } else {
     const branches = { ...task.branches }
     const branch: BranchState =
@@ -192,7 +260,7 @@ export function applyEvent(state: RunState, event: ObservationEvent): RunState {
       case 'branch_created':
         branch.parentBranchId = event.parent_branch_id
         branch.role = event.role
-        branch.edgeId = event.edge_id
+        branch.chanceId = event.chance_id
         branch.speculationKind = event.speculation_kind
         branch.speculationStartedAtMs = event.speculation_started_at_ms
         branch.createdAtSequence = event.sequence
@@ -200,6 +268,11 @@ export function applyEvent(state: RunState, event: ObservationEvent): RunState {
         if (event.role === 'authority') {
           if (task.authority === null) task.authority = event.branch_id
           task.authorityHistory = appendUnique(task.authorityHistory, event.branch_id)
+        }
+        if (event.chance_id && task.chances[event.chance_id]) {
+          const chance = { ...task.chances[event.chance_id] }
+          chance.branchIds = appendUnique(chance.branchIds, event.branch_id)
+          task.chances = { ...task.chances, [event.chance_id]: chance }
         }
         break
       case 'authority_changed':
@@ -297,13 +370,14 @@ export function isTerminalStatus(status: BranchStatus): boolean {
   return status === 'promoted' || status === 'discarded' || status === 'cleaned'
 }
 
+export function isBlockedStatus(
+  status: BranchStatus,
+): status is { blocked: BlockedReason } {
+  return typeof status === 'object' && 'blocked' in status
+}
+
 export function isActiveCandidate(branch: BranchState): boolean {
-  return (
-    branch.role === 'candidate' &&
-    branch.status !== 'promoted' &&
-    branch.status !== 'discarded' &&
-    branch.status !== 'cleaned'
-  )
+  return branch.role === 'candidate' && !isTerminalStatus(branch.status)
 }
 
 export function speculationReason(kind: ActionKind | null): SpeculationReason {
@@ -339,14 +413,26 @@ export function branchTokenTotal(branch: BranchState): {
   return { value, complete: complete && known, known }
 }
 
+export function blockedReasonLabel(reason: BlockedReason): string {
+  switch (reason) {
+    case 'extent_reached':
+      return '达到 extent'
+    case 'rebalanced':
+      return '被 rebalance 暂停'
+    case 'effect_gate':
+      return 'effect 未放行'
+  }
+}
+
 export function statusLabel(status: BranchStatus): string {
+  if (isBlockedStatus(status)) return `已阻塞：${blockedReasonLabel(status.blocked)}`
   switch (status) {
     case 'created':
       return '已创建'
     case 'running':
       return '运行中'
-    case 'awaiting_validation':
-      return '等待验证'
+    case 'finished':
+      return '已跑完，等待裁决'
     case 'promoting':
       return '正在晋级'
     case 'promoted':
@@ -359,6 +445,49 @@ export function statusLabel(status: BranchStatus): string {
       return '正在清理'
     case 'cleaned':
       return '已清理'
+  }
+}
+
+export function chanceStageLabel(stage: ChanceStage): string {
+  if (typeof stage === 'object') {
+    if ('accepted' in stage) return `已接受 ${stage.accepted}`
+    return `已抛弃：${discardedReasonLabel(stage.discarded)}`
+  }
+  switch (stage) {
+    case 'pending':
+      return '待选'
+    case 'running':
+      return '运行中'
+    case 'resolving':
+      return '核实中'
+  }
+}
+
+export function discardedReasonLabel(reason: DiscardedReason): string {
+  switch (reason) {
+    case 'match_rejected':
+      return '匹配失败'
+    case 'not_selected':
+      return '未被选中'
+    case 'ancestor_invalidated':
+      return '祖先失效'
+    case 'budget_exhausted':
+      return '预算耗尽'
+    case 'failed':
+      return '执行失败'
+  }
+}
+
+export function authorityStateLabel(state: AuthorityState): string {
+  switch (state) {
+    case 'not_requested':
+      return '未请求'
+    case 'fetching':
+      return '正在取得'
+    case 'arrived':
+      return '已到达'
+    case 'unavailable':
+      return '不可用'
   }
 }
 

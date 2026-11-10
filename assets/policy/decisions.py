@@ -21,7 +21,7 @@ def feasibility_pass(data, *, policy_config, capabilities):
 
 
 def select(data, *, policy_config, capabilities):
-    return [edge["edge_id"] for edge in data["frontier_view"][:policy_config["max_edges"]]]
+    return [chance["chance_id"] for chance in data["frontier_view"][:policy_config["max_chances"]]]
 
 
 def rebalance(data, *, policy_config, capabilities):

@@ -295,7 +295,7 @@ pub(super) fn validate_data(decision: Decision, binding: &Binding, data: &Value)
             )?;
         }
         Decision::Select => {
-            ids(&data["frontier_view"], "edge_id")?;
+            ids(&data["frontier_view"], "chance_id")?;
         }
         Decision::Rebalance => {
             let active = ids(&data["active_view"], "branch_id")?;
@@ -309,10 +309,19 @@ pub(super) fn validate_data(decision: Decision, binding: &Binding, data: &Value)
             require(
                 data["assumption_set"].as_array().is_some_and(|a| {
                     let mut seen = BTreeSet::new();
-                    a.iter()
-                        .all(|v| v.as_str().is_some_and(|id| seen.insert(id)))
+                    a.iter().all(|v| {
+                        v.as_object().is_some_and(|item| {
+                            item.len() == 2
+                                && item["chance_id"].is_string()
+                                && item["proposal_id"].is_string()
+                                && seen.insert((
+                                    item["chance_id"].as_str().unwrap_or_default(),
+                                    item["proposal_id"].as_str().unwrap_or_default(),
+                                ))
+                        })
+                    })
                 }),
-                "assumption_set must contain unique Proposal IDs",
+                "assumption_set must contain unique (chance_id, proposal_id) references",
             )?;
         }
         Decision::Launch => require(
@@ -375,7 +384,7 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
             .as_str()
             .is_some_and(|v| ["stop", "continue"].contains(&v)),
         Decision::Select => {
-            let candidates = ids(&data["frontier_view"], "edge_id")?;
+            let candidates = ids(&data["frontier_view"], "chance_id")?;
             let selected = result
                 .as_array()
                 .ok_or_else(|| invalid("select must return an array"))?;

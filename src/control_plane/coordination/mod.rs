@@ -14,63 +14,81 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::control_plane::agent_control::{
-    AgentCommand, AgentMessage, BranchPhase, BranchStatus, OperationKind, OperationStatus,
-    ProposalRecord, RuntimeExecutionState, SpeculativeTree,
+    AgentCommand, AgentMessage, AuthorityState, BlockedReason, BranchRole, BranchStatus,
+    ChanceStage, DiscardedReason, OperationKind, OperationStatus, ProposalRecord,
+    RuntimeExecutionState, SpeculativeTree,
 };
 use crate::protocol::contract::{Operation, RuntimeCapabilities};
 use crate::control_plane::session::ControlSession;
 use crate::control_plane::policy::{CompiledPolicy, Decision, PolicyEngine};
 
+/// 一个 Chance 的等待点：权威 Branch 在哪个 operation 上等待哪个工具结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolPending {
+    pub chance_id: String,
     pub branch_id: String,
     pub operation_id: String,
     pub tool_name: String,
     pub arguments: Value,
-    pub checkpoint: Option<Value>,
-    pub launch: bool,
-    /// 产生这次投机的准入请求时刻；只用于表达投机起点，不是工具开始时间。
-    pub speculation_started_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlOperation {
+    /// 对给定的 Pending Chance 求值 `select`。
+    Select(Vec<String>),
     Predict(ToolPending),
-    Establish(AgentCommand),
+    Launch(ToolPending),
     Invoke(ToolPending),
+    Establish(AgentCommand),
     Validate(String),
     Promote(String, Value),
     Terminate(String),
     Cleanup(String),
+    Rebalance,
 }
 
 impl ControlOperation {
     pub fn references(&self, branch: &str) -> bool {
-        self.branch() == branch
+        self.branch() == Some(branch)
             || matches!(self, Self::Establish(AgentCommand::StartCandidate {parent_branch_id, ..}) if parent_branch_id == branch)
     }
 
-    pub fn branch(&self) -> &str {
+    pub fn branch(&self) -> Option<&str> {
         match self {
-            Self::Predict(tool) | Self::Invoke(tool) => &tool.branch_id,
+            Self::Select(_) | Self::Rebalance => None,
+            Self::Predict(tool) | Self::Launch(tool) | Self::Invoke(tool) => {
+                Some(&tool.branch_id)
+            }
             Self::Establish(command) => {
                 let AgentCommand::StartCandidate { branch_id, .. } = command else {
                     unreachable!()
                 };
-                branch_id
+                Some(branch_id)
             }
             Self::Validate(id) | Self::Promote(id, _) | Self::Terminate(id) | Self::Cleanup(id) => {
-                id
+                Some(id)
             }
+        }
+    }
+
+    pub fn chance_id(&self) -> Option<&str> {
+        match self {
+            Self::Predict(tool) | Self::Launch(tool) | Self::Invoke(tool) => {
+                Some(&tool.chance_id)
+            }
+            _ => None,
         }
     }
 }
 
 pub enum ControlResult {
+    Selected(Vec<String>),
     Predictions(Vec<Value>),
-    PredictionsWithoutAuthority(Vec<Value>),
+    Launch(bool),
     Outcome(Value, Value),
     Disposition(bool, String),
+    /// `(branch_id, action)` pairs returned by `rebalance`.
+    Rebalance(Vec<(String, String)>),
     Completed,
 }
 

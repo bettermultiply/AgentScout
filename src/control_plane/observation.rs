@@ -1,6 +1,7 @@
 //! Public observation facts, independent of transport and file storage.
 use super::agent_control::{
-    ActionKind, ActionStatus, BranchRole, BranchStatus, RuntimeExecutionState,
+    ActionKind, ActionStatus, AuthorityState, BranchRole, BranchStatus, ChanceStage,
+    RuntimeExecutionState,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -22,10 +23,36 @@ pub enum ObservationContent {
         branch_id: String,
         parent_branch_id: Option<String>,
         role: BranchRole,
-        edge_id: Option<String>,
+        /// 这个 Branch 所属的 Chance；初始权威为 null。
+        chance_id: Option<String>,
         speculation_kind: Option<ActionKind>,
         /// 被准入投机的起点（准入请求的接入侧时刻）；非投机候选为 null。
         speculation_started_at_ms: Option<u64>,
+    },
+    /// `admit` 通过：Chance 获得 id，处于 `pending`。
+    ChanceCreated {
+        chance_id: String,
+        parent_branch_id: String,
+        parent_chance_id: Option<String>,
+        operation_id: String,
+        tool_name: String,
+        stage: ChanceStage,
+        authority_state: AuthorityState,
+    },
+    ChanceStageChanged {
+        chance_id: String,
+        stage: ChanceStage,
+        reason: Option<String>,
+    },
+    AuthorityStateChanged {
+        chance_id: String,
+        state: AuthorityState,
+    },
+    /// Chance 上新增一个不可变 Proposal。
+    ProposalAdded {
+        chance_id: String,
+        proposal_id: String,
+        payload: Value,
     },
     AuthorityChanged {
         branch_id: String,
@@ -104,8 +131,88 @@ pub struct ObservationAmount {
     pub estimated: Option<f64>,
 }
 
+/// 状态事件集中一个 Chance 的当前视图，由 Chance 与 Branch 事件折叠得到。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ObservedChance {
+    pub chance_id: String,
+    pub parent_branch_id: String,
+    pub parent_chance_id: Option<String>,
+    pub operation_id: String,
+    pub tool_name: String,
+    pub stage: ChanceStage,
+    pub authority_state: AuthorityState,
+    pub proposal_ids: Vec<String>,
+    pub branch_ids: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct StateEventSet {
     pub sequence: u64,
+    pub chances: Vec<ObservedChance>,
     pub events: Vec<ObservationEvent>,
+}
+
+impl StateEventSet {
+    pub fn new(sequence: u64, events: Vec<ObservationEvent>) -> Self {
+        let mut chances: Vec<ObservedChance> = Vec::new();
+        for event in &events {
+            match &event.content {
+                ObservationContent::ChanceCreated {
+                    chance_id,
+                    parent_branch_id,
+                    parent_chance_id,
+                    operation_id,
+                    tool_name,
+                    stage,
+                    authority_state,
+                } => chances.push(ObservedChance {
+                    chance_id: chance_id.clone(),
+                    parent_branch_id: parent_branch_id.clone(),
+                    parent_chance_id: parent_chance_id.clone(),
+                    operation_id: operation_id.clone(),
+                    tool_name: tool_name.clone(),
+                    stage: stage.clone(),
+                    authority_state: *authority_state,
+                    proposal_ids: Vec::new(),
+                    branch_ids: Vec::new(),
+                }),
+                ObservationContent::ChanceStageChanged {
+                    chance_id, stage, ..
+                } => {
+                    if let Some(chance) = chances.iter_mut().find(|c| &c.chance_id == chance_id) {
+                        chance.stage = stage.clone();
+                    }
+                }
+                ObservationContent::AuthorityStateChanged { chance_id, state } => {
+                    if let Some(chance) = chances.iter_mut().find(|c| &c.chance_id == chance_id) {
+                        chance.authority_state = *state;
+                    }
+                }
+                ObservationContent::ProposalAdded {
+                    chance_id,
+                    proposal_id,
+                    ..
+                } => {
+                    if let Some(chance) = chances.iter_mut().find(|c| &c.chance_id == chance_id) {
+                        chance.proposal_ids.push(proposal_id.clone());
+                    }
+                }
+                ObservationContent::BranchCreated {
+                    branch_id,
+                    chance_id: Some(chance_id),
+                    ..
+                } => {
+                    if let Some(chance) = chances.iter_mut().find(|c| &c.chance_id == chance_id) {
+                        chance.branch_ids.push(branch_id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Self {
+            sequence,
+            chances,
+            events,
+        }
+    }
 }

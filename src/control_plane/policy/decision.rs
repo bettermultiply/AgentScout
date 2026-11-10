@@ -65,7 +65,7 @@ impl Decision {
             Self::Extent => (&["process_state"], &[]),
             Self::Predict => (
                 &[
-                    "edge_context",
+                    "chance_context",
                     "process_context",
                     "assumption_set",
                     "capability_context",
@@ -73,7 +73,7 @@ impl Decision {
                 &["history"],
             ),
             Self::Launch => (
-                &["edge_context", "authority_state", "candidate_view"],
+                &["chance_context", "authority_state", "candidate_view"],
                 &["scheduling_context"],
             ),
             Self::Effect => (&["effect_descriptor", "context"], &[]),

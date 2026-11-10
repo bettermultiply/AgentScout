@@ -1,6 +1,6 @@
 //! AScout control facts only. Agent messages are rendered by the product in its PTY.
 use super::ui::{ObservedBranch, ObservedTree};
-use ascout::control_plane::agent_control::{BranchRole, BranchStatus};
+use ascout::control_plane::agent_control::{BlockedReason, BranchRole, BranchStatus};
 use serde_json::Value;
 
 pub fn role_label(role: BranchRole) -> &'static str {
@@ -14,7 +14,10 @@ pub fn status_label(status: BranchStatus) -> &'static str {
     match status {
         BranchStatus::Created => "已创建，等待启动",
         BranchStatus::Running => "运行中",
-        BranchStatus::AwaitingValidation => "等待验证",
+        BranchStatus::Blocked(BlockedReason::ExtentReached) => "已阻塞：达到 extent",
+        BranchStatus::Blocked(BlockedReason::Rebalanced) => "已阻塞：被 rebalance 暂停",
+        BranchStatus::Blocked(BlockedReason::EffectGate) => "已阻塞：effect 未放行",
+        BranchStatus::Finished => "已跑完，等待裁决",
         BranchStatus::Promoting => "正在晋级",
         BranchStatus::Promoted => "已晋级",
         BranchStatus::Discarding => "正在丢弃",

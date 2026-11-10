@@ -39,7 +39,7 @@ const sessions = new Map(), checkpoints = new Map(), results = new Map(), waiter
 const cancelled = new Set(), gates = new Map(), generations = new Map(), commands = new Map();
 const activeActions = new Map(), reportedActions = new Set();
 const aborting = new Set();
-const policies = new Map(), hookCounts = new Map(), countedHooks = new Set(), stopGates = new Map();
+const policies = new Map(), hookCounts = new Map(), countedHooks = new Set(), stopGates = new Map(), pauseGates = new Map();
 const modelActions = new Map();
 const runtimeTools = JSON.parse(process.env.ASCOUT_RUNTIME_TOOLS ?? '[]');
 async function evaluatePolicy(artifact, decision, data, signal) {
@@ -104,13 +104,8 @@ async function localDecision(branch, operationId, toolCallId, toolName, args, ch
     return feasibility === true ? {kind:'admit_speculation'} : {kind:'allow'};
 }
 async function beforeModelInference(branch, modelValue, context, signal) {
-    const gate=gates.get(branch);
-    if(gate)await new Promise((resolve,reject)=>{
-        const abort=()=>reject(Error('Candidate cancelled before model inference'));
-        gate.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
-        signal?.addEventListener('abort',abort,{once:true});
-        if(signal?.aborted)abort();
-    });
+    // Model inference is a PURE step; only external effects need the effect gate.
+    await waitPause(branch,signal);
     if(closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
     const artifact=policies.get(branch);
     if(artifact){
@@ -138,6 +133,39 @@ async function beforeModelInference(branch, modelValue, context, signal) {
         await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',status:status??(signal?.aborted?'cancelled':'succeeded'),result:null,timestamp_ms:Date.now()});
     };
 }
+// A Branch that has not been accepted yet may not produce effects. The `effect`
+// Decision is evaluated at the boundary; while the gate holds, the Branch is
+// reported as blocked by the effect gate.
+async function effectGate(branch, descriptor, message, signal) {
+    const gate=gates.get(branch);
+    if(!gate)return;
+    const artifact=policies.get(branch);
+    if(artifact){
+        const plan=await evaluatePolicy(artifact,'effect',{effect_descriptor:descriptor,context:{branch_id:branch}},signal);
+        if(plan?.mode==='deny')throw Error('Effect denied by Policy');
+    }
+    await report({message:'branch_suspended',branch_id:branch,reason:'effect_gate'});
+    await new Promise((resolve,reject)=>{
+        const abort=()=>reject(Error(message));
+        gate.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
+        signal?.addEventListener('abort',abort,{once:true});
+        if(signal?.aborted)abort();
+    });
+    await report({message:'branch_resumed',branch_id:branch});
+}
+// `rebalance` pause: hold the Branch at its next boundary until resumed.
+async function waitPause(branch, signal) {
+    const gate=pauseGates.get(branch);
+    if(!gate)return;
+    await report({message:'branch_suspended',branch_id:branch,reason:'rebalanced'});
+    await new Promise((resolve,reject)=>{
+        const abort=()=>reject(Error('Branch cancelled while paused'));
+        gate.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
+        signal?.addEventListener('abort',abort,{once:true});
+        if(signal?.aborted)abort();
+    });
+    await report({message:'branch_resumed',branch_id:branch});
+}
 async function waitStop(branch, signal) {
     const gate=stopGates.get(branch);
     if (!gate) return;
@@ -151,13 +179,8 @@ async function waitStop(branch, signal) {
 function install(session,branch) {
     const before=session.agent.beforeToolCall, after=session.agent.afterToolCall;
     session.agent.beforeToolCall=async(context,signal)=>{
-        const gate=gates.get(branch);
-        if(gate)await new Promise((resolve,reject)=>{
-            const abort=()=>reject(Error('Candidate cancelled'));
-            signal?.addEventListener('abort',abort,{once:true});
-            gate.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
-            if(signal?.aborted)abort();
-        });
+        await effectGate(branch,{kind:'tool_execution',tool:context.toolCall.name,arguments:context.args},'Candidate cancelled',signal);
+        await waitPause(branch,signal);
         const previous=await before?.(context,signal);
         if(previous?.block||signal?.aborted||branch!==authority)return previous;
         const saved=structuredClone(session.messages.filter(m=>m.role!=='custom'));
@@ -175,7 +198,7 @@ function install(session,branch) {
             const extent=await evaluatePolicy(policy,'extent',{process_state:{steps_completed:hookCounts.get(branch)??0,hook_count:hookCounts.get(branch)??0,phase:'tool_execution'}},signal);
             if(extent==='stop'){
                 let release;const promise=new Promise(resolve=>release=resolve);stopGates.set(branch,{promise,release});
-                await report({message:'branch_suspended',branch_id:branch});
+                await report({message:'branch_suspended',branch_id:branch,reason:'extent_reached'});
                 await waitStop(branch,signal);
             }
         }
@@ -292,6 +315,12 @@ async function handle(command) {
             await report({message:'branch_ready',branch_id:branch});
             executeTurn(session,branch,()=>session.continue());return;
         }
+        case 'pause': {
+            if(!pauseGates.has(branch)){let release;const promise=new Promise(resolve=>release=resolve);pauseGates.set(branch,{promise,release});}
+            return;
+        }
+        case 'resume':
+            pauseGates.get(branch)?.release();pauseGates.delete(branch);return;
         case 'resolve_pending': {
             stopGates.get(branch)?.release();stopGates.delete(branch);
             if(command.outcome===undefined){await report({message:'branch_resumed',branch_id:branch});return;}
@@ -306,9 +335,9 @@ async function handle(command) {
             try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled'); }
             finally { aborting.delete(branch); }
             return;
-        case 'discard': cancelled.add(branch);stopGates.get(branch)?.release();stopGates.delete(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');return;
+        case 'discard': cancelled.add(branch);stopGates.get(branch)?.release();stopGates.delete(branch);pauseGates.get(branch)?.release();pauseGates.delete(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');return;
         case 'cleanup':
-            cancelled.add(branch);stopGates.get(branch)?.release();stopGates.delete(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);gates.delete(branch);policies.delete(branch);hookCounts.delete(branch);modelActions.delete(branch);
+            cancelled.add(branch);stopGates.get(branch)?.release();stopGates.delete(branch);pauseGates.get(branch)?.release();pauseGates.delete(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);gates.delete(branch);policies.delete(branch);hookCounts.delete(branch);modelActions.delete(branch);
             await finishActions(branch,'cancelled');
             for(const id of checkpoints.keys())if(JSON.parse(id)[0]===branch)checkpoints.delete(id);
             await report({message:'agent_session_released',branch_id:branch});
@@ -354,7 +383,7 @@ try{
 }catch(error){
     transportError??=error;
 }finally{
-    closing=true;for(const gate of gates.values())gate.release();for(const gate of stopGates.values())gate.release();
+    closing=true;for(const gate of gates.values())gate.release();for(const gate of stopGates.values())gate.release();for(const gate of pauseGates.values())gate.release();
     await commandQueue.catch(()=>{});
     await Promise.allSettled([...sessions.values()].map(s=>s.abort()));
     await Promise.allSettled(tasks);for(const session of sessions.values())session.dispose();

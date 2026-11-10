@@ -29,6 +29,13 @@ export function StatusIcon({
   status,
   size = 16,
 }: IconProps & { status: BranchStatus }) {
+  if (typeof status === 'object') {
+    return (
+      <Svg size={size}>
+        <path d="M9 5v14M15 5v14" />
+      </Svg>
+    )
+  }
   switch (status) {
     case 'created':
       return (
@@ -42,7 +49,7 @@ export function StatusIcon({
           <path d="M8 5.5v13l10-6.5z" fill="currentColor" stroke="none" />
         </Svg>
       )
-    case 'awaiting_validation':
+    case 'finished':
       return (
         <Svg size={size}>
           <path d="M7 3h10M7 21h10M8 3c0 4 1.5 6 4 9-2.5 3-4 5-4 9M16 3c0 4-1.5 6-4 9 2.5 3 4 5 4 9" />

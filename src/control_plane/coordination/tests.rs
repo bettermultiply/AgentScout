@@ -44,7 +44,17 @@ use super::*;
     #[test]
     fn interrupt_invalidates_a_prediction_already_in_flight() {
         let (mut tree, _root) = task();
-        let predict = tree.speculative_admission(waiting()).unwrap().operations[0].0;
+        tree.speculative_admission(waiting()).unwrap();
+        let select = tree
+            .progress(&RuntimeCapabilities::default())
+            .unwrap()
+            .operations[0]
+            .0;
+        let predict = tree
+            .complete_work(select, Ok(ControlResult::Selected(vec!["chance-1".into()])))
+            .unwrap()
+            .operations[0]
+            .0;
         tree.interrupt().unwrap();
         let actions = tree
             .complete_work(
@@ -61,7 +71,7 @@ use super::*;
         let (mut tree, _root) = task();
         tree.speculative_admission(waiting()).unwrap();
         let command = tree
-            .start_candidate("authority", "op", "tool", json!("guess"), None, None)
+            .start_candidate("chance-1", json!("guess"))
             .unwrap();
         let AgentCommand::StartCandidate { branch_id, .. } = command else {
             unreachable!()
@@ -70,7 +80,7 @@ use super::*;
             branch_id: branch_id.clone(),
         })
         .unwrap();
-        tree.record_candidate_outcome("authority", "op", json!({"payload":"guess"}), None)
+        tree.record_authority_outcome("chance-1", json!({"payload":"guess"}), None)
             .unwrap();
         let mut actions = ControlActions::default();
         tree.schedule(ControlOperation::Validate(branch_id.clone()), &mut actions);
@@ -118,9 +128,10 @@ use super::*;
     #[test]
     fn branch_cannot_be_archived_while_its_environment_is_still_being_created() {
         let (mut tree, _root) = task();
-        let command = tree
-            .start_candidate("authority", "op", "tool", json!("guess"), None, None)
+        let chance = tree
+            .admit_chance("authority", "op", "tool", json!({}), None, None)
             .unwrap();
+        let command = tree.start_candidate(&chance, json!("guess")).unwrap();
         let child = match &command {
             AgentCommand::StartCandidate { branch_id, .. } => branch_id.clone(),
             _ => unreachable!(),
@@ -155,9 +166,10 @@ use super::*;
     #[test]
     fn firecracker_style_capabilities_route_establish_through_branch_environment() {
         let (mut tree, _root) = task();
-        let command = tree
-            .start_candidate("authority", "op", "tool", json!("guess"), None, None)
+        let chance = tree
+            .admit_chance("authority", "op", "tool", json!({}), None, None)
             .unwrap();
+        let command = tree.start_candidate(&chance, json!("guess")).unwrap();
         let child = match &command {
             AgentCommand::StartCandidate { branch_id, .. } => branch_id.clone(),
             _ => unreachable!(),

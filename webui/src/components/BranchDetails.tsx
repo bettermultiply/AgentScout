@@ -1,6 +1,8 @@
 import {
   actionStatusLabel,
+  authorityStateLabel,
   branchTokenTotal,
+  chanceStageLabel,
   isTerminalStatus,
   latestModel,
   roleLabel,
@@ -8,6 +10,7 @@ import {
   speculationKindLabel,
   statusLabel,
   type BranchState,
+  type ChanceState,
 } from '../fold'
 import {
   formatCost,
@@ -64,7 +67,13 @@ function modelTokenText(usage: BranchState['modelUsages'][number]): string {
   return '未上报'
 }
 
-export function BranchDetails({ branch }: { branch: BranchState }) {
+export function BranchDetails({
+  branch,
+  chance,
+}: {
+  branch: BranchState
+  chance: ChanceState | null
+}) {
   const active = !isTerminalStatus(branch.status)
   const now = useNow(active && branch.speculationStartedAtMs !== null)
   const conversation = useConversation(branch.branchId, true)
@@ -86,7 +95,13 @@ export function BranchDetails({ branch }: { branch: BranchState }) {
     <div className="branch-details">
       <div className={`branch-banner banner-${branch.role}`}>
         <span className={`badge badge-role-${branch.role}`}>{roleLabel(branch.role)}</span>
-        <span className={`badge badge-status-${branch.status}`}>{statusLabel(branch.status)}</span>
+        <span
+          className={`badge badge-status-${
+            typeof branch.status === 'string' ? branch.status : 'blocked'
+          }`}
+        >
+          {statusLabel(branch.status)}
+        </span>
         <code title={branch.branchId}>{branch.branchId}</code>
       </div>
 
@@ -100,7 +115,20 @@ export function BranchDetails({ branch }: { branch: BranchState }) {
             ) : null}
           </Field>
           <Field label="模型">{model ?? <span className="muted">未上报</span>}</Field>
-          <Field label="投机原因">{speculationKindLabel(branch.speculationKind)}</Field>
+          <Field label="投机来源">{speculationKindLabel(branch.speculationKind)}</Field>
+          <Field label="Chance">
+            {chance ? <code>{chance.chanceId}</code> : <span className="muted">未上报</span>}
+          </Field>
+          <Field label="Chance 阶段">
+            {chance ? chanceStageLabel(chance.stage) : <span className="muted">未上报</span>}
+          </Field>
+          <Field label="权威状态">
+            {chance ? (
+              authorityStateLabel(chance.authorityState)
+            ) : (
+              <span className="muted">未上报</span>
+            )}
+          </Field>
           <Field label="投机起点" title="branch_created.speculation_started_at_ms">
             {formatTimestamp(branch.speculationStartedAtMs)}
           </Field>
@@ -121,8 +149,8 @@ export function BranchDetails({ branch }: { branch: BranchState }) {
               <span className="muted">无（根分支）</span>
             )}
           </Field>
-          <Field label="Edge">
-            {branch.edgeId ?? <span className="muted">未上报</span>}
+          <Field label="所属 Chance">
+            {branch.chanceId ?? <span className="muted">无（初始权威）</span>}
           </Field>
         </dl>
       </Section>

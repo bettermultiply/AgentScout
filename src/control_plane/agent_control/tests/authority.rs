@@ -14,8 +14,11 @@ use serde_json::json;
             branch_id: "authority".into(),
         })
         .unwrap();
+        let chance = tree
+            .admit_chance("authority", "op", "tool", json!({}), None, None)
+            .unwrap();
         let first = tree
-            .start_candidate("authority", "op", "tool", json!("first"), None, None)
+            .start_candidate(&chance, json!("first"))
             .unwrap();
         let AgentCommand::StartCandidate {
             branch_id: winner, ..
@@ -24,7 +27,7 @@ use serde_json::json;
             unreachable!()
         };
         let second = tree
-            .start_candidate("authority", "op", "tool", json!("second"), None, None)
+            .start_candidate(&chance, json!("second"))
             .unwrap();
         let AgentCommand::StartCandidate {
             branch_id: sibling, ..
@@ -42,7 +45,7 @@ use serde_json::json;
             branch_id: winner.clone(),
         })
         .unwrap();
-        let commands = tree.resolve_candidate(&winner, true).unwrap();
+        let commands = tree.accept_candidate(&winner).unwrap();
         assert_eq!(tree.authority_branch_id.as_deref(), Some("authority"));
         assert_eq!(tree.branches[&sibling].status, BranchStatus::Running);
         tree.queue_prompt("next".into());
@@ -93,7 +96,7 @@ use serde_json::json;
                 status: BranchStatus::Running,
                 generation: 1,
                 execution_position: Default::default(),
-                proposal_id: None,
+                chance_id: None,
                 assumption_set: Vec::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
@@ -133,7 +136,7 @@ use serde_json::json;
                     generation: 1,
 
                     execution_position: Default::default(),
-                    proposal_id: None,
+                    chance_id: None,
                     assumption_set: Vec::new(),
                     pending_operations: Vec::new(),
                     execution_state: Default::default(),

@@ -18,7 +18,7 @@ decisions:
     file: decisions.py
     function: select
     policy_config:
-       max_edges: 4
+       max_chances: 4
   rebalance:
     file: decisions.py
     function: rebalance
