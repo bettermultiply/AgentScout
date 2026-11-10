@@ -530,3 +530,6 @@ ProcessBackend 已承担启动、冻结、终止及 namespace 记录，不再将
 列在未实现清单；跨 Backend 编排进一步统一与逃出进程组的后代仍保留为真实边界。
 信号驱动 trash、元数据隔离失败关闭、diff 比较目标移除的既有决定保持不变。
 本次只删除四份指定日志、修改文档，不改生产代码、不运行 cargo 测试、不提交。
+# 2026-11-10：观察事件与增量读取
+
+按已确认设计，弃用 `GET /api/run-view` 整体轮询及 `ui.rs` 每次 `state.tree = tree.clone()` 的整体替换。内部 SpeculativeTree 不再作为外部序列化模型；原始 Agent/Runtime/Ledger 消息不进入公共观察流。AScoutRunView 仅为从公共事件折叠的本地 TUI 视图；对话通过独立读取接口取得。现有简易页面改为首次事件快照 + SSE，后续 React + React Flow 前端尚未实现。具体接口与差距见 observation.md。

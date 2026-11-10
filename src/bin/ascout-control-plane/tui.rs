@@ -95,18 +95,17 @@ fn run(interface: &Interface) -> io::Result<()> {
                 content.push_str(&view::branch_details(
                     branch,
                     &state.tree,
-                    state
-                        .facts
-                        .get(id)
-                        .map(String::as_str)
-                        .unwrap_or("尚无运行事实"),
+                    "运行事实见 Tab 事件视图；候选内容未验证",
                 ));
             }
             if facts {
                 for event in state.events.iter().filter(|e| e["branch_id"] == *id) {
                     content.push_str(&view::structured(event));
                 }
-            } else if let Some(conversation) = state.conversations.get(id) {
+            } else if let Some(conversation) = interface.conversation(id) {
+                if conversation.unverified {
+                    content.push_str("\n候选内容未验证；查看不代表接受。\n");
+                }
                 if !conversation.inherited.is_empty() {
                     content.push_str("\n── 继承上下文 ──\n");
                 }

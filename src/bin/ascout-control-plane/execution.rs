@@ -17,7 +17,6 @@ struct Task<'a> {
     interface: &'a ui::Interface,
     capabilities: &'a RuntimeCapabilities,
     ledger: Ledger,
-    details: BTreeMap<String, String>,
     notice: String,
     started: Instant,
     draining: bool,
@@ -33,7 +32,6 @@ impl Task<'_> {
                 value["branch_id"].as_str().unwrap(),
             );
         }
-        self.interface.record(value);
         Ok(())
     }
 
@@ -96,6 +94,7 @@ impl Task<'_> {
         {
             return Err(io::Error::other(reason.to_string()));
         }
+        self.publish();
         let progress = self.tree.progress(self.capabilities)?;
         actions.commands.extend(progress.commands);
         actions.operations.extend(progress.operations);
@@ -106,7 +105,6 @@ impl Task<'_> {
     fn publish(&self) {
         self.interface.publish(
             self.tree,
-            &self.details,
             self.tree.authority_ready(),
             self.tree.authority_running(),
             &self.notice,
@@ -137,7 +135,6 @@ pub fn run(
         interface,
         capabilities,
         ledger,
-        details: BTreeMap::new(),
         notice: "Starting Agent session…".into(),
         started: Instant::now(),
         draining: false,
@@ -185,13 +182,17 @@ pub fn run(
                     Ok(Some(actions)) => actions,
                     Ok(None) => break,
                     Err(error) if !task.tree.is_stopping() => {
+                        task.publish();
                         failure = Some(error);
                         ControlActions {
                             commands: task.tree.begin_shutdown()?,
                             ..Default::default()
                         }
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        task.publish();
+                        return Err(error);
+                    }
                 };
                 for event in runtime.drain_events() {
                     task.record(
@@ -201,6 +202,7 @@ pub fn run(
                 for command in actions.commands {
                     send(task.stream, command)?;
                 }
+                task.publish();
                 for record in actions.records {
                     task.record(record)?;
                 }
@@ -221,6 +223,7 @@ pub fn run(
                         let _ = sender.send(Event::Completed(id, result));
                     });
                 }
+                task.publish();
                 loop {
                     let ids = task.tree.evictable_branches();
                     if ids.is_empty() {
@@ -256,7 +259,7 @@ pub fn run(
         let _ = close_reader.shutdown(std::net::Shutdown::Read);
         result
     });
-    interface.publish(task.tree, &task.details, false, false, "Stopped");
+    interface.publish(task.tree, false, false, "Stopped");
     let unarchived: Vec<_> = task.ledger.unarchived().collect();
     if !unarchived.is_empty() {
         return Err(format!(

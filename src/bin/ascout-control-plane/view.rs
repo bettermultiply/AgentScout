@@ -1,5 +1,6 @@
 //! AScout control facts only. Agent messages are rendered by the product in its PTY.
-use ascout::control_plane::agent_control::{BranchRecord, BranchRole, BranchStatus, SpeculativeTree};
+use super::ui::{ObservedBranch, ObservedTree};
+use ascout::control_plane::agent_control::{BranchRole, BranchStatus};
 use serde_json::Value;
 
 pub fn role_label(role: BranchRole) -> &'static str {
@@ -23,7 +24,7 @@ pub fn status_label(status: BranchStatus) -> &'static str {
     }
 }
 
-pub fn branch_details(branch: &BranchRecord, tree: &SpeculativeTree, facts: &str) -> String {
+pub fn branch_details(branch: &ObservedBranch, tree: &ObservedTree, facts: &str) -> String {
     let note = match branch.status {
         BranchStatus::Cleaned => "\n说明：已清理只表示会话和资源已释放，不等于投机失败。\n",
         BranchStatus::Discarded => "\n说明：已丢弃表示该候选没有被接受，不表示它一定不可行。\n",
@@ -44,7 +45,7 @@ pub fn branch_details(branch: &BranchRecord, tree: &SpeculativeTree, facts: &str
     )
 }
 
-pub fn select_branch(tree: &SpeculativeTree, input: &str) -> Result<String, String> {
+pub fn select_branch(tree: &ObservedTree, input: &str) -> Result<String, String> {
     input
         .parse::<usize>()
         .ok()
@@ -85,7 +86,9 @@ pub fn structured(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ascout::control_plane::agent_control::{BranchRole, BranchStatus};
+    use ascout::control_plane::agent_control::{
+        BranchRecord, BranchRole, BranchStatus, SpeculativeTree,
+    };
     #[test]
     fn invalid_selection_is_explicit_and_valid_selection_is_read_only() {
         let branch = BranchRecord {
@@ -106,12 +109,26 @@ mod tests {
         tree.branches.insert("authority".into(), branch);
         for input in ["0", "2", "abc", "", "-1"] {
             assert!(
-                select_branch(&tree, input)
-                    .unwrap_err()
-                    .contains("无效 Branch 编号")
+                select_branch(
+                    &super::super::ui::Interface::new(&tree, |_| Ok(()))
+                        .run_view()
+                        .tree,
+                    input
+                )
+                .unwrap_err()
+                .contains("无效 Branch 编号")
             );
         }
-        assert_eq!(select_branch(&tree, "1").unwrap(), "authority");
+        assert_eq!(
+            select_branch(
+                &super::super::ui::Interface::new(&tree, |_| Ok(()))
+                    .run_view()
+                    .tree,
+                "1"
+            )
+            .unwrap(),
+            "authority"
+        );
         assert_eq!(tree.authority_branch_id.as_deref(), Some("authority"));
     }
 }

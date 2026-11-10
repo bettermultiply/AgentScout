@@ -22,10 +22,11 @@ pub fn start(address: &str, interface: Interface) -> io::Result<()> {
             let Ok(mut stream) = stream else {
                 break;
             };
-            let _ = serve(&mut stream, &interface, &address.to_string());
-            if !interface.run_view().connected {
-                break;
-            }
+            let interface = interface.clone();
+            let host = address.to_string();
+            std::thread::spawn(move || {
+                let _ = serve(&mut stream, &interface, &host);
+            });
         }
     });
     Ok(())
@@ -73,9 +74,79 @@ fn serve(stream: &mut TcpStream, interface: &Interface, host: &str) -> io::Resul
             "text/html; charset=utf-8",
             include_bytes!("web/index.html"),
         ),
-        ["GET", "/api/run-view", _] => {
-            let body = serde_json::to_vec(&interface.run_view())?;
+        ["GET", "/api/observation/snapshot", _] => {
+            let body = serde_json::to_vec(&interface.snapshot())?;
             reply(stream, "200 OK", "application/json", &body)
+        }
+        ["GET", path, _] if path.starts_with("/api/observation/events") => {
+            let (path, query) = path.split_once('?').unwrap_or((path, ""));
+            if path != "/api/observation/events" {
+                return reply(stream, "404 Not Found", "text/plain", b"Not found");
+            }
+            let after = query.strip_prefix("after=");
+            if !query.is_empty() && after.is_none() {
+                return reply(
+                    stream,
+                    "400 Bad Request",
+                    "text/plain",
+                    b"Expected after sequence",
+                );
+            }
+            // EventSource sends Last-Event-ID on automatic reconnect; it supersedes the initial query.
+            let sequence = get("last-event-id").or(after).unwrap_or("0").parse::<u64>();
+            let Ok(mut sequence) = sequence else {
+                return reply(stream, "400 Bad Request", "text/plain", b"Invalid sequence");
+            };
+            if sequence > interface.sequence() {
+                return reply(
+                    stream,
+                    "409 Conflict",
+                    "text/plain",
+                    b"Sequence ahead of this run; reload snapshot",
+                );
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+            )?;
+            loop {
+                let events = interface.events_after(sequence).map_err(io::Error::other)?;
+                for event in events {
+                    sequence = event.sequence;
+                    writeln!(
+                        stream,
+                        "id: {sequence}\ndata: {}\n",
+                        serde_json::to_string(&event)?
+                    )?;
+                }
+                stream.write_all(b": keep-alive\n\n")?;
+                stream.flush()?;
+                if !interface.connected() && sequence == interface.sequence() {
+                    return Ok(());
+                }
+            }
+        }
+        ["GET", path, _]
+            if path.starts_with("/api/branches/") && path.ends_with("/conversation") =>
+        {
+            let branch = &path["/api/branches/".len()..path.len() - "/conversation".len()];
+            let Some(branch) = decode_segment(branch) else {
+                return reply(
+                    stream,
+                    "400 Bad Request",
+                    "text/plain",
+                    b"Invalid Branch id",
+                );
+            };
+            match interface.conversation(&branch) {
+                Some(conversation) => reply(
+                    stream,
+                    "200 OK",
+                    "application/json",
+                    &serde_json::to_vec(&conversation)?,
+                ),
+                None => reply(stream, "404 Not Found", "text/plain", b"Unknown Branch"),
+            }
         }
         ["POST", "/api/request", _] => {
             let origin = format!("http://{host}");
@@ -139,6 +210,21 @@ fn serve(stream: &mut TcpStream, interface: &Interface, host: &str) -> io::Resul
         }
         _ => reply(stream, "404 Not Found", "text/plain", b"Not found"),
     }
+}
+
+fn decode_segment(value: &str) -> Option<String> {
+    let mut bytes = value.bytes();
+    let mut decoded = Vec::new();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = (bytes.next()? as char).to_digit(16)?;
+            let low = (bytes.next()? as char).to_digit(16)?;
+            decoded.push((high * 16 + low) as u8);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 fn reply(stream: &mut TcpStream, status: &str, kind: &str, body: &[u8]) -> io::Result<()> {

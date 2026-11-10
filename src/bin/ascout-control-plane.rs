@@ -1,6 +1,5 @@
 //! Execution and policy coordination. Presentations consume the UI interface.
 
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -23,11 +22,13 @@ mod view;
 #[path = "ascout-control-plane/web.rs"]
 mod web;
 
-use ascout::control_plane::agent_control::{AgentCommand, AgentMessage, AgentWireMessage, SpeculativeTree};
-use ascout::protocol::contract::{AgentLaunch, Operation, RuntimeCapabilities};
-use ascout::control_plane::session::{ControlServer, ControlSession};
+use ascout::control_plane::agent_control::{
+    AgentCommand, AgentMessage, AgentWireMessage, SpeculativeTree,
+};
 use ascout::control_plane::ledger::Ledger;
 use ascout::control_plane::policy::{CompiledPolicy, Decision, PolicyEngine};
+use ascout::control_plane::session::{ControlServer, ControlSession};
+use ascout::protocol::contract::{AgentLaunch, Operation, RuntimeCapabilities};
 use ascout::protocol::transport;
 use serde_json::Value;
 use serde_json::json;
@@ -90,8 +91,7 @@ fn resolve_agent_entry() -> Result<std::path::PathBuf, Box<dyn std::error::Error
     let path = env::var_os("ASCOUT_AGENT_ENTRY")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("agent-access/pi/main.ts")
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agent-access/pi/main.ts")
         });
     if !path.is_file() {
         return Err(format!(
@@ -338,6 +338,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("ASCOUT_TASK_ID".into(), tree.execution_id.clone()),
         ]),
     };
+    let (events, receiver) = mpsc::channel();
+    let requests = events.clone();
+    let interface = ui::Interface::new(&tree, move |request| {
+        requests
+            .send(execution::Event::Request(request))
+            .map_err(|_| "Control plane disconnected".into())
+    });
+    let mut tui_thread = None;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         runtime_call(&session, "authority", Operation::EstablishEnvironment)?;
         // 环境建立后，由 Runtime 在其中建立 Agent 接入侧。
@@ -401,14 +409,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )?;
         send(&mut stream, command)?;
-        let (events, receiver) = mpsc::channel();
-        let requests = events.clone();
-        let interface = ui::Interface::new(tree.clone(), move |request| {
-            requests
-                .send(execution::Event::Request(request))
-                .map_err(|_| "Control plane disconnected".into())
-        });
-        let tui_thread = if let Some(address) = &web_address {
+        interface.publish(&tree, false, false, "Starting Agent session…");
+        tui_thread = if let Some(address) = &web_address {
             web::start(address, interface.clone())?;
             None
         } else {
@@ -423,10 +425,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &interface,
             (events, receiver),
         );
-        interface.disconnect();
-        if let Some(thread) = tui_thread {
-            let _ = thread.join();
-        }
         result
     })();
     // 先让 Runtime 停掉环境里的 Agent 进程，再断开 Adapter 让它自行退出。
@@ -499,6 +497,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Ok(())
     })();
+    interface.publish(&tree, false, false, "Stopped");
+    interface.disconnect();
+    if let Some(thread) = tui_thread {
+        let _ = thread.join();
+    }
     // Cleanup failure must not skip closing the cloned reader socket or
     // reaping the Adapter. Preserve every failure instead of hiding one.
     let mut errors = Vec::new();

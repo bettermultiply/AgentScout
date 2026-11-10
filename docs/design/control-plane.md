@@ -85,3 +85,13 @@ Ledger 以异步旁路记录控制面需要保留的运行事实，包括 Policy
 ## 4. 与 Runtime Adapter 的衔接
 
 控制面通过 Runtime Adapter 这一接入边界使用 Runtime，而不依赖内部的 Overlay、容器或虚拟机细节。请求表达所需的承载与保证，不默认要求独立环境或完整复制；Runtime 可以在满足要求时共享状态。Registry 校验和运行期结果用于确认能力与实际完成情况，不能仅凭模块名称或请求已发送推断保证成立。与 Policy 的完整协调、协商及运行时检测是后续实现目标，见 [Runtime 开发说明](../development/runtime-adapter.md)。具体接入约束见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
+
+## 5. 只读观察
+
+控制面对外提供受限的观察事件，不直接公开 Speculative Tree、控制命令、checkpoint 或 Runtime 内部对象。首次读取取得完整事件快照及其对应的最新序号；之后通过 SSE 持续接收增量，断线后携带最后收到的序号补发。快照是观察事件从头累积的结果，不维护另一套独立的树事实。每个事件包含全局递增序号、记录时刻和所属 task；序号在同一控制面运行内覆盖所有观察事件。
+
+树结构事件描述 Branch 创建（identity、Parent、Authority/Candidate、所属 Edge、投机对象类型）与权威切换（新旧 Authority）。生命周期事件使用 `BranchStatus` 的 Created、Running、AwaitingValidation、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned，记录新状态与已知原因。环境事件描述已确认的执行承载、独立 Instance、隔离环境嵌套及关键配置摘要，并区分环境清理结果。未知事实保持未知，命令已发送不表示环境已建立或清理成功。
+
+对话事件仅提示某 Branch 的消息发生变化；内容通过独立的按 Branch 只读接口按需取得。Candidate 的内容必须明确标记为“未验证”，选择观察对象不改变权威路由或生命周期裁决。
+
+用量事件记录已上报的模型调用结束信息（模型、token、耗时、费用）或工具调用结束事实，不由界面猜测。收益以一次投机的结算表示，包含 Branch、命中与否、时间与金钱两个维度；每个维度只有一个带符号数字，并标记实测或估计。命中节约为正，未命中浪费为负，失败浪费通过抵扣计入累计值；当前投机数量、累计节约等由事件累积计算，不单独发布统计事件。用量不等于收益，缺少比较依据时不得伪造结算。
