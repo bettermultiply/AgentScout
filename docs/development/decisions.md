@@ -445,10 +445,45 @@ accept 中 Chain 的 `delta_since` 必须排在 btrfs 分支之前；否则用 S
 `DEFAULT_FORK_FLATTEN_ENTRY_LIMIT = 256`。数据与命令写入
 `docs/fs-backend/current-state.md`；这是本机测量，换环境需重测。
 
-**未验证**：btrfs 数据面的 Chain 布局（`in_lower` 优先走 `delta_since`）尚未在
-真实特权环境验证，需要 `scripts/priv-check.sh` 补测 Chain 与 Flatten 两种布局。
+用户已批准 `ForkLayout`、`fork_flatten_entry_limit`、`MAX_LOWER_DEPTH`、
+`allow_overlapping_state_directory` 命名；对应含义分别为逐次布局、Flatten 阈值、
+lower 深度上限、内部允许状态目录重叠开关。父目录变化保留，不通过生产过滤修改
+diff；测试必须精确计入对应数据面会报告的目录。
+
+**验证边界**：用户第三轮 `log-3.txt` 已进入真实 btrfs Chain/Flatten/mixed，但
+Chain/mixed 因 EXDEV、Flatten 因缺父目录预期失败；当前修复后仍需重跑特权脚本。
 
 **废弃记录**：`FilesystemBackend::mount_uses_flattening` 及“flatten 只由状态目录
 重叠决定”的规则被删除；`launch_lowers` 不再因该判断忽略 lower 层，始终使用
 `[挂载点] + mount.lower` 的真实链。重叠场景仍强制 Flatten，但由逐次布局逻辑
 显式判断，不再有对挂载恒定的辅助函数。
+
+# 2026-11-10：第三轮特权失败修复与证据
+
+- btrfs 挂载存储使用父 volume 子卷，内部含 upper/work。OverlayFS copy-up 的
+  work→upper rename 必须位于同一子卷；普通用户真实回归已复现旧布局 errno 18，
+  修复后覆盖建立、新挂载、空子挂载、Chain、Flatten、mark 与恢复。fork/mark/diff
+  快照父 volume，send dump 只解释 upper 子树；其中父目录变化仍保留。
+- 旧的 upper-as-subvolume 布局恢复时明确拒绝并保留原数据、元数据和 work，不做
+  自动搬迁；upper/work 的同设备检查也在创建/启动前执行，防止再次延迟到 copy-up
+  才暴露 EXDEV。
+- 特权脚本使用 `--show-output --format=pretty --color=never`，避免 nocapture
+  打断 libtest 结果行。`check-test-output.py` 分别验证精确名单、命令退出码、结果
+  行、running 数和最终摘要；执行数=通过+失败，ignored 不算执行，任何 SKIP 失败。
+  真实 libtest 交错回归先 red 后 green，保留原假命令场景，共 24 场景。
+- launch 的挂载就绪要求每个 overlay 目标都存在（解码 mountinfo 路径），不再
+  接受任意一个。目标未齐时每轮检查 owned child 的退出状态；只有确认它已退出才
+  接受短命令完成，覆盖 mountinfo 可读但不完整、ENOENT 和退出未回收时的 EINVAL。
+  其他读取错误上报，活进程仍须满足全部目标，保留 400 × 5ms 期限和真实退出码。
+  两项退出回归先 red 后 green；完整测试最终库 140 项、bin 1 项通过、0 失败，
+  其中无权限自行 SKIP 的 btrfs/特权项不作特权成功证据。
+  live-target 增加初始观察标记与分阶段计时，共用原 30 秒期限；无证据将偶发超时
+  归因为高负载。status pipe 首行仍阻塞，作为已知边界记录。
+
+**废弃记录**：btrfs upper 本身为独立子卷、work 位于其外部的布局被父 volume
+布局取代；从 `--nocapture` 日志精确 grep `test NAME ... ok` 的检查被捕获输出和
+摘要交叉核对取代。`log-3.txt` 中 4 执行/1 通过与 0/7 误判不是实际只执行了
+1 个或没有执行进程测试。
+
+本轮无 sudo/特权挂载，用户日志三份保留；修复后的 btrfs send/receive、accept 与
+严格删除端到端仍待用户运行 `scripts/priv-check.sh`。不提交不推送，由主助手审查。

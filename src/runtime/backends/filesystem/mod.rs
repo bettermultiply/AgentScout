@@ -327,6 +327,25 @@ impl FilesystemBackend {
                                 entry.path().display()
                             ))
                         })?;
+                        for mount in environment.mounts.values() {
+                            // Check before any work reset or launch. Do not move an old
+                            // subvolume or rewrite durable paths behind a recovered process.
+                            if path_exists(&mount.upper) && path_exists(&mount.work) {
+                                ensure_overlay_work(&mount.upper, &mount.work)?;
+                            }
+                            if self.mechanism == FilesystemMechanism::Btrfs
+                                && path_exists(&mount.upper)
+                                && (fs::metadata(&mount.upper).map_err(error)?.ino() == 256
+                                    || fs::metadata(mount.volume()?).map_err(error)?.ino() != 256)
+                            {
+                                return Err(BackendError::new(format!(
+                                    "cannot restore btrfs environment {}: upper {} must be a directory \
+                                     inside its volume subvolume; preserve the state directory and recreate \
+                                     the environment (automatic layout migration is not supported)",
+                                    environment.id, mount.upper.display()
+                                )));
+                            }
+                        }
                         state
                             .environments
                             .insert(environment.id.clone(), environment);
@@ -493,6 +512,7 @@ impl FilesystemBackend {
         for mount in mounts {
             fs::create_dir_all(&mount.upper).map_err(error)?;
             reset_dir(&mount.work)?;
+            ensure_overlay_work(&mount.upper, &mount.work)?;
         }
         Ok(())
     }

@@ -76,10 +76,12 @@ layout                       PASS   state=<...> workspace=<...>
 btrfs-raw                    PASS   create/snapshot/send-dump/strict-delete
 direct-root-overlay          PASS   lower=/ in initial userns
 rust-build                   PASS   lib tests
-process-freeze               PASS   7/7 executed; mechanism=cgroup
-privileged-rust              PASS   4/4 executed
+process-freeze               PASS   7/7 executed; 7/7 passed; 0 ignored; mechanism=cgroup
+privileged-rust              PASS   4/4 executed; 4/4 passed; 0 ignored
 process tests executed       7      freeze mechanism: cgroup
+process tests passed         7      ignored: 0
 privileged tests executed    4      expected 4
+privileged tests passed      4      ignored: 0
 SUMMARY: ALL PRIVILEGED CHECKS PASSED (diagnostics: <log-dir>)
 ```
 
@@ -113,8 +115,10 @@ runtime::process::tests::
 runtime::backends::filesystem::tests::process::
 ```
 
-共 7 个测试必须全部 `... ok`，且不出现 `SKIP`。测试在 `--nocapture` 下打印固定
-标记（沿用 `FreezeMechanism` 的名字）：
+两个过滤器分别 `--list` 精确核对，共 7 个测试必须全部 `... ok`，且不出现 `SKIP`。
+运行使用 `--show-output --format=pretty --color=never --test-threads=1`，保留捕获
+日志并保证 libtest 的结果行不被测试内日志打断。测试打印固定标记（沿用
+`FreezeMechanism` 的名字）：
 
 ```text
 ASCOUT_FREEZE_MECHANISM=cgroup test=terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup
@@ -136,9 +140,11 @@ priv_btrfs_mixed_generations
 priv_direct_root_overlay_is_available_in_initial_userns
 ```
 
-再以 `--nocapture --test-threads=1` 运行，逐个确认 `... ok`，并拒绝任何
-`SKIP`。这些测试在 `ASCOUT_PRIV_TESTS=1` 打开后不会再跳过：前置条件不满足
-直接断言失败。
+再以 `--show-output --format=pretty --color=never --test-threads=1` 运行。
+`check-test-output.py` 交叉核对命令退出码、精确逐项结果、running 数和最终摘要，
+缺失、重复、额外测试、ignored、计数不一致或任何位置的 `SKIP` 均失败。汇总分别
+报告执行数（通过+失败）、通过数和 ignored；组内有错不打印该组 PASS。这些测试
+在 `ASCOUT_PRIV_TESTS=1` 打开后前置条件不满足会直接断言失败。
 
 - `priv_btrfs_chain_layout`（`fork_flatten_entry_limit=0`）
   - 默认配置（不打开 `allow_overlapping_state_directory`）建立状态目录与
@@ -151,10 +157,10 @@ priv_direct_root_overlay_is_available_in_initial_userns
   - discard 后子环境根、快照层和 trash 清空。
 - `priv_btrfs_flatten_layout`（`fork_flatten_entry_limit=usize::MAX`）
   - 同样的场景，但子 lower 与父相同，子 upper 含父文件；
-  - 验证 Flatten 下 diff/accept 走 `btrfs_delta` 分支。
+  - 验证 Flatten 下 diff/accept 走 `btrfs_delta` 分支；精确预期也包含父目录变化。
 - `priv_btrfs_mixed_generations`
   - 大 root upper 先 Chain，小 child upper 再 Flatten；
-  - 真实启动 grandchild，精确 diff、accept 回 child1，父 root 视图不变。
+  - 真实启动 grandchild，精确 diff（含父目录）、accept 回 child1，父 root 视图不变。
 - `priv_direct_root_overlay_is_available_in_initial_userns`
   - root + `unshare --mount` 中直接 `--overlay-src / ... /` 成功。
 
@@ -174,8 +180,9 @@ priv_direct_root_overlay_is_available_in_initial_userns
 python3 scripts/test-priv-check.py
 ```
 
-该回归用本地假命令模拟 btrfs、提权、`findmnt` 和测试二进制，不要求实际
-root/btrfs 环境。临时工作目录使用 Python `tempfile` 的默认位置（支持
+该回归用本地假命令模拟 btrfs、提权、`findmnt` 和测试二进制，并用 `rustc --test`
+构建真实 libtest fixture，先证明 `--nocapture` 会打断结果行，再验证脚本通过。
+不要求实际 root/btrfs 环境。临时工作目录使用 Python `tempfile` 的默认位置（支持
 `TMPDIR`），诊断日志保留在 `priv-check-regression-*` 下；可用
 `ASCOUT_PRIV_CHECK_TEST_LOG_DIR` 指定日志目录。
 
@@ -195,6 +202,12 @@ root/btrfs 环境。临时工作目录使用 Python `tempfile` 的默认位置�
 | `no-layout` | 找不到 btrfs 非重叠布局，打印 `NO_VALID_STATE_LAYOUT`，非零 |
 | `overlap-layout` | 状态目录在会被隔离的挂载内，非零 |
 | `cleanup-fail` | 清理失败，非零且不出现 `ALL PASSED` |
+| `interleaved` | 真实 libtest 的测试内输出交错；脚本捕获模式仍精确通过 |
+| `missing-process` / `extra-test` / `duplicate-test` | 缺进程测试、额外测试、重复测试均失败 |
+| `list-fail` / `process-fail` / `priv-exit-fail` | 即使输出貌似通过，命令非零也失败 |
+| `priv-failed` | 4/4 执行、1/4 通过，非零且无该组 PASS |
+| `ignored` / `skip-inline` | ignored 不算执行；行内 SKIP 同样失败 |
+| `bad-summary` / `incomplete-run` | 摘要或逐项记录不完整、不一致均失败 |
 
 每个失败场景都断言不出现 `ALL PRIVILEGED CHECKS PASSED`。
 
@@ -204,5 +217,7 @@ root/btrfs 环境。临时工作目录使用 Python `tempfile` 的默认位置�
 - 需要 root 的步骤失败时会明确标为 `FAIL` 或 `NEEDS_ROOT`，不会伪装成 `PASS`。
 - 普通用户无法在没有 sudo 的情况下把状态目录放到 `/`；此时脚本明确失败并
   说明需要什么。
-- 本机没有 Btrfs 数据面权限，所以 Chain/Flatten/mixed 三个 btrfs 测试只有在
-  用户实际运行本脚本时才第一次进入真实 btrfs send/receive 路径。
+- 用户 `log-3.txt` 已实际执行四项特权测试：direct-root 通过，Chain/mixed 写入
+  EXDEV，Flatten 的预期缺父目录。修复后的同子卷 upper/work、send 路径与
+  Chain/Flatten/mixed accept/严格清理尚需用户重新运行脚本。本机无特权回归只验证
+  真实 create/snapshot/rename/mark/reload 与 dump 解析，不声称完整特权通过。

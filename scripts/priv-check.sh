@@ -20,7 +20,11 @@ BTRFS_AVAILABLE=0
 BTRFS_BIN=""
 TEST_BIN=""
 PROCESS_RUN_COUNT=0
+PROCESS_PASS_COUNT=0
+PROCESS_IGNORED_COUNT=0
 PRIV_RUN_COUNT=0
+PRIV_PASS_COUNT=0
+PRIV_IGNORED_COUNT=0
 ACTUAL_FREEZE_MECHANISM="unknown"
 
 PRIV_TESTS=(
@@ -40,6 +44,7 @@ PROCESS_TESTS=(
 )
 PRIV_PREFIX="runtime::backends::filesystem::tests::privileged::"
 PRIV_FILTER="${PRIV_PREFIX}priv_"
+TEST_OUTPUT_CHECK="scripts/check-test-output.py"
 
 CHECKS=(
     environment
@@ -169,7 +174,9 @@ print_summary() {
         printf '%-28s %-6s %s\n' "$name" "${CHECK_STATUS[$name]}" "${CHECK_DETAIL[$name]}"
     done
     printf '%-28s %-6s %s\n' "process tests executed" "$PROCESS_RUN_COUNT" "freeze mechanism: $ACTUAL_FREEZE_MECHANISM"
+    printf '%-28s %-6s %s\n' "process tests passed" "$PROCESS_PASS_COUNT" "ignored: $PROCESS_IGNORED_COUNT"
     printf '%-28s %-6s %s\n' "privileged tests executed" "$PRIV_RUN_COUNT" "expected ${#PRIV_TESTS[@]}"
+    printf '%-28s %-6s %s\n' "privileged tests passed" "$PRIV_PASS_COUNT" "ignored: $PRIV_IGNORED_COUNT"
 }
 
 finish() {
@@ -525,30 +532,38 @@ begin_check process-freeze
 if [ -z "$TEST_BIN" ] || [ ! -x "$TEST_BIN" ]; then
     fail "test binary missing; process tests were not run"
 else
-    PROCESS_LOG_1="$LOG_DIR/process-runtime.log"
-    PROCESS_LOG_2="$LOG_DIR/process-filesystem.log"
     PROCESS_COMBINED="$LOG_DIR/process-combined.log"
-    if ! "$TEST_BIN" 'runtime::process::tests::' --nocapture --test-threads=1 \
-        >"$PROCESS_LOG_1" 2>&1; then
-        fail "runtime::process tests failed"
-        cat "$PROCESS_LOG_1" || true
-    fi
-    if ! "$TEST_BIN" 'runtime::backends::filesystem::tests::process::' --nocapture --test-threads=1 \
-        >"$PROCESS_LOG_2" 2>&1; then
-        fail "filesystem::tests::process tests failed"
-        cat "$PROCESS_LOG_2" || true
-    fi
-    cat "$PROCESS_LOG_1" "$PROCESS_LOG_2" >"$PROCESS_COMBINED"
-    for test_name in "${PROCESS_TESTS[@]}"; do
-        if ! grep -qx "test ${test_name} \.\.\. ok" "$PROCESS_COMBINED"; then
-            fail "expected process test did not run and pass: $test_name"
-        else
-            PROCESS_RUN_COUNT=$((PROCESS_RUN_COUNT + 1))
+    : >"$PROCESS_COMBINED"
+    for filter in 'runtime::process::tests::' 'runtime::backends::filesystem::tests::process::'; do
+        EXPECTED_TESTS=()
+        for test_name in "${PROCESS_TESTS[@]}"; do
+            if [[ "$test_name" == "$filter"* ]]; then
+                EXPECTED_TESTS+=("$test_name")
+            fi
+        done
+        GROUP_LOG="$LOG_DIR/process-${#EXPECTED_TESTS[@]}"
+        LIST_STATUS=0
+        "$TEST_BIN" "$filter" --list >"$GROUP_LOG.list" 2>&1 || LIST_STATUS=$?
+        if ! python3 "$TEST_OUTPUT_CHECK" list "$GROUP_LOG.list" "$LIST_STATUS" "${EXPECTED_TESTS[@]}"; then
+            fail "process test discovery failed: $filter"
+            cat "$GROUP_LOG.list"
+            continue
         fi
+        RUN_STATUS=0
+        "$TEST_BIN" "$filter" --show-output --format=pretty --color=never --test-threads=1 \
+            >"$GROUP_LOG.run" 2>&1 || RUN_STATUS=$?
+        if COUNTS="$(python3 "$TEST_OUTPUT_CHECK" run "$GROUP_LOG.run" "$RUN_STATUS" "${EXPECTED_TESTS[@]}")"; then
+            :
+        else
+            fail "process test execution failed: $filter"
+        fi
+        read -r EXECUTED PASSED IGNORED <<<"$COUNTS"
+        PROCESS_RUN_COUNT=$((PROCESS_RUN_COUNT + EXECUTED))
+        PROCESS_PASS_COUNT=$((PROCESS_PASS_COUNT + PASSED))
+        PROCESS_IGNORED_COUNT=$((PROCESS_IGNORED_COUNT + IGNORED))
+        cat "$GROUP_LOG.run" >>"$PROCESS_COMBINED"
     done
-    if grep -q '^SKIP' "$PROCESS_COMBINED"; then
-        fail "process tests reported SKIP"
-    fi
+    cat "$PROCESS_COMBINED"
 
     AUTO_MECHANISMS=""
     while IFS= read -r marker; do
@@ -576,11 +591,18 @@ $mechanism"
     if [ "$PROCESS_RUN_COUNT" -ne "${#PROCESS_TESTS[@]}" ]; then
         fail "expected ${#PROCESS_TESTS[@]} process tests, executed $PROCESS_RUN_COUNT"
     fi
-    if [ "$ACTUAL_FREEZE_MECHANISM" != "none" ] && [ "$ACTUAL_FREEZE_MECHANISM" != "unknown" ]; then
-        pass "${#PROCESS_TESTS[@]} process-group tests executed (freeze mechanism: $ACTUAL_FREEZE_MECHANISM)"
+    for test_name in "${PROCESS_TESTS[@]}"; do
+        short_name="${test_name##*::}"
+        MARKER_COUNT="$(grep -cE "^ASCOUT_FREEZE_MECHANISM=(cgroup|process_group) test=${short_name}$" "$PROCESS_COMBINED" || true)"
+        if [ "$MARKER_COUNT" -ne 1 ]; then
+            fail "expected exactly one valid freeze marker for $short_name, found $MARKER_COUNT"
+        fi
+    done
+    if [ "$CURRENT_FAILED" -eq 0 ]; then
+        pass "${#PROCESS_TESTS[@]} process-group tests executed and passed (freeze mechanism: $ACTUAL_FREEZE_MECHANISM)"
     fi
 fi
-CHECK_DETAIL[process-freeze]="${PROCESS_RUN_COUNT}/${#PROCESS_TESTS[@]} executed; mechanism=${ACTUAL_FREEZE_MECHANISM}"
+CHECK_DETAIL[process-freeze]="${PROCESS_RUN_COUNT}/${#PROCESS_TESTS[@]} executed; ${PROCESS_PASS_COUNT}/${#PROCESS_TESTS[@]} passed; ${PROCESS_IGNORED_COUNT} ignored; mechanism=${ACTUAL_FREEZE_MECHANISM}"
 complete_check
 
 # ---------------------------------------------------------------------------
@@ -610,46 +632,32 @@ else
     }
     PRIV_LIST_LOG="$LOG_DIR/tests.list"
     PRIV_RUN_LOG="$LOG_DIR/tests.run"
-    if ! run_priv "$PRIV_FILTER" --list >"$PRIV_LIST_LOG" 2>&1; then
-        fail "listing privileged Rust tests"
-        cat "$PRIV_LIST_LOG" || true
+    EXPECTED_TESTS=()
+    for test_name in "${PRIV_TESTS[@]}"; do
+        EXPECTED_TESTS+=("${PRIV_PREFIX}${test_name}")
+    done
+    LIST_STATUS=0
+    run_priv "$PRIV_FILTER" --list >"$PRIV_LIST_LOG" 2>&1 || LIST_STATUS=$?
+    cat "$PRIV_LIST_LOG"
+    if ! python3 "$TEST_OUTPUT_CHECK" list "$PRIV_LIST_LOG" "$LIST_STATUS" "${EXPECTED_TESTS[@]}"; then
+        fail "privileged Rust test discovery failed"
     else
-        cat "$PRIV_LIST_LOG"
-        LIST_COUNT="$(grep -cE "^${PRIV_PREFIX}[^:]+: test$" "$PRIV_LIST_LOG" || true)"
-        if [ "$LIST_COUNT" -ne "${#PRIV_TESTS[@]}" ]; then
-            fail "expected ${#PRIV_TESTS[@]} privileged tests, list found $LIST_COUNT"
-        fi
-        for test_name in "${PRIV_TESTS[@]}"; do
-            if ! grep -qx "${PRIV_PREFIX}${test_name}: test" "$PRIV_LIST_LOG"; then
-                fail "expected privileged test is missing: ${PRIV_PREFIX}${test_name}"
-            fi
-        done
-        if grep -q '^SKIP' "$PRIV_LIST_LOG"; then
-            fail "privileged test listing reported SKIP"
-        fi
-        if ! run_priv "$PRIV_FILTER" --nocapture --test-threads=1 >"$PRIV_RUN_LOG" 2>&1; then
-            fail "privileged Rust tests failed"
-            cat "$PRIV_RUN_LOG" || true
-        fi
+        RUN_STATUS=0
+        run_priv "$PRIV_FILTER" --show-output --format=pretty --color=never --test-threads=1 \
+            >"$PRIV_RUN_LOG" 2>&1 || RUN_STATUS=$?
         cat "$PRIV_RUN_LOG"
-        for test_name in "${PRIV_TESTS[@]}"; do
-            if grep -qx "test ${PRIV_PREFIX}${test_name} \.\.\. ok" "$PRIV_RUN_LOG"; then
-                PRIV_RUN_COUNT=$((PRIV_RUN_COUNT + 1))
-            else
-                fail "expected privileged test did not run and pass: ${PRIV_PREFIX}${test_name}"
-            fi
-        done
-        if grep -q '^SKIP' "$PRIV_RUN_LOG"; then
-            fail "privileged Rust tests reported SKIP"
-        fi
-        if [ "$PRIV_RUN_COUNT" -ne "${#PRIV_TESTS[@]}" ]; then
-            fail "expected ${#PRIV_TESTS[@]} privileged tests to execute, executed $PRIV_RUN_COUNT"
+        if COUNTS="$(python3 "$TEST_OUTPUT_CHECK" run "$PRIV_RUN_LOG" "$RUN_STATUS" "${EXPECTED_TESTS[@]}")"; then
+            :
         else
-            pass "${#PRIV_TESTS[@]} privileged Rust tests executed"
+            fail "privileged Rust test execution failed"
+        fi
+        read -r PRIV_RUN_COUNT PRIV_PASS_COUNT PRIV_IGNORED_COUNT <<<"$COUNTS"
+        if [ "$CURRENT_FAILED" -eq 0 ]; then
+            pass "${#PRIV_TESTS[@]} privileged Rust tests executed and passed"
         fi
     fi
 fi
-CHECK_DETAIL[privileged-rust]="${PRIV_RUN_COUNT}/${#PRIV_TESTS[@]} executed"
+CHECK_DETAIL[privileged-rust]="${PRIV_RUN_COUNT}/${#PRIV_TESTS[@]} executed; ${PRIV_PASS_COUNT}/${#PRIV_TESTS[@]} passed; ${PRIV_IGNORED_COUNT} ignored"
 complete_check
 
 exit "$SUMMARY_FAIL"

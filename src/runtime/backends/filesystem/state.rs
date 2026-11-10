@@ -24,7 +24,7 @@ pub(crate) struct MountUnit {
     #[serde(default)]
     pub(crate) lower: Vec<PathBuf>,
     /// Relative directory inside a snapshot layer root that holds this
-    /// mount's upper tree.  New layers use `mounts/<hash>`; migrated metadata
+    /// mount's upper tree.  Snapshot volumes use `mounts/<hash>/volume`; migrated metadata
     /// may still use `workspace` or `tmp`.
     #[serde(default = "default_layer_key")]
     pub(crate) layer_key: String,
@@ -44,6 +44,10 @@ fn default_layer_key() -> String {
 }
 
 impl MountUnit {
+    pub(crate) fn volume(&self) -> Result<&Path, BackendError> {
+        self.upper.parent().ok_or_else(|| BackendError::new("mount upper has no volume parent"))
+    }
+
     pub(crate) fn layer_upper(&self, layer: &Path) -> PathBuf {
         layer.join(&self.layer_key).join("upper")
     }
@@ -288,4 +292,3 @@ pub(crate) struct BackendState {
     pub(crate) snapshots: HashMap<String, SnapshotRecord>,
     pub(crate) operations: BTreeMap<String, OperationRecord>,
 }
-

@@ -682,6 +682,100 @@ use std::os::unix::fs::FileTypeExt;
     }
 
     #[test]
+    fn btrfs_mount_copy_up_rename_stays_within_subvolume() {
+        let root = btrfs_temp();
+        let mut backend = new_overlay_backend(root.path());
+        let probe = root.path().join("subvolume-probe");
+        if let Err(error) = backend.btrfs_create(&probe) {
+            eprintln!("SKIP btrfs_mount_copy_up_rename_stays_within_subvolume: {error}");
+            return;
+        }
+        remove_path(&backend.config.btrfs_path, &probe, true).unwrap();
+        // Exercise create/snapshot/layout without send or a privileged mount.
+        // The host cannot select the full btrfs plane without privileged send.
+        backend.mechanism = FilesystemMechanism::Btrfs;
+        let targets = backend.overlayable_mounts().into_iter()
+            .filter(|target| !backend.config.state_directory.starts_with(target))
+            .collect::<Vec<_>>();
+        assert!(!targets.is_empty(), "test needs a non-overlapping mount");
+        *backend.overlay_targets.lock().unwrap() = Some(vec![targets[0].clone()]);
+        let result = (|| -> Result<(), BackendError> {
+            backend.establish("root")?;
+            // Discover additional real mounts through the launch-fragment path;
+            // no sandbox process or privileged mount is started by this test.
+            *backend.overlay_targets.lock().unwrap() = Some(targets.clone());
+            let launch = crate::protocol::contract::AgentLaunch {
+                command: "/bin/true".into(), args: Vec::new(), cwd: targets[0].clone(),
+                log: root.path().join("unused.log"), instance_id: None, env: BTreeMap::new(),
+            };
+            backend.launch_fragment(&BackendContext::new("root"), &launch)?;
+            assert_eq!(backend.lock()?.environments["root"].mounts.len(), targets.len());
+            backend.fork("root", "empty", &[])?;
+            let empty_mounts = backend.lock()?.environments["empty"].mounts.clone();
+            for mount in empty_mounts.values() {
+                assert!(upper_is_empty(&mount.upper));
+                assert!(mount.lower.is_empty());
+                fs::write(mount.work.join("copy-up"), b"empty-child").map_err(error)?;
+                fs::rename(mount.work.join("copy-up"), mount.upper.join("keep"))
+                    .map_err(error)?;
+            }
+            for (parent, child, limit) in [("root", "chain", 0), ("chain", "flatten", usize::MAX)] {
+                let mounts = {
+                    let state = backend.lock()?;
+                    state.environments[parent].mounts.values().cloned().collect::<Vec<_>>()
+                };
+                for mount in &mounts {
+                    fs::write(mount.work.join("copy-up"), b"copy-up").map_err(error)?;
+                    fs::rename(mount.work.join("copy-up"), mount.upper.join("keep"))
+                        .map_err(|value| BackendError::new(format!(
+                            "work {} -> upper {} rename failed: {value}",
+                            mount.work.display(), mount.upper.display()
+                        )))?;
+                }
+                backend.config.fork_flatten_entry_limit = limit;
+                backend.fork(parent, child, &[])?;
+                let mounts = backend.lock()?.environments[child].mounts.clone();
+                for mount in mounts.values() {
+                    assert_eq!(upper_is_empty(&mount.upper), limit == 0);
+                    assert_eq!(mount.lower.len(), 1);
+                }
+            }
+            let mounts = backend.lock()?.environments["flatten"].mounts.clone();
+            for mount in mounts.values() {
+                fs::write(mount.work.join("copy-up"), b"last").map_err(error)?;
+                fs::rename(mount.work.join("copy-up"), mount.upper.join("keep"))
+                    .map_err(error)?;
+            }
+            backend.mark("flatten", "rename-domain", &[])?;
+            backend.load_metadata()?;
+            // An old upper-as-subvolume environment must fail recovery without
+            // moving data or resetting its work directory.
+            let legacy = backend.paths("legacy").join("mount");
+            fs::create_dir_all(&legacy).map_err(error)?;
+            backend.btrfs_create(&legacy.join("upper"))?;
+            fs::create_dir(legacy.join("work")).map_err(error)?;
+            fs::write(legacy.join("upper/keep"), b"preserved").map_err(error)?;
+            fs::write(legacy.join("work/untouched"), b"preserved-work").map_err(error)?;
+            let mut environment = backend.lock()?.environments["root"].clone();
+            environment.id = "legacy".into();
+            environment.root = backend.paths("legacy");
+            let mut mount = environment.mounts.values().next().unwrap().clone();
+            mount.upper = legacy.join("upper");
+            mount.work = legacy.join("work");
+            environment.mounts = BTreeMap::from([(mount.target.display().to_string(), mount)]);
+            backend.persist_environment(&environment)?;
+            let rejected = backend.load_metadata().unwrap_err();
+            assert!(rejected.message.contains("EXDEV"), "{rejected}");
+            assert_eq!(fs::read(legacy.join("upper/keep")).unwrap(), b"preserved");
+            assert_eq!(fs::read(legacy.join("work/untouched")).unwrap(), b"preserved-work");
+            Ok(())
+        })();
+        let cleanup = remove_path(&backend.config.btrfs_path, &backend.config.state_directory, true);
+        assert!(result.is_ok(), "{result:?}");
+        cleanup.unwrap();
+    }
+
+    #[test]
     fn live_target_accept_replays_through_inner_sandbox_pid() {
         let root = btrfs_temp();
         let base = root.path().join("base");
@@ -693,12 +787,28 @@ use std::os::unix::fs::FileTypeExt;
             .unwrap();
         assert!(run_in_environment(&backend, "child", &base, "rm -f x"));
         let base_snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
+        let started = std::time::Instant::now();
         let (target, target_pid, target_ns) = spawn_in_environment(
             &backend,
             "root",
             &base,
-            "while [ -e x ]; do sleep 0.05; done; exit 0",
+            "test -e x || exit 20; printf ready > .accept-ready; \
+             while [ -e x ]; do sleep 0.05; done; echo ASCOUT_ACCEPT_DELETION_OBSERVED; exit 0",
         );
+        let spawned = started.elapsed();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let ready = upper_at(&backend, "root", &base.join(".accept-ready"));
+        while !ready.exists() {
+            if target.try_wait("root").unwrap().is_some() || std::time::Instant::now() >= deadline {
+                let _ = target.stop("root");
+                panic!(
+                    "target did not confirm its initial view: spawn={spawned:?} elapsed={:?} pid={target_pid} log={}",
+                    started.elapsed(), fs::read_to_string(base.join("agent.log")).unwrap_or_default()
+                );
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let observing = started.elapsed();
         backend.suspend("root").unwrap();
 
         // The outer bwrap pid is in the host mount namespace and must be rejected.
@@ -726,9 +836,15 @@ use std::os::unix::fs::FileTypeExt;
             )
             .unwrap();
         assert!(accept.confirmation.published);
+        let published = started.elapsed();
+        let visible = fs::metadata(format!("/proc/{target_pid}/root{}/x", base.display()));
+        assert!(
+            visible.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "accepted deletion is still visible in the recorded sandbox: {visible:?}"
+        );
 
         let mut exited = false;
-        for _ in 0..3000 {
+        while std::time::Instant::now() < deadline {
             if let Some(status) = target.try_wait("root").unwrap() {
                 assert!(status.success());
                 exited = true;
@@ -738,8 +854,17 @@ use std::os::unix::fs::FileTypeExt;
         }
         if !exited {
             let _ = target.stop("root");
-            panic!("target process did not observe the accepted deletion");
+            panic!(
+                "target did not exit after accepted deletion: spawn={spawned:?} observing={observing:?} \
+                 published={published:?} elapsed={:?} pid={target_pid} namespace={target_ns} log={}",
+                started.elapsed(), fs::read_to_string(base.join("agent.log")).unwrap_or_default()
+            );
         }
+        eprintln!(
+            "live-target timing: spawn={spawned:?} observing={observing:?} published={published:?} exited={:?}",
+            started.elapsed()
+        );
+        target.cleanup("root").unwrap();
         assert_eq!(fs::read(base.join("x")).unwrap(), b"base");
         backend.terminate("child").unwrap();
         backend.discard("child", &[PathScope::Workspace]).unwrap();

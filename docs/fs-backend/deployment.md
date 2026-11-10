@@ -60,7 +60,7 @@ bwrap 上限 231/232 的一半）时 fork 返回明确错误，不会静默改�
 
 ## 副本生产者选择顺序
 
-1. **方案 A**：btrfs upper 子卷 + 有特权的增量 send diff/accept（最高优先级）。
+1. **方案 A**：btrfs volume 子卷（内含 upper/work）+ 有特权的增量 send diff/accept（最高优先级）。
 2. **方案 2 + btrfs 快照**：状态目录在 btrfs，且创建/只读快照/overlay lower/
    btrfs-aware 删除探测全部成功。fork/mark 为 O(1) 子卷快照；删除热路径是
    rename，后台 fallback 为 O(文件数)。
@@ -71,6 +71,17 @@ bwrap 上限 231/232 的一半）时 fork 返回明确错误，不会静默改�
 Chain（diff/accept O(增量)）或 Flatten（diff/accept O(upper)）；重叠时默认
 拒绝启动，只有内部测试开关启用时才强制 flatten。阈值与实测数据见
 `docs/fs-backend/current-state.md`。
+
+## btrfs upper/work 布局与恢复
+
+每挂载使用 `mounts/<hash>/volume` 子卷，其中 `upper` 与 `work` 都是普通子目录。
+fork/mark 快照整个 volume，lower 与 diff 只使用其 upper 子树。两目录必须同设备、
+同 btrfs 子卷，才能完成 OverlayFS copy-up 的临时文件 rename；仅在同一 btrfs
+文件系统上并不够。
+
+创建、发现新挂载、fork 和启动前均检查该约束。恢复不兼容布局时会返回含路径的
+明确错误并保留数据；当前不自动迁移，应保留旧状态目录、处理完其中环境后，在
+新的状态目录重建环境。不要仅编辑元数据路径来绕过检查。
 
 ## 验证
 

@@ -196,7 +196,7 @@ impl FilesystemBackend {
             if environment.mounts.contains_key(&key) {
                 continue;
             }
-            let layer_key = if self.snapshot_copies {
+            let layer_key = if self.uses_btrfs_storage() {
                 format!("mounts/{}/volume", short_hash(&key))
             } else {
                 format!("mounts/{}", short_hash(&key))
@@ -209,7 +209,7 @@ impl FilesystemBackend {
                     target,
                     lower: Vec::new(),
                     layer_key,
-                    volume_is_subvolume: self.snapshot_copies,
+                    volume_is_subvolume: self.uses_btrfs_storage(),
                 },
             );
         }
@@ -225,11 +225,12 @@ impl FilesystemBackend {
             return Ok(());
         }
         let units: Vec<MountUnit> = environment.mounts.values().cloned().collect();
-        if self.snapshot_copies {
+        if self.uses_btrfs_storage() {
             for mount in &units {
-                let volume = mount.upper.parent().ok_or_else(|| {
-                    BackendError::new("snapshot-copy mount upper has no volume parent")
-                })?;
+                if !mount.volume_is_subvolume {
+                    continue;
+                }
+                let volume = mount.volume()?;
                 if !path_exists(volume) {
                     if let Some(parent) = volume.parent() {
                         fs::create_dir_all(parent).map_err(error)?;
@@ -273,6 +274,7 @@ impl FilesystemBackend {
             ensure_overlay_disjoint(&mount.target, &mount.upper)?;
             fs::create_dir_all(&mount.upper).map_err(error)?;
             reset_dir(&mount.work)?;
+            ensure_overlay_work(&mount.upper, &mount.work)?;
             fragment.mounts.push(MountEntry::Overlay {
                 lowers: self.launch_lowers(mount),
                 upper: mount.upper.clone(),
@@ -423,4 +425,3 @@ pub(super) fn unescape_mount_path(value: &str) -> PathBuf {
     }
     PathBuf::from(result)
 }
-

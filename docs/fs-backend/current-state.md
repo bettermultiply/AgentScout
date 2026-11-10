@@ -31,9 +31,9 @@
   - `filesystem_fork_cost=btrfs_snapshot|reflink|copy`。选择顺序：
     **方案 A（btrfs 增量）→ 方案 2 + btrfs 快照副本 → reflink → copy**。
   - 当状态目录在 btrfs 且 `probe_btrfs_snapshot_copies` 成功（创建/只读快照/
-    overlay lower/子卷删除均可用）时，每个挂载的 upper 置于一个 btrfs 子卷的
-    `upper` 目录中，fork/mark 用只读快照产生层。Chain 布局为子 upper 建新的空
-    子卷；Flatten 布局用 S 的可写快照作为子 upper。启用探测要求创建/只读快照/
+    overlay lower/子卷删除均可用）时，每个挂载使用父 volume 子卷，其中 upper/work
+    都是普通子目录，fork/mark 用只读快照产生层。Chain 布局创建子 volume，再建
+    空 upper/work；Flatten 布局用 S 的可写快照作为子 volume。启用探测要求创建/只读快照/
     overlay lower/btrfs-aware 递归删除成功；`fast_delete` 只影响后台删除成本，
     不阻止启用。
   - **空 upper 跳过**：fork/mark 先对每个挂载用 `read_dir` 取第一个条目（O(1)）
@@ -65,32 +65,38 @@
     前由 ProcessBackend 冻结，成功后 `writers_quiesced=true`；直接调用 FS API 或
     冻结机制为 `none` 时仍为 false，并发写可能导致副本跨文件交错。
 - **btrfs fork**
-  - 每个挂载点的 upper 是一个独立 btrfs 子卷；fork 对每个选中挂载的父 upper
-    分别做只读快照 S_child。Chain 布局为 child 建新的空可写子卷并把 S_child
-    加入子 lower；Flatten 布局用 S_child 的可写快照作为 child upper，不加
-    lower。含状态目录的挂载（仅内部开关）强制 Flatten，避免 lower 重叠。
+  - 每个挂载使用 `mounts/<hash>/volume` 子卷，其中 upper/work 都是普通子目录。
+    fork 对每个选中且非空的父 upper 所在 volume 做只读快照 S_child。Chain 布局
+    创建空的 child volume 并把 S_child 的 upper 子树加入子 lower；Flatten 布局
+    用 S_child 的可写快照作为 child volume，子 lower 沿用父 lower。空挂载也创建
+    child volume，再建立 upper/work。含状态目录的挂载（仅内部开关）强制 Flatten。
+  - upper/work 必须同设备、同 btrfs 子卷；创建、发现新挂载、fork 和启动前检查
+    `st_dev`。元数据恢复还检查 btrfs volume/upper 结构，不兼容布局返回含路径的
+    错误并保留原数据，不自动搬迁；应保留状态目录并在新目录重建环境。
   - 父 upper/lower 和挂载不变。
   - 链布局下 accept 优先走 `delta_since`（子 upper 只含本分支改动）；只有
     Flatten 才用 `btrfs_delta`（拿 S 全量与子 upper 比较）。否则 Chain 会把
-    父内容全部误判为删除。此路径尚无真实特权环境验证，见下文。
+    父内容全部误判为删除。用户 `log-3.txt` 已执行两种布局与 mixed 测试，但失败
+    于写入或 diff 预期；修复后的成功路径仍需特权重跑，见下文。
   - btrfs 只有在 `incremental_diff=true` 时才被选为数据面；探测真实执行
     `btrfs send -p <snapshot> <snapshot> | btrfs receive --dump`。失败则降级
     overlay 并在日志/能力中说明。btrfs diff/accept 已实现：diff 解析 send dump，
-    accept 用同一 dump 构建增量视图后走 live-mount/openat2 重放。本机无权限，
-    无特权 btrfs 测试 SKIP；用户 2026-11-09 的特权运行已到 diff，暴露 dump
-    前缀/rename 解析错误，已修复。原 `priv_btrfs_fork_diff_accept_discard` 已由
-    新的 Chain / Flatten / mixed 三个特权测试取代，但用户尚未运行新脚本，
-    真实 btrfs 的 Chain/Flatten accept 仍未验证。见 `scripts/priv-check.sh`。
+    accept 用同一 dump 构建增量视图后走 live-mount/openat2 重放。增量 diff 快照
+    父 volume，dump 排除内部 work 和 volume 元数据，只解释 upper 子树并保留
+    其中父目录变化。本机没有 send 权限，完整 btrfs 测试会 SKIP；无特权真实
+    create/snapshot/rename/mark/reload 与 dump 解析已有回归。用户第三轮已执行
+    Chain/Flatten/mixed，修复后仍需重跑 `scripts/priv-check.sh` 才能验证 accept。
 - **btrfs 快照副本（overlay 方案 2）**
   - 探测 `probe_btrfs_snapshot_copies`：建子卷、写文件、只读快照、把快照作为
     overlay lower 真实 bwrap 挂载，再走 btrfs-aware 递归删除路径确认能删净。
     创建/快照/挂载/删除探测全部成功才启用；`fast_delete` 不再作为门槛，只影响
     后台删除成本，`filesystem_fast_delete=false` 与 `fork_cost=btrfs_snapshot`
     可以同时出现。
-  - 每个挂载 upper 位于一个 btrfs 子卷的 `upper` 子目录；fork 用只读快照作为
-    lower 层，子 upper 为新空子卷；flatten 情形用可写快照。mark 用只读快照。
+  - 每个挂载使用父 volume 子卷，upper/work 是其普通子目录；fork 的快照生产者
+    快照 volume，lower 使用其中 upper 子树，Chain 创建空 child volume，Flatten
+    用可写快照。mark 同样快照 volume。
   - 空 upper 同样跳过；小 upper（<256 条目）用 reflink/复制而不是快照，只有
-    ≥256 条目或已有 btrfs 子卷的挂载才走快照。
+    ≥256 条目且 volume 为 btrfs 子卷的挂载才走快照；复制得到的普通目录继续复制。
   - 选择顺序：方案 A → 方案 2 + btrfs 快照 → reflink → copy。
   - 本机普通用户 `btrfs subvolume delete` EPERM，但 `property set ro false`
     + 递归删除可删净；因此本机现在也启用 btrfs 快照副本，`fast_delete=false`
@@ -153,6 +159,10 @@
     记录 pid/mnt namespace。
   - ProcessBackend 负责把 MountSpec 翻译成 bwrap 参数、spawn、cgroup/freeze、
     `--json-status-fd`，并对外提供 `process_handle(env)`。
+  - 挂载就绪要求 mountinfo 中全部预期 overlay 目标存在，并解码路径的八进制转义；
+    保持原有 400 × 5ms 轮询期限。目标未齐时每轮检查持有的 child；只有确认它已
+    退出才接受短命令完成，包括 mountinfo 仍可读但不完整，或读取返回 ENOENT/EINVAL
+    的情况。其他读取错误返回诊断，活进程仍须满足全部目标。
 - **删除**
   - discard 热路径 rename 到 trash，O(1)；后台删除。
   - 后台删除由常驻工作者执行：首次需要物理删除时发信号；工作者持续扫描 trash
@@ -202,8 +212,9 @@
 
 - overlay fork 的副本不是冻结快照：并发写时各文件可能来自不同时刻；是否冻结
   由 BaseRuntime/ProcessBackend 在操作窗口内负责。
-- btrfs 低权限下通常不满足 `incremental_diff`，会降级 overlay；用户特权日志已
-  选中 btrfs，Rust 测试在 diff 断言失败，修复后的端到端尚未重跑。
+- btrfs 低权限下通常不满足 `incremental_diff`，会降级 overlay；用户第三轮特权
+  日志已选中 btrfs，Chain/mixed 在写入时报 EXDEV，Flatten 在 diff 预期失败，
+  修复后的端到端尚未重跑。
 - accept 直接写 upper / live mount 重放均非原子。
 - 并行 `clone_upper` 未实现：reflink/快照已覆盖数据拷贝，剩余主要成本是目录项
   遍历；并行目录/xattr/whiteout 写入顺序风险未在本轮引入。
@@ -212,36 +223,36 @@
   元数据”，不再把该快照层作为 lowerdir；这是为了避免 OverlayFS 的
   `Overlay directories may not overlap`。非重叠挂载的 Flatten 是正常的逐次布局
   选择，不是这个开关造成的。
-- Flatten 的 diff 用“当前 upper 副本 vs 基准层副本”比较。目录的 size/mtime 会
+- overlay Flatten 的 diff 用“当前 upper 副本 vs 基准层副本”比较。目录的 size/mtime 会
   因子项增删而变化，而子项变化已经单独报告；因此目录比较只看 mode、kind 和
   overlay 标记，不把父目录时间戳变化算成额外 diff 项。文件仍比较 size/mtime。
 - Chain 布局的 lower 链每代加深一层；`MAX_LOWER_DEPTH=96` 只负责明确报错，
   不实现整链合并。达到上限后需要换分支策略或把状态目录放到独立挂载。
 - Chain 的 diff 走 `delta_since`，会报告子 upper 中因写入而 copy-up 的祖先
-  目录；这是结构项，不是文件内容误报。Flatten 的目录比较只对 mode/kind/overlay
-  标记敏感。特权测试把 Chain 的这些结构目录纳入精确集合，额外条目仍失败。
-- **btrfs 数据面的 Chain 布局尚未在真实特权环境验证**。无特权测试只覆盖
-  overlay 数据面；`in_lower` 优先于 `btrfs_delta` 的 accept 分支仅经过代码推理。
-  新的特权测试 `priv_btrfs_chain_layout`、`priv_btrfs_flatten_layout` 和
-  `priv_btrfs_mixed_generations` 已写好，需要用户运行 `scripts/priv-check.sh`
-  在真实 btrfs 环境验证。
+  目录；btrfs Flatten/mixed 的 send dump 也报告父目录元数据变化。生产 diff 保留
+  这些目录；测试按数据面和布局精确期待文件及父目录，重复、额外项或异常 old_path
+  都失败。overlay Flatten 的既有目录比较行为未改。
+- **btrfs 数据面修复后成功路径尚待特权验证**。无特权回归能验证真实子卷建立、
+  快照、同子卷 rename、mark、恢复和 dump 解析，不能替代 send/receive 与完整
+  Chain/Flatten/mixed accept、严格删除验证。
+- live-target 的偶发超时尚未复现、原因未确定。测试增加“目标已看到 x”的标记和
+  spawn/观察/发布/退出计时，共用原有 30 秒期限，未延长等待。一次定向运行约
+  37/37/57/107ms；这不能证明或排除高负载假设。status pipe 首行仍为无超时阻塞
+  读取，挂载轮询期限不覆盖该阶段；此前的全局计数污染、EBUSY 不作为此次超时解释。
 - 本机普通用户 `btrfs subvolume delete` 返回 EPERM，`fast_delete=false`；快照
   副本仍可启用，后台删除走 recursion fallback（已验证可删净），只是成本更高。
 
 ## 未验证 / 需高权限
 
-- **btrfs fork/diff/accept 成功路径**：用户 `log.txt` 已证明真实 send dump 可用，
-  dump snapshot 前缀、临时 `rename ... dest=...`、真实 rename/删除与共用 accept
-  增量视图已有无特权回归。原 `priv_btrfs_fork_diff_accept_discard` 已删除，由
-  Chain、Flatten、mixed 三个测试取代；用户尚未运行新脚本，修复后的特权 Rust
-  accept 全程仍待重跑。运行 `scripts/priv-check.sh`，见
+- **btrfs fork/diff/accept 成功路径**：用户 `log-3.txt` 已执行四项特权测试，
+  direct-root 通过，Chain/mixed 写入 EXDEV，Flatten diff 缺父目录预期。当前
+  修复后完整 accept 路径仍待用户重跑 `scripts/priv-check.sh`，见
   `docs/fs-backend/priv-check.md`。
-- **btrfs 数据面的 Chain 布局**：`in_lower` 时走 `delta_since`、否则走
-  `btrfs_delta` 的优先级只在代码层推理；本机无特权，`btrfs` 机制测试会 SKIP。
-  新的 `priv_btrfs_chain_layout` 与 `priv_btrfs_flatten_layout` 分别在
+- **btrfs 数据面的 Chain/Flatten/mixed**：`in_lower` 时走 `delta_since`，否则走
+  `btrfs_delta`。`priv_btrfs_chain_layout` 与 `priv_btrfs_flatten_layout` 分别在
   `fork_flatten_entry_limit=0` / `usize::MAX` 下验证 Chain 与 Flatten 的
   fork/diff/accept，`priv_btrfs_mixed_generations` 验证大 Chain + 小 Flatten
-  两代混合；三者在真实 btrfs 环境尚未执行。
+  两代混合；三者的修复后真实 btrfs 成功路径尚未通过。
 - **严格 btrfs subvolume delete ioctl**：本机 `fast_delete=false`；fallback 的
   O(文件数) 后台删除未做大数据量性能验证。
 - 真实内核生成的 redirect/opaque/metacopy 只用合成 xattr 测试；whiteout 字符
@@ -253,11 +264,24 @@
 `ASCOUT_PRIV_STATE_DIR` 指定 btrfs 基目录，用 `ASCOUT_PRIV_WORKSPACE_DIR`
 指定另一个挂载上的 workspace 基目录）；脚本以普通用户编译测试并运行进程组
 冻结测试，再用 sudo 运行 `ASCOUT_PRIV_TESTS=1 <test-binary>
-runtime::backends::filesystem::tests::privileged::priv_ --nocapture` 的 4 个测试。
+runtime::backends::filesystem::tests::privileged::priv_ --show-output
+--format=pretty --color=never --test-threads=1` 的 4 个测试。
 状态目录必须位于后端隔离的挂载之外，脚本和测试都会断言这一点。live mount
 重放不要求高权限，本机实际运行并通过。当前本机 btrfs 测试会打印 SKIP，因为
-没有 btrfs send/receive 权限；Chain/Flatten/mixed 三个 btrfs 测试要等用户运行
-新脚本后才第一次进入真实 btrfs 数据面。
+没有 btrfs send/receive 权限；本轮未运行 sudo 或特权挂载，不能宣称特权通过。
+
+第三轮脚本证据：两个进程测试命令成功，但测试内日志打断结果行，脚本误报 0/7
+执行后仍打印该组 PASS；特权测试实际 4 执行、1 通过、3 失败，却把通过数当执行数。
+当前 `check-test-output.py` 交叉核对精确发现名单、命令退出码、逐项结果和摘要，
+执行数、通过数、ignored 分开汇总，任何 SKIP 或组内错误均不打印该组 PASS。
+`scripts/test-priv-check.py` 保留假命令失败场景，增加真实 libtest 交错输出回归，
+共 24 场景；交错场景已先 red 后 green。
+
+本轮完整测试另暴露两处短命令竞态：已退出但未回收进程的 mountinfo 真实返回
+EINVAL；读取成功但目标未齐时，轮询遗漏检查 child 退出。两项回归均先失败后通过，
+后一项用独立存活进程保持 mountinfo 可读，固定复现遗漏分支，不依赖 PID 复用。
+修复后 `cargo test --lib --bins` 为库 140 项、bin 1 项通过，0 失败；其中无权限
+而自行 SKIP 的 btrfs/特权项仍不算真实特权验证。
 
 ## 逐挂载 overlay（无特权默认，实测）
 
@@ -609,8 +633,8 @@ btrfs subvolume show <path>             -> Operation not permitted
 
 因此探测增加 `incremental_diff`：真实尝试
 `btrfs send -p <snapshot> <snapshot> | btrfs receive --dump`。成功才选择 btrfs；
-实现已启用 send dump diff/accept。结构是否改为 delta 链待用户决定，本轮未改
-btrfs fork 结构。
+实现已启用 send dump diff/accept；fork 按逐挂载 Chain/Flatten 规则决定是否追加
+lower 层，upper/work 位于同一 volume 子卷。
 
 ## D. 冻结（简单版）调研
 
@@ -745,7 +769,12 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | 相邻挂载同时 overlay | **实测**：bwrap 同时 overlay /home 与 /tmp，exit 0 |
 | 嵌套挂载在原始 mount 实验中可同时 overlay（先保存 child lower，再 parent，再 child） | **实测**：父子 tmpfs overlay 后两个文件都可见；当前 bwrap 参数实现未接入 |
 | 逐挂载 overlay 的挂载数/元数据成本 | **实测**：13 个可写挂载；200 次 mount+umount ~634ms；stat +34% |
-| btrfs fork/diff/accept 端到端 | **尚未通过**：旧 `priv_btrfs_fork_diff_accept_discard` 在 diff 断言失败，已由 `priv_btrfs_chain_layout` / `priv_btrfs_flatten_layout` / `priv_btrfs_mixed_generations` 取代；用户尚未运行新 `scripts/priv-check.sh`，Chain/Flatten accept 仍未验证 |
+| btrfs fork/diff/accept 端到端 | **尚未通过**：`log-3.txt` 已执行 Chain/Flatten/mixed，Chain/mixed 写入 EXDEV，Flatten diff 缺父目录预期；修复后完整 accept/严格清理仍待特权重跑 |
+| upper/work 同 btrfs 子卷 | **实测**：旧创建路径 work→upper rename 稳定 errno 18，修复后真实 create/snapshot/rename/mark/reload 回归通过；恢复拒绝不兼容布局并保留数据 |
+| 测试结果校验不受日志交错影响 | **实测**：真实 libtest 交错输出先 red 后 green；24 个脚本场景覆盖非零退出、精确名单、逐项结果、摘要、ignored、SKIP |
+| 全部 overlay 目标就绪 | **实测**：`readiness_requires_every_overlay_and_decodes_mount_paths` 先 red 后 green；不延长轮询期限 |
+| 短命令退出与挂载就绪轮询 | **实测**：真实未回收退出进程的 EINVAL、可读但目标未齐的 mountinfo 两项回归先 red 后 green；受管 child 确认退出才接受完成，退出码保留 |
+| live-target 偶发超时根因 | **未确定**：增加观察标记与分段计时，一次约 107ms 正常结束，不能据此归因高负载；status pipe 首行仍阻塞 |
 | ProcessBackend 启动/冻结/解冻 | **实测**：`process_freeze_thaw_stops_and_resumes_writer` 冻结期间 counter 不变，thaw 后继续 |
 | 进程组 SIGSTOP/SIGCONT fallback | **实测**：`process_group_fallback_freezes_and_reports_mechanism`，能力上报 `process_group` |
 | BaseRuntime writers_quiesced | **实测**：`base_runtime_freezes_and_marks_writers_quiesced` 有进程时 true，无进程时 false |

@@ -2,6 +2,7 @@
 """Unprivileged regression checks; every privileged command is a local fake."""
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -86,22 +87,47 @@ elif name == 'cargo':
     sys.exit(1 if mode == 'build-fail' else 0)
 elif name == 'fake-tests':
     with open(os.environ['FAKE_CALLS'], 'a') as f: f.write(' '.join(args)+'\n')
+    if mode == 'interleaved':
+        os.execv(os.environ['FAKE_REAL_BIN'], [os.environ['FAKE_REAL_BIN']]+args)
     names = json.loads(os.environ['FAKE_NAMES'])
     matched = [n for n in names if args[0] in n]
     if mode == 'zero' and 'privileged::priv_' in args[0]: matched = []
     if '--list' in args:
         for n in matched: print(n+': test')
+        print('\n%d tests, 0 benchmarks' % len(matched))
+        sys.exit(1 if mode == 'list-fail' else 0)
     else:
         if mode == 'skip' and 'privileged::priv_' in args[0]:
             print('SKIP required privileged capability')
         print('running %d tests' % len(matched))
         mechanism = {'freeze-none':'none', 'freeze-pg':'process_group'}.get(mode, 'cgroup')
-        for n in matched:
+        passed = failed = ignored = 0
+        for index, n in enumerate(matched):
             if '::process::' in n:
                 short = n.split('::')[-1]
                 print('ASCOUT_FREEZE_MECHANISM=%s test=%s' % (mechanism, short))
-            print('test '+n+' ... ok')
-        print('test result: ok. %d passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' % len(matched))
+            if mode == 'skip-inline' and index == 0:
+                print('test '+n+' ... SKIP required privileged capability')
+                print('ok')
+            elif mode == 'incomplete-run' and index == 0:
+                continue
+            elif mode == 'ignored' and index == 0:
+                print('test '+n+' ... ignored')
+                ignored += 1
+                continue
+            elif mode == 'priv-failed' and 'privileged::priv_' in args[0] and index < 3:
+                print('test '+n+' ... FAILED')
+                failed += 1
+                continue
+            else:
+                print('test '+n+' ... ok')
+            passed += 1
+        if mode == 'bad-summary': passed += 1
+        print('test result: %s. %d passed; %d failed; %d ignored; 0 measured; 0 filtered out' %
+              ('FAILED' if failed else 'ok', passed, failed, ignored))
+        if failed or (mode == 'process-fail' and 'privileged::priv_' not in args[0]) or (
+                mode == 'priv-exit-fail' and 'privileged::priv_' in args[0]):
+            sys.exit(1)
 elif name == 'btrfs':
     if args[:2] == ['subvolume','create']: pathlib.Path(args[2]).mkdir()
     elif args[:2] == ['subvolume','snapshot']:
@@ -137,7 +163,40 @@ else: sys.exit('unexpected fake command '+name)
 '''
 
 
-def run(mode, log_dir):
+def real_test_binary(root):
+    """Use libtest itself to reproduce the interrupted --nocapture result lines."""
+    tree = {}
+    for name in NAMES:
+        node = tree
+        for component in name.split('::'):
+            node = node.setdefault(component, {})
+
+    def source(node, prefix=()):
+        lines = []
+        for name, children in node.items():
+            if children:
+                lines.append('mod ' + name + ' {\n' + source(children, prefix + (name,)) + '}')
+            else:
+                body = 'eprintln!("diagnostic emitted inside test");'
+                if 'process' in prefix:
+                    body += ('eprintln!("ASCOUT_FREEZE_MECHANISM=cgroup test=' + name + '");')
+                lines.append('#[test] fn ' + name + '() { ' + body + ' }')
+        return '\n'.join(lines) + '\n'
+
+    fixture = root / 'interleaved.rs'
+    fixture.write_text(source(tree))
+    binary = root / 'interleaved-tests'
+    subprocess.run(['rustc', '--test', str(fixture), '-o', str(binary)], check=True)
+    result = subprocess.run([str(binary), '--nocapture', '--test-threads=1'],
+                            text=True, capture_output=False, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, check=True)
+    (root / 'real-nocapture.log').write_text(result.stdout)
+    assert re.search(r'^test [\w:]+ \.\.\. diagnostic emitted inside test\nok$',
+                     result.stdout, re.MULTILINE), result.stdout
+    return binary
+
+
+def run(mode, log_dir, real_bin):
     with tempfile.TemporaryDirectory(prefix="priv-check-fake-") as tmp:
         root = Path(tmp)
         fake = root / "bin"
@@ -151,11 +210,18 @@ def run(mode, log_dir):
         names = list(NAMES)
         if mode == "missing-test":
             names.remove(PRIV_PREFIX + "priv_btrfs_flatten_layout")
+        if mode == "missing-process":
+            names.remove(PROCESS_TESTS[0])
+        if mode == "extra-test":
+            names.append(PRIV_PREFIX + "priv_unexpected")
+        if mode == "duplicate-test":
+            names.append(PRIV_PREFIX + PRIV_TESTS[0])
         env = dict(
             os.environ,
             PATH=str(fake) + ":" + os.environ["PATH"],
             FAKE_MODE=mode,
             FAKE_BIN=str(fake / "fake-tests"),
+            FAKE_REAL_BIN=str(real_bin),
             FAKE_NAMES=json.dumps(names),
             FAKE_READONLY=str(root / "readonly"),
             FAKE_CALLS=str(root / "calls"),
@@ -189,10 +255,12 @@ if __name__ == "__main__":
     log_dir = Path(configured_logs).resolve() if configured_logs else Path(tempfile.mkdtemp(prefix="priv-check-regression-"))
     log_dir.mkdir(parents=True, exist_ok=True)
     print(f"diagnostics retained in {log_dir}")
+    real_bin = real_test_binary(log_dir)
     modes = [
         "success",
         "nonroot",
         "freeze-pg",
+        "interleaved",
         "freeze-none",
         "zero",
         "missing-test",
@@ -202,10 +270,21 @@ if __name__ == "__main__":
         "no-layout",
         "overlap-layout",
         "cleanup-fail",
+        "missing-process",
+        "extra-test",
+        "duplicate-test",
+        "list-fail",
+        "process-fail",
+        "priv-exit-fail",
+        "priv-failed",
+        "ignored",
+        "skip-inline",
+        "bad-summary",
+        "incomplete-run",
     ]
-    success_modes = {"success", "nonroot", "freeze-pg"}
+    success_modes = {"success", "nonroot", "freeze-pg", "interleaved"}
     for mode in modes:
-        result, calls, log = run(mode, log_dir)
+        result, calls, log = run(mode, log_dir, real_bin)
         output = result.stdout + result.stderr
         if "--reproduce" in sys.argv:
             print(f"{mode}: exit={result.returncode}, "
@@ -237,7 +316,13 @@ if __name__ == "__main__":
             if mode == "freeze-none":
                 assert "freeze mechanism none" in output, (mode, log)
             if mode == "missing-test":
-                assert "expected privileged test is missing" in output, (mode, log)
+                assert "missing test" in output, (mode, log)
+            if mode in {"priv-failed", "priv-exit-fail", "skip", "skip-inline", "ignored"}:
+                assert "PASS: 4 privileged Rust tests" not in output, (mode, log)
+            if mode in {"process-fail", "freeze-none", "missing-process"}:
+                assert "PASS: 7 process-group tests" not in output, (mode, log)
+            if mode == "priv-failed":
+                assert "4/4 executed; 1/4 passed" in output, (mode, log)
             if mode == "no-layout":
                 assert "NO_VALID_STATE_LAYOUT" in output, (mode, log)
             if mode == "overlap-layout":

@@ -72,8 +72,8 @@ impl FilesystemBackend {
         let created = (|| -> Result<(), BackendError> {
             match self.mechanism {
                 FilesystemMechanism::Btrfs => {
-                    // One read-only snapshot per non-empty selected mount
-                    // upper.  The live mount and uppers are not changed.
+                    // Snapshot volumes; only their upper subtree contributes
+                    // to the recorded filesystem view.
                     fs::create_dir_all(&layer_path).map_err(error)?;
                     let mut chains = Vec::new();
                     for mount in &selected {
@@ -82,8 +82,8 @@ impl FilesystemBackend {
                             continue;
                         }
                         chains.push(vec![ForkTask::SnapshotLayer {
-                            source: mount.upper.clone(),
-                            target: mount.layer_upper(&layer_path),
+                            source: mount.volume()?.to_path_buf(),
+                            target: layer_path.join(&mount.layer_key),
                         }]);
                     }
                     self.run_fork_chains(&mut profile, chains)?;

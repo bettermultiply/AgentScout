@@ -1,7 +1,7 @@
 //! 路径、目录删除、z 作用域与错误等通用工具。
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -108,6 +108,24 @@ pub(super) fn ensure_overlay_disjoint(target: &Path, upper: &Path) -> Result<(),
 
 pub(super) fn remove_path(btrfs: &Path, path: &Path, use_btrfs: bool) -> Result<(), BackendError> {
     remove_path_with_mode(btrfs, path, use_btrfs, use_btrfs)
+}
+
+/// Linux btrfs gives each subvolume its own st_dev, even on one filesystem.
+/// OverlayFS renames copy-up temporaries from work into upper, so both trees
+/// must have the same device (and hence the same btrfs subvolume).
+pub(super) fn ensure_overlay_work(upper: &Path, work: &Path) -> Result<(), BackendError> {
+    let upper_device = fs::metadata(upper).map_err(error)?.dev();
+    let work_device = fs::metadata(work).map_err(error)?.dev();
+    if upper_device != work_device {
+        return Err(BackendError::new(format!(
+            "overlay upper {} and work {} are on different filesystems or btrfs subvolumes; \
+             copy-up rename would fail with EXDEV. Preserve this state directory and recreate \
+             the environment with upper/work inside one volume subvolume; automatic migration \
+             of the old upper-as-subvolume layout is not supported",
+            upper.display(), work.display()
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn remove_path_with_mode(
@@ -279,4 +297,3 @@ pub(crate) fn now_nanos() -> u128 {
         .map(|value| value.as_nanos())
         .unwrap_or(0)
 }
-

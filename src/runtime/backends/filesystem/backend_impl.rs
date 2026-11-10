@@ -102,7 +102,7 @@ impl Backend for FilesystemBackend {
                 continue;
             }
             let key = target.display().to_string();
-            let layer_key = if self.snapshot_copies {
+            let layer_key = if self.uses_btrfs_storage() {
                 format!("mounts/{}/volume", short_hash(&key))
             } else {
                 format!("mounts/{}", short_hash(&key))
@@ -115,20 +115,14 @@ impl Backend for FilesystemBackend {
                     target,
                     lower: Vec::new(),
                     layer_key,
-                    volume_is_subvolume: self.snapshot_copies,
+                    volume_is_subvolume: self.uses_btrfs_storage(),
                 },
             );
         }
         let units: Vec<MountUnit> = mounts.values().cloned().collect();
-        if self.uses_btrfs_storage() || self.snapshot_copies {
+        if self.uses_btrfs_storage() {
             for mount in &units {
-                let volume = if self.snapshot_copies {
-                    mount.upper.parent().ok_or_else(|| {
-                        BackendError::new("snapshot-copy mount upper has no volume parent")
-                    })?
-                } else {
-                    &mount.upper
-                };
+                let volume = mount.volume()?;
                 if let Some(parent) = volume.parent() {
                     fs::create_dir_all(parent).map_err(error)?;
                 }
@@ -239,6 +233,7 @@ impl Backend for FilesystemBackend {
             ensure_overlay_disjoint(&mount.target, &mount.upper)?;
             fs::create_dir_all(&mount.upper).map_err(error)?;
             reset_dir(&mount.work)?;
+            ensure_overlay_work(&mount.upper, &mount.work)?;
             let lowers = self.launch_lowers(mount);
             spec.entries.push(MountEntry::Overlay {
                 lowers,

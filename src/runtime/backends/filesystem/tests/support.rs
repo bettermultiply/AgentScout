@@ -156,11 +156,9 @@ use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
         }
     }
 
-    /// Parent directories between a mount point and a file that a Chain delta
-    /// scan necessarily reports: writing a nested path copies the parent
-    /// directories into the child upper.  These are structural, not semantic
-    /// changes, but the assertion below still accounts for every entry so an
-    /// unexpected directory or file change fails.
+    /// Parent directories reported by a Chain upper scan or btrfs send's
+    /// directory metadata updates. Account for exactly these paths; unrelated
+    /// directories and file changes must still fail the assertion.
     fn ancestor_directories(mount: &Path, file: &Path) -> Vec<PathBuf> {
         let mut directories = Vec::new();
         let mut current = file.parent();
@@ -280,10 +278,8 @@ use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
         .into_iter()
         .collect();
         let mut expected = expected;
-        if expect_chain {
-            // Chain diffs scan the child upper directly, so the directories
-            // copied up for the nested paths are also reported.  Account for
-            // exactly those; any other entry still fails the comparison.
+        if expect_chain || backend.mechanism() == FilesystemMechanism::Btrfs {
+            // Btrfs Flatten also reports parent directory metadata updates.
             for file in [&keep, &remove, &newfile] {
                 expected.extend(
                     ancestor_directories(&child.target, file)
@@ -294,8 +290,10 @@ use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
         }
         assert_eq!(
             changes, expected,
-            "diff must report exactly the child's three changes for limit={flatten_entry_limit}"
+            "diff must report exactly the child's file and parent-directory changes for limit={flatten_entry_limit}"
         );
+        assert_eq!(document.changes.len(), expected.len(), "duplicate diff entries");
+        assert!(document.changes.iter().all(|change| change.old_path.is_none()));
 
         backend.suspend("root").unwrap();
         let accepted = backend
@@ -435,10 +433,22 @@ use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
         ]
         .into_iter()
         .collect();
+        let mut expected = expected;
+        if backend.mechanism() == FilesystemMechanism::Btrfs {
+            for file in [&keep, &remove, &newfile] {
+                expected.extend(
+                    ancestor_directories(&grandchild.target, file)
+                        .into_iter()
+                        .map(|directory| (directory.display().to_string(), "change".to_string())),
+                );
+            }
+        }
         assert_eq!(
             changes, expected,
-            "mixed-layout diff must report exactly the three grandchild changes"
+            "mixed-layout diff must report exactly the grandchild's file and parent-directory changes"
         );
+        assert_eq!(document.changes.len(), expected.len(), "duplicate diff entries");
+        assert!(document.changes.iter().all(|change| change.old_path.is_none()));
 
         backend.suspend("child1").unwrap();
         let accepted = backend

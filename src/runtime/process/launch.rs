@@ -186,7 +186,7 @@ impl ProcessBackend {
                             "injected overlay mount readiness failure",
                         ));
                     }
-                    wait_for_mounts(child_pid, &overlay_targets)?;
+                    wait_for_mounts(child_pid, &overlay_targets, &mut child)?;
                 }
                 Ok((child_pid, namespace))
             } else {
@@ -361,35 +361,137 @@ fn read_status_line(fd: &OwnedFd) -> Result<String, BackendError> {
     Ok(String::from_utf8_lossy(&line).into_owned())
 }
 
-fn wait_for_mounts(pid: u32, targets: &[PathBuf]) -> Result<(), BackendError> {
+fn wait_for_mounts(
+    pid: u32,
+    targets: &[PathBuf],
+    child: &mut std::process::Child,
+) -> Result<(), BackendError> {
     let path = format!("/proc/{pid}/mountinfo");
     for _ in 0..MOUNT_INFO_ATTEMPTS {
         match fs::read_to_string(&path) {
             Ok(text) => {
-                let ready = text.lines().any(|line| {
-                    let Some((left, right)) = line.split_once(" - ") else {
-                        return false;
-                    };
-                    if !right.starts_with("overlay ") {
-                        return false;
-                    }
-                    let fields: Vec<&str> = left.split_whitespace().collect();
-                    fields
-                        .get(4)
-                        .map(|target| {
-                            targets.iter().any(|expected| expected == &PathBuf::from(*target))
-                        })
-                        .unwrap_or(false)
-                });
-                if ready {
+                if overlay_targets_ready(&text, targets) {
                     return Ok(());
                 }
             }
-            Err(_) => return Ok(()),
+            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound
+                || failure.raw_os_error() == Some(libc::EINVAL) => {
+                // Exiting processes have no mount namespace: mountinfo may
+                // return EINVAL before reap or ENOENT after reap. The exit check
+                // below also covers readable but incomplete mountinfo.
+            }
+            Err(failure) => return Err(BackendError::new(format!(
+                "cannot inspect sandbox overlay readiness at {path}: {failure}"
+            ))),
+        }
+        // A short command can finish between the readiness checks. Only the
+        // owned outer child's exit confirms completion; an incomplete or
+        // disappearing mountinfo alone never proves readiness.
+        if child.try_wait().map_err(error)?.is_some() {
+            return Ok(());
         }
         std::thread::sleep(POLL_INTERVAL);
     }
-    Err(BackendError::new(
-        "sandbox did not finish mounting overlays before the readiness timeout",
-    ))
+    Err(BackendError::new(format!(
+        "sandbox {pid} did not finish mounting all overlays before the readiness timeout: {targets:?}"
+    )))
+}
+
+fn overlay_targets_ready(text: &str, targets: &[PathBuf]) -> bool {
+    use std::os::unix::ffi::OsStringExt;
+
+    let mounted: Vec<PathBuf> = text.lines().filter_map(|line| {
+        let Some((left, right)) = line.split_once(" - ") else {
+            return None;
+        };
+        if !right.starts_with("overlay ") {
+            return None;
+        }
+        let encoded = left.split_whitespace().nth(4)?.as_bytes();
+        let mut decoded = Vec::new();
+        let mut index = 0;
+        while index < encoded.len() {
+            if encoded[index] == b'\\' && index + 3 < encoded.len()
+                && encoded[index + 1..index + 4].iter().all(|byte| (b'0'..=b'7').contains(byte))
+            {
+                let octal = std::str::from_utf8(&encoded[index + 1..index + 4]).ok()?;
+                decoded.push(u8::from_str_radix(octal, 8).ok()?);
+                index += 4;
+            } else {
+                decoded.push(encoded[index]);
+                index += 1;
+            }
+        }
+        Some(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
+    }).collect();
+    targets.iter().all(|target| mounted.contains(target))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_accepts_mountinfo_of_an_exited_unreaped_child() {
+        for code in [0, 7] {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", &format!("exit {code}")])
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // WNOWAIT leaves the exited process in /proc. Linux returns EINVAL
+            // for its mountinfo before the parent reaps it, rather than ENOENT.
+            let waited = unsafe {
+                libc::waitid(libc::P_PID, pid, &mut status, libc::WEXITED | libc::WNOWAIT)
+            };
+            let result = wait_for_mounts(pid, &[PathBuf::from("/workspace")], &mut child);
+            let exit = child.wait().unwrap();
+            assert_eq!(waited, 0);
+            assert!(result.is_ok(), "exited child mountinfo: {result:?}");
+            assert_eq!(exit.code(), Some(code), "readiness must retain the exit status");
+        }
+    }
+
+    #[test]
+    fn readiness_checks_child_exit_even_when_mountinfo_is_readable() {
+        let mut namespace_holder = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut child = Command::new("/bin/true").spawn().unwrap();
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let waited = unsafe {
+            libc::waitid(libc::P_PID, child.id(), &mut status, libc::WEXITED | libc::WNOWAIT)
+        };
+        // Hold a real readable /proc entry independently of the managed child.
+        // This exercises successful reads with incomplete mounts deterministically,
+        // without relying on a race between reading mountinfo and process exit.
+        let pid = namespace_holder.id();
+        let targets = [PathBuf::from("/not-a-sandbox-overlay")];
+        let mountinfo = fs::read_to_string(format!("/proc/{pid}/mountinfo"));
+        let result = wait_for_mounts(
+            pid,
+            &targets,
+            &mut child,
+        );
+        let exit = child.wait().unwrap();
+        drop(namespace_holder.stdin.take());
+        let holder_exit = namespace_holder.wait().unwrap();
+        assert_eq!(waited, 0);
+        assert!(!overlay_targets_ready(&mountinfo.unwrap(), &targets));
+        assert!(result.is_ok(), "completed child readiness: {result:?}");
+        assert!(exit.success());
+        assert!(holder_exit.success());
+    }
+
+    #[test]
+    fn readiness_requires_every_overlay_and_decodes_mount_paths() {
+        let targets = vec![PathBuf::from("/workspace"), PathBuf::from("/extra mount")];
+        let first = "21 1 0:1 / /workspace rw - overlay overlay rw\n";
+        assert!(!overlay_targets_ready(first, &targets), "one overlay is not all overlays");
+        let both = format!("{first}22 1 0:2 / /extra\\040mount rw - overlay overlay rw\n");
+        assert!(overlay_targets_ready(&both, &targets));
+    }
 }

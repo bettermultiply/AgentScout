@@ -246,9 +246,10 @@ impl FilesystemBackend {
                     work: child_root.join(&mount.layer_key).join("work"),
                     lower,
                     layer_key: mount.layer_key.clone(),
-                    volume_is_subvolume: produced_here
-                        && produced.get(&key) == Some(&ForkProducer::Snapshot)
-                        && self.snapshot_copies,
+                    volume_is_subvolume: self.mechanism == FilesystemMechanism::Btrfs
+                        || (produced_here
+                            && produced.get(&key) == Some(&ForkProducer::Snapshot)
+                            && self.snapshot_copies),
                 };
                 child_mounts.insert(key, unit);
             }
@@ -339,8 +340,8 @@ impl FilesystemBackend {
         layer_path: &Path,
         profile: &mut Profile,
     ) -> Result<(), BackendError> {
-        // One read-only snapshot per non-empty selected mount upper, then a
-        // writable child upper per mount.  The parent is untouched.
+        // Snapshot each volume containing upper/work. Copy-up temporaries
+        // must stay in the same subvolume as upper, including empty children.
         fs::create_dir_all(layer_path).map_err(error)?;
         let mut chains = Vec::new();
         let mut chain_targets = BTreeSet::new();
@@ -350,27 +351,27 @@ impl FilesystemBackend {
                 continue;
             }
             chain_targets.insert(key.clone());
-            let layer_upper = mount.layer_upper(layer_path);
+            let layer_volume = layer_path.join(&mount.layer_key);
             let child_mount = plan
                 .child_environment
                 .mounts
                 .get(&key)
                 .expect("child mount exists");
             let mut chain = vec![ForkTask::SnapshotLayer {
-                source: mount.upper.clone(),
-                target: layer_upper.clone(),
+                source: mount.volume()?.to_path_buf(),
+                target: layer_volume.clone(),
             }];
             if plan.layouts.get(&key) == Some(&ForkLayout::Flatten) {
                 // Writable snapshot carries the parent state, so the layer is
                 // metadata/lower only and the mount is launched with the host
                 // mount as sole lower.
                 chain.push(ForkTask::SnapshotChild {
-                    source: layer_upper,
-                    target: child_mount.upper.clone(),
+                    source: layer_volume,
+                    target: child_mount.volume()?.to_path_buf(),
                 });
             } else {
                 chain.push(ForkTask::CreateVolume {
-                    target: child_mount.upper.clone(),
+                    target: child_mount.volume()?.to_path_buf(),
                 });
             }
             chains.push(chain);
@@ -381,7 +382,7 @@ impl FilesystemBackend {
                 continue;
             }
             chains.push(vec![ForkTask::CreateVolume {
-                target: mount.upper.clone(),
+                target: mount.volume()?.to_path_buf(),
             }]);
         }
         self.run_fork_chains(profile, chains)?;

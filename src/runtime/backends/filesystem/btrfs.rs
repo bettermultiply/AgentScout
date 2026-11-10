@@ -197,31 +197,61 @@ impl FilesystemBackend {
         let snapshot_root = self
             .snapshots_root()
             .join(format!("diff-snapshot-{token}"));
-        let current = snapshot_root.join(&mount.layer_key).join("upper");
+        let current = snapshot_root.join(&mount.layer_key);
         if let Some(parent) = current.parent() {
             fs::create_dir_all(parent).map_err(error)?;
         }
-        self.btrfs_snapshot(&mount.upper, &current, true)?;
-        let base_upper = mount.layer_upper(base);
-        let dump = match self.btrfs_send_dump(&base_upper, &current) {
+        self.btrfs_snapshot(mount.volume()?, &current, true)?;
+        let base_volume = base.join(&mount.layer_key);
+        let dump = match self.btrfs_send_dump(&base_volume, &current) {
             Ok(dump) => dump,
             Err(error) => {
                 let _ = remove_path(&self.config.btrfs_path, &snapshot_root, true);
                 return Err(error);
             }
         };
-        // The send stream is rooted at the mount upper itself.
-        let delta = send_dump_delta(&dump, &mount.upper);
+        // The stream is rooted at the volume. Work and volume metadata are
+        // internal; keep every change inside upper, including parent dirs.
+        let delta = send_dump_upper_delta(&dump, &mount.upper);
         let _ = remove_path(&self.config.btrfs_path, &snapshot_root, true);
         delta
     }
 }
 
-fn send_dump_delta(
+fn send_dump_upper_delta(
     dump: &str,
     upper: &Path,
 ) -> Result<(View, Vec<(String, String)>, Vec<FilesystemChange>), BackendError> {
-    let changes = parse_send_dump(dump);
+    let changes = parse_send_dump(dump)
+        .into_iter()
+        .filter_map(|change| {
+            let path = change.path.strip_prefix("upper/").map(str::to_string);
+            let old_path = change.old_path
+                .and_then(|path| path.strip_prefix("upper/").map(str::to_string));
+            match (path, old_path) {
+                (Some(path), old_path) => Some(FilesystemChange {
+                    path,
+                    kind: if change.kind == "rename" && old_path.is_none() {
+                        "change".to_string()
+                    } else {
+                        change.kind
+                    },
+                    old_path,
+                }),
+                (None, Some(path)) => Some(FilesystemChange {
+                    path, kind: "delete".to_string(), old_path: None,
+                }),
+                (None, None) => None,
+            }
+        })
+        .collect();
+    delta_from_changes(changes, upper)
+}
+
+fn delta_from_changes(
+    changes: Vec<FilesystemChange>,
+    upper: &Path,
+) -> Result<(View, Vec<(String, String)>, Vec<FilesystemChange>), BackendError> {
     let mut view = View::new();
     let mut redirects = Vec::new();
     // Tombstones first: a rename cycle may reuse an old name as a destination.
@@ -478,7 +508,7 @@ mod tests {
             rename ./upper/o261-840421-0 dest=./upper/created\n\
             rename ./upper/old dest=./upper/new\n\
             unlink ./upper/deleted\n";
-        let (delta, _, changes) = send_dump_delta(dump, root.path()).unwrap();
+        let (delta, _, changes) = delta_from_changes(parse_send_dump(dump), root.path()).unwrap();
         assert_eq!(
             delta.keys().map(String::as_str).collect::<Vec<_>>(),
             vec!["created", "deleted", "new", "new/unchanged", "old"]
@@ -503,6 +533,36 @@ mod tests {
             changes
                 .iter()
                 .any(|c| c.path == "new" && c.old_path.as_deref() == Some("old"))
+        );
+    }
+
+    #[test]
+    fn send_dump_volume_keeps_upper_parent_changes_and_excludes_work() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("parent/nested")).unwrap();
+        fs::write(root.path().join("parent/nested/keep"), b"changed").unwrap();
+        let dump = "snapshot ./volume uuid=example\n\
+            utimes ./volume/ atime=example\n\
+            utimes ./volume/upper atime=example\n\
+            utimes ./volume/upper/parent atime=example\n\
+            utimes ./volume/upper/parent/nested atime=example\n\
+            write ./volume/upper/parent/nested/keep offset=0 len=7\n\
+            unlink ./volume/upper/parent/nested/remove\n\
+            mkdir ./volume/work/work\n\
+            mkfile ./volume/work/work/temporary\n\
+            rename ./volume/work/work/temporary dest=./volume/upper/parent/nested/newfile\n";
+        fs::write(root.path().join("parent/nested/newfile"), b"new").unwrap();
+        let (_, _, changes) = send_dump_upper_delta(dump, root.path()).unwrap();
+        assert_eq!(
+            changes.iter().map(|change| (change.path.as_str(), change.kind.as_str(), change.old_path.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("parent", "change", None),
+                ("parent/nested", "change", None),
+                ("parent/nested/keep", "change", None),
+                ("parent/nested/newfile", "change", None),
+                ("parent/nested/remove", "delete", None),
+            ]
         );
     }
 
