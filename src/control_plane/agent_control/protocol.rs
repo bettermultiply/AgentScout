@@ -250,6 +250,20 @@ impl SpeculativeTree {
         if task_id != self.execution_id {
             return Err(invalid_input("action task does not match tree"));
         }
+        self.register_action(branch_id, action_id, action_kind, name, parent_action_id)
+    }
+
+    /// Pair an admitted action with its later ActionFinished. This registers
+    /// the action's identity only; it records no start time. Tool start time
+    /// comes exclusively from the adapter's ActionStarted fact.
+    pub(crate) fn register_action(
+        &mut self,
+        branch_id: &str,
+        action_id: String,
+        action_kind: ActionKind,
+        name: String,
+        parent_action_id: Option<String>,
+    ) -> io::Result<Vec<AgentCommand>> {
         let branch = self.branch(branch_id)?;
         if matches!(
             branch.status,

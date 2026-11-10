@@ -362,6 +362,7 @@ impl SpeculativeTree {
             BranchRole::Authority,
             BranchStatus::Created,
             None,
+            None,
         )?;
         self.change_authority(&branch_id)?;
         self.history_root_branch_id = Some(branch_id.clone());

@@ -123,6 +123,7 @@ impl SpeculativeTree {
         role: BranchRole,
         status: BranchStatus,
         speculation_kind: Option<ActionKind>,
+        speculation_started_at_ms: Option<u64>,
     ) -> io::Result<()> {
         if self.branches.contains_key(branch_id) {
             return Err(invalid_input("branch id already exists"));
@@ -154,6 +155,7 @@ impl SpeculativeTree {
                 role,
                 edge_id: None,
                 speculation_kind,
+                speculation_started_at_ms,
             },
         );
         self.pending_observations.push(

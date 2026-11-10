@@ -542,3 +542,7 @@ ProcessBackend 已承担启动、冻结、终止及 namespace 记录，不再将
 废弃观察接口的 snapshot / “快照”命名、`GET /api/observation/snapshot` 和 `ObservationSnapshot`：它们读取的是完整有序事件，不是被保存的状态。当前统一称状态事件集，英文直译为 `StateEventSet`，路径为 `/api/observation/state-event-set`。
 
 废弃 ui.rs 独立保存观察日志及通过 Tree 前后差异推断事件的做法。Ledger 在 events.jsonl 中以 `message: observation` 区分观察记录，直接提供只读句柄；Tree 在创建、生命周期、Authority 和环境转换入口产生待发事实，控制循环交给 Ledger 追加。保留同一次处理内的中间状态与入口明确给出的原因。观察日志不承担崩溃恢复整棵树的要求，不逐次保存完整树，也不实现折叠缓存。
+
+## 2026-11-10：投机起点与工具开始分离
+
+废弃“用 `SpeculativeAdmissionRequest.timestamp_ms` 合成 `ActionStarted` 作为工具开始时间”的做法：准入请求只登记 action 身份并表达投机起点，工具开始时间只来自接入侧真实的 `ActionStarted`。某 action 只有准入请求而尚无 `ActionStarted` 时，`tool_finished.started_at_ms` 为 null，耗时在起点和终点都可得时才计算。被准入投机的起点由 `branch_created.speculation_started_at_ms` 表达，取自对应准入请求的接入侧时刻；事件公共 `timestamp_ms` 仍是控制面记录时刻。`model_usage` 与 `tool_finished` 增加源侧 `started_at_ms` / `finished_at_ms`；`model_usage.action_id` 由可空改为必填字符串。

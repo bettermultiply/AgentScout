@@ -42,7 +42,7 @@ Agent 接入协议围绕 action，而非工具或 Branch 角色组织。action �
 
 `ActionStarted` 登记 action 生命周期；`result_pending=true` 明确表示接入侧停在真实执行之前的等待边界，不能据此断言真实 action 已经执行。普通 action 事实与投机准入请求分开；普通执行无需等待控制面投机决策。`ActionFinished` 报告成功、失败、取消或超时，并携带 result 和可选 evidence；取消请求不等于已取消，控制面等待期限届满也不等于 Agent 已停止。相同 action 的结果必须与开始事实配对。
 
-`ActionStarted`、`ActionFinished` 与 `SpeculativeAdmissionRequest` 各自携带接入侧测量的 Unix 毫秒 `timestamp_ms`，该时刻由接入侧在事件发生时测量，不使用控制面收到消息的时刻。投机开始以 `SpeculativeAdmissionRequest` 的 `timestamp_ms` 为准；权威路径真实结果到达的时刻以对应 `ActionFinished` 的 `timestamp_ms` 为准。`Usage` 必须关联 `action_id`，并报告接入侧测得的模型请求开始与结束时间；控制面由此得到源侧耗时，而不是用自身记录时刻冒充执行耗时。
+`ActionStarted`、`ActionFinished` 与 `SpeculativeAdmissionRequest` 各自携带接入侧测量的 Unix 毫秒 `timestamp_ms`，该时刻由接入侧在事件发生时测量，不使用控制面收到消息的时刻。工具的 `ActionStarted` 记录工具真正开始的时刻；`SpeculativeAdmissionRequest` 只表示投机起点，不能作为 action 的开始时间，控制面也不据此合成开始时间。投机开始以 `SpeculativeAdmissionRequest` 的 `timestamp_ms` 为准；权威路径真实结果到达的时刻以对应 `ActionFinished` 的 `timestamp_ms` 为准。`Usage` 必须关联 `action_id`，并报告接入侧测得的模型请求开始与结束时间；控制面由此得到源侧耗时，而不是用自身记录时刻冒充执行耗时。
 
 当前通用协议提供显式的 `SpeculativeAdmissionRequest` 路径，只有接入侧本地 Decision 产生该请求时，控制面才会进入投机准入和预测。Pi 的工具执行前 Hook 已接入下发的 Policy artifact，并按其 `admit` 结果区分普通 action 与投机准入请求；模型推理前已有真实 Hook，位于 Pi 分支的 `sdk.ts`，在请求发出前执行，可延迟请求或抛错阻止。sub-agent 启动前目前仍无统一 Hook，Pi 接入声明 `subagentPreExecutionInterception: false`，暂不支持该边界。Pi 的缓存预热等后台模型调用不经过该 Hook，不得宣称所有模型请求都被拦截。
 

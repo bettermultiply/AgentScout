@@ -61,7 +61,7 @@ use super::*;
         let (mut tree, _root) = task();
         tree.speculative_admission(waiting()).unwrap();
         let command = tree
-            .start_candidate("authority", "op", "tool", json!("guess"), None)
+            .start_candidate("authority", "op", "tool", json!("guess"), None, None)
             .unwrap();
         let AgentCommand::StartCandidate { branch_id, .. } = command else {
             unreachable!()
@@ -119,7 +119,7 @@ use super::*;
     fn branch_cannot_be_archived_while_its_environment_is_still_being_created() {
         let (mut tree, _root) = task();
         let command = tree
-            .start_candidate("authority", "op", "tool", json!("guess"), None)
+            .start_candidate("authority", "op", "tool", json!("guess"), None, None)
             .unwrap();
         let child = match &command {
             AgentCommand::StartCandidate { branch_id, .. } => branch_id.clone(),
@@ -156,7 +156,7 @@ use super::*;
     fn firecracker_style_capabilities_route_establish_through_branch_environment() {
         let (mut tree, _root) = task();
         let command = tree
-            .start_candidate("authority", "op", "tool", json!("guess"), None)
+            .start_candidate("authority", "op", "tool", json!("guess"), None, None)
             .unwrap();
         let child = match &command {
             AgentCommand::StartCandidate { branch_id, .. } => branch_id.clone(),

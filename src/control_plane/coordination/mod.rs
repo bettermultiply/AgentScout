@@ -29,6 +29,8 @@ pub struct ToolPending {
     pub arguments: Value,
     pub checkpoint: Option<Value>,
     pub launch: bool,
+    /// 产生这次投机的准入请求时刻；只用于表达投机起点，不是工具开始时间。
+    pub speculation_started_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

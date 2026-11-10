@@ -11,6 +11,7 @@ impl SpeculativeTree {
         tool_name: &str,
         prediction: Value,
         checkpoint: Option<Value>,
+        speculation_started_at_ms: Option<u64>,
     ) -> io::Result<AgentCommand> {
         if self.authority_branch_id.as_deref() != Some(parent) {
             return Err(invalid_input(
@@ -35,6 +36,7 @@ impl SpeculativeTree {
                 .get(parent)
                 .and_then(|actions| actions.get(operation_id))
                 .map(|action| action.action_kind),
+            speculation_started_at_ms,
         )?;
         self.record_candidate_context(
             &branch_id,

@@ -15,7 +15,7 @@ use serde_json::json;
         })
         .unwrap();
         let first = tree
-            .start_candidate("authority", "op", "tool", json!("first"), None)
+            .start_candidate("authority", "op", "tool", json!("first"), None, None)
             .unwrap();
         let AgentCommand::StartCandidate {
             branch_id: winner, ..
@@ -24,7 +24,7 @@ use serde_json::json;
             unreachable!()
         };
         let second = tree
-            .start_candidate("authority", "op", "tool", json!("second"), None)
+            .start_candidate("authority", "op", "tool", json!("second"), None, None)
             .unwrap();
         let AgentCommand::StartCandidate {
             branch_id: sibling, ..

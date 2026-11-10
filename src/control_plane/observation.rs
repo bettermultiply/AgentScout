@@ -24,6 +24,8 @@ pub enum ObservationContent {
         role: BranchRole,
         edge_id: Option<String>,
         speculation_kind: Option<ActionKind>,
+        /// 被准入投机的起点（准入请求的接入侧时刻）；非投机候选为 null。
+        speculation_started_at_ms: Option<u64>,
     },
     AuthorityChanged {
         branch_id: String,
@@ -51,7 +53,7 @@ pub enum ObservationContent {
     },
     ModelUsage {
         branch_id: String,
-        action_id: Option<String>,
+        action_id: String,
         model: String,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
@@ -59,12 +61,19 @@ pub enum ObservationContent {
         cache_write_tokens: Option<u64>,
         total_tokens: Option<u64>,
         cost: Option<f64>,
+        /// 接入侧测量的模型请求开始与结束时刻，数据不可得时为 null。
+        started_at_ms: Option<u64>,
+        finished_at_ms: Option<u64>,
         duration_ms: Option<u64>,
     },
     ToolFinished {
         branch_id: String,
         action_id: String,
         status: ActionStatus,
+        /// 工具真正开始时刻来自 ActionStarted；只有准入请求时为 null。
+        started_at_ms: Option<u64>,
+        /// 工具结束时刻来自 ActionFinished；数据不可得时为 null。
+        finished_at_ms: Option<u64>,
         duration_ms: Option<u64>,
     },
     Settlement {

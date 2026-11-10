@@ -52,19 +52,17 @@ impl SpeculativeTree {
                 "speculative admission does not use the delivered local Policy",
             ));
         }
-        let fact = AgentMessage::ActionStarted {
-            task_id,
-            branch_id: branch_id.clone(),
-            action_id: operation_id.clone(),
+        // Admission says the action exists and will be paired with its
+        // ActionFinished; it does not say the tool has started. The adapter
+        // measures the real start time in ActionStarted, so no start time is
+        // synthesized here from the admission timestamp.
+        self.register_action(
+            &branch_id,
+            operation_id.clone(),
             action_kind,
+            tool_name.clone(),
             parent_action_id,
-            result_pending: true,
-            name: tool_name.clone(),
-            arguments: arguments.clone(),
-            checkpoint: checkpoint.clone(),
-            timestamp_ms,
-        };
-        self.handle_message(fact)?;
+        )?;
         let mut actions = ControlActions::default();
         if self.stopping
             || !self.can_invoke_tool(&branch_id)
@@ -92,6 +90,7 @@ impl SpeculativeTree {
                 arguments,
                 checkpoint,
                 launch: true,
+                speculation_started_at_ms: Some(timestamp_ms),
             }),
             &mut actions,
         );
@@ -143,6 +142,7 @@ impl SpeculativeTree {
             operation_id,
             tool_name,
             checkpoint,
+            speculation_started_at_ms,
             ..
         } = &tool;
         if !self.waiting_point_live(&tool) {
@@ -172,6 +172,7 @@ impl SpeculativeTree {
                     tool_name,
                     predictions,
                     checkpoint.clone(),
+                    *speculation_started_at_ms,
                     actions,
                     false,
                 )?;
@@ -183,6 +184,7 @@ impl SpeculativeTree {
                     tool_name,
                     predictions,
                     checkpoint.clone(),
+                    *speculation_started_at_ms,
                     actions,
                     true,
                 )?;
@@ -238,6 +240,7 @@ impl SpeculativeTree {
         tool_name: &str,
         predictions: Vec<Value>,
         checkpoint: Option<Value>,
+        speculation_started_at_ms: Option<u64>,
         actions: &mut ControlActions,
         unsupported: bool,
     ) -> io::Result<()> {
@@ -248,6 +251,7 @@ impl SpeculativeTree {
                 tool_name,
                 prediction,
                 checkpoint.clone(),
+                speculation_started_at_ms,
             )?;
             let child = match &command {
                 AgentCommand::StartCandidate { branch_id, .. } => branch_id,

@@ -288,7 +288,7 @@ impl Interface {
                 ..
             } => Some(ObservationContent::ModelUsage {
                 branch_id: branch_id.clone(),
-                action_id: Some(action_id.clone()),
+                action_id: action_id.clone(),
                 model: model.clone(),
                 input_tokens: usage["input"].as_u64(),
                 output_tokens: usage["output"].as_u64(),
@@ -296,6 +296,8 @@ impl Interface {
                 cache_write_tokens: usage["cacheWrite"].as_u64(),
                 total_tokens: usage["totalTokens"].as_u64(),
                 cost: usage["cost"]["total"].as_f64(),
+                started_at_ms: Some(*started_at_ms),
+                finished_at_ms: Some(*finished_at_ms),
                 duration_ms: finished_at_ms.checked_sub(*started_at_ms),
             }),
             AgentMessage::ActionFinished {
@@ -315,6 +317,8 @@ impl Interface {
                     branch_id: branch_id.clone(),
                     action_id: action_id.clone(),
                     status: *status,
+                    started_at_ms: started,
+                    finished_at_ms: Some(*timestamp_ms),
                     duration_ms: started.and_then(|start| timestamp_ms.checked_sub(start)),
                 })
             }
