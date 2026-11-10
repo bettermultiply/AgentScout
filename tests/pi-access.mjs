@@ -168,3 +168,119 @@ export async function createAgentSession(options) {
     await finish(['candidate','authority']);
 });
 }
+
+test('model usage survives completion before message_end and reports an unpaired call', async t => {
+    const root = await mkdtemp(join(tmpdir(), 'ascout-pi-'));
+    const socketPath = join(root, 'agent.sock');
+    await mkdir(join(root, 'packages/coding-agent/src'), { recursive: true });
+    await mkdir(join(root, 'node_modules/typebox'), { recursive: true });
+    await writeFile(join(root, 'package.json'), '{"type":"module"}');
+    await writeFile(join(root, 'node_modules/typebox/index.js'), 'exports.Type={Unsafe:x=>x};');
+    // Pi settles the model stream and invokes the beforeModelInference completion
+    // callback before the agent loop emits message_end. A second prompt reports a
+    // model message that never went through the hook at all.
+    await writeFile(join(root, 'packages/coding-agent/src/index.ts'), `
+export const SessionManager = {inMemory:()=>({messages:[],appendMessage(m){this.messages.push(m)}})}, ModelRuntime = {}, resolveCliModel = () => ({});
+export async function createAgentSession(options) {
+    const controller = new AbortController();
+    let subscriber = () => {};
+    const session = {
+        agent: {}, messages: [], subscribe(fn) {subscriber=fn}, dispose() {}, async abort() {controller.abort()},
+        async prompt(prompt) {
+            const use = prompt === 'unpaired'
+                ? {input:1,output:2,cacheRead:0,cacheWrite:0,totalTokens:3,cost:{total:0.25}}
+                : {input:10,output:20,cacheRead:0,cacheWrite:0,totalTokens:30,cost:{total:1.5}};
+            if (prompt === 'unpaired') {
+                const message = {role:'assistant',content:[{type:'text',text:'unpaired'}],stopReason:'stop',model:'test',usage:use,timestamp:Date.now()};
+                subscriber({type:'message_start',message});
+                session.messages.push(message);
+                subscriber({type:'message_end',message});
+                return;
+            }
+            const started = Date.now();
+            const finishModelInference = await options.beforeModelInference?.(
+                {provider:'test',id:'test'},
+                {messages:session.messages},
+                controller.signal,
+            );
+            const message = {role:'assistant',content:[{type:'text',text:'paired'}],stopReason:'stop',model:'test',usage:use,timestamp:started,durationMs:12};
+            subscriber({type:'message_start',message});
+            session.messages.push(message);
+            await finishModelInference?.('succeeded');
+            subscriber({type:'message_end',message});
+        }
+    };
+    return {session};
+}
+`);
+    const messages = [];
+    let client;
+    const server = createServer(socket => {
+        client = socket;
+        let bytes = Buffer.alloc(0);
+        socket.on('data', chunk => {
+            bytes = Buffer.concat([bytes, chunk]);
+            while (bytes.length >= 4 && bytes.length >= bytes.readUInt32BE(0) + 4) {
+                const length = bytes.readUInt32BE(0);
+                messages.push(JSON.parse(bytes.subarray(4, length + 4)).payload);
+                bytes = bytes.subarray(length + 4);
+            }
+        });
+    });
+    await new Promise(resolve => server.listen(socketPath, resolve));
+    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', resolve('agent-access/pi/main.ts'), socketPath, 'agent'], {
+        env: { ...process.env, ASCOUT_PI_ROOT: root, ASCOUT_RUNTIME_TOOLS: '[]' }, stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stderr = '';
+    child.stderr.on('data', chunk => stderr += chunk);
+    t.after(async () => {
+        client?.destroy();
+        if (child.exitCode === null) {
+            const exited = new Promise(resolve => child.once('exit', resolve));
+            child.kill();
+            await exited;
+        }
+        await new Promise(resolve => server.close(resolve));
+        await rm(root, {recursive:true, force:true});
+    });
+    async function expectMessage(predicate) {
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline) {
+            const message = messages.find(predicate);
+            if (message) return message;
+            if (child.exitCode !== null) throw Error(stderr);
+            await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        assert.fail(`Timed out waiting for protocol message; received ${JSON.stringify(messages)}; ${stderr}`);
+    }
+    function send(payload) {
+        const body = Buffer.from(JSON.stringify({kind:'command',payload}));
+        const header = Buffer.alloc(4); header.writeUInt32BE(body.length);
+        client.write(Buffer.concat([header, body]));
+    }
+    await expectMessage(m => m.message === 'agent_connected');
+    send({command:'start_branch',branch_id:'authority',workspace:root,prompt:''});
+    await expectMessage(m => m.message === 'branch_started' && m.branch_id === 'authority');
+    send({command:'prompt',branch_id:'authority',prompt:'paired'});
+    const inference = await expectMessage(m => m.message === 'action_started' && m.action_kind === 'model_inference' && m.branch_id === 'authority');
+    const paired = await expectMessage(m => m.message === 'usage' && m.branch_id === 'authority' && m.action_id === inference.action_id);
+    assert.equal(paired.started_at_ms + 12, paired.finished_at_ms);
+    assert.equal(paired.usage.input, 10);
+    assert.equal(paired.usage.totalTokens, 30);
+    assert.equal(paired.usage.cost.total, 1.5);
+    send({command:'prompt',branch_id:'authority',prompt:'unpaired'});
+    const unpaired = await expectMessage(m => m.message === 'usage' && m.branch_id === 'authority' && m.action_id === null);
+    assert.equal(unpaired.model, 'test');
+    assert.equal(unpaired.usage.totalTokens, 3);
+    assert.equal(unpaired.usage.cost.total, 0.25);
+    send({command:'cleanup',branch_id:'authority',workspace:root,command_id:'cleanup-authority',generation:1});
+    await expectMessage(m => m.message === 'branch_released' && m.branch_id === 'authority');
+    const exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({code,signal})));
+    client.end();
+    const exit = await Promise.race([exited, new Promise((_,reject) => {
+        const timer=setTimeout(()=>reject(Error('integration did not exit after EOF')),2000);
+        timer.unref();
+    })]);
+    assert.deepEqual(exit,{code:0,signal:null},stderr);
+    assert.equal(stderr,'');
+});

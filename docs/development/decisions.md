@@ -2,6 +2,12 @@
 
 本文记录已接受的实现架构与验证决策。目标语义归 `docs/design/` 所有。
 
+## 2026-11-10：模型用量不得静默丢弃，`action_id` 可为 null
+
+真实 NLE 运行中模型已被调用，但控制面没有收到任何 `model_usage`。根因是 Pi 在 `message_end` 之前先用 `stream.result()` 结算模型流并执行 `beforeModelInference` 的完成回调；该回调把 action 从配对队列中移除，随后 `message_end` 找不到配对项，旧实现直接丢弃 `Usage`。修复后完成回调只结束 action 生命周期，`message_start` 标记对应的 action，`message_end` 才取走并发送 `Usage`；只有没有产生消息的请求才在完成回调中移除。
+
+此前要求 `Usage.action_id` 必填字符串。现在接入侧确实无法把一次模型调用与已上报的 action 配对时（例如调用没有经过 Hook），仍然发送 `Usage`，`action_id` 为 null；公共事件 `model_usage.action_id` 也允许 null，不伪造身份，也不静默丢弃。控制面按 Branch 保存每次模型用量，不再用 action id 作为唯一键，因此同一 Branch 的多次未配对调用都能保留并计入结算成本。
+
 ## 2026-11-10：对话观察移除 unverified 字段
 
 废弃 `GET /api/branches/{branch_id}/conversation` 响应与 `conversation_updated` 事件中的 `unverified` 字段，以及“候选内容必须明确标记为未验证”的旧表述。候选是否属于投机由 Branch 的角色（Authority/Candidate）与状态完整表达；对话接口改为返回该 Branch 当前的 `role` 与 `status`，前端据此显示投机身份。旧字段名仅保留在本记录。Agent Adapter 能力验证语境中的“未验证”是另一件事，含义不变。

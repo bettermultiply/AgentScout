@@ -256,6 +256,9 @@ pub(crate) struct SpeculationRecord {
 /// `model_usage` 观察事件表达。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ModelUsageFact {
+    /// 这次调用对应的模型 action；接入侧无法配对时为 None，不伪造身份。
+    #[serde(default)]
+    pub action_id: Option<String>,
     pub model: String,
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
@@ -321,9 +324,10 @@ pub struct SpeculativeTree {
     /// 已准入投机的内部事实，按 Branch 保存；不进入 Branch 归档。
     #[serde(default)]
     pub(crate) speculations: BTreeMap<String, SpeculationRecord>,
-    /// 模型用量事实，按 Branch 和 action 保存，供结算比较。
+    /// 模型用量事实，按 Branch 保存每次调用，供结算比较。无法配对 action
+    /// 的调用也保留，不因为缺少 action_id 而丢弃。
     #[serde(default)]
-    pub(crate) model_usage: BTreeMap<String, BTreeMap<String, ModelUsageFact>>,
+    pub(crate) model_usage: BTreeMap<String, Vec<ModelUsageFact>>,
     /// 工具 `ActionFinished` 的接入侧时刻，按 Branch 和 action 保存。
     #[serde(default)]
     pub(crate) tool_finished_at_ms: BTreeMap<String, BTreeMap<String, u64>>,
@@ -574,7 +578,10 @@ pub enum AgentMessage {
     },
     Usage {
         branch_id: String,
-        action_id: String,
+        /// 这次调用对应的模型 action。接入侧确实无法配对时为 None：仍然上报
+        /// 用量，但不伪造 action 身份。
+        #[serde(default)]
+        action_id: Option<String>,
         model: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking_level: Option<String>,

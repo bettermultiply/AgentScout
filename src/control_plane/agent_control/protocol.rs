@@ -77,16 +77,14 @@ impl SpeculativeTree {
                 ..
             } => {
                 self.branch(&branch_id)?;
-                self.model_usage.entry(branch_id).or_default().insert(
+                self.model_usage.entry(branch_id).or_default().push(ModelUsageFact {
                     action_id,
-                    ModelUsageFact {
-                        model,
-                        started_at_ms,
-                        finished_at_ms,
-                        duration_ms: finished_at_ms.checked_sub(started_at_ms),
-                        cost: usage["cost"]["total"].as_f64(),
-                    },
-                );
+                    model,
+                    started_at_ms,
+                    finished_at_ms,
+                    duration_ms: finished_at_ms.checked_sub(started_at_ms),
+                    cost: usage["cost"]["total"].as_f64(),
+                });
                 Ok(vec![])
             }
             AgentMessage::ActionStarted {

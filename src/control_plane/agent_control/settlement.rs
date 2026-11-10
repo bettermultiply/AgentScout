@@ -75,10 +75,16 @@ impl SpeculativeTree {
             Some(ActionKind::ModelInference) => {
                 let operation = branch.execution_position.operation_id.as_deref();
                 let fast = self.fast_model_usage(branch, operation);
-                let authority =
-                    branch.parent_branch_id.as_ref().zip(operation).and_then(
-                        |(parent, operation)| self.model_usage.get(parent)?.get(operation),
-                    );
+                let authority = branch
+                    .parent_branch_id
+                    .as_ref()
+                    .zip(operation)
+                    .and_then(|(parent, operation)| {
+                        self.model_usage
+                            .get(parent)?
+                            .iter()
+                            .find(|usage| usage.action_id.as_deref() == Some(operation))
+                    });
                 match (fast, authority) {
                     (Some(fast), Some(authority)) => {
                         // 有权威侧同一 operation 的模型用量，按权威模型校验处理。
@@ -123,10 +129,14 @@ impl SpeculativeTree {
         operation: Option<&str>,
     ) -> Option<&ModelUsageFact> {
         let usages = self.model_usage.get(&branch.branch_id)?;
-        if let Some(usage) = operation.and_then(|operation| usages.get(operation)) {
+        if let Some(usage) = operation.and_then(|operation| {
+            usages
+                .iter()
+                .find(|usage| usage.action_id.as_deref() == Some(operation))
+        }) {
             return Some(usage);
         }
-        let mut values = usages.values();
+        let mut values = usages.iter();
         let only = values.next()?;
         values.next().is_none().then_some(only)
     }
@@ -147,7 +157,7 @@ impl SpeculativeTree {
                 return None;
             }
             usages
-                .values()
+                .iter()
                 .map(|usage| usage.cost)
                 .collect::<Option<Vec<_>>>()
         });

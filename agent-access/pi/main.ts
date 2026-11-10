@@ -120,12 +120,21 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     }
     const actionId=`model-${nextAction++}`, startedAt=Date.now();
     const queue=modelActions.get(branch)??[];
-    queue.push({action_id:actionId,started_at_ms:startedAt});
+    const action={action_id:actionId,started_at_ms:startedAt,seen_message:false};
+    queue.push(action);
     modelActions.set(branch,queue);
     await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',result_pending:true,name:'model',arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length},timestamp_ms:startedAt});
     return async status=>{
-        const pending=modelActions.get(branch),index=pending?.findIndex(action=>action.action_id===actionId)??-1;
-        if(index>=0)pending.splice(index,1);
+        // Pi settles the stream and runs this callback before the agent loop
+        // emits the assistant message_end. Keep the action while its message
+        // has started so message_end can still pair the usage. Only forget an
+        // action that produced no message at all (the request threw before the
+        // stream started), so it cannot be paired with a later message.
+        if(!action.seen_message){
+            const pending=modelActions.get(branch),index=pending?.indexOf(action)??-1;
+            if(index>=0)pending.splice(index,1);
+            if(pending?.length===0)modelActions.delete(branch);
+        }
         await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',status:status??(signal?.aborted?'cancelled':'succeeded'),result:null,timestamp_ms:Date.now()});
     };
 }
@@ -188,15 +197,24 @@ function install(session,branch) {
         return previous;
     };
     session.subscribe(event=>{
+        if(event.type==='message_start'&&event.message.role==='assistant'){
+            // The completion callback can run before message_end, so the
+            // message itself marks which queued action it belongs to.
+            const action=modelActions.get(branch)?.find(action=>!action.seen_message);
+            if(action)action.seen_message=true;
+        }
         if(event.type==='message_update'&&event.assistantMessageEvent.type==='text_delta')void report({message:'output',branch_id:branch,text:event.assistantMessageEvent.delta});
         if(event.type==='message_end'){
             void report({message:'transcript',branch_id:branch,entry:event.message});
-            const action=event.message.role==='assistant'?modelActions.get(branch)?.shift():undefined;
-            if(action){
-                const started_at_ms=Number.isFinite(event.message.timestamp)?event.message.timestamp:action.started_at_ms;
+            if(event.message.role==='assistant'){
+                const pending=modelActions.get(branch),index=pending?.findIndex(action=>action.seen_message)??-1;
+                const action=index>=0?pending.splice(index,1)[0]:undefined;
+                if(pending?.length===0)modelActions.delete(branch);
+                const started_at_ms=Number.isFinite(event.message.timestamp)?event.message.timestamp:(action?.started_at_ms??Date.now());
                 const duration_ms=Number.isFinite(event.message.durationMs)?event.message.durationMs:Math.max(0,Date.now()-started_at_ms);
-                void report({message:'usage',branch_id:branch,action_id:action.action_id,started_at_ms,finished_at_ms:started_at_ms+duration_ms,model:event.message.model,thinking_level:event.message.thinkingLevel,usage:event.message.usage});
-                if(modelActions.get(branch)?.length===0)modelActions.delete(branch);
+                // Usage is never dropped: a model call that cannot be paired
+                // with an action reports a null action_id instead of inventing one.
+                void report({message:'usage',branch_id:branch,action_id:action?.action_id??null,started_at_ms,finished_at_ms:started_at_ms+duration_ms,model:event.message.model,thinking_level:event.message.thinkingLevel,usage:event.message.usage??{}});
             }
         }
     });

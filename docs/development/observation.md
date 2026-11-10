@@ -20,14 +20,14 @@
 - `environment_changed`：branch_id、state、independent_instance、parent_environment、configuration。
 - `environment_cleaned`：branch_id、succeeded、reason。
 - `conversation_updated`：branch_id，不含正文。
-- `model_usage`：branch_id、action_id（必填）、model、input_tokens、output_tokens、cache_read_tokens、cache_write_tokens、total_tokens、cost、started_at_ms、finished_at_ms、duration_ms；started_at_ms 与 finished_at_ms 是接入侧测量的模型请求开始与结束时刻，duration_ms 在两者可得时由二者相减得到。
+- `model_usage`：branch_id、action_id（无法与模型 action 配对时为 null）、model、input_tokens、output_tokens、cache_read_tokens、cache_write_tokens、total_tokens、cost、started_at_ms、finished_at_ms、duration_ms；started_at_ms 与 finished_at_ms 是接入侧测量的模型请求开始与结束时刻，duration_ms 在两者可得时由二者相减得到。
 - `tool_finished`：branch_id、action_id、status、started_at_ms、finished_at_ms、duration_ms，不公开工具结果或参数；started_at_ms 只来自接入侧真实的 ActionStarted，某 action 只有准入请求而尚无 ActionStarted 时为 null；finished_at_ms 来自 ActionFinished；duration_ms 在起点和终点时间都可得到时填写。
 - `settlement`：branch_id、hit、time_ms、money、currency；time_ms 与 money 都是 `{measured, estimated}`，两个部分各自是带符号数字或 null，缺少实测时为 null、缺少估计依据时为 null，二者不相加、也不互相填充；currency 只在金钱维度有数值时给出。每次已准入投机恰好产生一次；命中对应 Branch 进入 Promoted，未命中对应 Branch 进入 Discarded。累计值由读取方分别累加实测与估计部分，不另发统计事件。
 - `run_status`：ready、running、notice、connected，维持现有交互状态。
 
 ## 已核实的数据与差距
 
-Agent 协议现在要求 `ActionStarted`、`ActionFinished` 与 `SpeculativeAdmissionRequest` 携带接入侧测量的 Unix 毫秒时间戳；`Usage` 必须关联 `action_id`，并携带接入侧的开始与结束时间。准入请求的 `timestamp_ms` 只表示投机起点：控制面登记 action 身份以便与后续结果配对，不再用该时间合成 action 的开始时间；工具真正开始的时间只来自接入侧真实的 `ActionStarted`。`model_usage` 按已知 SDK 字段映射 token 和 cost.total，字段未提供时仍返回 null，不补零；`started_at_ms` / `finished_at_ms` 来自 Usage 的接入侧起止时刻，`duration_ms` 在两者可得时由二者相减得到。工具完成来自 `ActionFinished(ToolExecution)`，`started_at_ms` 来自同一 action 的 `ActionStarted`，`finished_at_ms` 来自 `ActionFinished`；某 action 只有准入请求而尚无 `ActionStarted` 时起点为 null，`duration_ms` 在起点缺失或终点早于起点时不填写。
+Agent 协议现在要求 `ActionStarted`、`ActionFinished` 与 `SpeculativeAdmissionRequest` 携带接入侧测量的 Unix 毫秒时间戳；`Usage` 应关联 `action_id`，并携带接入侧的开始与结束时间；接入侧无法配对时仍上报用量，`action_id` 为 null。准入请求的 `timestamp_ms` 只表示投机起点：控制面登记 action 身份以便与后续结果配对，不再用该时间合成 action 的开始时间；工具真正开始的时间只来自接入侧真实的 `ActionStarted`。`model_usage` 按已知 SDK 字段映射 token 和 cost.total，字段未提供时仍返回 null，不补零；`started_at_ms` / `finished_at_ms` 来自 Usage 的接入侧起止时刻，`duration_ms` 在两者可得时由二者相减得到。工具完成来自 `ActionFinished(ToolExecution)`，`started_at_ms` 来自同一 action 的 `ActionStarted`，`finished_at_ms` 来自 `ActionFinished`；某 action 只有准入请求而尚无 `ActionStarted` 时起点为 null，`duration_ms` 在起点缺失或终点早于起点时不填写。
 
 ## 一次投机的结算（2026-11-10）
 
@@ -64,9 +64,11 @@ Tree 在 `insert_branch` 收到准入投机的起点时建立内部 `Speculation
 
 排查问题时可以混合检索三类记录；按事件重放界面状态时必须只使用第三类。
 
-## 模型 action 与 usage 的配对假设
+## 模型 action 与 usage 的配对
 
-Pi 接入在每个 Branch 内维护一个模型 action 的先进先出队列：模型推理前把 `action_id` 和开始时刻入队，`message_end` 时按顺序取出并发送 `Usage`。这只在同一 Branch 内模型推理串行时成立；同一 Branch 出现并发模型请求（例如并行工具触发的多个模型调用）时，`Usage` 可能与错误的 `action_id` 配对。控制面的 `model_usage` 原样使用接入侧给出的 `action_id`，不另行推断配对。
+Pi 接入在每个 Branch 内保存模型 action 队列：模型推理前把 `action_id` 和开始时刻入队，并发送 `ActionStarted`；assistant 的 `message_start` 标记队列中下一个尚未见到消息的 action，`message_end` 取走该 action 并发送 `Usage`。Pi 会在 `message_end` 之前用 `stream.result()` 结算模型流并调用 `beforeModelInference` 的完成回调，因此完成回调只发送 `ActionFinished`，不把仍可能收到消息的 action 出队；只有完全没有产生消息的请求（流创建前就抛错）才在完成回调中移除，避免它与后续消息错配。`message_start` / `message_end` 本身是 SDK 输出事件，不是推理前 Hook。
+
+如果一条 assistant 消息找不到被标记的 action（例如该调用没有经过 Hook），接入侧仍发送 `Usage`，`action_id` 为 null；控制面的 `model_usage` 原样使用接入侧给出的 `action_id`，不另行推断配对，也不伪造身份。同一 Branch 出现并发模型请求时，消息与 action 的对应仍以 `message_start` 的标记顺序为准；无法确定时上报 null，不猜测。
 
 时钟实现：接入侧用 `Date.now()` 产生 Unix 毫秒墙钟时间戳；模型结束时间优先用 SDK 以单调时钟测得的 `durationMs` 锚定在请求开始时刻，缺少时才退回结束时的墙钟。Action 耗时使用两个墙钟时间戳相减，因此墙钟回退时不填写而不是给出负值。上述时间表示接入侧观察到的请求开始、结果到达或提交时刻，不是控制面收到消息的时刻。
 
@@ -84,7 +86,7 @@ Ledger::reader 返回只读 LedgerReader；Ledger 和句柄均提供 state_event
 
 新增代码名和接口名需主 Agent 向用户确认，未将它们扩展为新的领域术语。
 
-本轮待确认代码名：StateEventSet / state_event_set / `/api/observation/state-event-set`（状态事件集直译）；LedgerReader / reader（Ledger 只读句柄）；append_observation（Ledger 观察追加入口）；pending_observations / drain_observations（Tree 待发队列与取走入口）；change_status / change_authority / emit_environment / resolve_candidate_with_reason（内部转换及明确原因入口）；flush_observations（控制循环交接）；ObservationBlock / ObservationIndex（私有不可变事件链及末端索引）；observation.rs（公共事件类型模块）；文件记录 message 的 observation 值（区分观察记录）。ObservationEvent、ObservationContent、ObservationAmount、run_view 和现有公共事件名沿用原名，仅移动职责或调用位置；没有新增公共事件名。上一轮新增待确认代码名：Agent 消息字段 `timestamp_ms`（接入侧事件时刻）、`started_at_ms` / `finished_at_ms`（Usage 的接入侧起止时刻），对话响应字段 `role` / `status`，以及 `tool_finished` 的 `duration_ms`。本轮新增待确认代码名：公共事件 `branch_created` 的 `speculation_started_at_ms`（投机起点）、`model_usage` 与 `tool_finished` 的源侧字段 `started_at_ms` / `finished_at_ms`、Tree 内部入口 `register_action`（登记 action 身份，不记录开始时间）及 `ToolPending` 的同名投机起点字段。`model_usage` 的 `action_id` 由可空改为必填字符串，沿用原名。2026-11-10 结算轮新增公共字段：`time_ms` 与 `money` 的 `measured` / `estimated`（替代原 `value` / `measured`）；内部名：`SpeculationRecord`、`ModelUsageFact`、`queue_settlement`、`fast_model_usage` 与模块 `settlement.rs`，`currency` 沿用原名但改为可空。
+本轮待确认代码名：StateEventSet / state_event_set / `/api/observation/state-event-set`（状态事件集直译）；LedgerReader / reader（Ledger 只读句柄）；append_observation（Ledger 观察追加入口）；pending_observations / drain_observations（Tree 待发队列与取走入口）；change_status / change_authority / emit_environment / resolve_candidate_with_reason（内部转换及明确原因入口）；flush_observations（控制循环交接）；ObservationBlock / ObservationIndex（私有不可变事件链及末端索引）；observation.rs（公共事件类型模块）；文件记录 message 的 observation 值（区分观察记录）。ObservationEvent、ObservationContent、ObservationAmount、run_view 和现有公共事件名沿用原名，仅移动职责或调用位置；没有新增公共事件名。上一轮新增待确认代码名：Agent 消息字段 `timestamp_ms`（接入侧事件时刻）、`started_at_ms` / `finished_at_ms`（Usage 的接入侧起止时刻），对话响应字段 `role` / `status`，以及 `tool_finished` 的 `duration_ms`。本轮新增待确认代码名：公共事件 `branch_created` 的 `speculation_started_at_ms`（投机起点）、`model_usage` 与 `tool_finished` 的源侧字段 `started_at_ms` / `finished_at_ms`、Tree 内部入口 `register_action`（登记 action 身份，不记录开始时间）及 `ToolPending` 的同名投机起点字段。`model_usage` 的 `action_id` 沿用原名，正常情况为模型 action id，无法配对时为 null。2026-11-10 结算轮新增公共字段：`time_ms` 与 `money` 的 `measured` / `estimated`（替代原 `value` / `measured`）；内部名：`SpeculationRecord`、`ModelUsageFact`、`queue_settlement`、`fast_model_usage` 与模块 `settlement.rs`，`currency` 沿用原名但改为可空。
 
 ## Pi 接入的 EOF 与退出
 
@@ -96,6 +98,8 @@ Ledger::reader 返回只读 LedgerReader；Ledger 和句柄均提供 state_event
 
 `cargo build` 通过；`cargo test --lib --bins` 为 140 项库测试与 1 项控制面测试通过，没有新增常驻测试。`/usr/bin/node --test tests/pi-access.mjs` 的 4 项接入回归通过；修复前用带 `destroyOnReturn:false` 的半成品连续运行 20 次有 2 次 admission 失败（均为 “integration did not exit after EOF”，不是 `AbortError`），修复后 100 次仅 admission 用例与 20 次完整测试均为 0 失败。用 HEAD 的默认迭代器连续运行 80 次 admission 用例未复现 `AbortError`，说明它是低频竞态而不是稳定失败；其机制由默认迭代器在干净 EOF 时销毁 socket 解释，修复保留 `destroyOnReturn:false` 并加上显式退出。
 
-临时序列化检查确认 `branch_created` 含 `speculation_started_at_ms`，`model_usage` 的 `action_id` 为字符串且携带 `started_at_ms` / `finished_at_ms`，`tool_finished` 在起点缺失时输出 null 且不计算 `duration_ms`。结算临时检查确认工具命中输出 `time_ms: {"measured":123.0,"estimated":null}`、`money` 两部分为 null 且币种为 null；模型未命中输出 `time_ms` 两部分为 null、`money: {"measured":-0.5,"estimated":null}`、币种 `USD`；同一 Branch 命中后再次进入 Discarded 不重复结算。
+模型用量漏报修复：`tests/pi-access.mjs` 新增一个伪造 SDK 用例，模拟 Pi 先结算模型流并调用完成回调、再发出 `message_end` 的真实顺序，另有一轮不经过 Hook 的 assistant 消息。修复前该用例稳定超时，收到的消息里只有 `action_started`、`action_finished`、`transcript` 与 `turn_completed`，没有 `usage`；修复后完成回调不再提前出队，配对用例的 `action_id` 与 `ActionStarted` 一致，未配对用例仍发送 `usage` 且 `action_id` 为 null。`cargo build`、`cargo test --lib --bins`（140 项库测试与 1 项控制面测试）通过；`node --test tests/pi-access.mjs` 的 5 项接入回归连续运行 20 次无失败。全程使用伪造模型与手工事件，没有真实调用模型。
+
+临时序列化检查确认 `branch_created` 含 `speculation_started_at_ms`，`model_usage` 的 `action_id` 正常为字符串、无法配对时为 null，并携带 `started_at_ms` / `finished_at_ms`，`tool_finished` 在起点缺失时输出 null 且不计算 `duration_ms`。结算临时检查确认工具命中输出 `time_ms: {"measured":123.0,"estimated":null}`、`money` 两部分为 null 且币种为 null；模型未命中输出 `time_ms` 两部分为 null、`money: {"measured":-0.5,"estimated":null}`、币种 `USD`；同一 Branch 命中后再次进入 Discarded 不重复结算。
 
 不运行真实模型、浏览器/TUI 人工交互或完整 Firecracker E2E；不处理该 E2E 既有 Unix socket 路径长度问题。

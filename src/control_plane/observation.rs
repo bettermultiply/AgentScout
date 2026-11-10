@@ -53,7 +53,9 @@ pub enum ObservationContent {
     },
     ModelUsage {
         branch_id: String,
-        action_id: String,
+        /// 这次调用对应的模型 action；接入侧无法配对时为 null，不伪造身份，
+        /// 也不会因此丢弃这次用量。
+        action_id: Option<String>,
         model: String,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
