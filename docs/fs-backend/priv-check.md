@@ -211,9 +211,9 @@ python3 scripts/test-priv-check.py
 
 每个失败场景都断言不出现 `ALL PRIVILEGED CHECKS PASSED`。
 
-## 已验证结果（2026-11-10，用户 `log-4.txt`）
+## 已验证结果（用户 2026-11-10 第四轮验证）
 
-- 784–787 行四项特权测试逐项 ok；816 行为 4 passed、0 failed、0 ignored。
+- 上文四项特权测试逐项 ok；4 passed、0 failed、0 ignored。
   三项 btrfs 测试均选中真实 btrfs 数据面，`incremental_diff=true`、
   `fast_delete=true`；状态目录位于根 btrfs 挂载，workspace 位于 `/tmp` tmpfs，
   默认配置的非重叠布局检查通过。
@@ -222,10 +222,13 @@ python3 scripts/test-priv-check.py
   两代视图、accept 回 child1 且 root 不变，以及环境/快照/trash 清空。
 - 原始 btrfs create、只读 snapshot、增量 send dump、严格子卷删除，以及脚本与
   Rust 的初始 user namespace 直接 `lower=/` 检查均通过。
-- 7 项进程测试全部通过、0 failed、0 ignored（591、617 行）；自动机制为 cgroup，
-  强制 `process_group` fallback 测试也通过（610 行）。
-- 脚本退出 0（830 行），汇总全部 PASS（835–848 行），最终为
+- 7 项进程测试全部通过、0 failed、0 ignored；自动机制为 cgroup，
+  强制 `process_group` fallback 测试也通过。
+- 脚本退出 0，汇总全部 PASS，最终为
   `ALL PRIVILEGED CHECKS PASSED`；不是只列出测试、SKIP 或仅编译成功。
+
+原始四份根目录日志已按用户要求删除；这里保留测试名、结果与验证边界，
+不再以已删除日志的行号作为当前引用。第四轮结果与修复分别记录于 `652f60c`、`8c54403`。
 
 ## 已知边界
 

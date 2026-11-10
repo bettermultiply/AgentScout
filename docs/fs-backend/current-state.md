@@ -12,7 +12,7 @@
   - **Flatten**：父 upper 整个复制（或可写快照）成子 upper；子 lower = 父 lower，
     不加入 S。链不增长，但子 upper 混着父的内容，diff/accept 要拿子 upper 与
     基准 S 比较，成本随 upper 条目数增长。fork 时需要复制父 upper，冻结窗口内
-    的复制成本更高。
+    的复制成本更高。这里只是不增加本次 fork 的层，不会压平或移除已继承的 lower 链。
   - 逐挂载布局规则：状态目录位于该挂载内（只可能由内部开关
     `allow_overlapping_state_directory=true` 制造）时强制 Flatten；否则用
     `upper_entry_count` 封顶计数，条目数 < `DEFAULT_FORK_FLATTEN_ENTRY_LIMIT`
@@ -76,8 +76,8 @@
   - 父 upper/lower 和挂载不变。
   - 链布局下 accept 优先走 `delta_since`（子 upper 只含本分支改动）；只有
     Flatten 才用 `btrfs_delta`（拿 S 全量与子 upper 比较）。否则 Chain 会把
-     父内容全部误判为删除。用户 `log-4.txt` 已验证两种布局与 mixed 的成功路径，
-     包括真实进程写入、精确 diff、accept 后真实视图及 discard 清理。
+    父内容全部误判为删除。用户 2026-11-10 第四轮验证已覆盖两种布局与 mixed 的成功路径，
+    包括真实进程写入、精确 diff、accept 后真实视图及 discard 清理。
   - btrfs 只有在 `incremental_diff=true` 时才被选为数据面；探测真实执行
     `btrfs send -p <snapshot> <snapshot> | btrfs receive --dump`。失败则降级
     overlay 并在日志/能力中说明。btrfs diff/accept 已实现：diff 解析 send dump，
@@ -112,7 +112,9 @@
   - btrfs：逐选中挂载只读子卷快照，不改 live upper。
   - 独立 mark 的层只表示该时刻的增量；空层在 diff/accept 中按空视图处理。
 - **diff**
-  - overlay：扫描分支 upper 增量，不读内容。
+  - 只表示当前环境相对 fork 基准（或指定快照基准）的变化，不支持比较另一个环境；
+    accept 的目标环境参数不受此限制。
+  - overlay Chain：扫描分支 upper 增量，不读内容；Flatten 比较当前 upper 与基准副本。
   - 对 in-lower 的 fork 基准，扫描 base 之后的 delta 层和当前 upper。
   - 对独立 mark 副本，比较当前 upper 与 mark 副本元数据，O(upper entries)。
   - btrfs：send dump 解析 create/modify/delete/rename/chmod/xattr，whiteout
@@ -198,8 +200,6 @@
 - accept 重放已支持修改/删除/创建/目录替换的逆序回滚，但仍非原子；并发读者
   可能观察到中间状态。
 - 有特权时直接 `lower=/`：只做了探测/高权限测试，未作为默认路径。
-- 跨 Backend 冻结/快照/解冻编排、cgroup 归属、进程停止归属、mount ns 是否拆成
-  独立 Backend：待用户决定。
 - **ProcessBackend 已实现**：`src/runtime/process/` 负责 spawn、MountSpec、bwrap
   `--json-status-fd`、进程组、cgroup 创建/加入/冻结/解冻/kill、内层 pid 与 mnt ns。
   FilesystemBackend 只产出 `LaunchFragment`。
@@ -227,7 +227,8 @@
   因子项增删而变化，而子项变化已经单独报告；因此目录比较只看 mode、kind 和
   overlay 标记，不把父目录时间戳变化算成额外 diff 项。文件仍比较 size/mtime。
 - Chain 布局的 lower 链每代加深一层；`MAX_LOWER_DEPTH=96` 只负责明确报错，
-  不实现整链合并。达到上限后需要换分支策略或把状态目录放到独立挂载。
+  不实现整链合并。达到上限后需要调整分支策略或在新基准上重建环境；搬移状态目录
+  不会缩短既有链，小 upper Flatten 也只是不再追加当前层。
 - Chain 的 diff 走 `delta_since`，会报告子 upper 中因写入而 copy-up 的祖先
   目录；btrfs Flatten/mixed 的 send dump 也报告父目录元数据变化。生产 diff 保留
   这些目录；测试按数据面和布局精确期待文件及父目录，重复、额外项或异常 old_path
@@ -241,9 +242,9 @@
 
 ## 特权验证结果与剩余边界
 
-用户第四轮 `log-4.txt` 已通过 `scripts/priv-check.sh`：784–787 行四个指定测试
-逐项 ok，816 行为 4 passed、0 failed、0 ignored；830 行退出 0，835–848 行全部
-检查 PASS。状态目录在根 btrfs 挂载，workspace 在独立 `/tmp` tmpfs 挂载，默认
+用户 2026-11-10 第四轮验证已通过 `scripts/priv-check.sh`：四个指定测试
+逐项 ok，4 passed、0 failed、0 ignored；脚本退出 0，全部检查 PASS。
+状态目录在根 btrfs 挂载，workspace 在独立 `/tmp` tmpfs 挂载，默认
 非重叠配置；三项 btrfs 测试均为 `incremental_diff=true`、`fast_delete=true`。
 
 - `priv_btrfs_chain_layout` / `priv_btrfs_flatten_layout`：分别强制 Chain / Flatten，
@@ -278,7 +279,8 @@ runtime::backends::filesystem::tests::privileged::priv_ --show-output
 --format=pretty --color=never --test-threads=1` 的 4 个测试。
 状态目录必须位于后端隔离的挂载之外，脚本和测试都会断言这一点。live mount
 重放不要求高权限，本机实际运行并通过。普通用户缺少 btrfs send/receive 权限时
-会打印 SKIP，不作为特权通过证据；特权通过证据来自用户 `log-4.txt`。
+会打印 SKIP，不作为特权通过证据；特权通过结果来自用户 2026-11-10 第四轮验证，
+测试名、结果与范围保留在本文及 `priv-check.md`，原始根目录日志已按用户要求删除。
 
 `check-test-output.py` 交叉核对精确发现名单、命令退出码、逐项结果和摘要，
 执行数、通过数、ignored 分开汇总，任何 SKIP 或组内错误均不打印该组 PASS。
@@ -646,8 +648,7 @@ lower 层，upper/work 位于同一 volume 子卷。
 
 ## D. 冻结（简单版）调研
 
-- 旧实现（已修正）：`BaseRuntime::suspend_with_context` 曾只改状态并委托
-  inner/filesystem，没有真正的 freeze。现在改为 ProcessBackend 真实 freeze/thaw。
+- `BaseRuntime::suspend_with_context` 经 ProcessBackend 执行真实 freeze/thaw。
 - **cgroup v2**：本机 `/sys/fs/cgroup` 根不可写，但当前进程所在的 delegated
   `.scope` 可创建子 cgroup、写入 `cgroup.procs`、写 `cgroup.freeze=1`，并观察到
   `cgroup.events` 中 `frozen 1`。实测成功（无需 sudo）。
@@ -715,8 +716,8 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 - **无特权、直接 lower=/：不可行**（根继承的 locked 子挂载）。
 - **无特权、新根/新挂载树：可行**。实验：pivot_root 到 userns 内新建的 tmpfs 根，
   子挂载也由 userns 创建（非 locked），`lowerdir=/` overlay 成功。
-- **有特权初始 userns：直接 lower=/ 可行**，用户 2026-11-09 的 `log.txt`
-  263–266、310–311 行分别记录脚本检查和 Rust direct-root 测试通过。
+- **有特权初始 userns：直接 lower=/ 可行**，用户 2026-11-10 第四轮验证的
+  脚本检查和 `priv_direct_root_overlay_is_available_in_initial_userns` 均通过。
 - **备选：逐挂载点 overlay**：可行，但必须处理 locked 子挂载和嵌套挂载。
 
 ### 嵌套/相邻挂载
@@ -773,11 +774,11 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | upper/work 在 lower 路径之下本身不会 EINVAL | **实测**：lower=/tmp、upper/work 在 /tmp 下成功 |
 | 根 `/` overlay EINVAL 来自 locked 子挂载 | **实测 + 源码**：open_tree(CLONE) on / = EINVAL；clone_private_mount/__do_loopback 的 has_locked_children 返回 EINVAL；pivot 到新根后 lower=/ 成功 |
 | 无特权新根（子挂载由 userns 创建）可 lower=/ overlay | **实测**：pivot_root 新 tmpfs 根，lower=/ overlay rc=0 |
-| 初始 userns 特权下 lower=/ 可行 | **用户实测**：2026-11-09 `log.txt` 脚本检查和 Rust direct-root 测试通过 |
+| 初始 userns 特权下 lower=/ 可行 | **用户实测**：2026-11-10 第四轮脚本检查和 `priv_direct_root_overlay_is_available_in_initial_userns` 通过 |
 | 相邻挂载同时 overlay | **实测**：bwrap 同时 overlay /home 与 /tmp，exit 0 |
 | 嵌套挂载在原始 mount 实验中可同时 overlay（先保存 child lower，再 parent，再 child） | **实测**：父子 tmpfs overlay 后两个文件都可见；当前 bwrap 参数实现未接入 |
 | 逐挂载 overlay 的挂载数/元数据成本 | **实测**：13 个可写挂载；200 次 mount+umount ~634ms；stat +34% |
-| btrfs fork/diff/accept/discard 端到端 | **用户实测**：`log-4.txt` Chain/Flatten/mixed 全通过，真实 btrfs `incremental_diff=true fast_delete=true`；accept 无 live target，随后真实启动确认视图，含清理断言 |
+| btrfs fork/diff/accept/discard 端到端 | **用户实测**：2026-11-10 第四轮 Chain/Flatten/mixed 全通过，真实 btrfs `incremental_diff=true fast_delete=true`；accept 无 live target，随后真实启动确认视图，含清理断言 |
 | upper/work 同 btrfs 子卷 | **实测**：旧创建路径 work→upper rename 稳定 errno 18，修复后真实 create/snapshot/rename/mark/reload 回归通过；恢复拒绝不兼容布局并保留数据 |
 | 测试结果校验不受日志交错影响 | **实测**：真实 libtest 交错输出先 red 后 green；24 个脚本场景覆盖非零退出、精确名单、逐项结果、摘要、ignored、SKIP |
 | 全部 overlay 目标就绪 | **实测**：`readiness_requires_every_overlay_and_decodes_mount_paths` 先 red 后 green；不延长轮询期限 |

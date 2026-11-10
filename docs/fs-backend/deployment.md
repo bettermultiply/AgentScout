@@ -28,10 +28,14 @@ replay journal）。当状态目录位于某个会被 Agent overlay 的挂载点
   复制进 child upper，子 lower = 父 lower；
 - 条目数 ≥ 阈值 → Chain：新增只读层 S 到子 lower，子 upper 为空。
 
+Flatten 只把父 upper 放进子 upper，保持继承的 lower 链不变；它不压平全部继承层，
+也不能消除已达到的链深度。
+
 阈值可由 `FilesystemConfig::fork_flatten_entry_limit` 覆盖（测试与基准；
 `0` = 总是 Chain，`usize::MAX` = 总是 Flatten），不进入外部配置文件。Chain
 每次会让该挂载的 lower 链加深一层；达到 `MAX_LOWER_DEPTH`（96，低于本机实测
-bwrap 上限 231/232 的一半）时 fork 返回明确错误，不会静默改成 Flatten。
+bwrap 上限 231/232 的一半）时，若再追加一层将超限，fork 返回明确错误，
+不会静默改成 Flatten。
 
 生产部署要求把状态目录放在**不会被 Agent overlay 的独立挂载点**上，例如：
 

@@ -499,13 +499,13 @@ Rust btrfs 测试却在 diff 断言失败、未到 accept。解析器未去掉 s
 
 # 2026-11-10：第四轮特权验证通过与范围
 
-用户 `log-4.txt` 784–787 行为 Chain、Flatten、mixed、direct-root 四测试逐项 ok，
-816 行为 4 passed、0 failed、0 ignored；三项 btrfs 场景均选中真实 btrfs，
+用户 2026-11-10 第四轮验证中 Chain、Flatten、mixed、direct-root 四测试逐项 ok，
+4 passed、0 failed、0 ignored；三项 btrfs 场景均选中真实 btrfs，
 `incremental_diff=true fast_delete=true`。状态目录位于根 btrfs 挂载，workspace 在
 独立 `/tmp` tmpfs，默认非重叠布局成立。7 项进程测试全通过、0 failed、0 ignored，
 自动机制为 cgroup，强制 process_group fallback 也通过。原始子卷创建、只读快照、
-增量 send dump、严格删除及初始 userns 直接 lower=/ 均通过；脚本 830 行退出 0，
-835–848 行全部 PASS，最终 `ALL PRIVILEGED CHECKS PASSED`。
+增量 send dump、严格删除及初始 userns 直接 lower=/ 均通过；脚本退出 0，
+全部 PASS，最终 `ALL PRIVILEGED CHECKS PASSED`。
 
 亲读 `tests/privileged.rs` 与 `tests/support.rs` 确认：Chain/Flatten 检查实际布局、
 真实进程修改/删除/新建、含父目录的精确 diff、accept 发布及后续真实视图与清理；
@@ -515,4 +515,18 @@ overlay 元数据、特殊文件/ACL/ownership、偶发超时根因或物化完�
 
 废弃的 `priv_btrfs_fork_diff_accept_discard` 已由 Chain/Flatten/mixed 三项替代，
 不再作为当前测试名单；先前失败与修复过程留在本文件，正式状态以第四轮证据为准。
-本次仅同步文档，不改代码、不重跑 Rust/特权测试、不提交；所有用户 `log*.txt` 保留。
+该次仅同步文档，不改代码、不重跑 Rust/特权测试、不提交；当时用户日志保留。
+
+# 2026-11-10：删除用户日志与 FS 状态文档复查
+
+用户明确授权删除根目录 `log.txt`、`log-2.txt`、`log-3.txt`、`log-4.txt`。
+删除前已读取第四轮结果并与当前特权测试及 `652f60c`、`8c54403` 核对；当前文档
+保留准确测试名、通过数、能力值和边界，不再依赖已删除日志的行号。上文旧日志名与
+行号只作为失败/修复历史标识，原文件已按用户要求删除。
+
+复查修正：状态目录重叠默认拒绝，只有内部测试/诊断开关允许 Flatten；小 upper
+Flatten 只避免追加当前层，不会压平全部继承层，搬移状态目录也不会缩短既有链。
+ProcessBackend 已承担启动、冻结、终止及 namespace 记录，不再将这些现成功能
+列在未实现清单；跨 Backend 编排进一步统一与逃出进程组的后代仍保留为真实边界。
+信号驱动 trash、元数据隔离失败关闭、diff 比较目标移除的既有决定保持不变。
+本次只删除四份指定日志、修改文档，不改生产代码、不运行 cargo 测试、不提交。

@@ -16,8 +16,10 @@ FilesystemBackend 不再 spawn、不再记录 pid/namespace，只产出 `LaunchF
 启动片段按挂载点生成 overlay，fork/mark/diff/accept 也按同一组挂载点处理。
 
 当后端状态目录位于某个被 overlay 的挂载点下时，该挂载点的快照层不能再作为
-lowerdir（OverlayFS 报 `Overlay directories may not overlap`）。此时 fork 把父
-upper 展平进 child upper，快照层只作为 diff/accept 的元数据；启动时该挂载点
+lowerdir（OverlayFS 报 `Overlay directories may not overlap`）。默认在建立环境和
+生成启动片段前拒绝这种重叠；只有内部测试/诊断开关
+`allow_overlapping_state_directory=true` 才允许 fork 把父 upper 展平进 child upper，
+快照层只作为 diff/accept 的元数据；启动时该挂载点
 只用宿主挂载点作 lower。其他挂载点按每次 fork 的逐挂载布局选择 lower 链或
 flatten（正常部署也会对小 upper 选择 flatten）。
 

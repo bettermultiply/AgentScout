@@ -20,7 +20,7 @@ namespace 后以 `/proc/<pid>/root` dirfd 为根、通过 `openat2(RESOLVE_IN_RO
 btrfs diff/accept 共用 send dump 增量视图：从 snapshot 声明取得根前缀，按
 `rename <source> dest=<target>` 跟踪临时 inode 名称、真实 rename 和删除，普通
 变更统一输出 `change`。真实目录 rename 只读取目标子树以补足没有独立 send
-命令的未修改子项，不扫描无关 upper。用户 `log-4.txt` 已验证真实 btrfs
+命令的未修改子项，不扫描无关 upper。用户 2026-11-10 第四轮验证已覆盖真实 btrfs
 Chain/Flatten/mixed 的 fork、真实进程写入、精确 diff、accept 后真实视图与 discard
 清理（`incremental_diff=true fast_delete=true`），以及初始 userns 的 direct root
 overlay；4 项特权测试全通过、0 failed、0 ignored，脚本退出 0。accept 场景无
