@@ -37,7 +37,7 @@ cargo run --example policy -- evaluate /tmp/opencode/policy.json extent assets/p
 
 ## 2. 首版 YAML 与调用约定
 
-完整示例见 `assets/policy/policy.yaml` 和 `assets/policy/decisions.py`。顶层必需字段是 `version: 1`、`language: python`、`files`、`fidelity: Best-effort`、`decisions`。可选顶层字段 `runtime` 指定该 Policy 使用的 Runtime 配置路径，路径按控制面当前工作目录解析；控制面优先使用 `ASCOUT_RUNTIME_CONFIG` 覆盖。示例默认 `select` 的 `max_edges: 0`，即不选择任何待选 Edge，保持普通执行；改成 `1` 后可允许一个候选进入投机路径。
+完整示例见 `assets/policy/policy.yaml` 和 `assets/policy/decisions.py`。顶层必需字段是 `version: 1`、`language: python`、`files`、`fidelity: Best-effort`、`decisions`。可选顶层字段 `runtime` 指定该 Policy 使用的 Runtime 配置路径，路径按控制面当前工作目录解析；控制面优先使用 `ASCOUT_RUNTIME_CONFIG` 覆盖。示例默认 `select` 的 `max_edges: 0`，即不选择任何待选 Chance，保持普通执行；改成 `1` 后可允许一个候选进入投机路径。
 
 每个函数绑定使用 `file`、`function`，可选 `policy_config` 和 `inputs`：
 

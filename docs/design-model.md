@@ -54,7 +54,7 @@ Agent 默认无需感知背后的投机分支，仍可按原方式完成任务�
 6. **验证**：获取用于验证 Proposal 的权威依据，并按 Policy 规定的条件判断 Proposal 是否兼容或达到可接受标准。权威依据可以来自 Authority 提供的真实执行、用户输入、环境反馈或远程服务；Authority 可以为空，此时由独立的 validator 或其他可接受性判断完成验证。
 7. **处置与提交**：根据验证结果复用、继续、取消、重新执行、清理、残值回收、补偿或以其他方式处理投机工作，并将符合条件的结果、状态变化和外部效果纳入后续执行；没有需要提交的结果或副作用时，可以不设置独立的提交阶段。
 
-这些阶段在职责和实现上相互独立，每个阶段中都有多个决策点(Policy decision)，Policy 可以选择、替换和组合它们，但并不意味着阶段之间完全分离。例如，基于 Proposal 的投机工作需要先获得某种暂时依据；没有权威依据时，验证必须改用 validator 或其他可接受性判断；结果和副作用在满足相应条件前不能进入最终执行状态。Policy 决定执行策略，Mechanism 保证策略在既定约束内执行。这些决策点的组合视图（决策面）与其作用对象投机边，见 §3.1。
+这些阶段在职责和实现上相互独立，每个阶段中都有多个决策点(Policy decision)，Policy 可以选择、替换和组合它们，但并不意味着阶段之间完全分离。例如，基于 Proposal 的投机工作需要先获得某种暂时依据；没有权威依据时，验证必须改用 validator 或其他可接受性判断；结果和副作用在满足相应条件前不能进入最终执行状态。Policy 决定执行策略，Mechanism 保证策略在既定约束内执行。这些决策点的组合视图（决策面）与其作用对象 Chance，见 §3.1。
 
 ## 3. 支撑模型
 
@@ -66,7 +66,7 @@ Edge 是描述投机如何进行的抽象模型，给出这一通用过程的形
 
 九类 Policy Decision 的语义定义在 Edge 模型上，运行时作用于具体的 Chance。Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策，通过对不同 Policy Decision 的组合可以生成不同的执行策略。单个 Chance 上的局部决策、跨 Chance 的全局选择和已启动工作的调整由九类 policy decision 刻画：`admit`、`select`、`rebalance`、`extent`、`predict`、`launch`、`effect`、`match`、`dispose`。对每个 decision 的详细描述见 [Policy Decisions 设计](design/policy-decisions.md)。
 
-组合与嵌套：同一 Chance 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的投机机会（admit 后成为新的 Chance），由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定或发生变化都会使依赖它的后续工作失效；当前阶段不修复或重新对齐这类 Branch。父 Proposal 被确认时，原父 Branch 的执行延续成为权威路径，仍有未决依赖的后代 Branch 保留原有隔离环境和执行进展并重新挂到该权威执行延续之下；后代 Branch 只有在自身依赖清空后才具备提交资格。AScout 以树形、single-winner 和受控信息流约束这些关系；当前 task 内的嵌套 Edge 使用同一个 Policy。Proposal 依赖、确认与否定、Branch 取消、父 Branch salvage 以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
+组合与嵌套：同一 Chance 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的投机机会（admit 后成为新的 Chance），由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定或发生变化都会使依赖它的后续工作失效；当前阶段不修复或重新对齐这类 Branch。父 Proposal 被确认时，原父 Branch 的执行延续成为权威路径，仍有未决依赖的后代 Branch 保留原有隔离环境和执行进展并重新挂到该权威执行延续之下；后代 Branch 只有在自身依赖清空后才具备提交资格。AScout 以树形、single-winner 和受控信息流约束这些关系；当前 task 内的嵌套 Chance 使用同一个 Policy。Proposal 依赖、确认与否定、Branch 取消、父 Branch salvage 以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
 
 ### 3.2 状态与效果
 

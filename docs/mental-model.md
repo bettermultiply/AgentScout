@@ -26,7 +26,7 @@ Agent 以 action 及其结果报告执行事实，action 不限于工具调用�
 
 投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 待选准入 -> 启动选择 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。AScout 可以暂存已经准入但尚未启动的机会；一个 task / AScoutAgent 绑定的 Policy 在该 task 内全部有效待选机会之间选择现在启动哪些，并可以调整已经运行或暂停的投机工作。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、Promote 或结束。Parent 得到真实结果后立即继续，候选验证可并行进行；合法 Promote 才停止旧 Parent。工具准入与结果兼容性由 Policy 结合实际能力判断，不由固定工具数量或结果类型代替策略决策。
 
-Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Agent 接入侧负责 Agent 内部会话和行为接入；Runtime 承载动作并提供隔离、资源和效果边界；控制面负责全局编排、校验和裁决。Runtime Adapter 是 Runtime 的接入边界，不是与 Runtime 平级的另一套 Runtime。Speculation Contract 约束 Policy、控制面和 Runtime 之间的可观察语义；Runtime 内部可以组合不同的执行和效果管理能力。
+Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Agent 接入侧负责 Agent 内部会话和行为接入，并由与产品无关的通用层和产品专用的 Product Integration 组成——`extent`、`effect` 等本地 Decision 由通用层求值，Product Integration 只把产品执行点接入并执行处置结果，其余依赖全局状态的 Decision 由控制面求值；Runtime 承载动作并提供隔离、资源和效果边界；控制面负责全局编排、校验和裁决。Runtime Adapter 是 Runtime 的接入边界，不是与 Runtime 平级的另一套 Runtime。Speculation Contract 约束 Policy、控制面和 Runtime 之间的可观察语义；Runtime 内部可以组合不同的执行和效果管理能力。
 
 创建 task 时即建立对应的 Speculative Tree。树拥有该 task 的投机控制状态，其方法检查合法转换；Policy 函数计算策略选择。Controller 可以协调多棵树，不保存具体 task 的投机状态。同一 task 由消息和定时器触发顺序处理，耗时操作异步返回；Agent 的普通执行由接入侧负责。
 
@@ -36,7 +36,7 @@ Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面
 
 AScout 用三个支撑模型承接不同投机执行策略在预测、验证、拓扑和处置等方面的差异：
 
-- **投机过程与 Policy Decisions**：Edge 是描述投机如何进行的抽象模型，九类 Policy Decision 定义在它之上；其具体实例 Chance（被 admit 接纳的投机机会）是运行时 Decision 的作用对象；Branch 承载某次具体执行，Candidate 只是 Branch 角色。开发者可以根据任务、上下文、资源和 Runtime 能力，通过组合 Policy Decision 设计可替换的决策 Policy，并处理多次投机的组合与嵌套。
+- **投机过程与 Policy Decisions**：Edge 是描述投机如何进行的抽象模型，给出通用过程形状，九类 Policy Decision 定义在它之上；它不是运行时对象，没有 id。Edge 的具体实例 Chance 是被 `admit` 接纳的投机机会：从 `admit` 通过时获得 id，直到验证后被接受或抛弃、过程收敛为止；一个 Chance 下可有多个 Proposal 和多个 Branch，运行时 Decision 作用于 Chance。候选 Branch 上再次被接纳的机会与无嵌套时同理，仍是 Chance 模型的具体实例。Branch 承载某次具体执行，Candidate 只是 Branch 角色。开发者可以根据任务、上下文、资源和 Runtime 能力，通过组合 Policy Decision 设计可替换的决策 Policy，并处理多次投机的组合与嵌套。
 - **状态与效果**：把投机执行过程中需要保护的文件、进程、输入、结果和外部服务交互放入统一的管理框架。Agent Session 内部状态由接入侧管理；Runtime 提供动作承载和效果边界，根据需要组合隔离、暂存、延迟、阻塞、补偿或清理能力。
 - **Speculation Contract**：约束 Policy、控制面与 Runtime 之间语义对齐的契约；Runtime Adapter 负责把 Runtime 的能力、结果和事件接入这条可检查、可执行的路径，并让拒绝或降级原因可见。
 
@@ -75,6 +75,8 @@ task
 `task` 是 session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。task 准入时绑定 Policy 及其 task-level 配置，并建立初始 Agent，称为 root Authority Instance。在运行过程中，随着投机执行的不断发生和结束，Authority Instance 不断变化，由此形成树形结构。树中的每个子树都称为 `Branch`。`Branch` 是树中的计算延续，也是投机世界的结构实体；Branch 对应的根节点称为 `Branch Root`。`Branch Root` 具有稳定 identity 并直接拥有该根的 local state；`Instance` 是由 Runtime 承载 Branch Root 执行活动的实际执行单元。逻辑 Branch 可以在没有立即建立独立 Instance 的情况下先存在并推进，直到其状态或效果要求独立 Runtime 环境。
 
 对外，为只呈现一个单一 Agent，这个统一视图称为 `AScoutAgent`。端用户通过主对话直接操作当前有效的权威执行主线；另可只读观察候选 Branch 的运行状态与内容；候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份，以了解投机是否真实发生及其处理过程。观察不形成另一条用户对话，不表示候选已被接受，也不改变 Branch 的裁决权限或向其他 Branch 传播候选内容。一个 task 对应一个 AScoutAgent，一个 AScoutAgent 拥有一棵 Speculative Tree；控制面拥有 Tree、Branch 关系、逻辑推进和实际环境对齐状态，已建立 Instance 的实际执行、资源和隔离状态位于 Runtime，控制面只能通过 Adapter 观察所需结果。
+
+控制面在运行时以三类状态描述一次投机，它们分别回答不同问题：`ChanceStage` 属于 Chance，说明该投机机会从待选到收敛走到哪一步、最终是否被接受；`AuthorityState` 也属于 Chance，说明其权威值是否已请求和到达，与机会的运行并行；`BranchStatus` 属于 Branch，合并生命周期与运行状态，说明承载具体执行的 Branch 当前处于何处。三类状态不能互相替代。
 
 用户端保持稳定的 AScoutAgent 交互入口，不绑定某个后端 Agent session。合法 Promote 改变该视图对应的权威执行及输入输出路由，不要求用户切换对话，也不以候选会话结束为前提；候选保留自己的执行状态和在飞进展，接受与效果约束仍然有效。
 
