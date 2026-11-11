@@ -78,6 +78,12 @@ impl Task<'_> {
                 self.interface.message(self.ledger, &message)?;
                 if !matches!(message, AgentMessage::Output { .. }) {
                     let mut fact = serde_json::to_value(&message)?;
+                    if let AgentMessage::Transcript { entry, .. } = &message {
+                        fact.as_object_mut().unwrap().remove("entry");
+                        if let Some(role) = entry.get("role").and_then(Value::as_str) {
+                            fact["role"] = json!(role);
+                        }
+                    }
                     fact["source"] = json!("agent_adapter");
                     self.record(fact)?;
                 }

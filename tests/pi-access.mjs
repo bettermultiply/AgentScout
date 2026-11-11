@@ -4,7 +4,16 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+
+const REAL_PI = '/home/betmul/BETMUL/AgentScout-suit/pi';
+
+function readTree(file) {
+    const script = `import { SessionManager } from '${REAL_PI}/packages/coding-agent/src/core/session-manager.ts'; const m=SessionManager.open(process.argv[1]); console.log(JSON.stringify({entries:m.getEntries(),messages:m.buildSessionContext().messages}));`;
+    const result = spawnSync(process.execPath, ['--no-warnings', '--experimental-strip-types', '--import', `${REAL_PI}/packages/coding-agent/src/experimental/source-resolver.ts`, '--input-type=module', '-e', script, file], {encoding:'utf8'});
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+}
 
 for (const shutdownAt of ['completed', 'tool_wait', 'candidate_gate', 'admission']) {
 test(`runtime result commands and graceful shutdown at ${shutdownAt}`, async t => {
@@ -16,16 +25,19 @@ test(`runtime result commands and graceful shutdown at ${shutdownAt}`, async t =
     await writeFile(join(root, 'node_modules/typebox/index.js'), 'exports.Type={Unsafe:x=>x};');
     // A deterministic SDK double: one turn waits for a real runtime result.
     await writeFile(join(root, 'packages/coding-agent/src/index.ts'), `
-export const SessionManager = {inMemory:()=>({messages:[],appendMessage(m){this.messages.push(m)}})}, ModelRuntime = {}, resolveCliModel = () => ({});
+ import { SessionManager } from '${REAL_PI}/packages/coding-agent/src/core/session-manager.ts';
+ export { SessionManager };
+ export const ModelRuntime = {}, resolveCliModel = () => ({});
 export async function createAgentSession(options) {
     const tool = options.customTools[0];
     const controller = new AbortController();
     let subscriber = () => {};
     const session = {
-        agent: {}, messages: options.sessionManager?.messages ?? [], subscribe(fn) {subscriber=fn}, dispose() {}, async abort() {controller.abort()},
+         agent: {}, messages: options.sessionManager ? options.sessionManager.buildSessionContext().messages : [], subscribe(fn) {subscriber=fn}, dispose() {}, async abort() {controller.abort()},
         async continue() { return session.prompt('candidate'); },
         async prompt() {
-            const toolCall = {id:options.sessionManager?'operation-2':'operation-1',name:'runtime_tool'};
+             const isCandidate = options.sessionManager?.buildSessionContext().messages.some(m => m.role === 'toolResult');
+             const toolCall = {id:isCandidate?'operation-2':'operation-1',name:'runtime_tool'};
             const finishModelInference = await options.beforeModelInference?.(
                 {provider:'test',id:'test'},
                 {messages:session.messages},
@@ -59,8 +71,8 @@ export async function createAgentSession(options) {
         });
     });
     await new Promise(resolve => server.listen(socketPath, resolve));
-    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', resolve('agent-access/pi/main.ts'), socketPath, 'agent'], {
-        env: { ...process.env, ASCOUT_PI_ROOT: root, ASCOUT_RUNTIME_TOOLS: JSON.stringify([
+    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', '--import', `${REAL_PI}/packages/coding-agent/src/experimental/source-resolver.ts`, resolve('agent-access/pi/main.ts'), socketPath, 'agent'], {
+         env: { ...process.env, ASCOUT_PI_ROOT: root, ASCOUT_SESSION_FILE: join(root, 'session.jsonl'), ASCOUT_RUNTIME_TOOLS: JSON.stringify([
             {name:'runtime_tool',description:'test',parameters:{type:'object'}}
         ]) }, stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -163,6 +175,36 @@ export async function createAgentSession(options) {
         command_id:'resolve-2',generation:2,outcome:{payload:'candidate-real-result'}});
     await expectMessage(m => m.message === 'action_finished' && m.action_kind === 'tool_execution' && m.branch_id === 'candidate');
     await expectMessage(m => m.message === 'turn_completed' && m.branch_id === 'candidate');
+    if (shutdownAt === 'completed') {
+        const treeFile = join(root, 'session.jsonl');
+        const tree = readTree(treeFile);
+        const transcripts = messages.filter(m => m.message === 'transcript');
+        assert.ok(transcripts.length >= 3);
+        for (const transcript of transcripts) {
+            assert.equal(typeof transcript.session_entry_id, 'string');
+            const entry = tree.entries.find(e => e.id === transcript.session_entry_id);
+            assert.deepEqual(entry?.message, transcript.entry);
+        }
+        const authorityTranscript = transcripts.find(m => m.branch_id === 'authority' && m.entry.content?.some(p => p.type === 'toolCall' && p.id === 'operation-1'));
+        const paired = transcripts.find(m => m.branch_id === 'candidate' && m.entry.role === 'toolResult');
+        assert.ok(authorityTranscript && paired);
+        const authorityEntry = tree.entries.find(e => e.id === authorityTranscript.session_entry_id);
+        const pairedEntry = tree.entries.find(e => e.id === paired.session_entry_id);
+        assert.equal(pairedEntry.parentId, authorityEntry.id);
+        const marker = tree.entries.at(-1);
+        assert.equal(marker.customType, 'authority');
+        assert.equal(marker.data.branch_id, 'candidate');
+        const candidateTail = transcripts.filter(m => m.branch_id === 'candidate').at(-1);
+        assert.equal(marker.data.parentId, candidateTail.session_entry_id);
+        assert.equal(marker.parentId, candidateTail.session_entry_id);
+        assert.deepEqual(tree.messages.map(m => m.role), ['assistant', 'toolResult', 'assistant']);
+        // Every reported record stays in the file, including the Authority's own
+        // records that are not on the promoted path.
+        for (const transcript of transcripts) assert.ok(tree.entries.some(e => e.id === transcript.session_entry_id));
+        const authorityRecords = transcripts.filter(m => m.branch_id === 'authority');
+        assert.ok(authorityRecords.length >= 1);
+        for (const record of authorityRecords) assert.ok(tree.entries.some(e => e.id === record.session_entry_id));
+    }
     // Closing the controller's write half must let the integration drain its
     // output and exit without an unhandled rejected write.
     await finish(['candidate','authority']);
@@ -179,8 +221,10 @@ test('model usage survives completion before message_end and reports an unpaired
     // Pi settles the model stream and invokes the beforeModelInference completion
     // callback before the agent loop emits message_end. A second prompt reports a
     // model message that never went through the hook at all.
-    await writeFile(join(root, 'packages/coding-agent/src/index.ts'), `
-export const SessionManager = {inMemory:()=>({messages:[],appendMessage(m){this.messages.push(m)}})}, ModelRuntime = {}, resolveCliModel = () => ({});
+     await writeFile(join(root, 'packages/coding-agent/src/index.ts'), `
+ import { SessionManager } from '${REAL_PI}/packages/coding-agent/src/core/session-manager.ts';
+ export { SessionManager };
+ export const ModelRuntime = {}, resolveCliModel = () => ({});
 export async function createAgentSession(options) {
     const controller = new AbortController();
     let subscriber = () => {};
@@ -228,8 +272,8 @@ export async function createAgentSession(options) {
         });
     });
     await new Promise(resolve => server.listen(socketPath, resolve));
-    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', resolve('agent-access/pi/main.ts'), socketPath, 'agent'], {
-        env: { ...process.env, ASCOUT_PI_ROOT: root, ASCOUT_RUNTIME_TOOLS: '[]' }, stdio: ['ignore', 'pipe', 'pipe']
+    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', '--import', `${REAL_PI}/packages/coding-agent/src/experimental/source-resolver.ts`, resolve('agent-access/pi/main.ts'), socketPath, 'agent'], {
+         env: { ...process.env, ASCOUT_PI_ROOT: root, ASCOUT_SESSION_FILE: join(root, 'session.jsonl'), ASCOUT_RUNTIME_TOOLS: '[]' }, stdio: ['ignore', 'pipe', 'pipe']
     });
     let stderr = '';
     child.stderr.on('data', chunk => stderr += chunk);

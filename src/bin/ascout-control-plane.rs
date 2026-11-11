@@ -326,6 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_args.push("--thinking".into());
         agent_args.push(thinking);
     }
+    let session_file = run_dir.join("session.jsonl");
     let agent_launch = AgentLaunch {
         command: resolve_node()?.display().to_string(),
         args: agent_args,
@@ -336,11 +337,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("ASCOUT_RUNTIME_TOOLS".into(), runtime_tools),
             ("ASCOUT_PI_ROOT".into(), pi_root.display().to_string()),
             ("ASCOUT_TASK_ID".into(), tree.execution_id.clone()),
+            (
+                "ASCOUT_SESSION_FILE".into(),
+                session_file.display().to_string(),
+            ),
         ]),
     };
     let (events, receiver) = mpsc::channel();
     let requests = events.clone();
     let mut ledger = Ledger::open(&run_dir.join("events.jsonl"))?;
+    ledger.record(json!({
+        "source": "control_plane",
+        "message": "session_file",
+        "task_id": tree.execution_id,
+        "session_file": session_file,
+    }))?;
     let interface =
         ui::Interface::new(tree.execution_id.clone(), ledger.reader(), move |request| {
             requests

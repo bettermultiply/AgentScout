@@ -654,6 +654,8 @@ pub enum AgentMessage {
     },
     Transcript {
         branch_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_entry_id: Option<String>,
         entry: Value,
     },
     BranchReleased {

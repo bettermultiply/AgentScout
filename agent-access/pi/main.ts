@@ -8,11 +8,15 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { evaluatePolicyArtifact } from '../../../pi/packages/ascout-agent-access/src/local-policy.ts';
 import { createAgentAccess } from '../core/index.ts';
+import { SessionTree } from './session-tree.ts';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
 const require = createRequire(resolve(root, 'package.json'));
 const { createAgentSession, SessionManager, ModelRuntime, resolveCliModel } = require(resolve(root, 'packages/coding-agent/src/index.ts'));
+const sessionFile = process.env.ASCOUT_SESSION_FILE;
+if (!sessionFile) throw Error('ASCOUT_SESSION_FILE is required');
+const tree = new SessionTree(SessionManager.open(sessionFile));
 const { Type } = require('typebox');
 const args = process.argv.slice(2);
 const socketPath = args.shift();
@@ -36,6 +40,7 @@ if (modelPattern) {
     if (resolved.error || !resolved.model) throw Error(resolved.error ?? 'Unknown model');
     model = resolved.model;
 }
+tree.initialize(model,thinkingLevel);
 const sessions = new Map(), checkpoints = new Map(), results = new Map(), waiters = new Map(), resultWaiters = new Map();
 const cancelled = new Set(), generations = new Map(), commands = new Map();
 const activeActions = new Map(), reportedActions = new Set();
@@ -52,7 +57,7 @@ const capabilities = {
     cancelCompletion:true,
     toolResultInjection:true,
 };
-let authority = 'authority', closing = false, outgoing = Promise.resolve();
+let authority = tree.authority, closing = false, outgoing = Promise.resolve();
 const socket = connect({path:socketPath,allowHalfOpen:true});
 await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject)});
 let transportError;
@@ -139,7 +144,8 @@ function install(session,branch) {
             if(checkpoint)return checkpoint;
             saved=structuredClone(session.messages.filter(m=>m.role!=='custom'));
             checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${context.toolCall.id}:${saved.length}`};
-            checkpoints.set(key(branch,context.toolCall.id),{saved,checkpoint});
+            const treeTail=tree.assertCheckpoint(branch,saved);
+            checkpoints.set(key(branch,context.toolCall.id),{saved,checkpoint,treeTail});
             return checkpoint;
         };
         await access.beforeAction({
@@ -182,7 +188,8 @@ function install(session,branch) {
         }
         if(event.type==='message_update'&&event.assistantMessageEvent.type==='text_delta')void report({message:'output',branch_id:branch,text:event.assistantMessageEvent.delta});
         if(event.type==='message_end'){
-            void report({message:'transcript',branch_id:branch,entry:event.message});
+            const session_entry_id=tree.append(branch,event.message);
+            void report({message:'transcript',branch_id:branch,entry:event.message,session_entry_id});
             if(event.message.role==='assistant'){
                 const pending=modelActions.get(branch),index=pending?.findIndex(action=>action.seen_message)??-1;
                 const action=index>=0?pending.splice(index,1)[0]:undefined;
@@ -202,6 +209,7 @@ async function run(session,branch,operation) {
     const last=[...session.messages].reverse().find(m=>m.role==='assistant');
     if(last?.stopReason==='error')await report({message:'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
     await report({message:'turn_completed',branch_id:branch});
+    if(branch===authority)tree.settle();
 }
 // A turn may wait for a later control command (runtime result, Promote or
 // Abort). Keep setup ordered, but never hold the command queue for the turn.
@@ -220,7 +228,9 @@ async function handle(command) {
         case 'local_policy':
             return;
         case 'start_branch': {
-            const {session}=await createAgentSession({cwd:command.workspace,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+            const manager=SessionManager.inMemory(command.workspace);
+            for(const message of tree.context(branch).messages)manager.appendMessage(message);
+            const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){session.dispose();return}
             sessions.set(branch,session);install(session,branch);
             await report({message:'branch_created',branch_id:branch});
@@ -257,13 +267,15 @@ async function handle(command) {
             }
             const manager=SessionManager.inMemory(command.workspace);
             for(const message of [...messages,...paired])manager.appendMessage(message);
+            tree.fork(branch,checkpoint.treeTail);
+            const pairedEntryIds=paired.map(entry=>tree.append(branch,entry));
             await access.control(command);
             const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){session.dispose();return}
             sessions.set(branch,session);install(session,branch);
             await report({message:'branch_created',branch_id:branch});
             // Injected result is new candidate content, not copied from the Parent.
-            for(const entry of paired)await report({message:'transcript',branch_id:branch,entry});
+            for(let i=0;i<paired.length;i++)await report({message:'transcript',branch_id:branch,entry:paired[i],session_entry_id:pairedEntryIds[i]});
             await report({message:'branch_started',branch_id:branch});
             await report({message:'branch_ready',branch_id:branch});
             executeTurn(session,branch,()=>session.continue());return;
@@ -278,19 +290,19 @@ async function handle(command) {
         }
         case 'promote':
             if(cancelled.has(branch)||!sessions.has(branch))throw Error('Branch unavailable');
-            authority=branch;return;
+            authority=branch;tree.promote(branch);tree.settle();return;
         case 'abort':
             aborting.add(branch);
             try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled'); }
             finally { aborting.delete(branch); }
             return;
-        case 'discard': cancelled.add(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');return;
+        case 'discard': cancelled.add(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;
         case 'cleanup':
             cancelled.add(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);modelActions.delete(branch);
             await finishActions(branch,'cancelled');
             for(const id of checkpoints.keys())if(JSON.parse(id)[0]===branch)checkpoints.delete(id);
             await report({message:'agent_session_released',branch_id:branch});
-            await report({message:'branch_released',branch_id:branch});return;
+            await report({message:'branch_released',branch_id:branch});tree.settle();return;
         default:throw Error(`Unknown command ${command.command}`);
     }
 }
@@ -334,6 +346,7 @@ try{
 }finally{
     closing=true;access.releaseAll();
     await commandQueue.catch(()=>{});
+    tree.settle();
     await Promise.allSettled([...sessions.values()].map(s=>s.abort()));
     await Promise.allSettled(tasks);for(const session of sessions.values())session.dispose();
     for(const branch of sessions.keys())await finishActions(branch,'cancelled');
