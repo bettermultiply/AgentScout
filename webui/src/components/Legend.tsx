@@ -15,31 +15,31 @@ export function Legend() {
       <summary>图例</summary>
       <div className="legend-body">
         <section>
-          <h4>树枝（一个 Branch）</h4>
+          <h4>大枝（一个 Branch）</h4>
           <p className="legend-note">
-            权威路径是居中的主干；投机候选从主干或父候选分叉，按子树大小分配到左右两侧斜向下生长。纵向只表示调用顺序，长度不代表时间；分支名不显示。
+            树从根 Branch 自上而下生长。子枝从父枝上“创建它时的调用位置”分叉，分叉点固定；权威切换只改变颜色和粗细，不移动任何枝干。只有新增兄弟分支时才可能重新分配左右。纵向只表示调用顺序，长度不代表时间；分支名不显示。
           </p>
           <ul>
             <li>
               <span className="legend-trunk legend-trunk-authority" aria-hidden="true" />
-              权威树枝：实色，更粗
+              权威大枝：实色，更粗
             </li>
             <li>
               <span className="legend-trunk legend-trunk-candidate" aria-hidden="true" />
-              投机候选：同色系空心描边，运行中轻微脉动
+              投机候选：同色系细描边，运行中轻微脉动
             </li>
             <li>
               <span className="legend-trunk legend-trunk-abandoned" aria-hidden="true" />
-              已抛弃：灰色降透明度
+              已抛弃：灰色、降低透明度
             </li>
             <li>
               <span className="legend-head" aria-hidden="true">
-                <StatusIcon status="running" size={18} />
+                <StatusIcon status="running" size={10} />
                 <span className="legend-head-reason">
-                  <ReasonIcon reason="tool" size={11} />
+                  <ReasonIcon reason="tool" size={6} />
                 </span>
               </span>
-              树枝头部：生命周期状态 + 投机原因；点击进入详情顶部
+              枝头：紧凑状态标记 + 投机原因；点击进入详情顶部
             </li>
             <li>
               <span
@@ -48,7 +48,7 @@ export function Legend() {
               >
                 ✓
               </span>
-              头部旁的结算标记：命中；未命中为红色 ✕
+              枝头旁的结算标记：命中；未命中为红色 ✕
             </li>
           </ul>
         </section>
@@ -57,37 +57,31 @@ export function Legend() {
           <ul>
             <li>
               <TwigSample />
-              每次模型调用一根小枝条，末端小叶表示结果；比叶子大、比树枝细
+              每次模型调用一根小枝条，末端小圆点表示结果；比大枝细
             </li>
           </ul>
           <p className="legend-note">
-            悬停显示模型名、token、耗时与费用；缺失字段显示“未上报”。连续同模型调用合并为一条并带计数，悬停展开完整列表。点击定位到详情中的这次调用。
+            模型调用之后的工具调用挂在这根小枝条上；下一次模型调用开始新的小枝条。悬停显示模型名、token、耗时与费用；缺失字段显示“未上报”。连续同模型调用合并为一根并带计数。点击定位到详情中的这次调用。
           </p>
         </section>
         <section>
           <h4>叶子（工具调用）</h4>
           <ul>
             <li>
-              <span
-                className="legend-leaf tree-leaf leaf-tool tone-success"
-                aria-hidden="true"
-              >
+              <span className="legend-leaf tone-success" aria-hidden="true">
                 <span className="leaf-shape" />
               </span>
-              成功：绿色方形叶子
+              成功：绿色叶子
             </li>
             <li>
-              <span
-                className="legend-leaf tree-leaf leaf-tool tone-danger"
-                aria-hidden="true"
-              >
+              <span className="legend-leaf tone-danger" aria-hidden="true">
                 <span className="leaf-shape" />
               </span>
               失败：红色；取消为灰色，超时为黄色
             </li>
           </ul>
           <p className="legend-note">
-            沿树枝的每次工具调用是一片叶子，悬停显示工具名、状态与耗时。连续同名且同结果的调用合并为一片并带计数，悬停展开完整列表。点击定位到详情中的这次调用。
+            工具调用是叶子：第一次模型调用之前的工具叶子直接长在枝干上，之后的叶子长在所属模型的小枝条上。悬停显示工具名、状态与耗时。连续同名且同结果的调用在同一根小枝条内合并为一片并带计数。点击定位到详情中的这次调用。
           </p>
         </section>
         <section>

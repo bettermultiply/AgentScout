@@ -19,50 +19,60 @@ import type {
 } from './types'
 
 /**
- * Geometry for the branch-and-leaf tree.
+ * Geometry for the branch tree.
  *
- * A Branch is one thick branch (a trunk). Each of its tool calls is a leaf on
- * the trunk; each model call is a small twig growing out of the trunk. There is
- * no time axis: the vertical distance is only a readable event order.
+ * A Branch is one thick branch (a trunk). Each model call is a small twig
+ * growing out of the trunk; the tool calls after that model call sit as leaves
+ * along the same twig. Tool calls before the first model call are leaves on the
+ * trunk itself.
  *
- * The current authority path is the central trunk (x = 0). Speculative
- * candidates fork from the trunk or from a parent candidate and grow
- * diagonally to the left or right. Sibling subtrees get disjoint horizontal
- * bands, and all children of one parent share one header row. With straight
- * fork edges this keeps every connector above the header row, so a connector
- * never crosses another Branch head.
+ * The geometry is derived from the Branch tree alone: a branch's position
+ * depends only on `parentBranchId` and `createdAtSequence`. The current
+ * authority path is used for styling by the renderer and never enters these
+ * calculations, so promoting a branch cannot move a fork or reshape the tree.
+ * A branch forks from its parent at the trunk slot of the parent call that was
+ * current when the child was created, not at a shared row below the parent.
  */
-export const HEADER_SIZE = 44
-export const TRUNK_WIDTH = 14
-export const TRUNK_TOP_GAP = 0
-export const SLOT_TOP = 26
-export const SLOT_SPACING = 34
-export const TRUNK_TAIL = 20
-export const MIN_TRUNK_HEIGHT = 64
-export const FORK_GAP = 20
-export const STUB_FORK = 10
 
-/** Horizontal room reserved around a branch axis, on the trunk side. */
-const INNER_HALF = 38
-/** Horizontal room reserved around a branch axis, on the outward side. */
-const OUTER_HALF = 68
-const CHILD_GAP = 22
-const ROOT_GAP = 48
-const TILT_MAX = 26
-const TILT_RATIO = 0.12
-
-/** Click target around a tool leaf; the visible square is smaller. */
-export const TOOL_LEAF_SIZE = 18
-export const TOOL_LEAF_OFFSET = 8
-export const TWIG_LENGTH = 26
-export const TWIG_LEAF_SIZE = 8
-export const TWIG_WIDTH = TWIG_LENGTH + TWIG_LEAF_SIZE
-/** Click target around a model twig; the visible line is thinner. */
-export const TWIG_HEIGHT = 20
+/** Rendered width of one Branch node. Twigs grow down inside this box. */
+export const NODE_HALF_WIDTH = 64
+export const NODE_WIDTH = NODE_HALF_WIDTH * 2
+/**
+ * Horizontal room actually used by a Branch drawing when sibling lanes are
+ * packed. It is smaller than the node box because the box also carries count
+ * badges and the click area, which may safely overlap a neighbour's box as
+ * long as the drawn trunk, twigs and leaves stay apart.
+ */
+export const LANE_HALF_WIDTH = 58
+/** Compact Branch head marker. */
+export const HEAD_SIZE = 12
+export const HEAD_CENTER_Y = HEAD_SIZE / 2
+/** Vertical gap between a fork point and the child head. */
+export const FORK_DROP = 40
+/** Gap between a branch lane and its neighbouring sibling lanes. */
+export const CHILD_GAP = 18
+/** Gap between separate root branches. */
+export const ROOT_GAP = 40
+/** Extra trunk below the last call. */
+export const TRUNK_TAIL = 12
+/** Vertical room for a tool leaf that grows directly from the trunk. */
+export const LEAD_ROW = 18
+/** Distance from the trunk to a leading tool leaf. */
+export const LEAD_REACH = 25
+const TWIG_TOP_GAP = 6
+const TWIG_TAIL = 8
+/** Horizontal run of a model twig before it bends downward. */
+export const TWIG_OUT = 24
+export const TWIG_RADIUS = 9
+/** Distance between two leaves along one model twig. */
+export const LEAF_GAP = 13
+/** Perpendicular offset of a leaf from its twig. */
+export const LEAF_OFFSET = 4
+/** Fork below the head when the parent has no calls yet. */
+export const STUB_FORK = 16
+export const TRUNK_WIDTH = 9
 
 export type CallKind = 'tool' | 'model'
-
-export type CallSide = -1 | 0 | 1
 
 export type LeafTone =
   | 'neutral'
@@ -85,6 +95,50 @@ export interface CallGroup {
   lastSequence: number
 }
 
+export interface TwigLeafPoint {
+  x: number
+  y: number
+  /** Rotation of the leaf shape in degrees, already mirrored for the side. */
+  angle: number
+}
+
+export interface TwigShape {
+  d: string
+  leaves: TwigLeafPoint[]
+  tip: { x: number; y: number }
+  /** Vertical distance from the twig root to its tip. */
+  depth: number
+}
+
+export interface BranchSection {
+  id: string
+  /** Model call that starts this twig; null for a tool leaf on the trunk. */
+  twig: CallGroup | null
+  /** Tool calls on this twig, or the single tool leaf when `twig` is null. */
+  leaves: CallGroup[]
+  side: -1 | 1
+  /** Local y of the twig root, or of the leading tool leaf, from the node top. */
+  y: number
+  /** Vertical room consumed by this section. */
+  height: number
+  /** Twig path and leaf anchors; null for a leading tool leaf. */
+  shape: TwigShape | null
+}
+
+export interface BranchGeometry {
+  branchId: string
+  calls: CallGroup[]
+  sections: BranchSection[]
+  /** Absolute flow x of the branch axis. */
+  x: number
+  /** Absolute flow y of the node top (the head's top edge). */
+  y: number
+  width: number
+  height: number
+  /** Child branch id -> absolute flow y of the fork point on this trunk. */
+  forks: Map<string, number>
+}
+
 function toolTone(status: ActionStatus): LeafTone {
   switch (status) {
     case 'succeeded':
@@ -102,7 +156,11 @@ export function toolName(event: ToolFinishedEvent): string {
   return event.tool_name ?? '未上报'
 }
 
-function callSpec(event: CallEvent): { kind: CallKind; tone: LeafTone; signature: string } {
+function callSpec(event: CallEvent): {
+  kind: CallKind
+  tone: LeafTone
+  signature: string
+} {
   if (event.event === 'tool_finished') {
     return {
       kind: 'tool',
@@ -125,7 +183,8 @@ const groupCache = new WeakMap<BranchState, CallGroup[]>()
  * Tool calls become leaves, model calls become twigs. Other events are carried
  * by the branch head (lifecycle icon, settlement marker) and are not drawn as
  * calls. Consecutive calls with the same rendering signature merge into one
- * node with a count; the hover card still lists every call in the group.
+ * node with a count. Because a model call has a different signature from a tool
+ * call, a merged group never crosses a model-call boundary.
  */
 export function groupBranchCalls(branch: BranchState): CallGroup[] {
   const cached = groupCache.get(branch)
@@ -157,22 +216,157 @@ export function groupBranchCalls(branch: BranchState): CallGroup[] {
   return groups
 }
 
-export interface BranchGeometry {
-  branchId: string
+function twigDistance(index: number): number {
+  return TWIG_OUT * 0.72 + index * LEAF_GAP
+}
+
+function twigLeafPoint(
+  axis: number,
+  y: number,
+  side: -1 | 1,
+  distance: number,
+): TwigLeafPoint {
+  const arc = (Math.PI * TWIG_RADIUS) / 2
+  let localX = 0
+  let localY = 0
+  let angle = 0
+  if (distance <= TWIG_OUT) {
+    localX = distance
+  } else if (distance <= TWIG_OUT + arc) {
+    const radians = -Math.PI / 2 + (distance - TWIG_OUT) / TWIG_RADIUS
+    localX = TWIG_OUT + TWIG_RADIUS * Math.cos(radians)
+    localY = TWIG_RADIUS + TWIG_RADIUS * Math.sin(radians)
+    angle = radians + Math.PI / 2
+  } else {
+    localX = TWIG_OUT + TWIG_RADIUS
+    localY = TWIG_RADIUS + (distance - TWIG_OUT - arc)
+    angle = Math.PI / 2
+  }
+  // The leaf hangs on the upper/outer side of the twig.
+  const normalX = Math.sin(angle)
+  const normalY = -Math.cos(angle)
+  const mirrored = side > 0 ? angle : Math.PI - angle
+  return {
+    x: axis + side * (localX + normalX * LEAF_OFFSET),
+    y: y + localY + normalY * LEAF_OFFSET,
+    angle: (mirrored * 180) / Math.PI,
+  }
+}
+
+/**
+ * One model twig: a short horizontal run out of the trunk, a rounded bend and a
+ * downward stem. Extra leaves lengthen the downward stem, never the horizontal
+ * reach, so a growing twig stays inside its fixed Branch lane.
+ */
+export function twigShape(
+  axis: number,
+  y: number,
+  side: -1 | 1,
+  leafCount: number,
+): TwigShape {
+  const arc = (Math.PI * TWIG_RADIUS) / 2
+  const needed =
+    leafCount > 0
+      ? twigDistance(leafCount - 1) + 8
+      : TWIG_OUT + arc + 10
+  const vertical = Math.max(10, needed - TWIG_OUT - arc)
+  const depth = TWIG_RADIUS + vertical
+  const bendX = axis + side * (TWIG_OUT + TWIG_RADIUS)
+  const bendY = y + TWIG_RADIUS
+  const d = [
+    `M ${axis} ${y}`,
+    `L ${axis + side * TWIG_OUT} ${y}`,
+    `A ${TWIG_RADIUS} ${TWIG_RADIUS} 0 0 ${side > 0 ? 1 : 0} ${bendX} ${bendY}`,
+    `L ${bendX} ${y + depth}`,
+  ].join(' ')
+  const leaves = Array.from({ length: leafCount }, (_, index) =>
+    twigLeafPoint(axis, y, side, twigDistance(index)),
+  )
+  return {
+    d,
+    leaves,
+    tip: { x: bendX, y: y + depth },
+    depth,
+  }
+}
+
+interface BranchContent {
   calls: CallGroup[]
-  headerX: number
-  headerY: number
-  trunkTop: number
-  trunkHeight: number
-  /** Horizontal drift of the trunk bottom relative to its top. */
-  trunkDx: number
-  /** Absolute centre y of each call slot, in event order. */
-  slotCenters: number[]
-  /** Child branch id -> source offset from the trunk top. */
-  forks: Map<string, number>
-  side: CallSide
-  /** Outward direction of each call slot: model twigs use it, leaves lean to it. */
-  callSides: Array<-1 | 1>
+  sections: BranchSection[]
+  height: number
+  /** Call group id -> local y of its trunk slot. */
+  slotY: Map<string, number>
+}
+
+function buildContent(branch: BranchState): BranchContent {
+  const calls = groupBranchCalls(branch)
+  const sections: BranchSection[] = []
+  const slotY = new Map<string, number>()
+
+  let current: BranchSection | null = null
+  let twigIndex = 0
+  let leadIndex = 0
+  for (const group of calls) {
+    if (group.kind === 'model') {
+      const side: -1 | 1 = twigIndex % 2 === 0 ? 1 : -1
+      twigIndex += 1
+      current = {
+        id: group.id,
+        twig: group,
+        leaves: [],
+        side,
+        y: 0,
+        height: 0,
+        shape: null,
+      }
+      sections.push(current)
+    } else if (current) {
+      current.leaves.push(group)
+    } else {
+      const side: -1 | 1 = leadIndex % 2 === 0 ? 1 : -1
+      leadIndex += 1
+      sections.push({
+        id: group.id,
+        twig: null,
+        leaves: [group],
+        side,
+        y: 0,
+        height: 0,
+        shape: null,
+      })
+    }
+  }
+
+  let cursor = HEAD_CENTER_Y
+  for (const section of sections) {
+    if (section.twig) {
+      section.y = cursor + TWIG_TOP_GAP
+      section.shape = twigShape(
+        NODE_HALF_WIDTH,
+        section.y,
+        section.side,
+        section.leaves.length,
+      )
+      section.height = TWIG_TOP_GAP + section.shape.depth + TWIG_TAIL
+      slotY.set(section.twig.id, section.y)
+      section.leaves.forEach((leaf, index) => {
+        const point = section.shape?.leaves[index]
+        if (point) slotY.set(leaf.id, point.y)
+      })
+    } else {
+      section.y = cursor + LEAD_ROW / 2
+      section.height = LEAD_ROW
+      for (const leaf of section.leaves) slotY.set(leaf.id, section.y)
+    }
+    cursor += section.height
+  }
+
+  return {
+    calls,
+    sections,
+    height: Math.max(cursor + TRUNK_TAIL, HEAD_CENTER_Y + 28),
+    slotY,
+  }
 }
 
 function childrenOf(task: TaskState): Map<string, BranchState[]> {
@@ -187,185 +381,131 @@ function childrenOf(task: TaskState): Map<string, BranchState[]> {
   return children
 }
 
+interface Span {
+  left: number
+  right: number
+}
+
+interface ChildPlacement {
+  childId: string
+  /** Horizontal offset of the child axis from the parent axis. */
+  offset: number
+}
+
 export function layoutTree(task: TaskState): Map<string, BranchGeometry> {
   const geometry = new Map<string, BranchGeometry>()
   const children = childrenOf(task)
-  const spine = new Set<string>()
-  let cursor = task.authority
-  while (cursor && task.branches[cursor] && !spine.has(cursor)) {
-    spine.add(cursor)
-    const branch = task.branches[cursor]
-    cursor = branch.parentBranchId
+  const content = new Map<string, BranchContent>()
+  const spans = new Map<string, Span>()
+  const plans = new Map<string, ChildPlacement[]>()
+  const measuring = new Set<string>()
+
+  function contentOf(branch: BranchState): BranchContent {
+    const cached = content.get(branch.branchId)
+    if (cached) return cached
+    const built = buildContent(branch)
+    content.set(branch.branchId, built)
+    return built
   }
 
-  let minX = Number.POSITIVE_INFINITY
-  let maxX = Number.NEGATIVE_INFINITY
+  function spanOf(branch: BranchState): Span {
+    const cached = spans.get(branch.branchId)
+    if (cached) return cached
+    if (measuring.has(branch.branchId)) {
+      return { left: LANE_HALF_WIDTH, right: LANE_HALF_WIDTH }
+    }
+    measuring.add(branch.branchId)
 
-  const widths = new Map<string, number>()
-  let leftWeight = 0
-  let rightWeight = 0
-  function widthOf(branch: BranchState): number {
-    const cached = widths.get(branch.branchId)
-    if (cached !== undefined) return cached
     const kids = children.get(branch.branchId) ?? []
-    let width = INNER_HALF + OUTER_HALF
-    if (kids.length > 0) {
-      width += CHILD_GAP * (kids.length + 1)
-      for (const kid of kids) width += widthOf(kid)
-    }
-    widths.set(branch.branchId, width)
-    return width
-  }
-
-  function splitSides(candidates: BranchState[]): {
-    left: BranchState[]
-    right: BranchState[]
-  } {
-    const left: BranchState[] = []
-    const right: BranchState[] = []
-    // Balance across the whole spine, not only within one fork, so broad
-    // subtrees do not all pile up on the same side of the central trunk.
-    for (const candidate of candidates) {
-      const width = widthOf(candidate)
+    const left: Array<{ branch: BranchState; span: Span }> = []
+    const right: Array<{ branch: BranchState; span: Span }> = []
+    let leftWeight = 0
+    let rightWeight = 0
+    for (const child of kids) {
+      const childSpan = spanOf(child)
+      const weight = childSpan.left + childSpan.right + CHILD_GAP
       if (leftWeight <= rightWeight) {
-        left.push(candidate)
-        leftWeight += width + CHILD_GAP
+        left.push({ branch: child, span: childSpan })
+        leftWeight += weight
       } else {
-        right.push(candidate)
-        rightWeight += width + CHILD_GAP
+        right.push({ branch: child, span: childSpan })
+        rightWeight += weight
       }
     }
-    return { left, right }
+
+    const placements: ChildPlacement[] = []
+    let spanLeft = LANE_HALF_WIDTH
+    let cursor = LANE_HALF_WIDTH + CHILD_GAP
+    for (const child of left) {
+      const offset = -(cursor + child.span.right)
+      placements.push({ childId: child.branch.branchId, offset })
+      spanLeft = Math.max(spanLeft, -offset + child.span.left)
+      cursor = -offset + child.span.left + CHILD_GAP
+    }
+    let spanRight = LANE_HALF_WIDTH
+    cursor = LANE_HALF_WIDTH + CHILD_GAP
+    for (const child of right) {
+      const offset = cursor + child.span.left
+      placements.push({ childId: child.branch.branchId, offset })
+      spanRight = Math.max(spanRight, offset + child.span.right)
+      cursor = offset + child.span.right + CHILD_GAP
+    }
+
+    plans.set(branch.branchId, placements)
+    const span = { left: spanLeft, right: spanRight }
+    spans.set(branch.branchId, span)
+    measuring.delete(branch.branchId)
+    return span
   }
 
-  function track(axisX: number, side: CallSide) {
-    const leftHalf = side > 0 ? INNER_HALF : OUTER_HALF
-    const rightHalf = side < 0 ? INNER_HALF : OUTER_HALF
-    minX = Math.min(minX, axisX - leftHalf)
-    maxX = Math.max(maxX, axisX + rightHalf)
-  }
-
-  function place(
-    branch: BranchState,
-    headerX: number,
-    headerY: number,
-    side: CallSide,
-    onSpine: boolean,
-  ) {
-    const calls = groupBranchCalls(branch)
-    const trunkTop = headerY + HEADER_SIZE + TRUNK_TOP_GAP
-    const slotCenters = calls.map(
-      (_, index) => trunkTop + SLOT_TOP + index * SLOT_SPACING,
-    )
-    const trunkHeight = Math.max(
-      MIN_TRUNK_HEIGHT,
-      SLOT_TOP + calls.length * SLOT_SPACING + TRUNK_TAIL,
-    )
-    const trunkDx =
-      side === 0 ? 0 : side * Math.min(TILT_MAX, trunkHeight * TILT_RATIO)
-
+  function place(branch: BranchState, axisX: number, topY: number) {
+    const branchContent = contentOf(branch)
     const forks = new Map<string, number>()
-    for (const child of children.get(branch.branchId) ?? []) {
-      let index = -1
-      for (let i = 0; i < calls.length; i += 1) {
-        if (calls[i].firstSequence <= child.createdAtSequence) index = i
-        else break
+    const kids = children.get(branch.branchId) ?? []
+    for (const child of kids) {
+      let forkY = HEAD_CENTER_Y + STUB_FORK
+      for (const group of branchContent.calls) {
+        if (group.firstSequence <= child.createdAtSequence) {
+          forkY = branchContent.slotY.get(group.id) ?? forkY
+        } else {
+          break
+        }
       }
-      const forkY =
-        index >= 0
-          ? slotCenters[index]
-          : trunkTop + STUB_FORK
-      forks.set(child.branchId, forkY - trunkTop)
+      forks.set(child.branchId, topY + forkY)
     }
-
-    let toolIndex = 0
-    let modelIndex = 0
-    const callSides = calls.map((call): -1 | 1 => {
-      if (side !== 0) return side
-      if (call.kind === 'tool') {
-        const value = toolIndex % 2 === 0 ? 1 : -1
-        toolIndex += 1
-        return value
-      }
-      const value = modelIndex % 2 === 0 ? 1 : -1
-      modelIndex += 1
-      return value
-    })
 
     geometry.set(branch.branchId, {
       branchId: branch.branchId,
-      calls,
-      headerX,
-      headerY,
-      trunkTop,
-      trunkHeight,
-      trunkDx,
-      slotCenters,
+      calls: branchContent.calls,
+      sections: branchContent.sections,
+      x: axisX,
+      y: topY,
+      width: NODE_WIDTH,
+      height: branchContent.height,
       forks,
-      side,
-      callSides,
     })
-    track(headerX, side)
 
-    const childHeaderY = trunkTop + trunkHeight + FORK_GAP
-    const kids = children.get(branch.branchId) ?? []
-    if (onSpine) {
-      const spineKids = kids.filter((kid) => spine.has(kid.branchId))
-      const candidates = kids.filter((kid) => !spine.has(kid.branchId))
-      const { left, right } = splitSides(candidates)
-
-      let leftCursor = 0
-      for (const child of left) {
-        const edge = headerX - OUTER_HALF - CHILD_GAP - leftCursor
-        const childAxis = edge - INNER_HALF
-        place(child, childAxis, childHeaderY, -1, false)
-        leftCursor += widthOf(child) + CHILD_GAP
-      }
-
-      let rightCursor = 0
-      for (const child of right) {
-        const edge = headerX + OUTER_HALF + CHILD_GAP + rightCursor
-        const childAxis = edge + INNER_HALF
-        place(child, childAxis, childHeaderY, 1, false)
-        rightCursor += widthOf(child) + CHILD_GAP
-      }
-
-      const next = spineKids[0]
-      if (next) place(next, headerX, childHeaderY, 0, true)
-    } else {
-      const direction = side === 0 ? 1 : side
-      let outward = 0
-      for (const child of kids) {
-        const childAxis =
-          direction > 0
-            ? headerX + OUTER_HALF + CHILD_GAP + outward + INNER_HALF
-            : headerX - OUTER_HALF - CHILD_GAP - outward - INNER_HALF
-        place(child, childAxis, childHeaderY, direction, false)
-        outward += widthOf(child) + CHILD_GAP
-      }
+    for (const placement of plans.get(branch.branchId) ?? []) {
+      const child = task.branches[placement.childId]
+      if (!child) continue
+      const forkY = forks.get(child.branchId) ?? topY + HEAD_CENTER_Y + STUB_FORK
+      place(child, axisX + placement.offset, forkY + FORK_DROP)
     }
   }
 
   const roots = task.branchOrder
     .map((branchId) => task.branches[branchId])
     .filter((branch): branch is BranchState => Boolean(branch && !branch.parentBranchId))
-  const main = roots.find((root) => spine.has(root.branchId)) ?? roots[0]
+  const main = roots[0]
   if (main) {
-    const onSpine = spine.has(main.branchId)
-    place(main, 0, 0, onSpine ? 0 : 1, onSpine)
-    for (const root of roots) {
-      if (root.branchId === main.branchId) continue
-      const axis = maxX + ROOT_GAP + INNER_HALF
-      place(root, axis, 0, 1, false)
-    }
-  }
-
-  if (Number.isFinite(minX) && Number.isFinite(maxX)) {
-    const shift = -(minX + maxX) / 2
-    if (shift !== 0) {
-      for (const entry of geometry.values()) {
-        entry.headerX += shift
-      }
+    const mainSpan = spanOf(main)
+    place(main, 0, 0)
+    let cursor = mainSpan.right + ROOT_GAP
+    for (const root of roots.slice(1)) {
+      const span = spanOf(root)
+      const axisX = cursor + span.left
+      place(root, axisX, 0)
+      cursor = axisX + span.right + ROOT_GAP
     }
   }
 

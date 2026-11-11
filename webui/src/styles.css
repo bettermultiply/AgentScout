@@ -1050,10 +1050,11 @@ select {
 .legend-head {
   position: relative;
   flex: none;
-  width: 23px;
-  height: 23px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  border: 2px solid var(--accent);
+  border: 1.5px solid var(--accent);
+  background: var(--surface);
   color: var(--accent);
   display: grid;
   place-items: center;
@@ -1061,10 +1062,10 @@ select {
 
 .legend-head-reason {
   position: absolute;
-  right: -5px;
-  bottom: -5px;
-  width: 14px;
-  height: 14px;
+  right: -4px;
+  bottom: -3px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   border: 1px solid var(--accent);
   background: var(--surface-raised);
@@ -1119,13 +1120,19 @@ select {
 }
 
 .legend-leaf {
-  width: 18px;
-  height: 18px;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
 }
 
 .legend-leaf .leaf-shape {
-  width: 10px;
-  height: 10px;
+  display: block;
+  width: 11px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .legend-leaf-note {
@@ -1186,17 +1193,68 @@ select {
   display: none;
 }
 
-.branch-head {
+.tree-branch {
   position: relative;
-  width: 44px;
-  height: 44px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.tree-svg {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+/* A Branch is one capsule-trunk; candidates are hollow, authority is filled. */
+.tree-trunk {
+  stroke-linecap: round;
+  transition:
+    stroke 0.32s ease,
+    stroke-width 0.32s ease,
+    opacity 0.32s ease;
+}
+
+.tree-trunk-authority {
+  stroke: var(--accent);
+  stroke-width: 9;
+}
+
+.tree-trunk-candidate {
+  stroke: var(--accent);
+  stroke-width: 6.5;
+  opacity: 0.5;
+}
+
+.tree-trunk-core {
+  stroke: var(--surface);
+  stroke-width: 3.2;
+  stroke-linecap: round;
+}
+
+.tree-trunk-abandoned {
+  stroke: var(--muted);
+  stroke-width: 4.5;
+  opacity: 0.4;
+}
+
+.tree-trunk-live {
+  animation: trunk-pulse 2.6s ease-in-out infinite;
+}
+
+.branch-head {
+  position: absolute;
+  z-index: 3;
+  padding: 0;
   border-radius: 50%;
-  border: 2.5px solid var(--accent);
+  border: 1.5px solid var(--accent);
   background: var(--surface);
   color: var(--accent);
   display: grid;
   place-items: center;
   cursor: pointer;
+  outline: none;
+  pointer-events: auto;
   transition:
     background-color 0.32s ease,
     color 0.32s ease,
@@ -1207,7 +1265,7 @@ select {
 
 .branch-head:hover,
 .branch-head:focus-visible {
-  box-shadow: 0 0 0 4px var(--accent-soft);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .head-authority {
@@ -1219,79 +1277,64 @@ select {
 .head-abandoned {
   color: var(--muted);
   border-color: var(--muted);
+  background: var(--surface);
   opacity: 0.5;
-}
-
-.head-authority.head-abandoned {
-  background: var(--muted);
-  border-color: var(--muted);
-  color: var(--surface);
 }
 
 .head-live::after {
   content: '';
   position: absolute;
-  inset: -6px;
+  inset: -4px;
   border-radius: 50%;
-  border: 1.5px solid var(--accent);
+  border: 1.2px solid var(--accent);
   animation: node-pulse 2s ease-out infinite;
   pointer-events: none;
 }
 
-.head-status {
-  display: grid;
-  place-items: center;
-}
-
 .head-reason {
   position: absolute;
-  right: -11px;
-  bottom: -8px;
-  width: 26px;
-  height: 26px;
+  right: -6px;
+  bottom: -5px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  border: 1.5px solid var(--accent);
+  border: 1px solid var(--accent);
   background: var(--surface-raised);
   color: var(--accent);
-  box-shadow: 0 1px 3px rgb(22 33 44 / 16%);
+  pointer-events: none;
 }
 
-.head-abandoned .head-reason {
-  border-color: var(--muted);
-  color: var(--muted);
-}
-
+.head-abandoned .head-reason,
 .head-reason-unreported {
-  color: var(--muted);
   border-color: var(--muted);
+  color: var(--muted);
 }
 
 .head-settlement {
   position: absolute;
-  left: -10px;
-  bottom: -8px;
-  width: 20px;
-  height: 20px;
+  left: -5px;
+  bottom: -5px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 11px;
+  font-size: 7px;
   font-weight: 700;
   line-height: 1;
   background: var(--surface-raised);
-  box-shadow: 0 1px 3px rgb(22 33 44 / 16%);
   pointer-events: none;
 }
 
 .head-settlement-hit {
-  border: 1.5px solid var(--success);
+  border: 1px solid var(--success);
   color: var(--success);
 }
 
 .head-settlement-miss {
-  border: 1.5px solid var(--danger);
+  border: 1px solid var(--danger);
   color: var(--danger);
 }
 
@@ -1300,79 +1343,148 @@ select {
   color: var(--muted);
 }
 
-.tree-trunk {
-  position: relative;
-  width: 16px;
-  height: 100%;
-  display: flex;
-  justify-content: center;
-  cursor: default;
+/* A model call is a small twig: a rounded outward bend and a hanging stem. */
+.tree-twig-group {
+  cursor: pointer;
+  outline: none;
+  pointer-events: auto;
 }
 
-.tree-trunk-capsule {
-  position: relative;
-  display: block;
-  height: 100%;
-  border-radius: 999px;
-  transform-origin: top center;
+.tree-twig-visual {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
   transition:
-    width 0.32s ease,
-    background-color 0.32s ease,
-    border-color 0.32s ease,
-    opacity 0.32s ease,
-    box-shadow 0.28s ease,
-    transform 0.32s ease;
+    stroke 0.32s ease,
+    stroke-width 0.2s ease,
+    opacity 0.32s ease;
 }
 
-.trunk-authority {
-  width: 14px;
-  background: var(--accent);
-  border: 2px solid var(--accent);
+.tree-twig-authority .tree-twig-visual {
+  stroke: var(--accent);
+  stroke-width: 2.2;
 }
 
-.trunk-candidate {
-  width: 10px;
-  background: var(--surface);
-  border: 2px solid var(--accent);
+.tree-twig-candidate .tree-twig-visual {
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  opacity: 0.55;
 }
 
-.trunk-abandoned {
-  background: var(--surface);
-  border-color: var(--muted);
-  opacity: 0.5;
+.tree-twig-abandoned .tree-twig-visual {
+  stroke: var(--muted);
+  stroke-width: 1.3;
+  opacity: 0.4;
 }
 
-.trunk-authority.trunk-abandoned {
-  background: var(--muted);
-  border-color: var(--muted);
+.tree-twig-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
 }
 
-.trunk-live {
-  animation: trunk-pulse 2.6s ease-in-out infinite;
+.tree-twig-authority .tree-twig-tip {
+  fill: var(--accent);
+}
+
+.tree-twig-candidate .tree-twig-tip {
+  fill: var(--accent);
+  opacity: 0.55;
+}
+
+.tree-twig-abandoned .tree-twig-tip {
+  fill: var(--muted);
+  opacity: 0.4;
+}
+
+.tree-twig-group:hover .tree-twig-visual,
+.tree-twig-group:focus-visible .tree-twig-visual {
+  stroke-width: 2.8;
+  opacity: 1;
+}
+
+.tree-stem {
+  fill: none;
+  stroke-linecap: round;
+}
+
+.tree-stem-authority {
+  stroke: var(--accent);
+  stroke-width: 1.8;
+}
+
+.tree-stem-candidate {
+  stroke: var(--accent);
+  stroke-width: 1.3;
+  opacity: 0.55;
+}
+
+.tree-stem-abandoned {
+  stroke: var(--muted);
+  stroke-width: 1.1;
+  opacity: 0.4;
+}
+
+/* Leaves: tool calls on the trunk or on a model twig. */
+.tree-twig-parts {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
 .tree-leaf {
-  position: relative;
-  width: 18px;
-  height: 18px;
+  position: absolute;
+  z-index: 2;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  transform: translate(-50%, -50%);
   display: grid;
   place-items: center;
   cursor: pointer;
-  filter: drop-shadow(0 0 1px var(--surface)) drop-shadow(0 0 1px var(--surface));
+  pointer-events: auto;
+  color: var(--leaf-neutral);
+  outline: none;
+}
+
+.tree-leaf .leaf-shape {
+  display: block;
+  width: 10px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 1px var(--surface);
+  transform: rotate(var(--leaf-angle, 0deg));
   transition:
     transform 0.16s ease,
     opacity 0.32s ease;
 }
 
-.tree-leaf:hover,
+.tree-leaf:hover .leaf-shape,
+.tree-leaf:focus-visible .leaf-shape {
+  transform: rotate(var(--leaf-angle, 0deg)) scale(1.45);
+}
+
 .tree-leaf:focus-visible {
-  transform: scale(1.4);
-  outline: none;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.leaf-candidate .leaf-shape {
+  opacity: 0.82;
+}
+
+.leaf-abandoned .leaf-shape {
+  background: var(--muted);
+  opacity: 0.4;
 }
 
 .leaf-count {
   position: absolute;
-  left: 19px;
+  left: 13px;
   top: 50%;
   transform: translateY(-50%);
   padding: 0 3px;
@@ -1380,8 +1492,8 @@ select {
   border: 1px solid var(--border);
   background: var(--surface-raised);
   color: var(--text-soft);
-  font-size: 8.5px;
-  line-height: 11px;
+  font-size: 8px;
+  line-height: 10px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   pointer-events: none;
@@ -1389,91 +1501,23 @@ select {
 
 .leaf-side-left .leaf-count {
   left: auto;
-  right: 19px;
-}
-
-.leaf-shape {
-  display: block;
-  width: 10px;
-  height: 10px;
-  background: currentColor;
-}
-
-.leaf-tool .leaf-shape {
-  border-radius: 2px;
-}
-
-/* A model call is a small twig: a thin line plus a tiny hexagon result leaf. */
-.tree-twig {
-  position: relative;
-  width: 34px;
-  height: 20px;
-  color: var(--accent);
-  cursor: pointer;
-  transition:
-    transform 0.16s ease,
-    opacity 0.32s ease;
-}
-
-.tree-twig:hover,
-.tree-twig:focus-visible {
-  transform: scale(1.15);
-  outline: none;
-}
-
-.twig-line {
-  position: absolute;
-  top: 9px;
-  height: 2px;
-  width: 26px;
-  border-radius: 999px;
-  background: currentColor;
-}
-
-.twig-right .twig-line {
-  left: 0;
-}
-
-.twig-left .twig-line {
-  left: 8px;
-}
-
-.twig-leaf {
-  position: absolute;
-  top: 6px;
-  width: 8px;
-  height: 8px;
-  background: currentColor;
-  clip-path: polygon(50% 0, 95% 25%, 95% 75%, 50% 100%, 5% 75%, 5% 25%);
-}
-
-.twig-right .twig-leaf {
-  left: 26px;
-}
-
-.twig-left .twig-leaf {
-  left: 0;
+  right: 13px;
 }
 
 .twig-count {
   position: absolute;
-  left: 12px;
-  top: -7px;
+  z-index: 2;
+  transform: translate(-50%, -50%);
   padding: 0 3px;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--surface-raised);
   color: var(--text-soft);
-  font-size: 8.5px;
-  line-height: 11px;
+  font-size: 8px;
+  line-height: 10px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   pointer-events: none;
-}
-
-.twig-abandoned {
-  color: var(--muted);
-  opacity: 0.45;
 }
 
 .tone-neutral {
@@ -1502,11 +1546,6 @@ select {
 
 .tone-muted {
   color: var(--muted);
-}
-
-.leaf-abandoned {
-  color: var(--muted);
-  opacity: 0.45;
 }
 
 .tree-handle {
@@ -1838,10 +1877,10 @@ select {
 @keyframes trunk-pulse {
   0%,
   100% {
-    opacity: 1;
+    opacity: 0.45;
   }
   50% {
-    opacity: 0.72;
+    opacity: 0.7;
   }
 }
 
