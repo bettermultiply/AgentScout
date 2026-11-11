@@ -6,7 +6,7 @@
 
 降低 NLE 深度投机验证的模型推理成本。回放只用录制的 assistant 输出替换模型服务，检验系统的投机、Promote、Discard 与 single-winner 反应；不评价 Agent、不证明性能收益。NLE 工具真实重新执行，不以录制的工具结果代替执行。
 
-导出与伪造端点放在 `tools/replay/`，使用 Node／TypeScript，只读取 run 内 `events.jsonl` 和权威 session 文件。本阶段尚未实现这些工具；当前 Node 为 v26.12.1。
+导出与伪造端点放在 [`tools/replay/`](../../tools/replay/README.md)，使用 Node 26，只读取 run 内 `events.jsonl` 和权威 session 文件。`b1.mjs`、`b1-pi.mjs`、`b3.mjs` 是已验证的验收脚本；`b3-repeat.mjs` 对同一 recording 做五次全新 run 回放；`b3-deep.mjs` 通过 `DEEP_ROUNDS=3/4` 记录深度场景并做三次全新 run 回放。
 
 ## 记录来源
 
@@ -28,13 +28,29 @@
 
 长分支中两类键都可能碰撞：相同命令与预测可能对应不同历史，相同最新消息也可能对应不同模型请求。并发到达次序和重试还可能改变同键消费顺序；不能把“有匹配”当作历史完全一致的证明。
 
-## 当前缺口与核实
+## 回放风险（实测）
+
+取消请求是否已经发出取决于取消发生时的时序。若录制中取消请求尚未发出，而回放运行发出了该请求，回放端点会返回 HTTP 400；B3 与深度回放的三次全新 run 必须以实际请求报告为准，不猜测取消是否发生。
+
+## 当前边界与核实
+
+### 深度回放结构（2026-11-12）
+
+`b3-deep.mjs` 从 `chance_created` observation 的 `parent_branch_id` 与
+`parent_chance_id` 识别嵌套 Chance，而不是从 `candidate_created` 推断。N=3 的结构为：
+`chance-1` 的 parent 为 `authority`，`chance-2` 的 parent 为 `candidate-2/chance-1`，
+`chance-3` 的 parent 为 `candidate-4/chance-2`；N=4 再增加
+`chance-4` 的 parent 为 `candidate-6/chance-3`。每个 Chance 有 2 个 Candidate、1 个
+Promote 和 2 个 applied Discard；每个后续 Chance 都在其祖先 Candidate 已 Promote 后产生。
+因此本次没有“祖先 Candidate 被 Discard 后其嵌套 Chance”的案例。导出修复后录制为 10
+条（N=3 为 10，N=4 为 13；旧记录曾显示 14），三次回放均应为 `unconsumed=0`，并核对 hits/misses/exhausted、authority chain、NLE
+及事件结构。
 
 compaction 等不经 `message_end` 的变化未进入权威 session 文件；Ledger 的其他 action／Runtime 事实仍可能保存完整工具参数与结果，不能把 transcript 去重说成 Ledger 完全没有这些正文。
 
-阶段 A 的 NLE 与端点核实见下文；端点的完整回放、导出及闭环验收仍待阶段 B，不代表已经完成。
+端点、导出和一次 B3 闭环已由上述脚本验证；重复回放脚本逐次比较 Chance/Proposal/Candidate 数量、Promote、applied Discard、权威父链 role/text、真实 NLE 观察及命中/缺失/耗尽报告。它仍不证明模型推理质量或性能收益。
 
-## 阶段 A：NLE 核实（2026-11-12）
+## NLE 核实（2026-11-12）
 
 实际路径：`src/runtime/backends/nle.rs:69-108` 启动配置的 Python 与 `examples/nle-runtime-bridge.py`，通过 stdin/stdout JSONL 逐请求调用，Mutex 串行化请求（114-138）。`invoke_tool` 只把 bridge 的 result/evidence 包装回传（270-299）。Runtime 配置可由 `ASCOUT_RUNTIME_CONFIG` 覆盖，或由 task 绑定 Policy 的 runtime 路径选择（`src/bin/ascout-control-plane.rs:292-296`）；不是每个 Prompt 的参数。
 
@@ -63,9 +79,9 @@ explicit core+disp changed byte_equal= False bytes= 49961 51146
 
 Candidate 不取得 NLE 快照、不 fork 进程、不重放动作。Runtime 声明 shared_environment=true、branch_environment=false（nle.rs:189-190），Controller 将操作映射到同一个 authority 环境（coordination/controller.rs:14-18）。候选复制 Agent checkpoint 并注入预测工具结果（main.ts:247-278），推进推理；真实工具在接受前 gate，tools.execute 还有角色检查（main.ts:86-90）。所有 Branch 实际共享一个 NLE 进程和 RNG，没有独立复制的 RNG 状态；bridge 的 branch 操作本身也只是 World 别名（187-194），不是实际隔离能力。
 
-结论：仅替换模型输出在限定动作轨迹上可行，但当前不能无条件保证整个运行逐字复现。需要固定 core、disp、禁止 reseed，固定 NLE/NetHack/环境配置、工具内容、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。NLE 构造默认 `fix_moon_phase=False`（`nle/env/base.py:195-202`）；本轮未追踪其跨日期／初始化时间影响，因此不能声称时间因素已全部排除。建议后续允许显式配置 disp/reseed（必要时 lgen），保存实际种子及环境版本，并扩大轨迹核实；阶段 A 不修改实现。异步调度不因模型输出固定就自动稳定。
+结论：仅替换模型输出在限定动作轨迹上可行，但当前不能无条件保证整个运行逐字复现。需要固定 core、disp、禁止 reseed，固定 NLE/NetHack/环境配置、工具内容、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。NLE 构造默认 `fix_moon_phase=False`（`nle/env/base.py:195-202`）；本轮未追踪其跨日期／初始化时间影响，因此不能声称时间因素已全部排除。建议后续允许显式配置 disp/reseed（必要时 lgen），保存实际种子及环境版本，并扩大轨迹核实；当前仅记录上述实现缺口，不修改实现。异步调度不因模型输出固定就自动稳定。
 
-## 阶段 A：Pi 端点核实
+## Pi 端点核实
 
 `main.ts:27-41` 只接收 `--model` 与 `--thinking`，通过 `ModelRuntime.create()` 和 `resolveCliModel` 解析；没有自有 baseUrl CLI 参数。Pi `core/model-runtime.ts:218-223` 默认从 getAgentDir()/models.json 读取；`packages/coding-agent/src/config.ts:604-610,630-636` 默认变量为 `PI_CODING_AGENT_DIR`（APP_NAME 改名会改变变量前缀）。指定独立 agent 目录即可隔离真实凭据，不需要改 Pi。精确使用 `--model replay/fixture`，不要使用可能模糊匹配的短名称；resolver:450-505 使用全模型列表、解析 provider/model。baseUrl 与 key 写 models.json，不依赖未核实的 URL 环境变量。
 

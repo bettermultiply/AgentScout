@@ -62,6 +62,20 @@ cargo run --example policy -- evaluate /tmp/opencode/policy.json extent assets/p
 
 ## 文档
 
+### 记录回放验收
+
+回放工具和验收脚本位于 [`tools/replay/`](tools/replay/README.md)。它们只使用伪造模型或已经录制的模型输出，不调用真实模型：
+
+```sh
+node tools/replay/verify/b1.mjs          # 约 1 秒：导出、规范化、顺序消费和缺失/耗尽报告
+node tools/replay/verify/b1-pi.mjs       # 约 3 秒：通过现有 Pi provider 验证并行调用与续跑
+node tools/replay/verify/b3.mjs          # 约 30 秒：NLE 双 Candidate 的录制、Promote/Discard 和一次回放
+node tools/replay/verify/b3-repeat.mjs  # 约 2 分钟：同一 recording、五个全新 run 的严格重复回放
+node tools/replay/verify/b3-deep.mjs    # <1 秒：深度场景边界与同键构造审计（当前明确报告未执行）
+```
+
+B1 验证记录键规范化及端点的顺序消费；B1-PI 还验证 Pi 对两个并行工具调用的解析和后续请求；B3 验证真实 NLE action、每个 Chance 的双 Candidate、单一 Promote、applied Discard、权威 session 父链和回放报告。重复与深度脚本额外报告每轮结构、真实 NLE 观察、请求命中/缺失/耗尽和清理结果；这些是正确性证据，不是性能收益证据。B3 首次运行包含一次 `cargo build`，仅构建 debug 目标。
+
 文档以心智模型为唯一根文档，再延伸到各语义权威与实现细节（详见 [文档导航](docs/index.md)）。
 
 - [心智模型](docs/mental-model.md)

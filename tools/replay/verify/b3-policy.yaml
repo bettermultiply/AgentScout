@@ -1,0 +1,53 @@
+version: 1
+language: python
+files:
+  - decisions.py
+fidelity: Best-effort
+runtime: /tmp/ascout-replay/b3/runtime.json
+decisions:
+  admit:
+    opportunity_pass:
+      file: decisions.py
+      function: opportunity_pass
+    feasibility_pass:
+      file: decisions.py
+      function: feasibility_pass
+      policy_config:
+        example_tools_only: false
+  select:
+    file: decisions.py
+    function: select
+    policy_config:
+      max_chances: 4
+  rebalance:
+    file: decisions.py
+    function: rebalance
+  extent:
+    file: decisions.py
+    function: extent
+    inputs: [process_state.hook_count]
+    policy_config:
+      max_steps: 5
+  predict:
+    file: decisions.py
+    function: predict
+    policy_config:
+      candidates: ["moved", "blocked"]
+      value_type: enum
+      enum_values: ["moved", "blocked"]
+      sample_count: 2
+  launch:
+    file: decisions.py
+    function: launch
+  effect:
+    file: decisions.py
+    function: effect
+  match:
+    file: decisions.py
+    function: match_proposal
+    policy_config:
+      value_type: enum
+      enum_values: ["moved", "blocked"]
+  dispose:
+    file: decisions.py
+    function: dispose
