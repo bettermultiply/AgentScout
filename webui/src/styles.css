@@ -390,6 +390,12 @@ select {
   color: var(--muted);
 }
 
+.badge-history {
+  background: var(--surface-sunken);
+  color: var(--text-soft);
+  border-color: var(--border);
+}
+
 .readonly-note {
   font-size: 10.5px;
   color: var(--warning);
@@ -522,46 +528,6 @@ select {
   color: var(--danger);
   font-size: 12px;
   white-space: pre-wrap;
-}
-
-.inherited {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  overflow: hidden;
-}
-
-.inherited > summary {
-  cursor: pointer;
-  padding: 9px 13px;
-  font-size: 12px;
-  color: var(--text-soft);
-  background: var(--surface-sunken);
-}
-
-.inherited-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-}
-
-.conversation-divider {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 4px 0;
-  color: var(--muted);
-  font-size: 10.5px;
-  letter-spacing: 0.04em;
-}
-
-.conversation-divider::before,
-.conversation-divider::after {
-  content: '';
-  height: 1px;
-  flex: 1;
-  background: var(--border);
 }
 
 .streaming {

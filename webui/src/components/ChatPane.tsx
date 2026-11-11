@@ -9,7 +9,7 @@ import {
 import { shortId } from '../format'
 import { PanelIcon, SendIcon } from '../icons'
 import { useAppStore } from '../store'
-import type { BranchStatus } from '../types'
+import type { BranchRole, BranchStatus } from '../types'
 import { useConversation } from '../useConversation'
 import { ConversationView } from './ConversationView'
 
@@ -37,10 +37,19 @@ function connectionLabel(connection: string): string {
 function BranchBadges({
   role,
   status,
+  isCurrent,
 }: {
-  role: 'authority' | 'candidate'
+  role: BranchRole
   status: BranchStatus
+  isCurrent: boolean
 }) {
+  if (!isCurrent) {
+    return (
+      <span className="badges">
+        <span className="badge badge-history">历史权威</span>
+      </span>
+    )
+  }
   return (
     <span className="badges">
       <span className={`badge badge-role-${role}`}>{roleLabel(role)}</span>
@@ -203,8 +212,8 @@ export function ChatPane() {
             </option>
             {windows.map((window) => (
               <option key={window.branchId} value={window.branchId}>
-                {shortId(window.branchId)} · {statusLabel(window.status)}
-                {window.branchId === current?.branchId ? ' · 当前' : ''}
+                {shortId(window.branchId)} ·{' '}
+                {window.branchId === current?.branchId ? '当前权威' : '历史权威'}
               </option>
             ))}
           </select>
@@ -212,8 +221,12 @@ export function ChatPane() {
         {selected ? (
           <div className="window-identity">
             <code title={selected.branchId}>{shortId(selected.branchId)}</code>
-            <BranchBadges role={selected.role} status={selected.status} />
-            {!isCurrent ? <span className="readonly-note">历史权威 · 只读</span> : null}
+            <BranchBadges
+              role={selected.role}
+              status={selected.status}
+              isCurrent={isCurrent}
+            />
+            {!isCurrent ? <span className="readonly-note">只读</span> : null}
           </div>
         ) : null}
       </div>

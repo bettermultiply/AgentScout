@@ -10,7 +10,7 @@ interface Props {
 export function ConversationView({ entry, variant, emptyText }: Props) {
   const data = entry.data
   const scrollRef = useStickyScroll(
-    `${data?.messages.length ?? 0}:${data?.streaming.length ?? 0}:${entry.status}`,
+    `${data?.inherited.length ?? 0}:${data?.messages.length ?? 0}:${data?.streaming.length ?? 0}:${entry.status}`,
     variant === 'main',
   )
 
@@ -59,25 +59,12 @@ export function ConversationView({ entry, variant, emptyText }: Props) {
         <div className="inline-error">{entry.error ?? '读取对话失败'}</div>
       ) : null}
 
-      {data.inherited.length > 0 ? (
-        <details className="inherited">
-          <summary>继承上下文 · {data.inherited.length} 条消息</summary>
-          <div className="inherited-body">
-            {data.inherited.map((message, index) => (
-              <MessageView key={index} message={message} />
-            ))}
-          </div>
-        </details>
-      ) : null}
-
-      {data.inherited.length > 0 ? (
-        <div className="conversation-divider">
-          <span>本 Branch 独有内容</span>
-        </div>
-      ) : null}
+      {data.inherited.map((message, index) => (
+        <MessageView key={`inherited-${index}`} message={message} />
+      ))}
 
       {data.messages.map((message, index) => (
-        <MessageView key={index} message={message} />
+        <MessageView key={`message-${index}`} message={message} />
       ))}
 
       {data.streaming ? (
