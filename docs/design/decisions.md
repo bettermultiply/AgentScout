@@ -24,6 +24,8 @@
 
 **范围**：本项描述 `Promote`；`Reuse` 只采用一个 candidate 的已验证结果，不保留其 subtree，但仍遵守同一裁决只有一个结果来源。
 
+**历史保存**：权威 session 文件保留所有 Branch 消息不授予 loser 执行权、发布权或状态合并能力，不代替实际 Promote 完成。
+
 **原因**：AScout 选择完整的计算延续，不定义跨文件、计算状态和全局服务的通用 merge 协议。
 
 ## D-008：允许提交包含活跃 descendants 的 subtree

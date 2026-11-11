@@ -190,7 +190,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **选择**：一套。同一套 shadow 基础设施同时解决：Fidelity 审计（投机与串行同跑、只提交串行结果，是验证 lossless 的唯一手段）、predictor 数据管道（PASTE 挖 pattern、DSP 学 k、Speculate with Memory 的 miss episodes，三家各造轮子）、cost 校准（`p` / `α` / `ρ` 只能从影子流量测）、上线安全（五阶段灰度：offline replay → shadow → canary → online → drift kill-switch）。
 
-**方法学细节**：actor replay（采集一次轨迹后重放）是一等能力 —— 消除 actor 方差、把 API 成本隔离到 speculator，让 predictor 评测变成确定性。
+**方法学边界**：actor replay（采集一次轨迹后重放）可以固定 actor 的输出刺激，但环境、匹配与调度的可复现性仍须验证，不能据此承诺 predictor 评测确定性。系统外模型输出回放只检验系统反应，不评价 Agent 或证明性能收益。
 
 ---
 
@@ -269,7 +269,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 
 **问题**：Ledger / Fidelity Monitor / Trace & Shadow Store 如何组织？
 
-**选择**：**一个 Ledger**（记录 · 回放 · 校验）—— 三者本质都是记录与校验数据、都在异步旁路上。预算计数器**不**挂在 Ledger 上：**预算计数器归 Speculation Coordinator**（它需要在决策和执行时同步读取），**成本归属分类归 Ledger**（分类天然发生在 resolve 之后，由协调流程发分类事件、Ledger 存档）。
+**选择**：**一个 Ledger** 提供记录、回放与校验的数据来源，不驱动回放执行或决定生命周期；消息正文由权威 session 文件保存，Ledger 保存引用。预算计数器**不**挂在 Ledger 上：**预算计数器归 Speculation Coordinator**（它需要在决策和执行时同步读取），**成本归属分类归 Ledger**（分类天然发生在 resolve 之后，由协调流程发分类事件、Ledger 存档）。
 
 ---
 

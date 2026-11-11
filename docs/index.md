@@ -47,6 +47,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 6. [Runtime 生命周期协议](development/runtime-discussion.md)：Runtime 生命周期操作、请求/环境身份、多 Backend 组合下的顺序、部分失败、状态聚合与清理责任。
 7. [控制面 WebUI](development/web-ui.md)：React + React Flow 界面的行为、开发代理、构建产物嵌入与当前缺口。
 8. [Agent 接入侧通用层](development/agent-access.md)：通用接入层的接口、覆盖范围与限制。
+9. [模型输出记录与回放](development/replay.md)：控制面观察与记录的下层开发说明，涵盖外部回放边界、消息引用和匹配限制。
 
 ## 状态术语
 

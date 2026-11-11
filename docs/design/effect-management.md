@@ -84,7 +84,7 @@ Runtime 内部的效果协调机制持有效果分类、相关规则、服务效
 
 Runtime 负责受管效果的实际执行和强制处理，并持有效果 obligation 与执行归属；Agent 接入侧负责 Agent 执行实体和 Session 的本地管理。Effect Management 不替代 Execution、Workspace 或其他状态域的状态责任。
 
-Outcome 负责结果的产生、规范化和交付，Resource 负责资源压力、预算和准入，Ledger 负责记录、回放和审计。Policy 要求这些对象受到额外效果约束时，它们通过 Contract 和 Runtime 内部的效果协调机制协作，但不因此互相取代，也不改变 Runtime 的最终强制责任。
+Outcome 负责结果的产生、规范化和交付，Resource 负责资源压力、预算和准入，Ledger 提供回放与审计的记录来源，不驱动回放执行。系统外替换模型输出不等于录制或回放工具效果；真实工具仍受 Runtime、效果纪律和候选作用前门槛约束。Policy 要求这些对象受到额外效果约束时，它们通过 Contract 和 Runtime 内部的效果协调机制协作，但不因此互相取代，也不改变 Runtime 的最终强制责任。
 
 ## 5. 固定保证与明确边界
 

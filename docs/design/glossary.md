@@ -40,6 +40,8 @@
 
 ## 实体
 
+- **权威 session 文件**：所有 Branch 的消息记录按记录的父子关系存放的一份文件，Agent 从它 resume 得到权威路径；包含被丢弃旁支作为审计记录，不是新的控制面实体，也不是第二棵控制 Tree。同一文件不等于同一个运行中的 Agent session。（`agent-integration.md`；`control-plane.md` §2.6）
+
 - **Branch**：Speculative Tree 中的一个子树，是树中的计算延续和投机世界的结构实体。（`../mental-model.md` §4.2）
 - **Branch Root**：Branch 对应的根节点，具有稳定 identity 并直接拥有该根的 local state；表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
 - **Instance**：由 Runtime 承载 Branch Root 执行活动的执行单元；多个 Branch 可以共享、复制或独立承载所需状态，也可以在恢复或重建后继续。逻辑 Branch 可以在建立 Instance 前先存在并推进。（`../mental-model.md` §4.2）
@@ -108,7 +110,8 @@
 - **commit barrier**：效果释放屏障；照抄处理器 commit/retire 语义（"write operations are buffered but not allowed to execute until the instruction is committed"）。（`spec-exec-abstraction.md` §4）
 - **伪装执行（`simulate`）**：对已注册效果插件的外部服务拦截请求、不转发给真实服务、在 Branch 内生成明确标记并记录来源的模拟响应的处理方式，用于避免不可逆外部影响；模拟响应作为未验证假设参与 AssumptionSet 确认/否定，仍需 Authority、validator 或其他规则验证后才能被 winner 依赖。（`effect-management.md`；`policy-decisions.md` §2.5）
 - **规范化资源记账**：成本三分 —— (a) 无论如何都要花的（命中时投机 work 即权威 work）/ (b) 纯浪费 / (c) 部分成本（被抢占/取消时已消耗部分）。口径必须包含 token 之外的资源。（`spec-exec-abstraction.md` §5；`speculation-decisions.md` D-012）
-- **Shadow / Replay**：投机与串行同跑、只提交串行结果；同一套基础设施服务 fidelity 审计、predictor 数据管道、cost 校准与上线灰度（offline replay → shadow → canary → online → drift kill-switch）。（`spec-exec-abstraction.md` §7；`speculation-decisions.md` D-014）
+- **Shadow**：投机与串行同跑、只提交串行结果，用于 fidelity 审计、predictor 数据管道、cost 校准与上线灰度。（`speculation-decisions.md` D-014）
+- **Replay（回放）**：在独立验证运行中使用录制内容作为刺激；模型输出回放只检验系统反应，不评价 Agent、不证明性能收益，也不自动恢复原 task 的失败执行。（`speculation-contract.md` §3.3；实现范围见 `../development/replay.md`）
 - **透明嵌套**：投机实例与权威实例二进制同构，实例不知道自己是投机的；底座追踪 provenance、闸门设在效果层。（`spec-exec-abstraction.md` §9.3）
 - **反射 gating**：Policy 可以读取祖先依赖与成本等客观事实，自行估计实例存活概率并用于 `admit` 或 `select`；AScout 不固定 `survival` 字段，也不强制 Policy 使用该模型。（`spec-exec-abstraction.md` §9.3；`policy-decisions.md` §2.8）
 - **Speculation Contract**：AScout 约束 Policy、控制面与 Runtime 之间语义对齐的契约。它规定 Policy 如何表达与校验决策取值、Runtime 如何通过接入边界声明并兑现能力，以及失败时如何收敛；不固定 Runtime 内部实现。（`speculation-contract.md`）

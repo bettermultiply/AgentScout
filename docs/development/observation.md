@@ -62,7 +62,7 @@ Tree 在 `insert_branch` 收到准入投机的起点时建立内部 `Speculation
 
 同一个 `events.jsonl` 同时保存三类记录，读取时按顶层 `message` 字段区分，不能把每一行都当作观察事件：
 
-- 原始事实：控制面与 Runtime 运行事实、Agent 消息原文、Policy 记录和调度记录。`message` 是事实名（例如 `agent_adapter` 来源的消息、`runtime_event`、`candidate_created`、`policy_error`），可能带 `source` 与运行内相对时刻 `t_ms`；这些行不是公共观察事件。
+- 原始事实：控制面与 Runtime 运行事实、Agent 消息引用、Policy 记录和调度记录。transcript 只保留 Branch id、`session_entry_id` 与 role，正文存于权威 session 文件；其他 action／Runtime 事实仍可能含完整工具参数与结果。`message` 是事实名（例如 `agent_adapter` 来源的消息、`runtime_event`、`candidate_created`、`policy_error`），可能带 `source` 与运行内相对时刻 `t_ms`；这些行不是公共观察事件。
 - Branch 归档：`{"message":"branch_archived","branch_id":...,"branch":...}`，保存 Branch 移出活动 Tree 时的记录；它不是观察事件，也不参与界面折叠。
 - 观察事件：`{"message":"observation","observation":{sequence,timestamp_ms,task_id,event,...}}`。只有这一类的 `observation` 对象进入状态事件集和 SSE；`sequence` 是同一控制面进程内连续递增的观察序号。
 
@@ -76,17 +76,17 @@ Pi 接入在每个 Branch 内保存模型 action 队列：模型推理前把 `ac
 
 时钟实现：接入侧用 `Date.now()` 产生 Unix 毫秒墙钟时间戳；模型结束时间优先用 SDK 以单调时钟测得的 `durationMs` 锚定在请求开始时刻，缺少时才退回结束时的墙钟。Action 耗时使用两个墙钟时间戳相减，因此墙钟回退时不填写而不是给出负值。上述时间表示接入侧观察到的请求开始、结果到达或提交时刻，不是控制面收到消息的时刻。
 
-当前已知限制（属于原型实现，不是目标语义）：权威路径在工具 Hook 处可能需要等待一次本地 Policy 求值；该求值在沙箱内启动 Python 子进程，所有报告共用 Pi 接入侧的一条串行发送队列，控制面读取较慢时会拖住后续报告。对话正文仍由事件实时带来，Ledger 不保存对话正文；Branch 对应的 session id、路径和继承分界尚未记录，留待后续讨论。
+当前已知限制（属于原型实现，不是目标语义）：权威路径在工具 Hook 处可能需要等待一次本地 Policy 求值；该求值在沙箱内启动 Python 子进程，所有报告共用 Pi 接入侧的一条串行发送队列，控制面读取较慢时会拖住后续报告。对话正文仍由接入事件实时带来；持久化时 transcript 保存消息引用，正文由权威 session 文件保存，继承关系由记录父链表达。文件位置与引用是内部记录，不直接加入公共观察事件。compaction 尚未保存，见[记录与回放](replay.md)。
 
 Tree 在 `admit` 通过时创建 Chance；`branch_created` 的 `chance_id` 与 `chance_created` 使用同一个不透明 id，初始权威 Branch 为 null。speculation_kind 在创建入口按父 action 的现有 ActionKind 填写，无法关联时为 null。没有 Runtime 嵌套身份报告，parent_environment 为 null，不能拿逻辑 Parent 冒充环境嵌套。configuration 仅公开 shared_environment 能力摘要，不公开本地配置文件路径或凭据。Failed 不足以判断独立 Instance 是否仍存在，返回 null；Cleaned 表示该 Branch 已不拥有独立 Instance。
 
 Tree 的 insert_branch、change_status、change_authority、record_runtime_state / emit_environment 是创建、生命周期、角色与环境事件入口。入口修改状态时将事实放入 Tree 的 pending_observations，控制循环通过 drain_observations 取走并交给 Ledger，不依赖 HTTP 或文件格式。状态转换入口提供原因；Discard Applied 后依次记录 Discarded、Cleaning，不遗漏同一次处理内的中间状态。对话提示、模型用量、工具完成与 run_status 保持原有来源，通过 Ledger 追加。清理成功来自 Runtime Cleaned；Runtime Failed 只发布失败状态，尚不能从现有状态区分 terminate、cleanup 或其他操作失败，不伪造 environment_cleaned 失败结果。
 
-Ledger 复用 events.jsonl：观察事件记录为 {message: "observation", observation: 公共事件}，与 record 的原始事实和 archive_branch 的归档记录区分。采用同一文件便于一并检查控制事实和观察事实，保留 record / archive_branch 的职责；不逐次保存完整树，不设计崩溃恢复。append_observation 在追加时分配连续序号；文件写入失败仍保留内存事件并返回错误，报告历史不完整，不承诺部分文件写入回滚。
+Ledger 复用 events.jsonl：观察事件记录为 {message: "observation", observation: 公共事件}，与 record 的原始事实和 archive_branch 的归档记录区分。采用同一文件便于一并检查控制事实和观察事实，保留 record / archive_branch 的职责；不逐次保存完整树，不承诺完整 Tree 崩溃恢复。Promote 与消息引用可以提供有限消息定位依据，但恢复工具尚未实现。append_observation 在追加时分配连续序号；文件写入失败仍保留内存事件并返回错误，报告历史不完整，不承诺部分文件写入回滚。
 
 Ledger::reader 返回只读 LedgerReader；Ledger 和句柄均提供 state_event_set、events_after。web.rs / tui.rs 直接接收该句柄，不经 Interface 转交事件。内存有序历史用不可变 Arc 链保存，读取只在短锁内复制末端句柄和序号，遍历、复制和折叠均在锁外；追加不等待完整历史读取。events_after 在同一个序号锁和 Condvar 上检查并等待新事件，追加和断开事件唤醒所有等待连接。销毁历史采用迭代释放，避免长链递归释放栈溢出。
 
-日志包含完整运行前缀，不截断；状态事件集和 TUI 按事件折叠，尚未优化长运行的折叠与内存成本，也未实现折叠后的缓存状态。序号范围是单次控制面进程运行，重启后需重新取得状态事件集，不支持跨重启续传。归档不删除观察历史或对话。
+日志包含完整运行前缀，不截断；状态事件集和 TUI 按事件折叠，尚未优化长运行的折叠与内存成本，也未实现折叠后的缓存状态。序号范围是单次控制面进程运行，重启后需重新取得状态事件集，不支持跨重启续传。归档不删除观察历史或权威 session 文件中的消息旁支。
 
 新增代码名和接口名需主 Agent 向用户确认，未将它们扩展为新的领域术语。
 

@@ -30,6 +30,8 @@ Product Integration 从被拦截步骤的原调用返回路径自动取得成功
 
 `extent` 与 `effect` 属于 Agent 接入侧在本地范围内求值的 Decision，由与具体产品无关的通用接入层统一完成；Product Integration 只把产品的执行点交给通用接入侧，并执行其返回的继续、阻止、暂停或使用提供结果的处置，不自行求值 `extent` 或 `effect`。产品专有的消息、checkpoint、session 和 SDK 细节留在 Product Integration，不进入通用求值逻辑。
 
+Product Integration 负责将各 Branch 消息按记录的父子关系写入权威 session 文件，再报告消息引用；通用层只传递文件位置、Branch 与记录引用等契约数据，不解释产品格式。文件写入或读取位置提示不等于 Agent session 释放、Branch 执行释放或 Runtime 清理。
+
 ### 2.2 ASC-Proxy
 
 ASC-Proxy 是 Agent 接入侧与控制面之间的受管通信代理。它可以由控制面随 Agent 一起启动的进程内组件、本地 IPC 客户端、网络客户端或独立进程实现，不要求用户手工启动或直接管理。它与控制面建立通信会话，并在会话建立过程中确认通信双方的身份；在后续通信中，它通过通信凭证证明消息来自对应的 Agent 接入侧，避免信息伪造。
@@ -75,6 +77,8 @@ Agent 按照自身原有流程执行步骤。当 Agent 即将执行处于接入�
 真实步骤继续执行时，Product Integration 从原调用返回路径取得结果并交给 Interposer；Interposer 将其作为 outcome 归属对应 Branch，并通过 ASC-Proxy 提交控制面。Agent 主进程及其 sub-agent 产生的可观察步骤都经过同一处理路径，因此 AScout 介入的是步骤执行边界，而不改变 Agent 原有的执行流程。
 
 Parent 获得真实结果后沿原路径继续，不以候选比较完成为结果交付前提；只有控制面确认 Promote 时旧 Parent 才失去权威并受管停止。每个工具 operation 独立提交事实和判断准入，同一消息包含多个调用本身不是拒绝条件；候选续跑前必须保证全部调用与结果正确配对，不得为了恢复上下文而重复执行其他调用的效果。工具与结果兼容性由 Policy 结合接入能力判断，能力不足须明确报告或回退，不能伪造结果。
+
+共用权威 session 文件不等于共用运行中的 session。Promote 后 winner 沿自己的 session 继续，不重启、不合并上下文；文件只是历史的存放位置，不决定权威。
 
 ## 4. 部署与生命周期
 

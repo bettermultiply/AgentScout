@@ -32,7 +32,7 @@ Branch(r_n)     = r_n 及其全部 descendants 构成的子树
 children(r_n)   = r_n 的直接 child Branch Root 集合
 ```
 
-因此，`local state of r_n` 不包含 child Branch Root；`Branch r_n` 则包含 `r_n` 以及它的全部 descendants。Speculative Tree 从 root Authority Instance 对应的 root Branch Root 开始；状态本身不是另一棵独立的树。
+因此，`local state of r_n` 不包含 child Branch Root；`Branch r_n` 则包含 `r_n` 以及它的全部 descendants。Speculative Tree 从 root Authority Instance 对应的 root Branch Root 开始；状态本身不是另一棵独立的树。权威 session 文件中记录的父子关系只是消息历史的存放关系，不是第二棵控制 Tree，不取代 Branch identity、Instance 或所有权；控制树重新挂载不改写历史消息的父子关系。
 
 一个 AScoutAgent 恰好拥有一棵控制面 Speculative Tree。Branch Root identity、candidate handle、capability、commit/discard 和 resolution 都只在这棵 tree 内有意义；同一部署承载多个 AScoutAgent 不形成更高层的 Branch 关系。
 
@@ -109,11 +109,13 @@ Promote 不以 candidate 会话或当前模型请求结束为前提；已满足�
 
 在 `Promote` 中，candidate 按各状态类别规则已经可见的 parent state、已提交生效的 external effect 和已验证 outcome 必须随 winner 延续。parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播，也不执行 parent/candidate state merge。
 
+同一份权威 session 文件不等于同一个运行中的 Agent session。Winner 继续自己的 session 和上下文，不重启、不合并旧 Parent 的后续上下文；历史旁支保留不改变 single-winner。
+
 ### 4.6 Discard、失败与清理
 
 控制面可以依据 `dispose`、资源压力、Proposal 前提失效、任务结束或其他固定取消条件，在 live direct child 尚未达到提交条件时 discard 整个 child subtree。Discard 不要求 candidate ready，也不自动把 child partial state 或结果反馈给 parent。Commit 与 discard 的控制语义由控制面线性化；涉及执行承载的停止和清理经相应承载机制落实。
 
-对尚未被接受的投机 Branch，失败收敛为“该 Branch 在 Speculative Tree 中从未被创建”：不重放该操作，不保留它的部分结果作为成功。被接受的 Branch 已完成使命，不适用这一语义。
+对尚未被接受的投机 Branch，失败后对运行的影响等效于没有创建过：不重放该操作，不保留部分结果作为成功，并收敛副作用。审计记录必须保留；被保留的消息旁支只供观察与导出，不得重新执行或对权威生效。被接受的 Branch 已完成使命，不适用这一失败语义。
 
 Candidate 未被接受不表示其不可行。受控 metadata 应区分 Proposal invalidated、evaluated but rejected、policy/resource cancelled、execution failed 和 superseded 等 disposition。
 

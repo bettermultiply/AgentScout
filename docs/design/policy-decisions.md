@@ -145,6 +145,8 @@ Proposal = {
 
 ### 2.4 `launch` - 是否取得权威值
 
+Proposal 的不可变性不保证其运行内 id 跨运行稳定。外部回放可以按操作特征与候选输入匹配，但不得因此改变 Proposal、Promote／Reuse／Discard 或 single-winner 的语义；具体键与碰撞限制留在开发说明。
+
 ```text
 launch(input) -> bool
 ```
