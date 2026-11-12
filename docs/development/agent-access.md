@@ -59,7 +59,7 @@
 
 验证：`node --test tests/pi-access.mjs tests/pi-session-history.mjs` 共 7 项通过，覆盖 checkpoint 原生记录、原生 ID、真实结果重挂、运行 manager 不变、活跃源保留、停止后清理、失败保留和已安装 `pi-code-rollback` 的同仓库快照关联。快照在 `/tmp/opencode` 临时 Git 仓库生成，核对 `targetId`、`repoRoot`、`ref^{tree}`、Git blob 可读及重开后的启动 GC；没有执行用户仓库恢复。`node tools/replay/verify/b1-pi.mjs` 通过，使用本地回放服务，产物 `/tmp/opencode/ascout-replay-b1-pi-ENK910`。
 
-仍未完成：跨仓库迁移 Git ref/object、原生 Pi 完整工具任务继续及实际 rollback 恢复未验收；不能把复制 session 文件当作完整 `pi-code-rollback` 支持。compaction 已概括预测内容时摘要如何满足真实历史含义、custom 的任意外部引用及在飞模型推理与外部状态交接需主 Agent 收敛语义。当前保留原始摘要，不擅自重新生成或删除。Policy 真实结果通知接口仍未实现，默认无消息保持。
+后续审查已补上同仓库独立真实 Pi 文件任务继续及临时 Git 实际 rollback 恢复，并修复结果误选、候选重挂路径、独立重开位置和异步 shutdown 记录遗漏；完整命令、范围和剩余项见 [Pi session 审查修复](pi-session-review-2026-11-13.md)。跨仓库 Git ref/object、NLE 外部资源迁移仍未验收，不能把复制 session 文件当作完整 `pi-code-rollback` 支持。compaction 摘要覆盖预测的最终历史语义和 Policy 可选通知接口仍需主 Agent 决策；当前保留原始摘要、默认不追加通知。
 
 ## 5. 限制
 

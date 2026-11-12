@@ -30,13 +30,17 @@ export class SessionTree {
         const directory=join(dirname(this.manager.getSessionFile()),'sessions');
         mkdirSync(directory,{recursive:true});
         const file=join(directory,`${randomUUID()}.jsonl`);
-        const header={...source.getHeader(),id:randomUUID(),cwd:workspace,parentSession:source.getSessionFile()};
+        const header={...source.getHeader(),id:randomUUID(),timestamp:new Date().toISOString(),cwd:workspace,parentSession:source.getSessionFile()};
         const entries=structuredClone(source.getEntries());
         // Native createBranchedSession mutates its receiver and recreates label
         // IDs. Copy native records instead, preserving IDs and off-path custom
         // references, and explicitly select the checkpoint on the new manager.
         this.write(file,header,entries);
         const manager=source.constructor.open(file,undefined,workspace);
+        if(leaf)manager.branch(leaf);else manager.resetLeaf();
+        // branch() only selects an in-memory leaf. A neutral native record
+        // persists the checkpoint path for an independent open of this file.
+        manager.appendCustomEntry('authority',{branch_id:branchId,parentId:leaf??null});
         if(leaf)manager.branch(leaf);else manager.resetLeaf();
         this.branches.set(branchId,{manager,stopped:false});
         this.tails.set(branchId,leaf);
@@ -102,18 +106,50 @@ export class SessionTree {
         for(const [id,entry] of entries){
             if(entry.parentId&&!entries.has(entry.parentId))throw Error(`Missing Pi parent ${entry.parentId} for ${id}`);
             for(const field of ['targetId','firstKeptEntryId','fromId'])if(entry[field]&&entry[field]!=='root'&&!entries.has(entry[field]))throw Error(`Missing Pi ${field} ${entry[field]} for ${id}`);
+            if(entry.type==='custom'&&entry.customType==='rollback-snapshot'&&entry.data?.targetId&&!entries.has(entry.data.targetId))throw Error(`Missing rollback target ${entry.data.targetId} for ${id}`);
         }
         this.originalEntries=new Map([...entries].map(([id,e])=>[id,structuredClone(e)]));
         for(const branchId of this.accepted??[]){
             const input=this.inputs.get(branchId);if(!input)continue;
             const source=input.source??this.branches.get(input.parent)?.manager;
-            const sourceEntries=source?.getEntries()??[...this.originalEntries.values()];
-            const results=sourceEntries.filter(e=>e.type==='message'&&e.message.role==='toolResult'&&input.operations.includes(e.message.toolCallId));
-            const real=results.at(-1);
-            const first=[...entries.values()].find(e=>e.parentId===input.pairedTail);
+            const path=(manager,tail)=>{
+                const result=[],seen=new Set();
+                for(let entry=manager?manager.getEntry(tail):this.originalEntries.get(tail);entry;entry=manager?manager.getEntry(entry.parentId):this.originalEntries.get(entry.parentId)){
+                    if(seen.has(entry.id))throw Error(`Cyclic native Pi history at ${entry.id}`);
+                    seen.add(entry.id);result.unshift(entry);
+                }
+                return result;
+            };
+            // A copied index contains predictions and unrelated paths. Only
+            // the source continuation of this exact checkpoint supplies facts.
+            let checkpoint=input.checkpoint;
+            if(!checkpoint){
+                let entry=this.originalEntries.get(input.pairedTail);
+                for(let i=0;i<input.operations.length;i++)entry=this.originalEntries.get(entry?.parentId);
+                checkpoint=entry?.id;
+            }
+            if(!input.realTail&&source){
+                const sourcePath=path(source,source.getLeafId()),start=sourcePath.findIndex(e=>e.id===checkpoint);
+                if(start>=0){
+                    const found=new Set();
+                    for(const entry of sourcePath.slice(start+1)){
+                        if(entry.type!=='message')continue;
+                        if(entry.message.role==='assistant')break;
+                        if(entry.message.role==='toolResult'&&input.operations.includes(entry.message.toolCallId)){
+                            if(found.has(entry.message.toolCallId))throw Error(`Duplicate result after Pi checkpoint ${checkpoint}`);
+                            found.add(entry.message.toolCallId);
+                            if(found.size===input.operations.length){input.realTail=entry.id;break}
+                        }
+                    }
+                }
+            }
+            const candidate=this.branches.get(branchId)?.manager;
+            const candidatePath=path(candidate,candidate?.getLeafId()??this.tail(branchId));
+            const first=input.first?entries.get(input.first):candidatePath.find(e=>e.parentId===input.pairedTail);
             if(!first)continue;
-            if(new Set(results.map(e=>e.message.toolCallId)).size!==input.operations.length)continue;
-            first.parentId=real.id;
+            input.first=first.id;
+            if(!input.realTail)continue;
+            entries.get(first.id).parentId=input.realTail;
         }
         for(const entry of entries.values()){
             const path=new Set();let current=entry;

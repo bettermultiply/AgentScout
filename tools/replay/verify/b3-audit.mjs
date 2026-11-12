@@ -36,7 +36,11 @@ export function audit(dir) {
   const roleText=chain.filter(e=>e.message?.role).map(e=>({role:e.message.role,text:typeof e.message.content==="string"?e.message.content:(e.message.content||[]).filter(p=>p.type==="text").map(p=>p.text).join("\n")}));
   assert.deepEqual(roleText.map(e=>e.role),["system","user","assistant","toolResult","assistant"]);
   assert.equal(roleText[1].text,"Use nle_action once, then stop.");
-  assert.equal(roleText[3].text,"moved"); assert.equal(roleText[4].text,"scripted complete");
+  const originalResults=session.filter(e=>e.type==='message'&&e.message?.role==='toolResult'&&e.message.toolCallId==='fixture-call');
+  const actual=originalResults.find(e=>e.id===chain.find(e=>e.message?.role==='toolResult')?.id);
+  assert.ok(actual,'final path must contain an original native result');
+  assert.match(roleText[3].text,/position=.*hp=.*depth=.*turn=/,'final path must use real NLE observation, not predicted moved');
+  assert.equal(roleText[4].text,'scripted complete');
   const nle=obs.filter(e=>e.event==="nle_map_action").map(e=>({action:e.action,action_id:e.action_id,branch_id:e.branch_id,before:e.before,after:e.after}));
   assert.equal(nle.length,1); assert.equal(nle[0].action,1);
   const recording=JSON.parse(fs.readFileSync(dir+"/recording.json")); assert.equal(recording.length,4);

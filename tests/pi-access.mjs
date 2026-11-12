@@ -15,7 +15,7 @@ function readTree(file) {
     return JSON.parse(result.stdout);
 }
 
-for (const shutdownAt of ['completed', 'tool_wait', 'candidate_gate', 'admission']) {
+for (const shutdownAt of ['completed', 'tool_wait', 'candidate_gate', 'admission', 'eof_tool_wait']) {
 test(`runtime result commands and graceful shutdown at ${shutdownAt}`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'ascout-pi-'));
     const socketPath = join(root, 'agent.sock');
@@ -33,6 +33,7 @@ export async function createAgentSession(options) {
     const controller = new AbortController();
     let subscriber = () => {};
     const session = {
+        extensionRunner:{hasHandlers:()=>true,async emit(event){if(event.type==='session_shutdown'){await new Promise(r=>setImmediate(r));options.sessionManager.appendCustomEntry('shutdown-final',{reason:event.reason})}}},
          agent: {}, sessionManager:options.sessionManager, messages: options.sessionManager ? options.sessionManager.buildSessionContext().messages : [], subscribe(fn) {subscriber=fn}, dispose() {}, async abort() {controller.abort()},
         async continue() { return session.prompt('candidate'); },
         async prompt() {
@@ -106,7 +107,7 @@ export async function createAgentSession(options) {
         const header = Buffer.alloc(4); header.writeUInt32BE(body.length);
         client.write(Buffer.concat([header, body]));
     }
-    async function finish(branches) {
+    async function finish(branches, expectedShutdowns=branches.length) {
         for (const branch_id of branches) {
             send({command:'cleanup',branch_id,workspace:root,command_id:`cleanup-${branch_id}`,
                 generation:branch_id==='authority'?1:2});
@@ -123,6 +124,9 @@ export async function createAgentSession(options) {
         })]);
         assert.deepEqual(exit,{code:0,signal:null},stderr);
         assert.equal(stderr,'');
+        const final=readTree(join(root,'session.jsonl'));
+        assert.equal(final.entries.filter(e=>e.customType==='shutdown-final').length,expectedShutdowns);
+        assert.ok(final.entries.filter(e=>e.customType==='shutdown-final').every(e=>e.data.reason==='quit'));
     }
     const connected = await expectMessage(m => m.message === 'agent_connected');
     assert.deepEqual(connected.capabilities, {
@@ -155,6 +159,7 @@ export async function createAgentSession(options) {
     const pending = await expectMessage(m => m.message === 'action_started' && m.action_kind === 'tool_execution');
     assert.equal(pending.action_id, 'operation-1');
     assert.equal(pending.result_pending, true);
+    if (shutdownAt === 'eof_tool_wait') return finish([],1);
     if (shutdownAt === 'tool_wait') return finish(['authority']);
     // Rust's JSON encoder sorts object keys; checkpoint identity must not depend
     // on insertion order. Candidate setup also must not hold the command queue.

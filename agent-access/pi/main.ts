@@ -51,6 +51,21 @@ const transcriptQueues = new Map();
 const replayKeys = new Map();
 const reportedEntries = new Set();
 const candidateWaiters = new Map();
+const branchTasks = new Map();
+const setupTasks = new Map();
+async function stopSession(branch) {
+    const session=sessions.get(branch);
+    await session?.abort();
+    await Promise.allSettled([...(branchTasks.get(branch)??[])]);
+    // dispose() is synchronous and does not emit session_shutdown. Await the
+    // native extension lifecycle while its append context is still valid.
+    if(session?.extensionRunner?.hasHandlers('session_shutdown'))
+        await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});
+    await session?.waitForIdle?.();
+    syncTranscript(branch);
+    session?.dispose();sessions.delete(branch);modelActions.delete(branch);
+    tree.stop(branch);tree.settle();
+}
 function releaseCandidateWaiters(branch) {
     for(const reject of candidateWaiters.get(branch)??[])reject(Error('Candidate cancelled while waiting for sibling result'));
     candidateWaiters.delete(branch);
@@ -250,6 +265,8 @@ function executeTurn(session,branch,operation) {
     const task=run(session,branch,operation)
         .catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error instanceof Error?error.message:error)}));
     tasks.add(task);
+    const running=branchTasks.get(branch)??new Set();running.add(task);branchTasks.set(branch,running);
+    void task.finally(()=>{running.delete(task);if(!running.size)branchTasks.delete(branch)}).catch(()=>socket.destroy());
     void task.finally(()=>tasks.delete(task)).catch(()=>socket.destroy());
 }
 async function handle(command) {
@@ -263,7 +280,7 @@ async function handle(command) {
         case 'start_branch': {
             const manager=tree.createBranch(branch,command.workspace,tree.manager,tree.tail(branch)??tree.manager.getLeafId());
             const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
-            if(closing||cancelled.has(branch)){session.dispose();return}
+            if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
             sessions.set(branch,session);install(session,branch);
             await report({message:'branch_created',branch_id:branch});
             await report({message:'branch_started',branch_id:branch});
@@ -307,7 +324,7 @@ async function handle(command) {
             tree.settle();
             await access.control(command);
             const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
-            if(closing||cancelled.has(branch)){session.dispose();return}
+            if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
             sessions.set(branch,session);install(session,branch);
             await report({message:'branch_created',branch_id:branch});
             // Injected result is new candidate content, not copied from the Parent.
@@ -335,8 +352,9 @@ async function handle(command) {
             return;
         case 'discard': cancelled.add(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;
         case 'cleanup':
-            cancelled.add(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);modelActions.delete(branch);
-            syncTranscript(branch);tree.stop(branch);tree.settle();
+            cancelled.add(branch);releaseCandidateWaiters(branch);
+            await setupTasks.get(branch)?.catch(()=>{});
+            await stopSession(branch);
             await finishActions(branch,'cancelled');
             for(const id of checkpoints.keys())if(JSON.parse(id)[0]===branch)checkpoints.delete(id);
             await report({message:'agent_session_released',branch_id:branch});
@@ -379,6 +397,10 @@ try{
             const result=old?.result??(command.command==='start_candidate'
                 ?commandQueue.then(()=>dispatch(command))
                 :(commandQueue=commandQueue.then(()=>dispatch(command))));
+            if(command.command==='start_candidate'){
+                setupTasks.set(command.branch_id,result);
+                void result.finally(()=>{if(setupTasks.get(command.branch_id)===result)setupTasks.delete(command.branch_id)}).catch(()=>{});
+            }
             if(id&&!old)commands.set(id,{serialized:JSON.stringify(command),result});
             const task=result.then(reply=>reply?report(reply):undefined);tasks.add(task);void task.finally(()=>tasks.delete(task)).catch(()=>socket.destroy());
         }
@@ -390,9 +412,9 @@ try{
     for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
     await commandQueue.catch(()=>{});
     await Promise.allSettled([...sessions.values()].map(s=>s.abort()));
-    await Promise.allSettled(tasks);for(const session of sessions.values())session.dispose();
-    for(const branch of sessions.keys()){syncTranscript(branch);tree.stop(branch)}tree.settle();
-    for(const branch of sessions.keys())await finishActions(branch,'cancelled');
+    await Promise.allSettled(tasks);
+    for(const branch of [...tree.branches.keys()]){await stopSession(branch);await finishActions(branch,'cancelled')}
+    tree.settle();
     await report({message:'agent_released',agent_id:agentId});
     await outgoing;
     if(!socket.destroyed)await new Promise(resolve=>socket.end(resolve));

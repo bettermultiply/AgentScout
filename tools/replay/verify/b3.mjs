@@ -100,14 +100,15 @@ checkReport(finalReport,{total_requests:6,hits:4,misses:1,exhausted:1,consumed:4
 checkReport(badReport,{total_requests:1,hits:0,misses:1,exhausted:0,consumed:0,unconsumed:4});
 fs.writeFileSync(root+"/acceptance.json",JSON.stringify({firstAudit,secondAudit,normalReport,finalReport,badReport},null,2));
 const psText=execFileSync("ps",["-eo","pid=,args="],{encoding:"utf8"});
-const psMatches=psText.split("\n").filter(line=>/(ascout-control-plane|ascout-runtime-adapter|nle-runtime-bridge|tools\/replay\/(serve|verify\/b3)\.mjs)/.test(line)).filter(line=>!line.trim().startsWith(String(process.pid)+" ")).filter(line=>!(/\b(bash|timeout)\b/.test(line)));
+const ownedPids=new Set(children.map(child=>child.pid));
+const psMatches=psText.split("\n").filter(line=>ownedPids.has(Number(line.trim().split(/\s+/)[0])));
 if (psMatches.length) throw new Error(`B3 process cleanup failed:\n${psMatches.join("\n")}`);
 console.log(JSON.stringify({run,run2,modelRequests,recording:true,firstSummary:{...firstSummary,raw:undefined},secondSummary:summary2(),same_role_text:same,replay:{missing_status:miss.status,exhausted_status:exhausted.status,altered_status:altered.status},control_exit:child.exitCode,replay_control_exit:child2.exitCode,ps_checked:true,ps_matches:psMatches},null,2));
 } finally {
   const cleanup=await Promise.allSettled(children.map(terminate));
   for(const server of servers) { server.closeAllConnections(); await closeServer(server); }
   assert.equal(cleanup.filter(r=>r.status==="rejected").length,0,"process cleanup failures");
-  const remaining=execFileSync("ps",["-eo","pid=,comm=,args="],{encoding:"utf8"}).split("\n").filter(l=>/(ascout-control-plane|ascout-runtime-adapter|nle-runtime-bridge|tools\/replay\/(serve|verify\/b3)\.mjs)/.test(l)).filter(l=>!l.trim().startsWith(process.pid+" ")&&!/\b(bash|timeout)\s/.test(l));
+  const remaining=execFileSync("ps",["-eo","pid=,comm=,args="],{encoding:"utf8"}).split("\n").filter(l=>children.some(child=>child.pid===Number(l.trim().split(/\s+/)[0])));
   assert.deepEqual(remaining,[],"B3 process cleanup failed");
   const ports=execFileSync("ss",["-ltnH"],{encoding:"utf8"}).split("\n").filter(l=>/:(18082|18083|18085|18086|18087)\b/.test(l));
   assert.deepEqual(ports,[],"B3 ports still occupied");

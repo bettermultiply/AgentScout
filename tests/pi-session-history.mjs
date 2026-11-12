@@ -51,11 +51,11 @@ test('installed pi-code-rollback snapshot references survive assembly with their
     const pi=resolve('../pi');
     const script=`
         import assert from 'node:assert/strict';
-        import {writeFileSync} from 'node:fs';
+        import {writeFileSync,readFileSync,existsSync} from 'node:fs';
         import {execFileSync} from 'node:child_process';
         import {SessionManager} from '${pi}/packages/coding-agent/src/core/session-manager.ts';
         import {SessionTree} from '${resolve('agent-access/pi/session-tree.ts')}';
-        import rollback from '${directory}/rollback.ts';
+        import rollback,{__testing__} from '${directory}/rollback.ts';
         const directory=process.argv[1];
         execFileSync('git',['init','--quiet',directory]);
         writeFileSync(directory+'/task.txt','baseline');
@@ -77,11 +77,17 @@ test('installed pi-code-rollback snapshot references survive assembly with their
         assert.ok(reopened.getBranch().some(e=>e.id===snapshot.data.targetId));
         assert.equal(git('show',snapshot.data.ref+':task.txt'),'baseline');
         // Re-open the extension against the standalone final Pi session, and
-        // run only its startup reference GC, never restore a working tree.
+        // run its startup reference GC before exercising actual restoration.
         const after={...context,sessionManager:reopened};
         await hooks.get('session_start')({},after);
         assert.equal(git('rev-parse',snapshot.data.ref+'^{tree}'),snapshot.data.tree);
         assert.deepEqual(warnings,[]);
+        // Restore only this disposable repository, never the user repository.
+        writeFileSync(directory+'/task.txt','changed after snapshot');
+        writeFileSync(directory+'/new.txt','new file');
+        await __testing__.restoreSnapshot(directory,reopened.getEntry(snapshot.id).data.ref);
+        assert.equal(readFileSync(directory+'/task.txt','utf8'),'baseline');
+        assert.equal(existsSync(directory+'/new.txt'),false);
     `;
     execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script,directory],{encoding:'utf8'});
 });
