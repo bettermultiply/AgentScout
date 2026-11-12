@@ -69,9 +69,9 @@
 
 2026-11-13 独立 adapter 审查新增 `tests/pi-notification-adapter.mjs`：真实 `main.ts` 子进程、Unix 帧协议和原生 `SessionManager`，SDK double 只模拟 `triggerTurn:false` 的运行中队列、abort、idle 及落盘事件，不模拟真实推理。9 项覆盖排队后的 cleanup／EOF／abort／自然 turn_end、缺省零通知、完整相同 `command_id` 重传（交付前后）及冲突 payload 拒绝；空闲与排队两种写失败均核对源文件保留、无通知 transcript、无虚假 released、EOF 非零退出，空闲接收失败另核对 `adapter_capability_gap(notification, failed)` 而 Promote 仍 Applied。正常 Promote 不 abort，不增加模型执行；通知重开核对正文、原生 ID 和 command_id。联合原五组共 24 项通过。Rust 协调层 8 项通过，新增两个 Chance 的 outcome／evidence 不串用检查；真实 Policy 的 context 输入与 Runtime 失败不交付沿用现有测试。本轮未发现需要生产代码修复的问题。
 
-边界：SDK double 的 shutdown／故障注入不是完整原生 Pi adapter 端到端验收；原生 Pi 双工具队列与自然下一请求由独立 SDK 测试覆盖。没有验证跨崩溃去重、全系统恢复、跨仓库／外部环境资源迁移。`display:false` 只关闭 Pi 本地展示，不阻止模型上下文或 transcript 持久化；已记录目标语义未要求强制 display=true，本轮未改动。关于 `context.authority_outcome` 的批准来源，本轮只能核实文档自称已确认，记忆页没有用户回答原文，深查因服务认证失败不可用，故不能独立证明用户明确批准；该字段本已存在于 Chance，本次仅核查其新增 Policy context 位置的实际行为，批准溯源交主 Agent 处理，不自行改名。
+边界：SDK double 的 shutdown／故障注入不是完整原生 Pi adapter 端到端验收；原生 Pi 双工具队列与自然下一请求由独立 SDK 测试覆盖。没有验证跨崩溃去重、全系统恢复、跨仓库／外部环境资源迁移。`display:false` 只关闭 Pi 本地展示，不阻止模型上下文或 transcript 持久化；已记录目标语义未要求强制 display=true，本轮未改动。关于 `dispose.context.authority_outcome` 的批准来源，早先“已确认”的表述缺乏独立批准依据；2026-11-13 本轮用户明确回复“同意”，批准保留该字段，向 Policy 提供对应 Chance／operation 的真实结果，不自动给模型追加消息。此批准不追认早先已确认；本轮仅文档收尾，不改实现、不重跑测试，见 `decisions.md`。
 
-本轮全量 `cargo test --lib` 为 144 通过、1 失败：无关的 `send_dump_drains_large_send_stderr` 在启动临时可执行文件时报 `Text file busy (os error 26)`；立即单项复跑通过。未修改该测试或声称本轮全量全过。`Discussion.md` 已追加本轮验证与批准来源待核对记录，但该文件当前被 Git 忽略，未强制纳入版本控制。
+上述审查的全量 `cargo test --lib` 为 144 通过、1 失败：无关的 `send_dump_drains_large_send_stderr` 在启动临时可执行文件时报 `Text file busy (os error 26)`；立即单项复跑通过。未修改该测试或声称上述审查全量全过。`Discussion.md` 保留既有验证记录，批准来源待核对项已由本轮明确批准收敛；该文件当前被 Git 忽略，未强制纳入版本控制。
 
 ## 5. 限制
 

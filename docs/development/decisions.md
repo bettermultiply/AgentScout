@@ -1,5 +1,11 @@
 # 开发决策
 
+## 2026-11-13：本轮明确批准保留 dispose.context.authority_outcome
+
+用户在本轮明确回复“同意”，批准保留 `dispose.context.authority_outcome`，用于向 Policy 提供对应 Chance／operation 的真实结果。该字段不自动给模型追加消息；是否追加真实结果通知仍由 Policy 通过可选 `notification` 决定，默认完全不追加。Match evidence 与 `context.match` 保持不变。
+
+早先文档把该字段写成“用户同意”时，缺乏可独立核实的批准依据；本条记录的是本轮明确批准，不追认早先已确认。同步纠正接入实现文档的批准溯源，清除 Discussion 中对应待确认项。本轮仅文档收尾，不修改实现、不运行测试、不委派；只提交本次可隔离的文档差异，Discussion 被忽略则不强制纳入提交。
+
 ## 2026-11-13：Pi 原生分支持久化实施进展
 
 按 6b99d9b 接通独立原生持久 SessionManager，复制 native entries 和 ID；不用消息投影重建 checkpoint，也不在活跃 manager 调用会修改 receiver 的 createBranchedSession。汇总使用临时文件及 rename，校验父引用和循环，只有停止写入且成功汇总的源文件才清理。运行 manager 保留预测上下文；汇总父链单独按真实结果整理。旧 message_end 向共享文件生成新 ID 的方式废弃。
