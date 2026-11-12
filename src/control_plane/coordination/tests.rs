@@ -147,6 +147,21 @@ use super::*;
     }
 
     #[test]
+    fn candidate_authority_outcome_is_bound_to_its_chance_not_latest_operation() {
+        let (mut tree, _root) = task();
+        let first = tree.admit_chance("authority", "first", "tool", json!({}), None, None).unwrap();
+        let AgentCommand::StartCandidate { branch_id: first_candidate, .. } = tree.start_candidate(&first, json!("first guess")).unwrap() else { unreachable!() };
+        tree.record_authority_outcome(&first, json!({"actual":"first real"}), Some(json!({"evidence":"first"}))).unwrap();
+        let second = tree.admit_chance("authority", "second", "tool", json!({}), None, None).unwrap();
+        let AgentCommand::StartCandidate { branch_id: second_candidate, .. } = tree.start_candidate(&second, json!("second guess")).unwrap() else { unreachable!() };
+        tree.record_authority_outcome(&second, json!({"actual":"second real"}), Some(json!({"evidence":"second"}))).unwrap();
+        assert_eq!(tree.candidate_outcome(&first_candidate), Some(&json!({"actual":"first real"})));
+        assert_eq!(tree.candidate_evidence(&first_candidate), Some(&json!({"evidence":"first"})));
+        assert_eq!(tree.candidate_outcome(&second_candidate), Some(&json!({"actual":"second real"})));
+        assert_eq!(tree.candidate_evidence(&second_candidate), Some(&json!({"evidence":"second"})));
+    }
+
+    #[test]
     fn dispose_receives_authority_outcome_without_replacing_match_evidence() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("policy.yaml"), include_str!("../../../assets/policy/policy.yaml")).unwrap();

@@ -65,7 +65,13 @@
 
 `Notifications` 跟踪已接受但未确认原生落盘的通知，以 `command_id` 关联 pending 与原生 details。发送使用 `triggerTurn:false`，不是 prompt／steer。读取源文件核对完整原生 entry 后才移除 pending 并报告 transcript；stopSession 在停止和 idle 后重试检查，失败不删除源文件、不报告 released。EOF 失败非零退出。Promote 已完成后通知失败报告既有 `adapter_capability_gap`，不伪称 Promote Failed。pending 只在进程内，不提供跨崩溃恢复保证。
 
-真实 Pi SDK 加本地伪 HTTP 模型验证见 `tests/pi-notification.mjs`：缺省零记录、完整双工具批次后交付、下一自然请求可见、空闲无新请求、去重、汇总重开 ID／正文／关联及注入写失败后保留 pending 和重试。Rust 检查 schema／缺省序列化、真实结果与 evidence 分别进入 Policy、Runtime 失败不发通知与重复完成不重发。`cargo test --lib` 144 项、`cargo check --all-targets` 通过；Pi notification/access/history-regressions/session-history/standalone 五组共 15 项通过。未调用外部模型或操作用户仓库恢复。真实 adapter 的 notification cleanup／EOF 故障注入仍待独立验收；本次不增加外部资源迁移能力。全仓格式检查存在既有差异，未批量格式化。
+真实 Pi SDK 加本地伪 HTTP 模型验证见 `tests/pi-notification.mjs`：缺省零记录、完整双工具批次后交付、下一自然请求可见、空闲无新请求、去重、汇总重开 ID／正文／关联及注入写失败后保留 pending 和重试。Rust 检查 schema／缺省序列化、真实结果与 evidence 分别进入 Policy、Runtime 失败不发通知与重复完成不重发。原实现验证为 `cargo test --lib` 144 项、`cargo check --all-targets` 通过；Pi notification/access/history-regressions/session-history/standalone 五组共 15 项通过。未调用外部模型或操作用户仓库恢复。全仓格式检查存在既有差异，未批量格式化。
+
+2026-11-13 独立 adapter 审查新增 `tests/pi-notification-adapter.mjs`：真实 `main.ts` 子进程、Unix 帧协议和原生 `SessionManager`，SDK double 只模拟 `triggerTurn:false` 的运行中队列、abort、idle 及落盘事件，不模拟真实推理。9 项覆盖排队后的 cleanup／EOF／abort／自然 turn_end、缺省零通知、完整相同 `command_id` 重传（交付前后）及冲突 payload 拒绝；空闲与排队两种写失败均核对源文件保留、无通知 transcript、无虚假 released、EOF 非零退出，空闲接收失败另核对 `adapter_capability_gap(notification, failed)` 而 Promote 仍 Applied。正常 Promote 不 abort，不增加模型执行；通知重开核对正文、原生 ID 和 command_id。联合原五组共 24 项通过。Rust 协调层 8 项通过，新增两个 Chance 的 outcome／evidence 不串用检查；真实 Policy 的 context 输入与 Runtime 失败不交付沿用现有测试。本轮未发现需要生产代码修复的问题。
+
+边界：SDK double 的 shutdown／故障注入不是完整原生 Pi adapter 端到端验收；原生 Pi 双工具队列与自然下一请求由独立 SDK 测试覆盖。没有验证跨崩溃去重、全系统恢复、跨仓库／外部环境资源迁移。`display:false` 只关闭 Pi 本地展示，不阻止模型上下文或 transcript 持久化；已记录目标语义未要求强制 display=true，本轮未改动。关于 `context.authority_outcome` 的批准来源，本轮只能核实文档自称已确认，记忆页没有用户回答原文，深查因服务认证失败不可用，故不能独立证明用户明确批准；该字段本已存在于 Chance，本次仅核查其新增 Policy context 位置的实际行为，批准溯源交主 Agent 处理，不自行改名。
+
+本轮全量 `cargo test --lib` 为 144 通过、1 失败：无关的 `send_dump_drains_large_send_stderr` 在启动临时可执行文件时报 `Text file busy (os error 26)`；立即单项复跑通过。未修改该测试或声称本轮全量全过。`Discussion.md` 已追加本轮验证与批准来源待核对记录，但该文件当前被 Git 忽略，未强制纳入版本控制。
 
 ## 5. 限制
 
