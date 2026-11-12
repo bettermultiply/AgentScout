@@ -9,6 +9,7 @@ import { resolve } from 'node:path';
 import { evaluatePolicyArtifact } from '../../../pi/packages/ascout-agent-access/src/local-policy.ts';
 import { createAgentAccess } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
+import { requestKey } from '../../tools/replay/normalize.mjs';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
@@ -46,6 +47,34 @@ const cancelled = new Set(), generations = new Map(), commands = new Map();
 const activeActions = new Map(), reportedActions = new Set();
 const aborting = new Set();
 const modelActions = new Map();
+const transcriptQueues = new Map();
+const replayKeys = new Map();
+const reportedEntries = new Set();
+const candidateWaiters = new Map();
+function releaseCandidateWaiters(branch) {
+    for(const reject of candidateWaiters.get(branch)??[])reject(Error('Candidate cancelled while waiting for sibling result'));
+    candidateWaiters.delete(branch);
+}
+function syncTranscript(branch) {
+    const manager=tree.branches.get(branch)?.manager;
+    if(!manager)return;
+    const queue=transcriptQueues.get(branch)??[];
+    const pending=[];
+    for(const item of [...queue]){
+        const entry=manager.getEntries().find(e=>!reportedEntries.has(e.id)&&e.type==='message'&&(e.message===item.message||JSON.stringify(e.message)===JSON.stringify(item.message)));
+        if(!entry)continue;
+        queue.splice(queue.indexOf(item),1);
+        reportedEntries.add(entry.id);
+        if(item.message.role==='assistant'){
+            const request_key=replayKeys.get(branch)?.shift();
+            if(request_key)tree.requests.set(entry.id,request_key);
+        }
+        tree.tails.set(branch,manager.getLeafId());
+        pending.push({message:'transcript',branch_id:branch,entry:item.message,session_entry_id:entry.id});
+    }
+    tree.settle();
+    for(const payload of pending)void report(payload);
+}
 const runtimeTools = JSON.parse(process.env.ASCOUT_RUNTIME_TOOLS ?? '[]');
 const capabilities = {
     preExecutionInterception:true,
@@ -98,6 +127,8 @@ function tools(branch) {
     }}));
 }
 async function beforeModelInference(branch, modelValue, context, signal) {
+    syncTranscript(branch);
+    const keys=replayKeys.get(branch)??[];keys.push(requestKey(context.messages));replayKeys.set(branch,keys);
     // Model inference is a PURE step: the generic layer evaluates `admit` but
     // never applies the effect gate, reports an admission, or counts extent.
     if(closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
@@ -142,10 +173,11 @@ function install(session,branch) {
         let saved, checkpoint;
         const prepareCheckpoint=()=>{
             if(checkpoint)return checkpoint;
-            saved=structuredClone(session.messages.filter(m=>m.role!=='custom'));
+            syncTranscript(branch);
+            saved=structuredClone(session.messages);
             checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${context.toolCall.id}:${saved.length}`};
             const treeTail=tree.assertCheckpoint(branch,saved);
-            checkpoints.set(key(branch,context.toolCall.id),{saved,checkpoint,treeTail});
+            checkpoints.set(key(branch,context.toolCall.id),{saved,checkpoint,treeTail,manager:tree.branches.get(branch).manager});
             return checkpoint;
         };
         await access.beforeAction({
@@ -188,8 +220,9 @@ function install(session,branch) {
         }
         if(event.type==='message_update'&&event.assistantMessageEvent.type==='text_delta')void report({message:'output',branch_id:branch,text:event.assistantMessageEvent.delta});
         if(event.type==='message_end'){
-            const session_entry_id=tree.append(branch,event.message);
-            void report({message:'transcript',branch_id:branch,entry:event.message,session_entry_id});
+            const queue=transcriptQueues.get(branch)??[];
+            queue.push({message:event.message});transcriptQueues.set(branch,queue);
+            queueMicrotask(()=>syncTranscript(branch));
             if(event.message.role==='assistant'){
                 const pending=modelActions.get(branch),index=pending?.findIndex(action=>action.seen_message)??-1;
                 const action=index>=0?pending.splice(index,1)[0]:undefined;
@@ -205,7 +238,7 @@ function install(session,branch) {
 }
 async function run(session,branch,operation) {
     try { await operation(); }
-    finally { await finishActions(branch,cancelled.has(branch)||aborting.has(branch)?'cancelled':'failed'); }
+    finally { syncTranscript(branch);await finishActions(branch,cancelled.has(branch)||aborting.has(branch)?'cancelled':'failed'); }
     const last=[...session.messages].reverse().find(m=>m.role==='assistant');
     if(last?.stopReason==='error')await report({message:'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
     await report({message:'turn_completed',branch_id:branch});
@@ -228,8 +261,7 @@ async function handle(command) {
         case 'local_policy':
             return;
         case 'start_branch': {
-            const manager=SessionManager.inMemory(command.workspace);
-            for(const message of tree.context(branch).messages)manager.appendMessage(message);
+            const manager=tree.createBranch(branch,command.workspace,tree.manager,tree.tail(branch)??tree.manager.getLeafId());
             const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){session.dispose();return}
             sessions.set(branch,session);install(session,branch);
@@ -249,6 +281,7 @@ async function handle(command) {
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
             const messages=structuredClone(checkpoint.saved),last=messages.at(-1);
             if(last?.role!=='assistant'||!last.content.some(p=>p.type==='toolCall'&&p.id===command.operation_id&&p.name===command.tool_name))throw Error('Invalid pending checkpoint');
+            const manager=tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail);
             const paired: any[]=[];
             for(const part of last.content){
                 if(part.type!=='toolCall')continue;
@@ -256,19 +289,22 @@ async function handle(command) {
                 else {
                     const sibling=checkpoints.get(key(command.parent_branch_id,part.id))?.result;
                     if(sibling) paired.push(structuredClone(sibling));
-                    else paired.push(await new Promise((resolve,reject)=>{
-                        const resultKey=key(command.parent_branch_id,part.id);
-                        const pending=resultWaiters.get(resultKey)??[];
-                        pending.push(resolve);
+                     else paired.push(await new Promise((resolve,reject)=>{
+                         const resultKey=key(command.parent_branch_id,part.id);
+                         const pending=resultWaiters.get(resultKey)??[];
+                         const rejects=candidateWaiters.get(branch)??new Set();
+                         const done=value=>{rejects.delete(cancel);resolve(value)};
+                         const cancel=()=>{const index=pending.indexOf(done);if(index>=0)pending.splice(index,1);reject(Error('Candidate cancelled while waiting for sibling result'))};
+                         rejects.add(cancel);candidateWaiters.set(branch,rejects);
+                         pending.push(done);
                         resultWaiters.set(resultKey,pending);
                         if(closing||cancelled.has(command.branch_id))reject(Error('Candidate cancelled while waiting for sibling result'));
                     }));
                 }
             }
-            const manager=SessionManager.inMemory(command.workspace);
-            for(const message of [...messages,...paired])manager.appendMessage(message);
-            tree.fork(branch,checkpoint.treeTail);
             const pairedEntryIds=paired.map(entry=>tree.append(branch,entry));
+            tree.inputs.set(branch,{parent:command.parent_branch_id,source:checkpoint.manager,operation:command.operation_id,checkpoint:checkpoint.treeTail,prediction:pairedEntryIds[paired.findIndex(e=>e.toolCallId===command.operation_id)],pairedTail:pairedEntryIds.at(-1),operations:paired.map(e=>e.toolCallId)});
+            tree.settle();
             await access.control(command);
             const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){session.dispose();return}
@@ -290,15 +326,17 @@ async function handle(command) {
         }
         case 'promote':
             if(cancelled.has(branch)||!sessions.has(branch))throw Error('Branch unavailable');
+            tree.accepted??=new Set();tree.accepted.add(branch);
             authority=branch;tree.promote(branch);tree.settle();return;
         case 'abort':
             aborting.add(branch);
             try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled'); }
             finally { aborting.delete(branch); }
             return;
-        case 'discard': cancelled.add(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;
+        case 'discard': cancelled.add(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;
         case 'cleanup':
-            cancelled.add(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);modelActions.delete(branch);
+            cancelled.add(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();sessions.get(branch)?.dispose();sessions.delete(branch);modelActions.delete(branch);
+            syncTranscript(branch);tree.stop(branch);tree.settle();
             await finishActions(branch,'cancelled');
             for(const id of checkpoints.keys())if(JSON.parse(id)[0]===branch)checkpoints.delete(id);
             await report({message:'agent_session_released',branch_id:branch});
@@ -336,7 +374,11 @@ try{
             const id=command.command_id;
             const old=id?commands.get(id):undefined;
             if(old&&old.serialized!==JSON.stringify(command)){await report({message:'branch_failed',branch_id:command.branch_id,reason:'Command id reused with different payload'});continue}
-            const result=old?.result??(commandQueue=commandQueue.then(()=>dispatch(command)));
+            // A candidate may wait for sibling tool results. It must not hold
+            // up resolve_pending / cleanup on the transport's command queue.
+            const result=old?.result??(command.command==='start_candidate'
+                ?commandQueue.then(()=>dispatch(command))
+                :(commandQueue=commandQueue.then(()=>dispatch(command))));
             if(id&&!old)commands.set(id,{serialized:JSON.stringify(command),result});
             const task=result.then(reply=>reply?report(reply):undefined);tasks.add(task);void task.finally(()=>tasks.delete(task)).catch(()=>socket.destroy());
         }
@@ -345,10 +387,11 @@ try{
     transportError??=error;
 }finally{
     closing=true;access.releaseAll();
+    for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
     await commandQueue.catch(()=>{});
-    tree.settle();
     await Promise.allSettled([...sessions.values()].map(s=>s.abort()));
     await Promise.allSettled(tasks);for(const session of sessions.values())session.dispose();
+    for(const branch of sessions.keys()){syncTranscript(branch);tree.stop(branch)}tree.settle();
     for(const branch of sessions.keys())await finishActions(branch,'cancelled');
     await report({message:'agent_released',agent_id:agentId});
     await outgoing;

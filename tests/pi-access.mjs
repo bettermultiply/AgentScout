@@ -33,7 +33,7 @@ export async function createAgentSession(options) {
     const controller = new AbortController();
     let subscriber = () => {};
     const session = {
-         agent: {}, messages: options.sessionManager ? options.sessionManager.buildSessionContext().messages : [], subscribe(fn) {subscriber=fn}, dispose() {}, async abort() {controller.abort()},
+         agent: {}, sessionManager:options.sessionManager, messages: options.sessionManager ? options.sessionManager.buildSessionContext().messages : [], subscribe(fn) {subscriber=fn}, dispose() {}, async abort() {controller.abort()},
         async continue() { return session.prompt('candidate'); },
         async prompt() {
              const isCandidate = options.sessionManager?.buildSessionContext().messages.some(m => m.role === 'toolResult');
@@ -47,10 +47,13 @@ export async function createAgentSession(options) {
             subscriber({type:'message_start',message});
             session.messages.push(message);
             subscriber({type:'message_end',message});
+            options.sessionManager.appendMessage(message);
             await finishModelInference?.('succeeded');
             await session.agent.beforeToolCall({toolCall,args:{}}, controller.signal);
             const result = await tool.execute(toolCall.id, {}, controller.signal);
             await session.agent.afterToolCall({toolCall,result,isError:false});
+            const toolResult={role:'toolResult',toolCallId:toolCall.id,toolName:toolCall.name,content:result.content,isError:false,timestamp:Date.now()};
+            session.messages.push(toolResult);subscriber({type:'message_end',message:toolResult});options.sessionManager.appendMessage(toolResult);
         }
     };
     return {session};
@@ -197,7 +200,9 @@ export async function createAgentSession(options) {
         const candidateTail = transcripts.filter(m => m.branch_id === 'candidate').at(-1);
         assert.equal(marker.data.parentId, candidateTail.session_entry_id);
         assert.equal(marker.parentId, candidateTail.session_entry_id);
-        assert.deepEqual(tree.messages.map(m => m.role), ['assistant', 'toolResult', 'assistant']);
+        assert.deepEqual(tree.messages.map(m => m.role), ['assistant', 'toolResult', 'assistant', 'toolResult']);
+        const resumedResult=tree.messages.find(m=>m.role==='toolResult');
+        assert.match(resumedResult.content[0].text,/real-result/);
         // Every reported record stays in the file, including the Authority's own
         // records that are not on the promoted path.
         for (const transcript of transcripts) assert.ok(tree.entries.some(e => e.id === transcript.session_entry_id));

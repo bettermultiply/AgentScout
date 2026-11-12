@@ -1,5 +1,14 @@
 # 开发决策
 
+## 2026-11-13：Pi 原生分支持久化实施进展
+
+按 6b99d9b 接通独立原生持久 SessionManager，复制 native entries 和 ID；不用消息投影重建 checkpoint，也不在活跃 manager 调用会修改 receiver 的 createBranchedSession。汇总使用临时文件及 rename，校验父引用和循环，只有停止写入且成功汇总的源文件才清理。运行 manager 保留预测上下文；汇总父链单独按真实结果整理。旧 message_end 向共享文件生成新 ID 的方式废弃。
+
+回放在调用前计算既有 requestKey，以 assistant 原生 ID 写入现有 authority custom 元数据；整理文件缺少原始 key 时导出报错，不偷偷以新父链匹配。没有新增 Policy 类别，默认不追加真实结果通知。
+
+同仓库 rollback 验证保留 targetId、ref、repoRoot 与 Git object，可读 blob 且启动 GC 不删引用；不等于跨仓库迁移、执行 restore 或完整任务继续。摘要跨越预测输入、任意 custom 外部引用和机制状态交接仍需收敛，不自行改写摘要或选择新的 Backend。
+
+
 ## 2026-11-13：真实结果整理历史与正确状态交接
 
 用户确认最终权威 session 的含义改变为经过验证、用真实结果整理后的执行历史，不再要求准确复原候选当时收到的预测输入。保留预测输入节点，将其后第一条后续记录的 `parentId` 改接对应真实结果 ID；原主／丢弃分支保留，single-winner 与单一最终 session 不变。不采纳额外强制另存完整投机后续路径的建议。

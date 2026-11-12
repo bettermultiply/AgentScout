@@ -18,6 +18,8 @@ for (const e of events) {
 }
 const out = []; let missing = 0; let skippedAborted = 0; let skippedError = 0;
 const byId = new Map(session.map((line) => [line.id ?? line.session_entry_id ?? line.sessionEntryId, line]));
+const recordedKeys = new Map(session.filter(e=>e.type==='custom'&&e.customType==='authority'&&e.data?.requests).flatMap(e=>Object.entries(e.data.requests)));
+const assembled = session.some(e=>e.type==='custom'&&e.customType==='authority'&&e.data?.requests);
 const linearContext = [];
 function contextFor(line) {
   if (!(line?.parentId ?? line?.parent_id)) return linearContext.slice();
@@ -39,9 +41,10 @@ for (const line of session) {
     if (stopReason === "aborted") { skippedAborted++; continue; }
     if (stopReason === "error" || errorMessage != null) { skippedError++; continue; }
     const entry = line.session_entry_id ?? line.sessionEntryId ?? line.id ?? line.entry_id;
+    if(assembled&&!recordedKeys.has(entry))throw Error(`Assembled assistant entry ${entry} has no original replay request key; refusing parent-chain fallback`);
     const branch = entry && branchByEntry.get(entry);
     if (!branch) missing++;
-    out.push({ key: requestKey(contextFor(line)), reply: replyParts(m), branch_id: branch ?? null, session_entry_id: entry ?? null });
+    out.push({ key: recordedKeys.get(entry) ?? requestKey(contextFor(line)), reply: replyParts(m), branch_id: branch ?? null, session_entry_id: entry ?? null });
   }
   linearContext.push(m);
 }
