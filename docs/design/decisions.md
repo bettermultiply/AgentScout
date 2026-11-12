@@ -26,6 +26,8 @@
 
 **历史保存**：权威 session 文件保留所有 Branch 消息不授予 loser 执行权、发布权或状态合并能力，不代替实际 Promote 完成。
 
+**状态交接**：机制必须保证各状态类别要求的正确交接；这不等于任意状态的通用 merge。最终 session 用真实结果整理后的历史语义及通知策略见 `agent-integration.md` §3；历史整理不代替状态交接。
+
 **原因**：AScout 选择完整的计算延续，不定义跨文件、计算状态和全局服务的通用 merge 协议。
 
 ## D-008：允许提交包含活跃 descendants 的 subtree

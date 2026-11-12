@@ -30,7 +30,7 @@ Product Integration 从被拦截步骤的原调用返回路径自动取得成功
 
 `extent` 与 `effect` 属于 Agent 接入侧在本地范围内求值的 Decision，由与具体产品无关的通用接入层统一完成；Product Integration 只把产品的执行点交给通用接入侧，并执行其返回的继续、阻止、暂停或使用提供结果的处置，不自行求值 `extent` 或 `effect`。产品专有的消息、checkpoint、session 和 SDK 细节留在 Product Integration，不进入通用求值逻辑。
 
-Product Integration 负责将各 Branch 消息按记录的父子关系写入权威 session 文件，再报告消息引用；通用层只传递文件位置、Branch 与记录引用等契约数据，不解释产品格式。文件写入或读取位置提示不等于 Agent session 释放、Branch 执行释放或 Runtime 清理。
+Product Integration 负责完整持久化运行分支的 session 记录，并在接入侧汇总为单一最终权威 session，再报告可定位的记录引用；通用层只传递文件位置、Branch 与记录引用等契约数据，不解释产品格式。完整记录包括 compaction 和 custom 记录，不限于消息正文。文件写入或读取位置提示不等于 Agent session 释放、Branch 执行释放或 Runtime 清理。
 
 ### 2.2 ASC-Proxy
 
@@ -78,7 +78,13 @@ Agent 按照自身原有流程执行步骤。当 Agent 即将执行处于接入�
 
 Parent 获得真实结果后沿原路径继续，不以候选比较完成为结果交付前提；只有控制面确认 Promote 时旧 Parent 才失去权威并受管停止。每个工具 operation 独立提交事实和判断准入，同一消息包含多个调用本身不是拒绝条件；候选续跑前必须保证全部调用与结果正确配对，不得为了恢复上下文而重复执行其他调用的效果。工具与结果兼容性由 Policy 结合接入能力判断，能力不足须明确报告或回退，不能伪造结果。
 
-共用权威 session 文件不等于共用运行中的 session。Promote 后 winner 沿自己的 session 继续，不重启、不合并上下文；文件只是历史的存放位置，不决定权威。
+最终权威 session 表示经过验证、用真实结果整理后的执行历史，不要求准确复原候选当时收到的预测输入。预测输入节点保留；整理时，将候选在预测输入之后的第一条后续记录的 `parentId` 改接到对应真实结果的记录 ID。原主分支和被丢弃分支的历史继续保留，不授予其执行权或发布权，也不改变 single-winner。此规则不额外要求另存一条完整的投机后续路径。
+
+最终单一 session 不等于运行期间只能有一个 session。Promote 后 winner 沿自己的 session 保留执行进展继续；历史整理不决定权威，也不直接替换运行中的上下文。原始运行上下文与从整理后历史恢复的上下文可能不同，这是上述历史含义的组成部分，不承诺二者必然相同。
+
+是否向获胜候选追加真实结果通知由 Policy 决定；默认完全不追加，而不是追加空消息。不因此强制引入新的 Policy 名称或类别。真实结果的验证与必要状态交接仍是机制责任，不依赖这条通知是否追加。
+
+状态交接必须正确完成，不能把历史父链整理或权威路由更新当作交接已经完成。历史整理涉及的 compaction/custom 引用与摘要、在飞推理、rollback 与外部资源的关联仍有实现差距，见 [Agent 接入实现](../development/agent-access.md)；这里不据此规定重启、强制取消或替换运行中上下文的方案。
 
 ## 4. 部署与生命周期
 

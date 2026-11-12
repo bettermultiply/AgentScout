@@ -37,7 +37,25 @@
 - `rebalance` 的 pause/resume 与 extent/effect hold 都由通用层保存和释放；`branch_suspended` / `branch_resumed` 由通用层上报。
 - 控制面命令的 hold 生命周：`start_candidate` 建立 effect hold，`promote` 释放 effect/extent，`discard`、`cleanup` 释放全部 hold 并清理本地状态，`resolve_pending` 释放 extent。
 
-## 4. 限制
+## 4. session 持久化与状态交接：已定方向及实现差距
+
+2026-11-13 确认：运行分支采用 Pi 原生完整持久化，允许多 session 作为过渡，由接入侧汇总为单一最终权威 session。源分支停止写入且成功汇总后，才可删除对应临时文件；Promote 后仍活跃的 winner 不能删除。compaction、custom 等记录必须保存，不只保存 `message_end`。这些是已定实现方向，不表示当前适配器已经完成。
+
+本轮核对 `agent-access/pi/main.ts` 与 `session-tree.ts`：当前仍由消息结束事件向共享树文件追加消息，运行 session 使用内存 SessionManager；没有实现上述原生完整持久化、真实结果父链整理和停止写入后的汇总删除流程。本轮仅修改文档，不迁移实现。
+
+必要状态交接的正确性由机制保证。文件系统可讨论以共同快照为基准，将真实执行的差异合入获胜候选；这只是讨论方向，不是已实现 Backend，也不是通用状态 merge 的授权。
+
+尚未解决的实现差距：
+
+- 完整持久化及汇总的记录身份、引用可定位、去重与失败处理；保留预测输入，将其第一条后续记录 `parentId` 改接真实结果 ID，同时保留原主／丢弃历史。未额外要求另存完整投机后续路径。
+- compaction/custom 记录必须保存，但历史整理后如何处理其中的引用、摘要及其覆盖内容仍未定。
+- 在飞推理如何与历史整理、状态交接协调仍未定；不擅定重启、强制取消或替换运行中上下文。
+- rollback 与外部资源状态如何关联仍未定；最终 session 能恢复对话历史不等于已证明工具、环境和外部资源可完整继续。
+- 历史重挂后，模型回放不能直接把父链当作原请求上下文；现有导出如何取得正确匹配依据尚无解决方案，见 [回放](replay.md)。
+
+原始运行上下文与整理后恢复上下文可能不同，是用户接受的历史含义变化，不把二者相同列为验收承诺。是否向 winner 追加真实结果通知交由 Policy，默认完全不追加，不发送空消息；相应接入接口尚未在本轮实现，不新增 Policy 名称或类别。
+
+## 5. 限制
 
 - 只有 Pi 一个 Product Integration；sub-agent 启动前仍无统一 Hook。
 - effect 只实现 `block` / `deny` 两种最小计划，没有 Reuse、Salvage 或更多效果模式。

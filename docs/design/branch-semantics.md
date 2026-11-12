@@ -32,7 +32,7 @@ Branch(r_n)     = r_n 及其全部 descendants 构成的子树
 children(r_n)   = r_n 的直接 child Branch Root 集合
 ```
 
-因此，`local state of r_n` 不包含 child Branch Root；`Branch r_n` 则包含 `r_n` 以及它的全部 descendants。Speculative Tree 从 root Authority Instance 对应的 root Branch Root 开始；状态本身不是另一棵独立的树。权威 session 文件中记录的父子关系只是消息历史的存放关系，不是第二棵控制 Tree，不取代 Branch identity、Instance 或所有权；控制树重新挂载不改写历史消息的父子关系。
+因此，`local state of r_n` 不包含 child Branch Root；`Branch r_n` 则包含 `r_n` 以及它的全部 descendants。Speculative Tree 从 root Authority Instance 对应的 root Branch Root 开始；状态本身不是另一棵独立的树。权威 session 文件中记录的父子关系表达整理后的执行历史，不是第二棵控制 Tree，不取代 Branch identity、Instance 或所有权。历史父链按真实结果整理的规则见 [Agent 接入设计](agent-integration.md) §3，不由控制树拓扑直接推导。
 
 一个 AScoutAgent 恰好拥有一棵控制面 Speculative Tree。Branch Root identity、candidate handle、capability、commit/discard 和 resolution 都只在这棵 tree 内有意义；同一部署承载多个 AScoutAgent 不形成更高层的 Branch 关系。
 
@@ -107,9 +107,9 @@ Promote 不以 candidate 会话或当前模型请求结束为前提；已满足�
 
 `Reuse` 只把 candidate 已验证的 outcome 和按声明需要移交的受管状态交给现有权威延续；现有延续保留自己的 Branch identity、推理和上下文，candidate 自身在交接完成后清理。Reuse 不合并任意 Agent context，不转移未声明状态；未决 Proposal 必须先按既有规则确认或否定，带状态变更的复用还必须满足 D-031／Effect Management 的等价和移交条件。Reuse 不自动改变 descendant 的假设或挂载关系：只有现有权威延续能够提供 descendant 所需基础和依赖时，descendant 才按既有规则保留，否则取消或清理。其他 candidate 仍按 single-winner 失效，不能因为 Reuse 让多个互斥结果同时生效。
 
-在 `Promote` 中，candidate 按各状态类别规则已经可见的 parent state、已提交生效的 external effect 和已验证 outcome 必须随 winner 延续。parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播，也不执行 parent/candidate state merge。
+在 `Promote` 中，candidate 按各状态类别规则已经可见的 parent state、已提交生效的 external effect 和已验证 outcome 必须随 winner 延续。正确的状态交接是机制必须保证的条件，不能仅靠 Policy 通知或路由切换代替。parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播；按状态类别完成必要交接不等于任意 parent/candidate state merge。
 
-同一份权威 session 文件不等于同一个运行中的 Agent session。Winner 继续自己的 session 和上下文，不重启、不合并旧 Parent 的后续上下文；历史旁支保留不改变 single-winner。
+单一最终权威 session 不等于同一个运行中的 Agent session。Winner 保留自己的 session 和执行进展，不合并旧 Parent 的任意后续上下文。最终历史以真实结果整理，保留预测输入节点，并将其第一条后续记录改接对应真实结果；恢复所得上下文可能不同于原始运行上下文。历史旁支保留不改变 single-winner。是否追加真实结果通知由 Policy 决定，默认完全不追加；通知不能替代必要状态交接。
 
 ### 4.6 Discard、失败与清理
 

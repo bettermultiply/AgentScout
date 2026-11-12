@@ -40,7 +40,7 @@
 
 ## 实体
 
-- **权威 session 文件**：所有 Branch 的消息记录按记录的父子关系存放的一份文件，Agent 从它 resume 得到权威路径；包含被丢弃旁支作为审计记录，不是新的控制面实体，也不是第二棵控制 Tree。同一文件不等于同一个运行中的 Agent session。（`agent-integration.md`；`control-plane.md` §2.6）
+- **权威 session 文件**：最终汇总为单一 session 的、经过验证并用真实结果整理后的执行历史，保留预测输入节点、原主分支和被丢弃旁支。Agent 从它 resume 得到整理后的权威路径，不保证准确复原候选原始预测输入上下文；它不是新的控制面实体或第二棵控制 Tree，单一最终文件不等于单一运行 session。（`agent-integration.md` §3；`control-plane.md` §2.6）
 
 - **Branch**：Speculative Tree 中的一个子树，是树中的计算延续和投机世界的结构实体。（`../mental-model.md` §4.2）
 - **Branch Root**：Branch 对应的根节点，具有稳定 identity 并直接拥有该根的 local state；表示该 Branch 在 Speculative Tree 中的结构位置。（`../mental-model.md` §4.2）
