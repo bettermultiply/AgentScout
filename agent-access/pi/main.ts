@@ -10,6 +10,7 @@ import { evaluatePolicyArtifact } from '../../../pi/packages/ascout-agent-access
 import { createAgentAccess } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
 import { requestKey } from '../../tools/replay/normalize.mjs';
+import { Notifications } from './notification.ts';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
@@ -53,6 +54,7 @@ const reportedEntries = new Set();
 const candidateWaiters = new Map();
 const branchTasks = new Map();
 const setupTasks = new Map();
+const notifications = new Notifications();
 async function stopSession(branch) {
     const session=sessions.get(branch);
     await session?.abort();
@@ -62,6 +64,7 @@ async function stopSession(branch) {
     if(session?.extensionRunner?.hasHandlers('session_shutdown'))
         await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});
     await session?.waitForIdle?.();
+    if(session)await notifications.drain(session);
     syncTranscript(branch);
     session?.dispose();sessions.delete(branch);modelActions.delete(branch);
     tree.stop(branch);tree.settle();
@@ -73,10 +76,15 @@ function releaseCandidateWaiters(branch) {
 function syncTranscript(branch) {
     const manager=tree.branches.get(branch)?.manager;
     if(!manager)return;
+    notifications.confirm(manager);
     const queue=transcriptQueues.get(branch)??[];
     const pending=[];
     for(const item of [...queue]){
-        const entry=manager.getEntries().find(e=>!reportedEntries.has(e.id)&&e.type==='message'&&(e.message===item.message||JSON.stringify(e.message)===JSON.stringify(item.message)));
+        const entry=manager.getEntries().find(e=>{
+            if(reportedEntries.has(e.id))return false;
+            if(e.type==='custom_message'&&item.message.role==='custom')return e.customType===item.message.customType&&JSON.stringify(e.content)===JSON.stringify(item.message.content)&&JSON.stringify(e.details)===JSON.stringify(item.message.details);
+            return e.type==='message'&&(e.message===item.message||JSON.stringify(e.message)===JSON.stringify(item.message));
+        });
         if(!entry)continue;
         queue.splice(queue.indexOf(item),1);
         reportedEntries.add(entry.id);
@@ -344,7 +352,20 @@ async function handle(command) {
         case 'promote':
             if(cancelled.has(branch)||!sessions.has(branch))throw Error('Branch unavailable');
             tree.accepted??=new Set();tree.accepted.add(branch);
-            authority=branch;tree.promote(branch);tree.settle();return;
+            authority=branch;tree.promote(branch);tree.settle();
+            if(command.notification!==undefined){
+                try {
+                    await notifications.accept(sessions.get(branch),command);
+                    syncTranscript(branch);
+                } catch(error) {
+                    // Promote is already applied. Do not turn a notification
+                    // persistence failure into a false Promote failure, and do
+                    // not emit a delivery record for a message not accepted by Pi.
+                    console.error(`Notification persistence failed for ${command.command_id}:`,error);
+                    await report({message:'adapter_capability_gap',branch_id:branch,capability:'notification',status:'failed',reason:`${command.command_id}: ${error}`});
+                }
+            }
+            return;
         case 'abort':
             aborting.add(branch);
             try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled'); }
@@ -413,9 +434,16 @@ try{
     await commandQueue.catch(()=>{});
     await Promise.allSettled([...sessions.values()].map(s=>s.abort()));
     await Promise.allSettled(tasks);
-    for(const branch of [...tree.branches.keys()]){await stopSession(branch);await finishActions(branch,'cancelled')}
+    for(const branch of [...tree.branches.keys()]){
+        try{await stopSession(branch);await finishActions(branch,'cancelled')}
+        catch(error){
+            transportError??=error;
+            console.error(`Session shutdown failed for ${branch}:`,error);
+            await report({message:'agent_failed',agent_id:agentId,reason:`Session shutdown failed for ${branch}: ${error}`});
+        }
+    }
     tree.settle();
-    await report({message:'agent_released',agent_id:agentId});
+    if(!transportError)await report({message:'agent_released',agent_id:agentId});
     await outgoing;
     if(!socket.destroyed)await new Promise(resolve=>socket.end(resolve));
     // An aborted local-policy evaluation can leave the evaluator child's stdio

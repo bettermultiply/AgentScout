@@ -84,7 +84,13 @@ Parent 获得真实结果后沿原路径继续，不以候选比较完成为结�
 
 是否向获胜候选追加真实结果通知由 Policy 决定；默认完全不追加，而不是追加空消息。不因此强制引入新的 Policy 名称或类别。真实结果的验证与必要状态交接仍是机制责任，不依赖这条通知是否追加。
 
-状态交接必须正确完成，不能把历史父链整理或权威路由更新当作交接已经完成。历史整理涉及的 compaction/custom 引用与摘要、在飞推理、rollback 与外部资源的关联仍有实现差距，见 [Agent 接入实现](../development/agent-access.md)；这里不据此规定重启、强制取消或替换运行中上下文的方案。
+既有 `dispose.actions` 的 `Promote` action 可携带可选 `notification`，必须是非空白字符串，拒绝 null、错误类型及其他 intent 携带该字段。Policy 从 `context.authority_outcome` 取得对应 Chance／operation 的真实返回值，`context.match` 保持比较结果，Match 的 evidence 输入不变。全部正文由 Policy 构造，机制不自动补写业务文本。缺省时命令不序列化该字段、不产生占位记录。
+
+Runtime 成功后才向 winner 发送带通知的 Promote。Pi 使用原生 `customType: notification` 和 `sendCustomMessage(..., {triggerTurn:false})`：空闲时保存，运行中等待当前 assistant 及完整工具批次结束后追加，后续自然请求可见。不使用 prompt／steer，不启动新 turn，不取消或重启推理。Promote Applied 确认接替而非通知落盘；队列接受与持久化交付必须区分。同一 `command_id` 重传只追加一次，原生 details 保留关联；不承诺跨崩溃 exactly-once。清理或 EOF 检查已接受通知，未确认持久化时报告失败并保留源文件，不能声称清理成功。
+
+compaction 摘要保留原文，即使包含预测，也不阻止汇总或满足其他条件后的源清理，不自动重新生成摘要。通知原生 entry ID、正文、关联及已记录请求匹配依据须在持久化、汇总、重开后保留，不能按整理后的父链重新计算原请求。
+
+状态交接必须正确完成，不能把历史父链整理或权威路由更新当作交接已经完成。在飞推理、rollback 与外部资源的关联仍有实现差距，见 [Agent 接入实现](../development/agent-access.md)；这里不据此规定重启、强制取消或替换运行中上下文的方案。
 
 ## 4. 部署与生命周期
 

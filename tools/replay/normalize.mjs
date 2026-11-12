@@ -30,7 +30,7 @@ function callsOf(message) {
 
 /** Matches the final context Pi sends to openai-completions. */
 export function requestKey(messages) {
-  const ms = Array.isArray(messages) ? messages : [];
+  const ms = (Array.isArray(messages) ? messages : []).map(m => m?.role === "custom" ? {...m, role:"user"} : m);
   let ai = -1;
   for (let i = ms.length - 1; i >= 0; i--) if (ms[i]?.role === "assistant") { ai = i; break; }
   const tail = ai >= 0 ? ms.slice(ai + 1) : [];
@@ -48,6 +48,10 @@ export function requestKey(messages) {
     const user = [...ms].reverse().find(m => m?.role === "user");
     material = textOfContent(user?.content ?? user?.text ?? "");
   }
+  // Pi converts custom messages to user content before provider serialization.
+  // Include that context after tool results while keeping legacy keys stable.
+  const users = tail.filter(m => m?.role === "user");
+  if (tools.length && users.length) material = { material, users: users.map(m => textOfContent(m.content)) };
   return crypto.createHash("sha256").update(stable(material)).digest("hex");
 }
 
@@ -62,5 +66,9 @@ export function replyParts(message) {
 }
 
 export function messageBody(line) {
+  if (line?.type === "custom_message") return {
+    role: "custom", customType: line.customType, content: line.content,
+    display: line.display, details: line.details, timestamp: Date.parse(line.timestamp),
+  };
   return line?.message ?? line?.data?.message ?? line;
 }

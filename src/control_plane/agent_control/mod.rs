@@ -525,6 +525,14 @@ impl SpeculativeTree {
 }
 
 /// 控制面向 Pi 接入侧发送的命令。
+fn deserialize_notification<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    if text.trim().is_empty() {
+        return Err(serde::de::Error::custom("notification must be nonblank"));
+    }
+    Ok(Some(text))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AgentCommand {
@@ -584,6 +592,8 @@ pub enum AgentCommand {
     },
     Promote {
         branch_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_notification")]
+        notification: Option<String>,
         #[serde(default)]
         command_id: String,
         #[serde(default)]

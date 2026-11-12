@@ -6,6 +6,8 @@
 
 ## 视角映射
 
+**notification**：Policy 在既有 dispose／Promote 中可选构造、向成功 winner 交付的非空白上下文通知；缺省零记录，Pi 使用同名原生 custom message，不启动新 turn。见 [Agent 接入设计](agent-integration.md) §3。
+
 `decisions.md` 从 Speculative Tree 机制视角记录语义，`speculation-decisions.md` 从投机执行底座视角记录语义；二者描述同一个 AScout 系统。
 
 | 底座术语 | Speculative Tree 视角 | 关系 |

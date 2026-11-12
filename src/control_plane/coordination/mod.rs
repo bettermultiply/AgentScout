@@ -86,7 +86,7 @@ pub enum ControlResult {
     Predictions(Vec<Value>),
     Launch(bool),
     Outcome(Value, Value),
-    Disposition(bool, String),
+    Disposition(bool, String, Option<String>),
     /// `(branch_id, action)` pairs returned by `rebalance`.
     Rebalance(Vec<(String, String)>),
     Completed,

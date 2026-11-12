@@ -449,7 +449,15 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                         });
                     }
                     actions.iter().all(|action| {
-                        action.as_object().is_some_and(|m| m.len() == 1)
+                        let valid_notification = action.get("notification").is_none_or(|value| {
+                            value.as_str().is_some_and(|text| !text.trim().is_empty())
+                        });
+                        action.as_object().is_some_and(|m| {
+                            (m.len() == 1 || (m.len() == 2 && action["intent"] == "Promote"))
+                                && m.keys().all(|key| ["intent", "notification"].contains(&key.as_str()))
+                                && (action.get("notification").is_none() || action["intent"] == "Promote")
+                                && valid_notification
+                        })
                             && (action["intent"] == "Reuse"
                                 || action["intent"] == "Salvage"
                                 || action["intent"] == "Re-execute"
@@ -483,4 +491,26 @@ pub(super) fn ids(value: &Value, key: &str) -> io::Result<BTreeSet<String>> {
         require(ids.insert(id.to_owned()), "duplicate ID in input view")?;
     }
     Ok(ids)
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn dispose_notification_is_optional_nonblank_and_promote_only() {
+        let input = json!({"resolution":"accepted"});
+        for action in [json!({"intent":"Promote"}), json!({"intent":"Promote","notification":"real result"})] {
+            validate_result(Decision::Dispose, &input, &json!({"actions":[action]})).unwrap();
+        }
+        for action in [json!({"intent":"Promote","notification":null}), json!({"intent":"Promote","notification":" \n"}), json!({"intent":"Promote","notification":2}), json!({"intent":"Discard","notification":"no"}), json!({"intent":"Promote","other":"no"})] {
+            assert!(validate_result(Decision::Dispose, &input, &json!({"actions":[action]})).is_err());
+        }
+        let command: crate::control_plane::agent_control::AgentCommand = serde_json::from_value(json!({"command":"promote","branch_id":"winner"})).unwrap();
+        assert!(serde_json::to_value(command).unwrap().get("notification").is_none());
+        for value in [json!(null), json!(" \n"), json!(2)] {
+            assert!(serde_json::from_value::<crate::control_plane::agent_control::AgentCommand>(json!({"command":"promote","branch_id":"winner","notification":value})).is_err());
+        }
+    }
 }

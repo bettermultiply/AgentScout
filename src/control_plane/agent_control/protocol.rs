@@ -538,9 +538,10 @@ impl SpeculativeTree {
         &mut self,
         candidate: &str,
         success: bool,
+        notification: Option<String>,
     ) -> io::Result<Vec<AgentCommand>> {
         if success {
-            Ok(vec![self.make_promote_command(candidate)?])
+            Ok(vec![self.make_promote_command(candidate, notification)?])
         } else {
             self.change_status(
                 candidate,

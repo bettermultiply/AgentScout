@@ -396,9 +396,11 @@ impl SpeculativeTree {
         if self.stopping || !self.candidate_due(&candidate) {
             return Ok(());
         }
-        let (compatible, verdict, error) = match result {
-            Ok(ControlResult::Disposition(compatible, verdict)) => (compatible, verdict, None),
-            Err(error) => (false, "error".into(), Some(error)),
+        let (compatible, verdict, notification, error) = match result {
+            Ok(ControlResult::Disposition(compatible, verdict, notification)) => {
+                (compatible, verdict, notification, None)
+            }
+            Err(error) => (false, "error".into(), None, Some(error)),
             _ => unreachable!(),
         };
         let proposal = self
@@ -412,6 +414,10 @@ impl SpeculativeTree {
                 BranchStatus::Promoting,
                 "Validation accepted; Runtime promotion requested",
             )?;
+            let mut record = record;
+            if let Some(notification) = notification {
+                record["notification"] = json!(notification);
+            }
             self.schedule(ControlOperation::Promote(candidate, record), actions);
         } else if compatible && self.ancestor_assumptions_unresolved(self.branch(&candidate)?) {
             // The nested Proposal matches, but the Branch still depends on an
@@ -463,9 +469,13 @@ impl SpeculativeTree {
             },
         )?;
         if !self.stopping && self.branches[&candidate].status == BranchStatus::Promoting {
+            let notification = record
+                .get("notification")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             actions
                 .commands
-                .extend(self.finish_runtime_promotion(&candidate, succeeded)?);
+                .extend(self.finish_runtime_promotion(&candidate, succeeded, notification)?);
             record["disposition"] = json!(if succeeded { "Promote" } else { "Discard" });
             record["runtime_promote_error"] = json!(result.err());
             actions.records.push(record);

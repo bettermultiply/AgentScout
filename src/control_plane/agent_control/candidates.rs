@@ -302,6 +302,6 @@ impl SpeculativeTree {
             BranchStatus::Promoting,
             "Candidate accepted; promotion requested",
         )?;
-        Ok(vec![self.make_promote_command(branch_id)?])
+        Ok(vec![self.make_promote_command(branch_id, None)?])
     }
 }

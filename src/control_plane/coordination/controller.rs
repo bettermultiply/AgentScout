@@ -72,12 +72,15 @@ impl AgentController {
                     tree.branch_proposal(candidate)
                         .ok_or("candidate Proposal is missing")?,
                     &chance.operation_id,
+                    &tree.candidate_evidence(candidate).cloned().unwrap_or(Value::Null),
                     &tree
-                        .candidate_evidence(candidate)
+                        .candidate_outcome(candidate)
                         .cloned()
                         .unwrap_or(Value::Null),
                 )
-                .map(|(compatible, verdict)| ControlResult::Disposition(compatible, verdict))
+                .map(|(compatible, verdict, notification)| {
+                    ControlResult::Disposition(compatible, verdict, notification)
+                })
                 .map_err(|error| error.to_string())
             }
             ControlOperation::Invoke(tool) => {
@@ -293,14 +296,15 @@ impl AgentController {
         policy: &CompiledPolicy,
         proposal: &ProposalRecord,
         operation_id: &str,
+        evidence: &Value,
         outcome: &Value,
-    ) -> Result<(bool, String), Box<dyn std::error::Error>> {
+    ) -> Result<(bool, String, Option<String>), Box<dyn std::error::Error>> {
         let engine = PolicyEngine::default();
         let result = engine.evaluate(
             policy,
             Decision::Match,
             &json!({
-                "proposal": {"payload": proposal.payload}, "evidence": outcome,
+                "proposal": {"payload": proposal.payload}, "evidence": evidence,
                 "match_context": {"operation_id": operation_id}
             }),
         )?;
@@ -312,12 +316,21 @@ impl AgentController {
             &json!({
                 "branch": {"operation_id": operation_id},
                 "resolution": if compatible {"accepted"} else {"rejected"},
-                "context": {"match": result}
+                "context": {
+                    "match": result,
+                    "authority_outcome": outcome
+                }
             }),
         )?;
+        let notification = disposition["actions"]
+            .as_array()
+            .and_then(|actions| actions.iter().find(|action| action["intent"] == "Promote"))
+            .and_then(|action| action.get("notification"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let promote = disposition["actions"]
             .as_array()
             .is_some_and(|actions| actions.iter().any(|action| action["intent"] == "Promote"));
-        Ok((compatible && promote, verdict))
+        Ok((compatible && promote, verdict, notification))
     }
 }

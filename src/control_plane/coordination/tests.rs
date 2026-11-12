@@ -111,7 +111,7 @@ use super::*;
         let actions = tree
             .complete_work(
                 validation,
-                Ok(ControlResult::Disposition(true, "compatible".into())),
+                Ok(ControlResult::Disposition(true, "compatible".into(), None)),
             )
             .unwrap();
         assert!(
@@ -123,6 +123,49 @@ use super::*;
         assert!(actions.commands.iter().any(
             |command| matches!(command,AgentCommand::Discard {branch_id:id,..} if id==&branch_id)
         ));
+    }
+
+    #[test]
+    fn notification_reaches_agent_only_after_runtime_success_and_completion_is_consumed() {
+        for success in [false, true] {
+            let (mut tree, _root) = task();
+            tree.speculative_admission(waiting()).unwrap();
+            let AgentCommand::StartCandidate { branch_id, .. } = tree.start_candidate("chance-1", json!("guess")).unwrap() else { unreachable!() };
+            tree.handle_message(AgentMessage::BranchStarted { branch_id: branch_id.clone() }).unwrap();
+            tree.record_authority_outcome("chance-1", json!("real result"), None).unwrap();
+            let mut actions = ControlActions::default();
+            tree.schedule(ControlOperation::Validate(branch_id.clone()), &mut actions);
+            let validation = actions.operations.pop().unwrap().0;
+            let mut actions = tree.complete_work(validation, Ok(ControlResult::Disposition(true, "compatible".into(), Some("Policy text".into())))).unwrap();
+            assert!(!actions.commands.iter().any(|c| matches!(c, AgentCommand::Promote { .. })));
+            let promotion = actions.operations.pop().unwrap().0;
+            let actions = tree.complete_work(promotion, if success { Ok(ControlResult::Completed) } else { Err("Runtime failed".into()) }).unwrap();
+            let notices: Vec<_> = actions.commands.iter().filter_map(|c| match c { AgentCommand::Promote { notification, .. } => Some(notification.clone()), _ => None }).collect();
+            assert_eq!(notices, if success { vec![Some("Policy text".into())] } else { vec![] });
+            assert!(tree.complete_work(promotion, Ok(ControlResult::Completed)).unwrap().commands.is_empty());
+        }
+    }
+
+    #[test]
+    fn dispose_receives_authority_outcome_without_replacing_match_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("policy.yaml"), include_str!("../../../assets/policy/policy.yaml")).unwrap();
+        let base = include_str!("../../../assets/policy/decisions.py").split("def match_proposal(").next().unwrap();
+        let source = format!("{}\n{}", base, r#"
+def match_proposal(data, *, policy_config, capabilities):
+    assert data["evidence"] == {"verifier": "evidence"}
+    return {"verdict": "compatible"}
+def dispose(data, *, policy_config, capabilities):
+    assert data["context"]["match"]["verdict"] == "compatible"
+    return {"actions": [{"intent": "Promote", "notification": data["context"]["authority_outcome"]["actual"]}]}
+"#);
+        std::fs::write(root.path().join("decisions.py"), source).unwrap();
+        let policy = PolicyEngine::default().compile(&root.path().join("policy.yaml")).unwrap();
+        let (mut tree, _workspace) = task();
+        tree.speculative_admission(waiting()).unwrap();
+        let AgentCommand::StartCandidate { branch_id, .. } = tree.start_candidate("chance-1", json!("guess")).unwrap() else { unreachable!() };
+        let result = AgentController.disposition(&policy, tree.branch_proposal(&branch_id).unwrap(), "op", &json!({"verifier":"evidence"}), &json!({"actual":"Policy authoritative text"})).unwrap();
+        assert_eq!(result, (true, "compatible".into(), Some("Policy authoritative text".into())));
     }
 
     #[test]

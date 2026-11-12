@@ -240,11 +240,12 @@ impl SpeculativeTree {
         Ok(id)
     }
 
-    pub(super) fn make_promote_command(&mut self, branch_id: &str) -> io::Result<AgentCommand> {
+    pub(super) fn make_promote_command(&mut self, branch_id: &str, notification: Option<String>) -> io::Result<AgentCommand> {
         let generation = self.branch(branch_id)?.generation;
         let command_id = self.register(branch_id, CommandOperation::Promote, None, generation)?;
         Ok(AgentCommand::Promote {
             branch_id: branch_id.to_string(),
+            notification,
             command_id,
             generation,
         })

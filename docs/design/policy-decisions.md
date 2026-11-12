@@ -232,6 +232,8 @@ MatchResult = {
 dispose(branch, resolution, context) -> DispositionPlan
 ```
 
+`context.match` 提供比较结果，`context.authority_outcome` 提供对应 Chance／operation 的真实返回值，不以 verifier evidence 替代。仅 Promote action 可携带可选 `notification` 非空白字符串，正文由 Policy 构造；缺省不追加记录。交付与持久化边界见 [Agent 接入设计](agent-integration.md) §3，不新增 Decision。
+
 `resolution` 表示为什么进入处置，而不是具体怎么处置：
 `resolution =[accepted, rejected, indeterminate, error, cancelled, preempted, extent_reached, failed]`
 
