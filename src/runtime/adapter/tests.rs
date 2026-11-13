@@ -177,6 +177,7 @@ mod queue_panic_tests {
     fn panicking_operation_does_not_kill_the_environment_queue() {
         let (out, receiver) = mpsc::channel();
         let shared = Arc::new(Shared {
+            preserving: std::sync::atomic::AtomicBool::new(false),
             runtime: Arc::new(PanicOnce {
                 calls: AtomicUsize::new(0),
             }),

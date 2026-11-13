@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 #[path = "ascout-control-plane/execution.rs"]
 mod execution;
+#[path = "ascout-control-plane/recovery.rs"]
+mod recovery;
 #[path = "ascout-control-plane/tui.rs"]
 mod tui;
 #[path = "ascout-control-plane/ui.rs"]
@@ -265,11 +267,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = take_option(&mut args, "--model")?;
     let thinking = take_option(&mut args, "--thinking")?;
     let web_address = take_option(&mut args, "--web")?;
+    let resume = if let Some(index)=args.iter().position(|value|value=="--resume") {args.remove(index);true} else {false};
     if !(2..=3).contains(&args.len())
         || (web_address.is_none() && (!io::stdin().is_terminal() || !io::stdout().is_terminal()))
     {
         return Err(
-            "usage: ascout-control-plane <run-dir> <pi-root> [policy.yaml] [--web 127.0.0.1:8080] [--model <provider/model>] [--thinking <level>]".into(),
+            "usage: ascout-control-plane <run-dir> <pi-root> [policy.yaml] [--resume] [--web 127.0.0.1:8080] [--model <provider/model>] [--thinking <level>]".into(),
         );
     }
     // 运行目录由调用方（实验脚手架）创建，控制面只使用它。
@@ -295,12 +298,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| policy.runtime().map(std::path::PathBuf::from))
         .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
     // Establish task control state before starting its execution infrastructure.
-    let mut tree = SpeculativeTree::with_workspace("agent", &run_dir)?;
-    let (mut adapter, session, runtime_capabilities) = start_adapter(&config_path, &run_dir)?;
+    let recovered=if resume {Some(recovery::load(&run_dir)?)} else {None};
+    let recovery_generation=recovered.as_ref().map(|(_,path)|path.clone());
+    let mut tree = if let Some((mut tree,_))=recovered {
+        if tree.execution_id != run_dir.display().to_string() {return Err("Recovery task identity mismatch".into());}
+        // No work may run until the adapter confirms all native sources.
+        tree.recovering=true;
+        tree
+    } else {
+        if run_dir.join("recovery.json").exists() {return Err("Saved execution exists; use --resume".into());}
+        SpeculativeTree::with_workspace("agent", &run_dir)?
+    };
     tree.execution_id = run_dir.display().to_string();
+    if resume && tree.local_policy_digest.as_deref()!=Some(policy.digest()) {return Err("Recovery Policy changed".into());}
+    if resume && tree.runtime_binding.as_ref().and_then(|v|v.get("config_path"))!=Some(&json!(config_path)) {return Err("Recovery Runtime binding changed".into());}
+    let config_digest=recovery::digest(&config_path)?;
+    if resume && tree.runtime_binding.as_ref().and_then(|v|v.get("sha256"))!=Some(&json!(config_digest)) {return Err("Recovery Runtime configuration changed".into());}
+    let (mut adapter, session, runtime_capabilities) = start_adapter(&config_path, &run_dir)?;
+    if resume && tree.capability_view.as_ref()!=Some(&serde_json::to_value(&runtime_capabilities)?) {return Err("Recovery Runtime capabilities changed".into());}
     tree.bind_execution(
         json!({"source": args.get(2).map(String::as_str).unwrap_or("assets/policy/policy.yaml")}),
-        json!({"config_path": config_path}),
+        json!({"config_path": config_path,"sha256":config_digest}),
         serde_json::to_value(&runtime_capabilities)?,
     );
     tree.bind_local_policy(policy.digest());
@@ -360,7 +378,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     let mut tui_thread = None;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        runtime_call(&session, "authority", Operation::EstablishEnvironment)?;
+        runtime_call(&session, "authority", if resume {Operation::LoadRuntime {path:recovery_generation.as_ref().unwrap().join("runtime.json")}} else {Operation::EstablishEnvironment})?;
         // 环境建立后，由 Runtime 在其中建立 Agent 接入侧。
         runtime_call(
             &session,
@@ -399,7 +417,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         stream.set_read_timeout(None)?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let command = tree.create_authority("authority", "")?;
+        let command = if resume {AgentCommand::Load {branch_id:tree.authority_branch_id.clone().ok_or("Recovery authority missing")?,path:recovery_generation.as_ref().unwrap().join("agent.json")}} else {tree.create_authority("authority", "")?};
         tree.record_runtime_state(
             "authority",
             ascout::control_plane::agent_control::RuntimeExecutionState::Ready,
@@ -447,11 +465,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &interface,
             &mut ledger,
             (events, receiver),
+            &run_dir,
         );
         result
     })();
     // 先让 Runtime 停掉环境里的 Agent 进程，再断开 Adapter 让它自行退出。
     let runtime_result: Result<(), Box<dyn std::error::Error>> = (|| {
+        if tree.recovering {return Ok(());}
         // Every retained Branch refers to this same shared environment. A
         // confirmed environment fact therefore applies to all of them, not
         // only the last Authority. Archived records remain historical facts.

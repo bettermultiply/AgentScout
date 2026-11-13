@@ -331,6 +331,15 @@ pub trait Backend: Send + Sync {
 
     fn environments(&self) -> Vec<String>;
 
+    /// Explicit opt-in: serializing an environment ID is not a saved execution.
+    fn save_runtime(&self, _path: &std::path::Path) -> Result<(), BackendError> {
+        Err(BackendError::new("Runtime does not support restart recovery"))
+    }
+
+    fn load_runtime(&self, _path: &std::path::Path) -> Result<(), BackendError> {
+        Err(BackendError::new("Runtime does not support restart recovery"))
+    }
+
     /// Adapter 退出时回收所有仍然存在的环境。
     ///
     /// 默认实现逐个 terminate + cleanup，并且单个失败不会跳过其余环境；

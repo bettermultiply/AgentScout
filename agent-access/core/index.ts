@@ -55,6 +55,8 @@ export type AgentAccess = {
     control(command: ControlCommand): Promise<void>;
     beforeAction(point: ExecutionPoint): Promise<Disposition>;
     releaseAll(): void;
+    snapshot(): unknown;
+    restore(record: any): void;
 };
 
 type Hold = { promise: Promise<void>; release: () => void };
@@ -156,6 +158,20 @@ export function createAgentAccess({ taskId, report, evaluate, now = Date.now }: 
 
     return {
         setPolicy,
+
+        snapshot() {
+            return {policies:[...policies],effectHolds:[...effectHolds.keys()],pauseHolds:[...pauseHolds.keys()],
+                extentHolds:[...extentHolds.keys()],hookCounts:[...hookCounts],countedHooks:[...countedHooks]};
+        },
+
+        restore(record) {
+            for(const [branch,artifact] of record.policies)setPolicy(branch,artifact);
+            for(const branch of record.effectHolds)effectHolds.set(branch,makeHold());
+            for(const branch of record.pauseHolds)pauseHolds.set(branch,makeHold());
+            for(const branch of record.extentHolds)extentHolds.set(branch,makeHold());
+            for(const [branch,count] of record.hookCounts)hookCounts.set(branch,count);
+            for(const key of record.countedHooks)countedHooks.add(key);
+        },
 
         async control(command) {
             const branch = command.branch_id;

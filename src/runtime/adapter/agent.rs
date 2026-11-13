@@ -55,6 +55,9 @@ impl Shared {
     /// Adapter 退出路径：先停止 Agent，再让 Runtime 回收所有环境。
     pub(super) fn shutdown(&self) {
         self.stop_agents();
+        if self.preserving.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("adapter: Runtime shutdown incomplete: {error}");
         }

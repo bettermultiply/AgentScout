@@ -436,6 +436,8 @@ pub struct SpeculativeTree {
     #[serde(default)]
     pub(crate) stopping: bool,
     #[serde(default)]
+    pub recovering: bool,
+    #[serde(default)]
     shutdown_deadline: Option<u64>,
     #[serde(default = "first_id")]
     next_generation: u64,
@@ -471,6 +473,7 @@ impl SpeculativeTree {
             epoch: 0,
             rebalance_epoch: None,
             stopping: false,
+            recovering: false,
             shutdown_deadline: None,
             next_generation: 1,
             next_command_id: 1,
@@ -536,6 +539,9 @@ fn deserialize_notification<'de, D: serde::Deserializer<'de>>(deserializer: D) -
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AgentCommand {
+    CancelSave { branch_id: String },
+    Save { branch_id: String, path: PathBuf },
+    Load { branch_id: String, path: PathBuf },
     /// Delivers the compiled local Decision artifact. The adapter may reject
     /// it when it has no real Hook/evaluation seam.
     LocalPolicy {
@@ -620,6 +626,8 @@ pub enum AgentCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AgentMessage {
+    RecoverySaved { path: PathBuf, error: Option<String> },
+    RecoveryLoaded { error: Option<String> },
     Output {
         branch_id: String,
         #[serde(default)]

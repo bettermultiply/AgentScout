@@ -164,6 +164,17 @@ fn error(error: impl std::fmt::Display) -> BackendError {
 }
 
 impl Backend for NleBackend {
+    fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
+        self.request(json!({"op":"save", "path":path}))?;
+        Ok(())
+    }
+
+    fn load_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
+        let response = self.request(json!({"op":"load", "path":path}))?;
+        let states: HashMap<String, EnvironmentState> = serde_json::from_value(response["states"].clone()).map_err(error)?;
+        *self.states.lock().unwrap() = states;
+        Ok(())
+    }
     fn capabilities(&self) -> RuntimeCapabilities {
         RuntimeCapabilities {
             tools: vec![

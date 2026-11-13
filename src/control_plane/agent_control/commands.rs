@@ -3,6 +3,9 @@
 use super::*;
 
 impl SpeculativeTree {
+    pub fn recovery_pending_commands(&self) -> bool {
+        !self.pending_commands.is_empty()
+    }
     pub fn queue_prompt(&mut self, prompt: String) {
         if !prompt.trim().is_empty() {
             self.queued_prompts.push_back(prompt);

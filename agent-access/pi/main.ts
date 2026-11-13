@@ -11,6 +11,7 @@ import { createAgentAccess } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
 import { requestKey } from '../../tools/replay/normalize.mjs';
 import { Notifications } from './notification.ts';
+import {save as saveRecovery,load as loadRecovery} from './recovery.ts';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
@@ -18,7 +19,7 @@ const require = createRequire(resolve(root, 'package.json'));
 const { createAgentSession, SessionManager, ModelRuntime, resolveCliModel } = require(resolve(root, 'packages/coding-agent/src/index.ts'));
 const sessionFile = process.env.ASCOUT_SESSION_FILE;
 if (!sessionFile) throw Error('ASCOUT_SESSION_FILE is required');
-const tree = new SessionTree(SessionManager.open(sessionFile));
+let tree = new SessionTree(SessionManager.open(sessionFile));
 const { Type } = require('typebox');
 const args = process.argv.slice(2);
 const socketPath = args.shift();
@@ -54,6 +55,8 @@ const reportedEntries = new Set();
 const candidateWaiters = new Map();
 const branchTasks = new Map();
 const setupTasks = new Map();
+let saving=false;
+const pendingHooks=new Map();
 const notifications = new Notifications();
 async function stopSession(branch) {
     const session=sessions.get(branch);
@@ -154,7 +157,7 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     const keys=replayKeys.get(branch)??[];keys.push(requestKey(context.messages));replayKeys.set(branch,keys);
     // Model inference is a PURE step: the generic layer evaluates `admit` but
     // never applies the effect gate, reports an admission, or counts extent.
-    if(closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
+    if(saving||closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
     const op={kind:'model_inference',produces_result:true,result_pending:true,has_predictor:false};
     await access.beforeAction({
         branch,
@@ -191,8 +194,10 @@ async function beforeModelInference(branch, modelValue, context, signal) {
 function install(session,branch) {
     const before=session.agent.beforeToolCall, after=session.agent.afterToolCall;
     session.agent.beforeToolCall=async(context,signal)=>{
+        if(saving)throw Error('Save requested before tool execution');
+        pendingHooks.set(key(branch,context.toolCall.id),{branch,toolCall:structuredClone(context.toolCall)});
         const previous=await before?.(context,signal);
-        if(previous?.block||signal?.aborted)return previous;
+        if(previous?.block||signal?.aborted){pendingHooks.delete(key(branch,context.toolCall.id));return previous;}
         let saved, checkpoint;
         const prepareCheckpoint=()=>{
             if(checkpoint)return checkpoint;
@@ -221,6 +226,7 @@ function install(session,branch) {
         return previous;
     };
     session.agent.afterToolCall=async(context,signal)=>{
+        pendingHooks.delete(key(branch,context.toolCall.id));
         const previous=await after?.(context,signal);
         const content=previous?.content??context.result.content,isError=previous?.isError??context.isError;
         const result={role:'toolResult',toolCallId:context.toolCall.id,toolName:context.toolCall.name,content:structuredClone(content),isError,timestamp:Date.now()};
@@ -283,6 +289,69 @@ async function handle(command) {
     // generic access layer; each product only connects its own execution points.
     if(command.command!=='start_candidate')await access.control(command);
     switch(command.command){
+        case 'cancel_save':
+            saving=false;
+            return;
+        case 'save': {
+            saving=true;
+            let error;
+            try {
+                // Until a suspended native tool frame can be reconstructed,
+                // refuse this case before changing its original wait state.
+                if(pendingHooks.size||setupTasks.size||candidateWaiters.size||waiters.size||resultWaiters.size)
+                    throw Error('Recovery of an active or blocked tool batch is not implemented; execution retained');
+                // Cancellation is requested concurrently on every session,
+                // before waiting for any individual inference to settle.
+                const aborts=[...sessions.values()].map(session=>session.abort());
+                await Promise.all(aborts);
+                await commandQueue;
+                await Promise.all([...branchTasks.values()].flatMap(set=>[...set]));
+                if(setupTasks.size||candidateWaiters.size)throw Error('Pending candidate setup cannot yet be saved');
+                if(waiters.size||resultWaiters.size)throw Error('Unresolved tool batch cannot yet be saved');
+                for(const [branch,session] of sessions){await notifications.drain(session);syncTranscript(branch)}
+                const commandRecords=[];
+                for(const [id,item] of commands){
+                    const value=JSON.parse(item.serialized);
+                    if(['save','load'].includes(value.command))continue;
+                    commandRecords.push([id,{serialized:item.serialized,reply:await item.result}]);
+                }
+                saveRecovery(command.path,{version:1,taskId,tree:tree.snapshot(),authority,nextAction,
+                    access:access.snapshot(),generations:[...generations],results:[...results],
+                    cancelled:[...cancelled],reportedEntries:[...reportedEntries],commands:commandRecords,
+                    checkpoints:[...checkpoints].map(([id,c])=>[id,{...c,manager:c.manager.getSessionFile()}])});
+            }catch(reason){error=String(reason)}
+            await report({message:'recovery_saved',path:command.path,error:error??null});
+            if(error)saving=false;
+            return;
+        }
+        case 'load': {
+            // A failed load must not settle/delete the saved native sources.
+            saving=true;
+            let error;
+            try {
+                if(sessions.size)throw Error('Load requires an empty Agent adapter');
+                const record=loadRecovery(command.path);
+                if(record.taskId!==taskId)throw Error('Recovery task identity mismatch');
+                const restored=SessionTree.restore(record.tree,SessionManager);
+                const managers=new Map([...restored.branches.values()].map(b=>[b.manager.getSessionFile(),b.manager]));
+                for(const [,checkpoint] of record.checkpoints)if(!managers.has(checkpoint.manager))throw Error('Recovery checkpoint manager missing');
+                tree=restored;authority=record.authority;nextAction=record.nextAction;
+                access.restore(record.access);
+                for(const [id,value] of record.generations)generations.set(id,value);
+                for(const [id,value] of record.results)results.set(id,value);
+                for(const value of record.cancelled)cancelled.add(value);
+                for(const value of record.reportedEntries)reportedEntries.add(value);
+                for(const [id,value] of record.commands)commands.set(id,{serialized:value.serialized,result:Promise.resolve(value.reply)});
+                for(const [id,c] of record.checkpoints)checkpoints.set(id,{...c,manager:managers.get(c.manager)});
+                for(const [branch,{manager,stopped}] of tree.branches){
+                    if(stopped)continue;
+                    const {session}=await createAgentSession({cwd:manager.getHeader().cwd,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+                    sessions.set(branch,session);install(session,branch);
+                }
+                saving=false;
+            }catch(reason){error=String(reason)}
+            await report({message:'recovery_loaded',error:error??null});return;
+        }
         case 'local_policy':
             return;
         case 'start_branch': {
@@ -297,6 +366,7 @@ async function handle(command) {
             return;
         }
         case 'prompt': {
+            if(saving)throw Error('Execution is saved and waiting for exit');
             if(branch!==authority)throw Error('Only the authority accepts user input');
             const session=sessions.get(branch);if(!session)throw Error('Session missing');
             executeTurn(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));return;
@@ -388,6 +458,7 @@ async function dispatch(command){
     let reason;
     const acknowledgement=status=>({message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status,generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{})});
     try{
+        if(saving&&!['save','cancel_save'].includes(command.command))throw Error('Save in progress; command not applied');
         const generation=generations.get(command.branch_id);
         if(generation!==undefined&&command.generation!==undefined&&generation!==command.generation)throw Error('Stale command generation');
         if(command.generation!==undefined)generations.set(command.branch_id,command.generation);
@@ -415,7 +486,9 @@ try{
             if(old&&old.serialized!==JSON.stringify(command)){await report({message:'branch_failed',branch_id:command.branch_id,reason:'Command id reused with different payload'});continue}
             // A candidate may wait for sibling tool results. It must not hold
             // up resolve_pending / cleanup on the transport's command queue.
-            const result=old?.result??(command.command==='start_candidate'
+            // Save must interrupt immediately even if setup is awaiting a tool.
+            const result=old?.result??(command.command==='save'
+                ?dispatch(command):command.command==='start_candidate'
                 ?commandQueue.then(()=>dispatch(command))
                 :(commandQueue=commandQueue.then(()=>dispatch(command))));
             if(command.command==='start_candidate'){
@@ -429,6 +502,11 @@ try{
 }catch(error){
     transportError??=error;
 }finally{
+    if(saving){
+        await outgoing;
+        if(!socket.destroyed)await new Promise(resolve=>socket.end(resolve));
+        process.exit(transportError?1:0);
+    }
     closing=true;access.releaseAll();
     for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
     await commandQueue.catch(()=>{});

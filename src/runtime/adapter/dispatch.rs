@@ -83,6 +83,20 @@ impl Shared {
         let state = self.runtime.state(environment_id);
         let context = operation_context(environment_id, request);
         match &request.operation {
+            Operation::SaveRuntime { path } | Operation::LoadRuntime { path } => {
+                let result = if matches!(request.operation, Operation::SaveRuntime { .. }) {
+                    // Even a failed save must not fall through to destructive EOF cleanup.
+                    self.preserving.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.runtime.save_runtime(path)
+                } else {
+                    self.preserving.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.runtime.load_runtime(path)
+                };
+                match result {
+                    Ok(()) => make_result(request, ResultStatus::Completed, self.runtime.state(environment_id), false),
+                    Err(error) => self.reasoned_failure(request, state, &error.to_string()),
+                }
+            }
             Operation::EstablishEnvironment => self.execute_establish(environment_id, request, state, &context),
             Operation::OperateEnvironment { command, agent } => self.execute_operate(environment_id, request, state, &context, command, agent.as_ref(), cancel),
             Operation::BranchEnvironment { child_environment_id } => self.execute_branch(environment_id, request, state, &context, child_environment_id),

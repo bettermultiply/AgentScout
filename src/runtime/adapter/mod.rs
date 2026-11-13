@@ -27,6 +27,7 @@ use queue::Queue;
 use result_cache::ResultCache;
 
 pub(super) struct Shared {
+    pub(super) preserving: std::sync::atomic::AtomicBool,
     pub(super) runtime: Arc<dyn Backend>,
     pub(super) out: Sender<AdapterMessage>,
     pub(super) queues: Mutex<HashMap<String, Arc<Queue>>>,

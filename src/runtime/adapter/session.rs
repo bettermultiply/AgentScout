@@ -38,6 +38,7 @@ impl Adapter {
         });
 
         let shared = Arc::new(Shared {
+            preserving: std::sync::atomic::AtomicBool::new(false),
             runtime: self.runtime,
             out,
             queues: Mutex::new(HashMap::new()),
@@ -66,5 +67,4 @@ impl Adapter {
         Ok(())
     }
 }
-
 

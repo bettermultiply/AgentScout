@@ -141,6 +141,8 @@ pub struct RuntimeCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
+    SaveRuntime { path: std::path::PathBuf },
+    LoadRuntime { path: std::path::PathBuf },
     EstablishEnvironment,
     /// 环境内操作。`agent` 在场时表示在环境内建立 Agent 接入侧。
     OperateEnvironment {

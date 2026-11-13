@@ -6,6 +6,7 @@ impl SpeculativeTree {
     /// 接收 Pi 报告的启动事实。
     pub fn handle_message(&mut self, message: AgentMessage) -> io::Result<Vec<AgentCommand>> {
         match message {
+            AgentMessage::RecoverySaved { .. } | AgentMessage::RecoveryLoaded { .. } => Ok(vec![]),
             AgentMessage::AgentConnected { agent_id, .. } if agent_id == self.agent_id => {
                 Ok(vec![])
             }

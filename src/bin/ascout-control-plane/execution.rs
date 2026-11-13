@@ -20,6 +20,8 @@ struct Task<'a> {
     notice: String,
     started: Instant,
     draining: bool,
+    recovery_path: std::path::PathBuf,
+    saved: bool,
 }
 
 impl Task<'_> {
@@ -38,21 +40,33 @@ impl Task<'_> {
 
     fn handle(&mut self, event: Event) -> io::Result<Option<ControlActions>> {
         let mut actions = match event {
-            Event::Request(ui::Request::Shutdown) => ControlActions {
-                commands: self.tree.begin_shutdown()?,
-                ..Default::default()
+            Event::Request(ui::Request::Shutdown) => {
+                if self.tree.recovering {return Ok(Some(ControlActions::default()));}
+                if self.tree.pending_work() || self.tree.recovery_pending_commands() {
+                    self.notice="Save failed; a control operation is still pending; execution retained".into();
+                    return Ok(Some(ControlActions::default()));
+                }
+                let directory=self.recovery_path.parent().unwrap().join(format!("recovery-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+                std::fs::create_dir(&directory)?;
+                self.recovery_path=directory.join("agent.json");
+                self.tree.recovering = true;
+                ControlActions {
+                    commands: vec![AgentCommand::Save {branch_id:self.tree.authority_branch_id.clone().unwrap_or_default(),path:self.recovery_path.clone()}],
+                    ..Default::default()
+                }
             },
             Event::Request(ui::Request::Interrupt) => ControlActions {
-                commands: self.tree.interrupt()?,
+                commands: if self.tree.recovering {vec![]} else {self.tree.interrupt()?},
                 ..Default::default()
             },
             Event::Request(ui::Request::Prompt { prompt }) => {
+                if self.tree.recovering {return Ok(Some(ControlActions::default()));}
                 self.tree.queue_prompt(prompt);
                 ControlActions::default()
             }
             Event::Completed(id, result) => self.tree.complete_work(id, result)?,
             Event::Timer => {
-                self.tree.check_command_deadlines()?;
+                if !self.tree.recovering {self.tree.check_command_deadlines()?;}
                 ControlActions::default()
             }
             Event::Agent(message) => {
@@ -68,6 +82,20 @@ impl Task<'_> {
                 let AgentWireMessage::Message(message) = message else {
                     return Err(io::Error::other("Agent sent a control-plane command"));
                 };
+                if let AgentMessage::RecoverySaved { path, error } = &message {
+                    if path != &self.recovery_path {return Err(io::Error::other("Recovery path mismatch"));}
+                    if let Some(error) = error {
+                        self.tree.recovering = false;
+                        self.saved = false;
+                        self.notice = format!("Save failed; still running: {error}");
+                    } else {self.saved = true;}
+                }
+                if let AgentMessage::RecoveryLoaded {error:Some(error)} = &message {
+                    return Err(io::Error::other(format!("Recovery load failed: {error}")));
+                }
+                if let AgentMessage::RecoveryLoaded {error:None} = &message {
+                    self.tree.recovering=false;
+                }
                 let commands =
                     if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
                         Vec::new()
@@ -142,6 +170,7 @@ pub fn run(
     interface: &ui::Interface,
     ledger: &mut Ledger,
     channel: (mpsc::Sender<Event>, mpsc::Receiver<Event>),
+    run_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (events, receiver) = channel;
     let mut reader = stream.try_clone()?;
@@ -159,6 +188,8 @@ pub fn run(
         notice: "Starting Agent session…".into(),
         started: Instant::now(),
         draining: false,
+        recovery_path: run_dir.join("agent-recovery.json"),
+        saved: false,
     };
     let result = thread::scope(|scope| {
         let sender = events.clone();
@@ -185,7 +216,7 @@ pub fn run(
         let result = (|| -> io::Result<()> {
             task.publish()?;
             loop {
-                let event = match task.tree.next_deadline() {
+                let event = match if task.tree.recovering {None} else {task.tree.next_deadline()} {
                     Some(deadline) => match receiver
                         .recv_timeout(Duration::from_millis(deadline.saturating_sub(now_ms())))
                     {
@@ -202,7 +233,7 @@ pub fn run(
                 let actions = match task.handle(event) {
                     Ok(Some(actions)) => actions,
                     Ok(None) => break,
-                    Err(error) if !task.tree.is_stopping() => {
+                    Err(error) if !task.tree.is_stopping() && !task.tree.recovering => {
                         task.publish()?;
                         failure = Some(error);
                         ControlActions {
@@ -244,6 +275,24 @@ pub fn run(
                         let _ = sender.send(Event::Completed(id, result));
                     });
                 }
+                if task.saved && !task.draining && !task.tree.pending_work() {
+                    let save_result=(||->io::Result<()> {
+                        let generation=task.recovery_path.parent().unwrap();
+                        runtime_call(runtime,"authority",Operation::SaveRuntime {path:generation.join("runtime.json")})
+                            .map_err(|error|io::Error::other(error.to_string()))?;
+                        recovery::publish(run_dir,generation,task.tree)?;
+                        Ok(())
+                    })();
+                    if let Err(error)=save_result {
+                        task.notice=format!("Save failed; execution retained: {error}");
+                        task.saved=false;
+                        send(task.stream,AgentCommand::CancelSave {branch_id:task.tree.authority_branch_id.clone().unwrap_or_default()})?;
+                        task.tree.recovering=false;
+                    } else {
+                        task.stream.shutdown(std::net::Shutdown::Write)?;
+                        task.draining=true;
+                    }
+                }
                 loop {
                     let ids = task.tree.evictable_branches();
                     if ids.is_empty() {
@@ -262,14 +311,14 @@ pub fn run(
                     task.stream.shutdown(std::net::Shutdown::Write)?;
                     task.draining = true;
                 }
-                task.notice = if task.tree.is_stopping() {
+                if !task.notice.starts_with("Save failed") {task.notice = if task.tree.is_stopping() {
                     "Stopping"
                 } else if task.tree.authority_running() {
                     "Agent running"
                 } else {
                     "Ready"
                 }
-                .into();
+                .into();}
                 task.publish()?;
             }
             failure.map_or(Ok(()), Err)
@@ -282,7 +331,7 @@ pub fn run(
     task.flush_observations()?;
     interface.publish(task.ledger, false, false, "Stopped")?;
     let unarchived: Vec<_> = task.ledger.unarchived().collect();
-    if !unarchived.is_empty() {
+    if !unarchived.is_empty() && !task.saved {
         return Err(format!(
             "{}; Ledger history incomplete: {}",
             result

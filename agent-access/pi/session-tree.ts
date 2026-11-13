@@ -2,6 +2,8 @@
 import { mkdirSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { checksum } from './recovery.ts';
 
 export class SessionTree {
     constructor(manager, authority='authority') {
@@ -84,6 +86,54 @@ export class SessionTree {
     }
 
     stop(branchId) { const branch=this.branches.get(branchId);if(branch)branch.stopped=true; }
+
+    /** Original native indexes are separate from the assembled final history. */
+    snapshot() {
+        const managers=new Map([[this.manager.getSessionFile(),this.manager]]);
+        for(const {manager} of this.branches.values())managers.set(manager.getSessionFile(),manager);
+        for(const input of this.inputs.values())if(input.source)managers.set(input.source.getSessionFile(),input.source);
+        const sources=[...managers].map(([file,manager])=>({file,leaf:manager.getLeafId(),
+            header:manager.getHeader(),entries:structuredClone(manager.getEntries()),
+            checksum:checksum(readFileSync(file))}));
+        return {authority:this.authority,manager:this.manager.getSessionFile(),sources,
+            branches:[...this.branches].map(([id,{manager,stopped}])=>[id,{file:manager.getSessionFile(),stopped}]),
+            inputs:[...this.inputs].map(([id,input])=>[id,{...input,source:input.source?.getSessionFile()}]),
+            tails:[...this.tails],requests:[...this.requests],originalEntries:[...this.originalEntries],accepted:[...(this.accepted??[])]};
+    }
+
+    static restore(record, SessionManager) {
+        const managers=new Map();
+        // Validate the entire set before opening any manager or selecting paths.
+        for(const source of record.sources){
+            if(checksum(readFileSync(source.file))!==source.checksum)throw Error(`Recovery source changed: ${source.file}`);
+            const records=readFileSync(source.file,'utf8').trim().split('\n').map(JSON.parse);
+            const ids=new Set(source.entries.map(e=>e.id));
+            if(ids.size!==source.entries.length||source.leaf&&!ids.has(source.leaf))throw Error('Invalid recovery Pi index');
+            if(JSON.stringify(records[0])!==JSON.stringify(source.header))throw Error('Recovery Pi header mismatch');
+            for(const entry of source.entries){
+                if(!records.some(e=>e.id===entry.id&&JSON.stringify(e)===JSON.stringify(entry)))throw Error(`Recovery entry missing: ${entry.id}`);
+                if(entry.parentId&&!ids.has(entry.parentId))throw Error(`Recovery parent missing: ${entry.parentId}`);
+            }
+        }
+        for(const source of record.sources){
+            const manager=SessionManager.open(source.file);
+            if(source.leaf)manager.branch(source.leaf);else manager.resetLeaf();
+            managers.set(source.file,manager);
+        }
+        const tree=new SessionTree(managers.get(record.manager),record.authority);
+        tree.authority=record.authority;tree.branches=new Map(record.branches.map(([id,b])=>{
+            const manager=managers.get(b.file);if(!manager)throw Error('Recovery branch source missing');
+            return [id,{manager,stopped:b.stopped}];
+        }));
+        tree.inputs=new Map(record.inputs.map(([id,input])=>{
+            const source=input.source?managers.get(input.source):undefined;
+            if(input.source&&!source)throw Error('Recovery prediction source missing');
+            return [id,{...input,source}];
+        }));
+        tree.tails=new Map(record.tails);tree.requests=new Map(record.requests);
+        tree.originalEntries=new Map(record.originalEntries);tree.accepted=new Set(record.accepted);
+        return tree;
+    }
 
     // Read native indexes at a synchronous boundary. Active managers are never
     // rewritten, reloaded, disposed or deleted by history assembly.

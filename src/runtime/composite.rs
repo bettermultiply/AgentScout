@@ -320,6 +320,19 @@ fn normalize_outputs(
 }
 
 impl Backend for CompositeRuntime {
+    fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
+        if self.connections.len()!=1 {
+            return Err(BackendError::new("Multiple Backend recovery is not implemented"));
+        }
+        self.connections[0].backend.save_runtime(path)
+    }
+
+    fn load_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
+        if self.connections.len()!=1 {
+            return Err(BackendError::new("Multiple Backend recovery is not implemented"));
+        }
+        self.connections[0].backend.load_runtime(path)
+    }
     fn backend_id(&self) -> &str {
         &self.id
     }

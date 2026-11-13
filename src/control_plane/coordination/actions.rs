@@ -576,6 +576,9 @@ impl SpeculativeTree {
 
     pub fn progress(&mut self, capabilities: &RuntimeCapabilities) -> io::Result<ControlActions> {
         let mut actions = ControlActions::default();
+        if self.recovering {
+            return Ok(actions);
+        }
         self.check_command_deadlines()?;
         self.sweep_chances()?;
         if !self.stopping {
