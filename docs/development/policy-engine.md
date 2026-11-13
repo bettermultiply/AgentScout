@@ -16,11 +16,17 @@
 
 保存使用同目录私有临时文件、sync 和不覆盖发布；失败明确返回错误，不启动 Adapter。已有 `policy.json` 的普通启动拒绝覆盖。保存成功但后续基础设施启动失败会留下完整 artifact，不自动删除运行资料。`CompiledPolicy::load` 校验既有 executable digest，Tree 的原生 Policy binding 另外绑定 artifact 字节 SHA-256；YAML/来源元数据不改变原 Decision digest 算法。
 
+普通启动也拒绝含原生 session/events、recovery 或 Agent socket 的已有运行目录。恢复的完整文件摘要校验和反序列化使用同一份字节，不二次读取产物。写入／发布失败不留下半份目标文件；发布后目录同步失败时完整文件可能已经存在，仍报告失败，不启动 Adapter。示例 compile 的输出文件必须尚不存在，重新编译使用新输出路径；仅含 basename 的输出路径仍可使用。
+
 `--resume` 无 Policy 参数时读取 run 内 artifact，不重新编译外部源。有显式 Policy 参数时先编译核对 digest，仍使用留档版本；artifact 存在但损坏或绑定不符直接失败。artifact 缺失时要求显式提供 YAML，原 digest 与 Runtime 路径/内容检查通过才保存补充的 artifact，不回退默认策略。不提供旧 artifact 格式兼容。
 
 Runtime 环境变量仍是显式覆盖入口；恢复未指定时使用保存的 Runtime binding，照旧校验路径、内容和能力。普通启动的 Policy Runtime 相对路径仍按启动 cwd 解析，artifact 中另存解析路径，避免误改为 run 目录或 YAML 目录。Runtime 配置文件及环境仍需保留；本轮不复制完整 Runtime。自包含范围为 YAML 与已声明文件，不包括 Python 可执行文件、标准库、动态库、第三方服务或未声明动态依赖；现有隔离与明确拒绝规则不变。
 
 验证：`cargo check --all-targets`、`cargo build --bins --example policy`、`cargo test --test policy`（1/1）、Policy 模块已有测试（3/3）、`node --test tests/recovery-active.mjs`（4/4）通过，无真实模型请求。手构造 `/tmp/opencode/check-policy-record.py` 验证原 YAML/源码逐字一致、声明包相对导入、源删除后求值、已有 artifact 不覆盖及临时文件清理；删除 `/tmp/opencode/recovery-active-owpWLQ/policy` 后不传 Policy/Runtime 覆盖，真实恢复并再次保存通过；追加验证 artifact 篡改、缺失、显式策略 digest 变化、已有运行保护与源码缺失时不发布 artifact/不启动基础设施均通过，最终证据 `/tmp/opencode/policy-record-o7sd7v9d`。该脚本前两轮在恢复握手完成前请求 Shutdown 超时，最终等待本轮 recovery_loaded 后通过；不据此声称启动期退出竞态已修复。
+
+接续独立验证：`cargo test --lib control_plane` 首次 25/26，一项手构造 `CompiledPolicy` fixture 缺少新必需字段；只补齐三个字段后 26/26，无新增测试或兼容默认值。`cargo test --test policy` 1/1；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 5/5（真实 Pi/NLE/FS 与本地假模型）。`python3 /tmp/opencode/policy-save-check.py` 在首个隔离进程调用时（作者文件已读取、编译尚未返回）刻意改写原 YAML 与包脚本，保存内容仍逐字等于实际加载版本；删除整个源码目录后求值、十个绑定、来源、相对 Runtime 解析、basename 输出、重复保存不覆盖、发布失败清理、缺少文件和损坏摘要拒绝均通过，证据 `/tmp/opencode/policy-save-check-79vgyts5`。第一次该手工检查漏传现有必需的 `hook_count` 而失败，补齐输入后通过，未修改生产输入校验。
+
+`python3 /tmp/opencode/policy-cli-check.py` 通过真实正常启动→主动保存→删除外部 Policy 目录→不传 Policy 默认恢复；完整文件绑定摘要、已有 run 保护、显式不同 Policy 拒绝、缺失 artifact 明确报错及显式补充、篡改拒绝、进程退出均通过，证据 `/tmp/opencode/policy-cli-check-4zcbwh9l`。此检查只配置不可连接的本地假模型端点，不发送 prompt 或模型请求；不代表完整交互回放已实现。
 
 ```rust
 use std::path::Path;

@@ -233,6 +233,9 @@ def dispose(data, *, policy_config, capabilities):
             _ => unreachable!(),
         };
         let policy: CompiledPolicy = serde_json::from_value(json!({
+            "source": "/fixture/policy.yaml",
+            "definition": "",
+            "runtime_config_path": null,
             "version": 1,
             "python": "test",
             "files": {},
