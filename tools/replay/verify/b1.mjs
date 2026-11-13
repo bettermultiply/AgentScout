@@ -21,17 +21,17 @@ const parallel = [
 assert.equal(requestKey(messages), requestKey(JSON.parse(JSON.stringify(messages)).map(x=>x)));
 assert.notEqual(requestKey(messages), requestKey(parallel));
 const run = root + "/run"; fs.mkdirSync(run); fs.writeFileSync(run+"/session.jsonl", [
-  JSON.stringify({id:"u",message:messages[0]}), JSON.stringify({id:"a",message:messages[1],session_entry_id:"e1"}),
-  JSON.stringify({id:"t",message:messages[2]}), JSON.stringify({id:"a2",message:messages[3],session_entry_id:"e2"}),
-  JSON.stringify({id:"discard-user",message:{role:"user",content:"discard branch"}}),
-  JSON.stringify({id:"discard",parentId:"discard-user",message:{role:"assistant",content:[{type:"text",text:"discarded"}]},session_entry_id:"e3"}),
-  JSON.stringify({id:"unused-user",message:{role:"user",content:"unused branch"}}),
-  JSON.stringify({id:"unused",parentId:"unused-user",message:{role:"assistant",content:[{type:"text",text:"never requested"}]},session_entry_id:"e4"}),
-  JSON.stringify({id:"aborted",message:{role:"assistant",stopReason:"aborted",content:[{type:"text",text:"must not export"}]},session_entry_id:"e5"}),
-  JSON.stringify({id:"error",message:{role:"assistant",errorMessage:"fixture failure",content:[{type:"text",text:"must not export"}]},session_entry_id:"e6"}),
+  JSON.stringify({type:"message",id:"u",parentId:null,message:messages[0]}), JSON.stringify({type:"message",id:"a",parentId:"u",message:messages[1]}),
+  JSON.stringify({type:"message",id:"t",parentId:"a",message:{...messages[2],role:"toolResult"}}), JSON.stringify({type:"message",id:"a2",parentId:"t",message:messages[3]}),
+  JSON.stringify({type:"message",id:"discard-user",parentId:null,message:{role:"user",content:"discard branch"}}),
+  JSON.stringify({type:"message",id:"discard",parentId:"discard-user",message:{role:"assistant",content:[{type:"text",text:"discarded"}]}}),
+  JSON.stringify({type:"message",id:"unused-user",parentId:null,message:{role:"user",content:"unused branch"}}),
+  JSON.stringify({type:"message",id:"unused",parentId:"unused-user",message:{role:"assistant",content:[{type:"text",text:"never requested"}]}}),
+  JSON.stringify({type:"message",id:"aborted",parentId:"u",message:{role:"assistant",stopReason:"aborted",content:[{type:"text",text:"must not export"}]}}),
+  JSON.stringify({type:"message",id:"error",parentId:"u",message:{role:"assistant",errorMessage:"fixture failure",content:[{type:"text",text:"must not export"}]}}),
 ].join("\n")+"\n");
 fs.writeFileSync(run+"/events.jsonl", [
-  JSON.stringify({message:"transcript",session_entry_id:"e1",branch_id:"authority"}), JSON.stringify({message:"transcript",session_entry_id:"e2",branch_id:"authority"}), JSON.stringify({message:"transcript",session_entry_id:"e3",branch_id:"discard"})
+  JSON.stringify({message:"transcript",session_entry_id:"a",branch_id:"authority"}), JSON.stringify({message:"transcript",session_entry_id:"a2",branch_id:"authority"}), JSON.stringify({message:"transcript",session_entry_id:"discard",branch_id:"discard"}), JSON.stringify({message:"transcript",session_entry_id:"unused",branch_id:"unused"})
 ].join("\n")+"\n");
 let exportStderr="";
 await new Promise((resolve,reject)=>{const p=spawn(process.execPath,["tools/replay/export.mjs",run],{stdio:["ignore","ignore","pipe"]});p.stderr.on("data",b=>exportStderr+=b);p.on("exit",c=>c?reject(new Error("export")):resolve());});

@@ -98,8 +98,13 @@ if (process.argv[2] === "--pi-child") {
       entry("message", "continuation", "tool-b", { message: { ...assistant, stopReason: "stop", content: [{ type: "text", text: "parallel continuation hit" }] } }),
       entry("custom", "tip", "continuation", { customType: "authority", data: { branch_id: "authority", parentId: "continuation" } }),
     ];
-    fs.writeFileSync(path.join(root, "session.jsonl"), session.map(JSON.stringify).join("\n") + "\n");
-    fs.writeFileSync(path.join(root, "events.jsonl"), ["calls", "continuation"].map(session_entry_id => JSON.stringify({ message: "transcript", session_entry_id, branch_id: "authority" })).join("\n") + "\n");
+    if (process.argv[2]) {
+      // Optional existing B1-PI native run: export it without touching sources.
+      for (const name of ["session.jsonl", "events.jsonl"]) fs.copyFileSync(path.join(process.argv[2], name), path.join(root, name));
+    } else {
+      fs.writeFileSync(path.join(root, "session.jsonl"), session.map(JSON.stringify).join("\n") + "\n");
+      fs.writeFileSync(path.join(root, "events.jsonl"), ["calls", "continuation"].map(session_entry_id => JSON.stringify({ message: "transcript", session_entry_id, branch_id: "authority" })).join("\n") + "\n");
+    }
     const exporter = start([path.join(here, "../export.mjs"), root]);
     assert.equal(await deadline(exporter.done, 10000, "export timeout"), 0, exporter.errors);
     const recording = JSON.parse(fs.readFileSync(path.join(root, "recording.json")));

@@ -28,7 +28,7 @@
 
 按 6b99d9b 接通独立原生持久 SessionManager，复制 native entries 和 ID；不用消息投影重建 checkpoint，也不在活跃 manager 调用会修改 receiver 的 createBranchedSession。汇总使用临时文件及 rename，校验父引用和循环，只有停止写入且成功汇总的源文件才清理。运行 manager 保留预测上下文；汇总父链单独按真实结果整理。旧 message_end 向共享文件生成新 ID 的方式废弃。
 
-废弃记录（2026-11-13 用户批准清理）：曾在调用前计算 requestKey，以 assistant 原生 ID 写入 authority custom 的 data.requests，并写入恢复快照；导出优先读取这些键。此方案使正常运行依赖系统外回放工具，并为测试额外记录专用数据，现已移除。正常运行只生成原生 session/events，键仅允许在导出产物中生成；新还原方案另行研究确认。当前导出暂时拒绝含 authority 标记的文件，避免静默使用重挂后的错误父链。没有新增 Policy 类别，默认不追加真实结果通知。
+废弃记录（2026-11-13 用户批准清理）：曾在调用前计算 requestKey，以 assistant 原生 ID 写入 authority custom 的 data.requests，并写入恢复快照；导出优先读取这些键。此方案使正常运行依赖系统外回放工具，并为测试额外记录专用数据，现已移除。临时拒绝含 authority 标记文件的限制也已移除，改为按原生 transcript ID、Candidate/Chance 和 applied Promote 在导出内存中还原父关系。测试套件先从已有运行导出，不先录制；不为测试新增运行期元数据、不兼容旧格式、不通过正文或时间猜测。没有新增 Policy 类别，默认不追加真实结果通知。
 
 同仓库 rollback 验证保留 targetId、ref、repoRoot 与 Git object，可读 blob 且启动 GC 不删引用；不等于跨仓库迁移、执行 restore 或完整任务继续。摘要跨越预测输入、任意 custom 外部引用和机制状态交接仍需收敛，不自行改写摘要或选择新的 Backend。
 
@@ -40,7 +40,7 @@
 
 运行分支采用 Pi 原生完整持久化、多 session 过渡、接入侧汇总。源分支停止写入且成功汇总后才能删临时文件，活跃 Promote winner 不能删。这是已定方向，不是已完成迁移；当前消息结束事件向共享树文件追加的实现尚未满足它。
 
-正确状态交接是机制保证；FS 共同快照差异合入 winner 仅为讨论方向，不写成已实现 Backend，也不授权通用状态 merge。是否追加真实结果通知由 Policy 决定，默认完全不追加，不是空消息，不强制新增 Policy 名称或类别。历史重挂后的模型回放不能再直接假设父链是原请求上下文，解决方案未定。
+正确状态交接是机制保证；FS 共同快照差异合入 winner 仅为讨论方向，不写成已实现 Backend，也不授权通用状态 merge。是否追加真实结果通知由 Policy 决定，默认完全不追加，不是空消息，不强制新增 Policy 名称或类别。历史重挂后的模型回放不能直接假设父链是原请求上下文；当前原生记录还原实现及验证边界见 replay.md。
 
 本轮只更新设计、开发和 Discussion 文档；目标见 `../design/agent-integration.md` §3，实现差距见 `agent-access.md` §4 和 `replay.md`。不编码、不跑测试、不调用真实模型。
 

@@ -76,7 +76,7 @@ Pi 接入在每个 Branch 内保存模型 action 队列：模型推理前把 `ac
 
 时钟实现：接入侧用 `Date.now()` 产生 Unix 毫秒墙钟时间戳；模型结束时间优先用 SDK 以单调时钟测得的 `durationMs` 锚定在请求开始时刻，缺少时才退回结束时的墙钟。Action 耗时使用两个墙钟时间戳相减，因此墙钟回退时不填写而不是给出负值。上述时间表示接入侧观察到的请求开始、结果到达或提交时刻，不是控制面收到消息的时刻。
 
-当前已知限制（属于原型实现，不是目标语义）：权威路径在工具 Hook 处可能需要等待一次本地 Policy 求值；该求值在沙箱内启动 Python 子进程，所有报告共用 Pi 接入侧的一条串行发送队列，控制面读取较慢时会拖住后续报告。对话正文仍由接入事件实时带来；持久化时 transcript 保存消息引用，正文由权威 session 文件保存，继承关系由记录父链表达。文件位置与引用是内部记录，不直接加入公共观察事件。compaction 尚未保存，见[记录与回放](replay.md)。
+当前已知限制（属于原型实现，不是目标语义）：权威路径在工具 Hook 处可能需要等待一次本地 Policy 求值；该求值在沙箱内启动 Python 子进程，所有报告共用 Pi 接入侧的一条串行发送队列，控制面读取较慢时会拖住后续报告。对话正文仍由接入事件实时带来；持久化时 transcript 保存消息引用，正文由权威 session 文件保存，继承关系由记录父链表达。文件位置与引用是内部记录，不直接加入公共观察事件。原生 compaction 可随 SessionManager 汇总保留，未持久化的扩展上下文改写不能还原，见[记录与回放](replay.md)。
 
 Tree 在 `admit` 通过时创建 Chance；`branch_created` 的 `chance_id` 与 `chance_created` 使用同一个不透明 id，初始权威 Branch 为 null。speculation_kind 在创建入口按父 action 的现有 ActionKind 填写，无法关联时为 null。没有 Runtime 嵌套身份报告，parent_environment 为 null，不能拿逻辑 Parent 冒充环境嵌套。configuration 仅公开 shared_environment 能力摘要，不公开本地配置文件路径或凭据。Failed 不足以判断独立 Instance 是否仍存在，返回 null；Cleaned 表示该 Branch 已不拥有独立 Instance。
 

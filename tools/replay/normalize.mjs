@@ -24,8 +24,7 @@ function argsOf(call) {
 }
 function callsOf(message) {
   if (Array.isArray(message?.tool_calls)) return message.tool_calls;
-  return (message?.toolCalls ?? message?.content ?? [])
-    .filter?.(p => p && (p.type === "toolCall" || p.type === "tool_use")) || [];
+  return (message?.content ?? []).filter?.(p => p?.type === "toolCall") || [];
 }
 
 /** Matches the final context Pi sends to openai-completions. */
@@ -42,14 +41,14 @@ export function requestKey(messages) {
     material = tools.map(t => {
       const id = t.tool_call_id ?? t.toolCallId;
       const call = byId.get(id) || {};
-      return { name: call.function?.name ?? call.name ?? t.name ?? "", arguments: argsOf(call), result: textOfContent(t.content ?? t.result ?? t.data) };
+      return { name: call.function?.name ?? call.name ?? t.toolName ?? "", arguments: argsOf(call), result: textOfContent(t.content) };
     });
   } else {
     const user = [...ms].reverse().find(m => m?.role === "user");
-    material = textOfContent(user?.content ?? user?.text ?? "");
+    material = textOfContent(user?.content ?? "");
   }
   // Pi converts custom messages to user content before provider serialization.
-  // Include that context after tool results while keeping legacy keys stable.
+  // Include that context after tool results.
   const users = tail.filter(m => m?.role === "user");
   if (tools.length && users.length) material = { material, users: users.map(m => textOfContent(m.content)) };
   return crypto.createHash("sha256").update(stable(material)).digest("hex");
@@ -60,15 +59,45 @@ export function replyParts(message) {
     ...(Array.isArray(message?.content) ? message.content : (typeof message?.content === "string" ? [{type:"text", text:message.content}] : [])),
     ...(message?.tool_calls ?? []).map(c => ({type:"toolCall", id:c.id, name:c.function?.name, arguments:argsOf(c)})),
   ];
-  return parts.filter(p => p?.type === "text" || p?.type === "toolCall" || p?.type === "tool_use").map(p => p.type === "tool_use" ? {
-    type: "toolCall", id: p.id, name: p.name, arguments: p.input ?? p.arguments ?? {}
-  } : p.type === "toolCall" ? { type: "toolCall", id: p.id, name: p.name, arguments: p.arguments ?? {} } : { type: "text", text: p.text ?? "" });
+  return parts.filter(p => p?.type === "text" || p?.type === "toolCall").map(p => p.type === "toolCall" ? { type: "toolCall", id: p.id, name: p.name, arguments: p.arguments ?? {} } : { type: "text", text: p.text ?? "" });
 }
 
-export function messageBody(line) {
-  if (line?.type === "custom_message") return {
-    role: "custom", customType: line.customType, content: line.content,
-    display: line.display, details: line.details, timestamp: Date.parse(line.timestamp),
-  };
-  return line?.message ?? line?.data?.message ?? line;
+/** Read a current native Pi message entry, never custom state data. */
+export function messageBody(entry) {
+  if (entry.type === "custom_message") return { role: "custom", customType: entry.customType, content: entry.content ?? [], display: entry.display, details: entry.details, timestamp: Date.parse(entry.timestamp) };
+  return entry.type === "message" ? entry.message : {};
+}
+
+/** Current Pi buildSessionProjection + convertToLlm semantics on one native path. */
+export function sessionContext(path) {
+  const compaction = path.findLastIndex(e => e.type === "compaction");
+  let selected = path;
+  if (compaction >= 0) {
+    const c = path[compaction], kept = path.findIndex(e => e.id === c.firstKeptEntryId);
+    if (c.firstKeptEntryId && (kept < 0 || kept > compaction)) throw Error(`Missing compaction retained entry ${c.firstKeptEntryId}`);
+    selected = [c, ...(kept >= 0 ? path.slice(kept, compaction).filter(e => e.message?.role !== "system") : []), ...path.slice(compaction + 1)];
+  }
+  const edits = new Map(selected.filter(e => e.type === "context_edit").map(e => [e.targetId, e]));
+  const messages = [];
+  for (const [i, e] of selected.entries()) {
+    const edit = edits.get(e.id);
+    if (edit?.replacement === null) continue;
+    let projected = [];
+    if (e.type === "message") projected = [e.message];
+    if (e.type === "custom_message") projected = [{ role: "user", content: e.content ?? [] }];
+    if (e.type === "branch_summary" && e.summary) projected = [{ role: "user", content: `The following is a summary of a branch that this conversation came back from:\n\n<summary>\n${e.summary}</summary>` }];
+    if (e.type === "compaction" && i === 0) projected = [...(e.systemMessage ? [e.systemMessage] : []), { role: "user", content: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${e.summary}\n</summary>` }];
+    for (let m of projected) {
+      if (!["system", "user", "assistant", "toolResult"].includes(m.role)) throw Error(`Unsupported persisted message role ${m.role}`);
+      if (edit && ["message", "custom_message"].includes(e.type) && ["user", "assistant", "toolResult", "custom"].includes(m.role)) m = { ...m, content: edit.replacement.content };
+      if (m.role === "assistant" && ["aborted", "error"].includes(m.stopReason)) continue;
+      if (m.role === "toolResult") {
+        const previous = messages.findLastIndex(x => x.role === "toolResult" && x.toolCallId === m.toolCallId);
+        const assistant = messages.findLastIndex(x => x.role === "assistant");
+        if (previous > assistant) messages.splice(previous, 1);
+      }
+      messages.push(m);
+    }
+  }
+  return messages;
 }

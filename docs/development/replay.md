@@ -6,7 +6,7 @@
 
 降低 NLE 深度投机验证的模型推理成本。回放只用录制的 assistant 输出替换模型服务，检验系统的投机、Promote、Discard 与 single-winner 反应；不评价 Agent、不证明性能收益。NLE 工具真实重新执行，不以录制的工具结果代替执行。
 
-导出与伪造端点放在 [`tools/replay/`](../../tools/replay/README.md)，使用 Node 26，只读取 run 内 `events.jsonl` 和权威 session 文件。`b1.mjs`、`b1-pi.mjs`、`b3.mjs` 是已验证的验收脚本；`b3-repeat.mjs` 对同一 recording 做五次全新 run 回放；`b3-deep.mjs` 通过 `DEEP_ROUNDS=3/4` 记录深度场景并做三次全新 run 回放。
+导出与伪造端点放在 [`tools/replay/`](../../tools/replay/README.md)，使用 Node 26，只读取已有 run 内 `events.jsonl` 和 `session.jsonl`。记录是系统原生能力，测试套件不执行录制：B3、repeat、deep 均须提供已有 run，先导出再执行一次、五次或三次回放；低层 B1／B1-PI 保留手构造原生数据验证，B1-PI 也可接收已有样例目录。
 
 ## 记录来源
 
@@ -22,11 +22,11 @@
 
 整理后恢复上下文可能不同于原始运行上下文；compaction/custom 必须保存，但引用、摘要、在飞推理与 rollback 外部资源关联仍有未决实现差距，详见 [接入实现](agent-access.md) §4。是否追加真实结果通知由 Policy 决定，默认完全不追加，不是空消息。
 
-**模型回放边界**：正常运行仅生成原生 session/events，不为回放计算或持久化匹配键，不依赖 `tools/replay`；键只在系统外导出产物中生成。历史重挂后，assistant 的父链不一定代表原始请求上下文；仅用原生 session/events 还原关系的方案尚未确认、尚未实现。
+**模型回放边界**：正常运行仅生成原生 session/events，不为回放计算或持久化匹配键，不依赖 `tools/replay`；键只在系统外导出产物中生成。导出按 events 文件序建立 transcript 原生 ID 的 Branch 归属，以 candidate_created 的 parent/chance 和 chance_created 的 operation_id 核对候选注入批次；由原生 toolCall ID 验证整批（包括并行 sibling），applied Promote 后将第一后续记录的父边仅在内存中接回预测批次尾部。嵌套候选按创建顺序还原。无正文相似度、命名解析或时间近似匹配，源文件不变。
 
-当前导出对含 authority 标记的 session 明确拒绝，包括尚未发生 Promote 的此类文件；这是临时保守限制，不能把整理后的父链静默当作原请求上下文。无 authority 标记的既有简单样例仍按父链导出。B3 及深度场景的当前导出／回放闭环因此受阻，下文历史验收结果不代表当前通过。
+第一后续记录可以是 custom、compaction、context_edit 或 custom_message，不限 assistant。通知以 details.command_id 关联 applied Promote。还原后按最新 compaction 的保留区间、context_edit replacement、branch_summary/custom_message 构造当前 Pi 模型上下文；失败 assistant 排除，当前待决调用的较早同 toolCallId 结果被后续结果替换。缺原生引用、注入批次不全、未知消息角色或无法唯一确定重挂边时明确失败，不加旧格式回退。未持久化的扩展改写及任意 provider 转换不在保证内。
 
-本次清理验证：既有 `node --test tests/pi-*.mjs` 26 项通过，`b1.mjs` 通过；`b1-pi.mjs` 在导出含 authority 标记的原生文件时明确失败，尚未进入回放核对。未新增测试、未调用真实模型，未运行 B3／深度整链。
+本轮验证：B1 与 B1-PI 通过，后者从已有 `/tmp/opencode/ascout-replay-b1-pi-hyZBIv` 开始导出、经真实 Pi stream 消费两个输出，hits/consumed=2、misses/exhausted/unconsumed=0；`native.mjs` 覆盖自定义首后续、反序并行完成、嵌套、compaction/edit/notification、时钟重置、源文件不变与歧义报错。已有 `/tmp/opencode/recovery-active-BITw2r` 并行恢复样例导出成功，candidate-2 的 4b5fdb14 上下文使用预测批次 02901c7e → 204d72b4；四层 `/tmp/ascout-replay/b3-deep-4/deep-recording` 导出 13 项，十层记录导出 31 项。B3 真实工具回放尝试 3 hit／1 miss，四层也因缺键失败，不能宣称严格整链通过。B3 新运行 NLE 初始地图／位置与源记录不同，严格保留 400 及所有结构、正文、观测和消费断言；不重新录制或弱化匹配。日志 `/tmp/opencode/native-b3.log`、`/tmp/opencode/native-deep4.log`。所有模型请求仅到 loopback。
 
 失败 Branch 对有效执行、成功产物和副作用的影响须等效于没有创建过，但审计记录必须存在；旁支不得重新执行或对权威生效。
 
@@ -35,7 +35,7 @@
 - 工具调用投机：待决工具调用的名称与参数，加预测内容本身。
 - 模型调用投机：最新一条消息的内容，可取内容哈希。
 - 不使用 Branch、Proposal 或工具调用的跨运行 id，不比较完整历史。
-- 当前导出沿 assistant 记录父关系取得特征；该假设仅适用于尚未按真实结果重挂的记录，不能推广为整理后历史的原请求上下文，迁移缺口见上。
+- 导出沿内存中还原后的原生父关系取得特征，不直接使用最终权威父链。
 - 同键对应多条录制时，按录制出现顺序依次返回。缺失或耗尽必须报错，不得退回真实模型。
 
 长分支中两类键都可能碰撞：相同命令与预测可能对应不同历史，相同最新消息也可能对应不同模型请求。并发到达次序和重试还可能改变同键消费顺序；不能把“有匹配”当作历史完全一致的证明。
@@ -58,7 +58,7 @@ Promote 和 2 个 applied Discard；每个后续 Chance 都在其祖先 Candidat
 条（N=3 为 10，N=4 为 13；旧记录曾显示 14），三次回放均应为 `unconsumed=0`，并核对 hits/misses/exhausted、authority chain、NLE
 及事件结构。
 
-compaction 等不经 `message_end` 的变化未进入权威 session 文件；Ledger 的其他 action／Runtime 事实仍可能保存完整工具参数与结果，不能把 transcript 去重说成 Ledger 完全没有这些正文。
+原生 SessionManager 已持久化的 compaction/custom 等可随完整索引汇总保留，导出处理其上下文语义；未落盘的变化不能恢复。Ledger 的其他 action／Runtime 事实仍可能保存完整工具参数与结果，不能把 transcript 去重说成 Ledger 完全没有这些正文。
 
 端点、导出和一次 B3 闭环已由上述脚本验证；重复回放脚本逐次比较 Chance/Proposal/Candidate 数量、Promote、applied Discard、权威父链 role/text、真实 NLE 观察及命中/缺失/耗尽报告。它仍不证明模型推理质量或性能收益。
 
