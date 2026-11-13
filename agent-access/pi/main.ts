@@ -355,7 +355,7 @@ async function handle(command) {
                 const snapshot=tree.snapshot(dirname(command.path),[...checkpoints.values()].map(c=>c.manager));
                 const sourceFiles=new Map(snapshot.sources.map(source=>[source.originalFile,source.file]));
                 saveRecovery(command.path,{version:1,taskId,tree:snapshot,authority,nextAction,
-                    resourceBinding:recoveryBinding(root,snapshot.sources.map(source=>source.header.cwd)),
+                    resourceBinding:await recoveryBinding(root,snapshot.sources.map(source=>source.header.cwd)),
                     snapshotResources:snapshotResources(snapshot.sources),
                     executionConfig:{model:model??null,modelPattern:modelPattern??null,thinkingLevel,runtimeTools},
                     access:access.snapshot(),generations:[...generations],results:[...results],
@@ -376,7 +376,7 @@ async function handle(command) {
                 if(sessions.size)throw Error('Load requires an empty Agent adapter');
                 const record=loadRecovery(command.path);
                 if(record.taskId!==taskId)throw Error('Recovery task identity mismatch');
-                if(record.resourceBinding&&JSON.stringify(record.resourceBinding)!==JSON.stringify(recoveryBinding(root,record.tree.sources.map(source=>source.header.cwd))))throw Error('Recovery Pi code, extension or configuration resources changed');
+                if(record.resourceBinding&&JSON.stringify(record.resourceBinding)!==JSON.stringify(await recoveryBinding(root,record.tree.sources.map(source=>source.header.cwd))))throw Error('Recovery Pi code, extension or configuration resources changed');
                 snapshotResources(record.tree.sources,record.snapshotResources);
                 const executionConfig={model:model??null,modelPattern:modelPattern??null,thinkingLevel,runtimeTools};
                 if(record.executionConfig&&JSON.stringify(record.executionConfig)!==JSON.stringify(executionConfig))throw Error('Recovery model, thinking level or tool configuration changed');

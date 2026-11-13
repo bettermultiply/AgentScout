@@ -46,9 +46,9 @@ target/debug/ascout-control-plane <run-dir> <pi-root> <policy.yaml> --resume --w
 ## 验收与剩余边界
 
 - `node --test tests/recovery-active.mjs` 先在原实现复现 Shutdown 不退出（证据 `/tmp/opencode/recovery-active-8zpJIk`），实现后通过真实 Pi + 真实 NLE + 本地假模型：authority 同一 assistant 发两个工具，两个有效候选等待 sibling，真实 sibling NLE 动作在途时退出，收齐一项动作后保存，所有任务进程关闭；重启不请求模型，用户继续后三个 Branch 实际请求模型、两个候选获得真实 sibling 配对结果，原两个动作最终恰执行两次，再次保存退出且保存源不变。最终联合回归证据 `/tmp/opencode/recovery-active-6rDa6i`。这验证了核心等待恢复，不代表全部 backend／extension 恢复。
-- FS portable overlay 保存与独立可写恢复已实现并经过真实 shell 执行验证；btrfs 原生子卷及 snapshot-copy 布局明确拒绝。尚未完成 FS + Pi 控制面主入口整链，不声称保存任意子进程内存。
-- 恢复检查 task/authority、存活 Branch 的原生 session、Chance/Proposal 引用、已支持 Runtime 的环境存在性和 NLE world 索引；全面关联校验仍有缺口（例如复杂混合路由的参与环境集合、深层父链语义）。无限阻塞 Runtime 或故障导致的回执无法收齐目前不能保存成功；外部原生工具只保留 Pi 取消终态，不承诺恢复子进程内存。
-- Pi 原生源在保存时复制到该代 `sources/`，恢复时再复制为独立可写源，checkpoint 按保存源身份重新关联；继续原运行或恢复运行不会改写该代 Pi 源。本地扩展/配置与代码绑定及外部 Git snapshot 保留见下方，包管理扩展尚不支持。
+- FS portable overlay 与 btrfs snapshot-copy 保存、独立可写恢复、恢复后 fork 和再次保存已通过真实环境验证；FS + Pi 控制面主入口已通过下述整链。原生 btrfs incremental backend 本机探测失败，不能据 snapshot-copy 结果宣称其验收通过。不保存任意子进程内存。
+- 恢复检查 task/authority、存活 Branch 的原生 session、Chance/Proposal 引用、Runtime 参与环境集合和 NLE world 索引；不据此宣称任意复杂部署及深层语义均已验证。无限阻塞 Runtime 或故障导致的回执无法收齐目前不能保存成功；外部原生工具只保留 Pi 取消终态，不承诺恢复子进程内存。
+- Pi 原生源在保存时复制到该代 `sources/`，恢复时再复制为独立可写源，checkpoint 按保存源身份重新关联；继续原运行或恢复运行不会改写该代 Pi 源。package-managed 扩展、glob、配置与代码绑定及外部 Git snapshot 保留见下方。
 - Promote notification 已在真实 main 入口、真实 Pi + NLE + 假模型的保存失败后继续／晋级／再次保存／恢复中验证最终历史恰一次；尚未验证所有通知交付时刻的跨恢复组合。
 
 早期 `cargo build --bins`、`cargo test --lib control_plane -- --nocapture`（26/26）、Pi 联合回归含新整链用例（20/20）通过。既有无工具、永不自然结束模型流 `/tmp/opencode/check-recovery.mjs` 通过，证据 `/tmp/opencode/control-recovery-wiBhe4`。没有调用真实模型；后续扩展验证见下方。
@@ -63,13 +63,13 @@ target/debug/ascout-control-plane <run-dir> <pi-root> <policy.yaml> --resume --w
 
 ## 多组件、失败继续与资源绑定（2026-11-13）
 
-CompositeRuntime 多连接与 BaseRuntime inner/data-plane 分别写入本代私有 `*.components/`；所有子组件成功才写父组件索引，最后控制面发布总 manifest。索引绑定 backend 顺序、身份、组件 SHA-256 与参与环境集合。加载先检查同级所有组件字节，再逐个重建；失败不会启动 Agent 推理，不提供已加载组件的内存事务回滚。
+CompositeRuntime 多连接与 BaseRuntime inner/data-plane 分别写入本代私有 `*.components/`；所有子组件成功才写父组件索引，最后控制面发布总 manifest。索引绑定 backend 顺序、身份、组件 SHA-256 与参与环境集合。加载先检查同级所有组件字节，再逐个重建，并核对参与者与实际环境集合；中途失败对所有组件执行 shutdown，错误包含清理失败信息，不启动 Agent 推理。不提供已加载组件的内存事务回滚。
 
-FS portable overlay 复制存活环境、lower/snapshot 与已执行操作回执；保存数据树校验文件内容、类型/权限、symlink、OverlayFS opaque/whiteout/redirect/metacopy。OverlayFS 内部 work 目录不复制，恢复重建。BaseRuntime 复制期间冻结拥有的执行进程，失败也尝试 thaw。每次恢复另建 `restored-*` 可写副本；保存代和旧运行目录均不覆盖。外部 lower 挂载保留原路径及 dev/inode 并验证可用；这不等于冻结整个宿主 lower 内容，也不承诺支持可变宿主 lower 的任意漂移。
+FS 复制存活环境、lower/snapshot 与已执行操作回执；每个底层目录在本代独立复制一次，恢复不再以原宿主目录作为底层。保存数据树校验文件内容、类型/权限、symlink、OverlayFS opaque/whiteout/redirect/metacopy。OverlayFS 内部 work 目录不复制，恢复重建；btrfs 子卷布局记录后在恢复目录重建。BaseRuntime 复制期间冻结拥有的执行进程，失败也尝试 thaw。每次恢复另建 `restored-*` 可写副本；保存代和旧运行目录均不覆盖。拒绝 `/`、包含 runtime/recovery storage 的底层及活动 socket；可用 `filesystem.isolated_paths` 显式指定独立工作目录，`passthrough_rw` 仍为宿主直通，不具有保存独立性。系统只读依赖绑定 pacman/dpkg 的已安装版本列表与 sh/env/bwrap 内容摘要，不复制整个宿主 root；这不是对未受包管理文件或任意系统文件原地篡改的完整证明。宿主并发写者不在 Runtime 冻结范围，保存期间应保持 lower 静止。
 
-Pi SDK 默认使用 DefaultResourceLoader 自动加载全局/项目扩展，因此保存绑定 Node 版本、Pi 与接入代码内容、模型配置、全局和项目 settings/extension/skill/prompt/system prompt/AGENTS 资源。恢复在创建 session、执行扩展代码前验证；变化明确拒绝。当前只接受显式本地资源；package-managed 扩展与 glob 声明保存明确失败，不静默忽略。绑定不覆盖任意第三方扩展的传递依赖或外部服务配置，不能作为完整 extension 环境部署方案。
+Pi SDK 默认使用 DefaultResourceLoader 自动加载全局/项目扩展，因此保存绑定 Node 版本、Pi 与接入代码内容、模型配置、全局和项目 settings/extension/skill/prompt/system prompt/AGENTS 资源。使用 SDK `DefaultPackageManager.resolve()` 解析 package 与 glob，绑定有效资源、package root 及其已安装 node_modules；验证期间不安装缺失包或执行扩展代码。恢复在创建 session、执行扩展代码前验证；变化明确拒绝。任意目录外动态依赖、第三方服务及全部间接依赖发现不在保证范围，不能作为完整 extension 环境部署方案。
 
-`rollback-snapshot` 绑定 repoRoot、Git directory、原 ref、tree/commit，并建立独立 `refs/ascout/recovery/<digest>` 保留对象可达性；只执行读取和 update-ref，不 reset/checkout 工作区。恢复验证原 ref 及保留 ref 均匹配，缺失明确失败。保留 ref 目前没有自动回收，保存失败可能留下安全但冗余的 ref。复制 session 不代表复制 Git 对象。
+`rollback-snapshot` 绑定 repoRoot、Git directory、原 ref、tree/commit，并建立独立 `refs/ascout/recovery/<digest>` 保留对象可达性；只执行读取和 update-ref，不 reset/checkout 工作区。恢复验证保留 ref、commit/tree；原 ref 删除或移动不影响独立保留对象，保留 ref 缺失则明确失败。保留 ref 目前没有自动回收，保存失败可能留下安全但冗余的 ref。复制 session 不代表复制 Git 对象。
 
 故障整链通过占用 `recovery.tmp` 让中断后最终发布失败：进程留在暂停，manifest 字节不变；分别验证直接重试及用户继续、全部三个 Branch 继续、两个原动作总共恰执行两次，再次保存退出、旧保存代独立恢复。该用例还复现并修复已晋级候选保留原生预测源、父 Branch/其他候选已清理时被错误拒绝恢复的问题；重试开始显式清除旧 saved 标记。
 
@@ -77,4 +77,18 @@ Pi SDK 默认使用 DefaultResourceLoader 自动加载全局/项目扩展，因�
 
 补充执行 `cargo test --lib recovery -- --nocapture`（2/2）：第二项在真实 sandbox writer 运行时冻结复制、注入复制失败、验证 thaw 后计数继续增长及上一代恢复；`cargo test --lib control_plane -- --nocapture`（26/26）；Pi access/history/notification/recovery-sources/recovery-binding 联合回归（20/20）。
 
-仍需完成：FS + Pi 主入口组合验收；btrfs 保存恢复；多 backend 中间组件保存失败的整链注入；扩展代码变化的真实入口拒绝；更完整的跨组件关联检查与复杂路由支持。当前不能将上述部分交付称为全部验收。
+## FS 主入口与保存独立性验收（2026-11-13）
+
+`tests/recovery-filesystem.mjs` 使用两个真实 NLE backend、FS 数据面、Pi 原生 bash 和本地假 SSE 服务：实际隔离写入，模型流中断保存后全部任务进程退出；中间 FS 组件保存失败时旧 manifest 不变、运行保持暂停并可重试；加载中途 FS 内容损坏时清理先前已加载组件且不请求模型；package 扩展代码变化在推理前拒绝。恢复不自动推理，用户继续后读取保存时 lower 与写入内容并继续写；改写原 lower 后旧代仍读取保存内容，再次恢复旧代有效，旧保存文件摘要不变。修复了 FS trait 未提供 launch fragment、同组件合法重复挂载目标被误拒绝两项真实入口缺陷。
+
+实际命令：
+
+```sh
+cargo build --bins
+cargo test --lib runtime -- --nocapture
+node --test tests/recovery-filesystem.mjs tests/recovery-active.mjs tests/pi-access.mjs tests/pi-session-history.mjs tests/pi-notification.mjs tests/pi-notification-adapter.mjs tests/pi-recovery-binding.mjs tests/pi-recovery-sources.mjs
+```
+
+Runtime 118/118（含现有环境条件跳过的用例）、Node 联合回归 25/25 通过；最终 FS 主入口证据 `/tmp/opencode/recovery-filesystem-65JoGp`。所有模型请求均为本地假服务。`recovery_btrfs_and_snapshot_copy_layouts` 在隔离 `/var/tmp/ascout-recovery-btrfs-*` 验证 snapshot-copy 和普通 overlay 的保存、恢复、fork、再次保存；本机探测报告 “btrfs create/snapshot works but incremental diff is unavailable; falling back to overlay”，原生 btrfs incremental backend 仍是环境验证缺口，不修改宿主挂载绕过探测。
+
+剩余限制：原生 btrfs incremental backend 未完成环境验收；保存失败可能留下未发布的 generation 子目录，加载失败的目录清理错误尚未完整上报；系统绑定不覆盖任意未受管文件和全部可执行依赖；任意外部扩展依赖／服务、无限阻塞 Runtime、崩溃恢复及任意进程内存恢复均不在本次保证范围。

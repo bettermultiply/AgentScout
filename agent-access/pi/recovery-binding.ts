@@ -1,15 +1,13 @@
 // @ts-nocheck
 import {existsSync,readFileSync,readdirSync,lstatSync,realpathSync} from 'node:fs';
-import {resolve,dirname,join,isAbsolute} from 'node:path';
+import {resolve,dirname,join} from 'node:path';
 import {homedir} from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {checksum} from './recovery.ts';
+import {createRequire} from 'node:module';
 
-/** Bind auto-discovered configuration before Pi can load extensions on resume.
- * This is not an extension deployment system: package-managed extensions must
- * provide a supported local resource, otherwise saving fails explicitly.
- */
-export function recoveryBinding(piRoot,workspaces) {
+/** Bind Pi-resolved resources before extension execution on resume. */
+export async function recoveryBinding(piRoot,workspaces) {
     const resources=new Map();
     function fingerprint(path,required=false) {
         path=resolve(path);
@@ -27,16 +25,30 @@ export function recoveryBinding(piRoot,workspaces) {
     function settings(path,base) {
         fingerprint(path);
         if(!existsSync(path))return;
-        const config=JSON.parse(readFileSync(path,'utf8'));
-        if(config.packages?.length)throw Error(`Recovery does not yet support package-managed extensions: ${path}; retain local extension resources instead`);
-        for(const resource of [...(config.extensions??[]),...(config.skills??[]),...(config.prompts??[])]) {
-            if(typeof resource!=='string')throw Error(`Unsupported recovery resource declaration: ${path}`);
-            const name=resource.startsWith('!')?resource.slice(1):resource;
-            if(name.includes('*'))throw Error(`Recovery requires explicit local resource paths: ${name}`);
-            fingerprint(name.startsWith('~/')?join(homedir(),name.slice(2)):isAbsolute(name)?name:resolve(base,name),true);
-        }
+        JSON.parse(readFileSync(path,'utf8'));
+        // Declaration syntax and package filters belong to Pi's resolver.
     }
     const agentDir=resolve(process.env.PI_CODING_AGENT_DIR??join(homedir(),'.pi/agent'));
+    const require=createRequire(resolve(piRoot,'package.json'));
+    const {DefaultPackageManager,SettingsManager}=require(resolve(piRoot,'packages/coding-agent/src/index.ts'));
+    const resolved=[];
+    for(const cwd of [...new Set(workspaces)].sort()) {
+        const manager=new DefaultPackageManager({cwd,agentDir,settingsManager:SettingsManager.create(cwd,agentDir)});
+        // Recovery never installs or runs extension code during validation.
+        const paths=await manager.resolve(async()=> 'error');
+        if(paths.installFailures?.length)throw Error(`Recovery package resolution failed: ${JSON.stringify(paths.installFailures)}`);
+        resolved.push({cwd,paths});
+        for(const type of ['extensions','skills','prompts','themes'])for(const resource of paths[type]) {
+            if(!resource.enabled||resource.path.startsWith('builtin:'))continue;
+            fingerprint(resource.path,true);
+            if(resource.metadata.packageRoot) {
+                fingerprint(resource.metadata.packageRoot,true);
+                // Installed dependencies are part of the executable package.
+                const dependencies=join(resource.metadata.packageRoot,'node_modules');
+                if(existsSync(dependencies))for(const name of readdirSync(dependencies).sort())fingerprint(join(dependencies,name),true);
+            }
+        }
+    }
     for(const name of ['models.json','extensions','skills','prompts','SYSTEM.md','APPEND_SYSTEM.md'])fingerprint(join(agentDir,name));
     settings(join(agentDir,'settings.json'),agentDir);
     for(const cwd of new Set(workspaces)) {
@@ -52,7 +64,7 @@ export function recoveryBinding(piRoot,workspaces) {
     for(const name of ['package.json','packages/coding-agent/src','packages/agent/src','packages/ai/src','packages/ascout-agent-access/src'])fingerprint(join(piRoot,name),true);
     fingerprint(new URL('../core',import.meta.url).pathname,true);
     fingerprint(dirname(new URL(import.meta.url).pathname),true);
-    return {node:process.version,resources:[...resources].sort(([a],[b])=>a.localeCompare(b))};
+    return {node:process.version,resolved,resources:[...resources].sort(([a],[b])=>a.localeCompare(b))};
 }
 
 export function snapshotResources(sources,expected) {
@@ -63,8 +75,9 @@ export function snapshotResources(sources,expected) {
         if(!data?.repoRoot||!/^refs\/pi\/rollback\//.test(data.ref??'')||!/^[a-f0-9]{40,64}$/.test(data.tree??''))throw Error('Unsupported rollback snapshot resource');
         const git=(...args)=>execFileSync('git',['-C',data.repoRoot,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
         const gitDirectory=realpathSync(git('rev-parse','--absolute-git-dir'));
-        const commit=git('rev-parse','--verify',`${data.ref}^{commit}`);
-        if(git('rev-parse','--verify',`${data.ref}^{tree}`)!==data.tree)throw Error(`Rollback snapshot tree changed: ${data.ref}`);
+        const retained=expected?.find(r=>r.gitDirectory===gitDirectory&&r.ref===data.ref&&r.tree===data.tree);
+        const commit=retained?.commit??git('rev-parse','--verify',`${data.ref}^{commit}`);
+        if(git('rev-parse','--verify',`${commit}^{tree}`)!==data.tree)throw Error(`Rollback snapshot tree changed: ${data.ref}`);
         git('cat-file','-e',`${data.tree}^{tree}`);
         // Keep objects reachable independently of an extension's session-start GC.
         // No checkout/reset is performed and an existing ref is never overwritten.
