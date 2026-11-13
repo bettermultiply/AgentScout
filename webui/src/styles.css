@@ -1465,14 +1465,11 @@ select {
 }
 
 .tree-twig-visual {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: var(--twig-stem-width, 2);
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  fill: currentColor;
+  stroke: none;
   transition:
-    stroke 0.32s ease,
-    stroke-width 0.2s ease,
+    fill 0.32s ease,
+    filter 0.2s ease,
     opacity 0.32s ease;
 }
 

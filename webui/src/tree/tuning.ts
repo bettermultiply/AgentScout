@@ -9,7 +9,7 @@ const EXTRA_DEFAULTS = {
   budLength: 30, budWidth: 4.5, modelTipRadius: 1.5, chanceRadiusRatio: .05,
   nodeOrigin: 64, sampleGap: 4, stemOppositeBias: .5,
   petioleLength: 6, petioleWidth: 1.4, leafStrokeWidth: 1, veinWidth: 1,
-  leafOpacity: 1, veinStart: .1, veinEnd: .85, stemAnchor: .5,
+  leafOpacity: 1, veinStart: .1, veinEnd: .85, stemWidthRatio: .9,
   stemControlX: .5, stemControlY: .1, stemTipY: .14,
   connectionParentRatio: .15, connectionRootRatio: .15,
   startLeadRatio: .5,
@@ -52,7 +52,7 @@ export const EXTRA_FIELDS: TuneField[] = [
   field('leafStrokeWidth', '叶片描边宽度', 0, 12, .1, '叶片'), field('veinWidth', '叶脉线宽', 0, 12, .1, '叶片'),
   field('leafOpacity', '叶片透明度', 0, 1, .05, '叶片'),
   field('veinStart', '叶脉起点比例', 0, 1, .01, '叶片'), field('veinEnd', '叶脉终点比例', 0, 1, .01, '叶片'),
-  field('stemAnchor', '叶茎起点 / 枝宽', 0, 1, .05, '叶茎'),
+  field('stemWidthRatio', '叶茎宽度比例 / 本处枝宽', 0, 1, .05, '叶茎'),
   field('stemControlX', '叶茎控制点横向比例', 0, 1, .05, '叶茎'),
   field('stemControlY', '叶茎控制点上翘比例', 0, 1, .01, '叶茎'),
   field('stemTipY', '叶茎末端上翘比例', 0, 1, .01, '叶茎'),
@@ -68,7 +68,7 @@ export const TUNE_FIELDS: TuneField[] = [
   { key:'widthExponent', label:'宽度指数', min:.05, max:2, step:.05, group:'树枝' },
   { key:'minTrunkWidth', label:'最小枝宽', min:0, max:20, step:.2, group:'树枝' },
   { key:'stemK', label:'叶茎系数', min:0, max:200, step:.5, group:'叶茎' },
-  { key:'stemWidth', label:'叶茎宽度', min:.2, max:12, step:.2, group:'叶茎' },
+  { key:'stemWidth', label:'叶茎最大宽度', min:.2, max:12, step:.2, group:'叶茎' },
   { key:'leafMin', label:'叶长最小', min:0, max:200, step:1, group:'叶片' },
   { key:'leafMax', label:'叶长最大', min:0, max:300, step:1, group:'叶片' },
   ...EXTRA_FIELDS,
@@ -114,7 +114,7 @@ export interface TreeTuning extends ExtraTuning {
   stemK: number
   leafMin: number
   leafMax: number
-  /** Stem stroke width in tree units. */
+  /** Maximum filled stem width in tree units. */
   stemWidth: number
 }
 

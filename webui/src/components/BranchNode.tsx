@@ -71,8 +71,9 @@ function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
             onMouseEnter={e=>show(e,section.twig??leaves[0])} onMouseLeave={()=>setHover(null)}
             onClick={e=>{e.stopPropagation();open(section.twig??leaves[0])}}
             onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open(section.twig??leaves[0])}}}>
+            <path className="tree-twig-visual" data-length={shape.length} d={shape.outline!.d} />
+            <circle className="tree-twig-visual" cx={shape.cap!.cx} cy={shape.cap!.cy} r={shape.cap!.r} />
             <g transform={shape.transform}>
-              <path className="tree-twig-visual" data-length={shape.length} style={{strokeWidth:shape.path.stroke,strokeLinecap:"round"}} d={shape.path.d} />
               {leaves.length===0
                 ? <circle className="tree-model-tip" cx={shape.tip.x} cy={shape.tip.y} r={shape.tipRadius} />
                 : shape.leaves.map(leaf=>{

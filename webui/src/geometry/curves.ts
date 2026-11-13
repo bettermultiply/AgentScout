@@ -10,11 +10,23 @@ export function splitCubic(c: Cubic, t: number): [Cubic, Cubic] {
   const e = mix(a, b, t), f = mix(b, d, t), p = mix(e, f, t)
   return [{ start: c.start, c1: a, c2: e, end: p }, { start: p, c1: f, c2: d, end: c.end }]
 }
+// Geometry callers construct new curves/points rather than editing published ones.
+// Keep tolerance in the key: callers may request different integration accuracy.
+const lengthCache = new WeakMap<Cubic, Map<number, number>>()
 export function cubicLength(c: Cubic, tolerance = 1e-6): number {
+  let values = lengthCache.get(c)
+  const cached = values?.get(tolerance)
+  if (cached !== undefined) return cached
+  const length = measureCubic(c, tolerance)
+  if (!values) { values = new Map(); lengthCache.set(c, values) }
+  values.set(tolerance, length)
+  return length
+}
+function measureCubic(c: Cubic, tolerance: number): number {
   const chord = distance(c.start, c.end), polygon = distance(c.start, c.c1) + distance(c.c1, c.c2) + distance(c.c2, c.end)
   if (polygon - chord <= tolerance) return (polygon + chord) / 2
   const [a, b] = splitCubic(c, .5)
-  return cubicLength(a, tolerance / 2) + cubicLength(b, tolerance / 2)
+  return measureCubic(a, tolerance / 2) + measureCubic(b, tolerance / 2)
 }
 export function outlineCurves(points: Point[]): Cubic[] {
   return points.slice(1).map((end, i) => {
@@ -25,7 +37,9 @@ export function outlineCurves(points: Point[]): Cubic[] {
 }
 /** Arc coordinate of a fixed curve parameter; never searches for a nearby edge. */
 export function arcCoordinate(curves: Cubic[], index: number, t: number): number {
-  return curves.slice(0, index).reduce((n, c) => n + cubicLength(c), 0) + (curves[index] ? cubicLength(splitCubic(curves[index], t)[0]) : 0)
+  const prefixes = chainData(curves).prefixes
+  const prefix = Number.isInteger(index) && index >= 0 && index <= curves.length ? prefixes[index] : curves.slice(0, index).reduce((n, c) => n + cubicLength(c), 0)
+  return prefix + (curves[index] ? cubicLength(splitCubic(curves[index], t)[0]) : 0)
 }
 function parameterAtLength(c: Cubic, length: number): number {
   const total = cubicLength(c)
@@ -57,7 +71,7 @@ export function curveInterval(curves: Cubic[], from: number, to: number): Cubic[
 }
 const unit = (a: Point, b: Point): Point => { const n = distance(a, b) || 1; return { x: (b.x - a.x) / n, y: (b.y - a.y) / n } }
 const along = (p: Point, d: Point, n: number): Point => ({ x: p.x + d.x * n, y: p.y + d.y * n })
-export const chainLength = (curves: Cubic[]): number => curves.reduce((n, c) => n + cubicLength(c), 0)
+export const chainLength = (curves: Cubic[]): number => chainData(curves).prefixes[curves.length]
 const bezierPoint = (c: Cubic, t: number): Point => {
   const u = 1 - t
   return {
@@ -76,9 +90,10 @@ const bezierTangent = (c: Cubic, t: number): Point => {
 export function pointAtArc(curves: Cubic[], arc: number): { point: Point; tangent: Point } {
   if (!curves.length) throw new Error('空曲线序列没有位置')
   const total = chainLength(curves)
+  const lengths = chainData(curves).lengths
   let rest = Math.max(0, Math.min(total, arc))
   for (let index = 0; index < curves.length; index++) {
-    const c = curves[index], length = cubicLength(c)
+    const c = curves[index], length = lengths[index]
     if (rest <= length || index === curves.length - 1) {
       const t = parameterAtLength(c, Math.min(rest, length))
       const tangent = bezierTangent(c, t)
@@ -92,9 +107,10 @@ export function pointAtArc(curves: Cubic[], arc: number): { point: Point; tangen
 /** Cut a chain at an arc length. The tangent points forward, into `rest`. */
 export function cutAtArc(curves: Cubic[], arc: number): { point: Point; tangent: Point; rest: Cubic[] } {
   const total = chainLength(curves)
+  const lengths = chainData(curves).lengths
   let rest = Math.max(0, Math.min(total, arc))
   for (let index = 0; index < curves.length; index++) {
-    const c = curves[index], length = cubicLength(c)
+    const c = curves[index], length = lengths[index]
     if (rest < length || index === curves.length - 1) {
       const t = parameterAtLength(c, Math.min(rest, length))
       const [head, tail] = splitCubic(c, t)
@@ -158,17 +174,36 @@ export function sectionSides(root: Point, direction: Point, width: number, strok
 type IntersectionSample = { point: Point; t: number; arc: number }
 const cross = (a: Point, b: Point) => a.x * b.y - a.y * b.x
 const subtract = (a: Point, b: Point): Point => ({ x: a.x - b.x, y: a.y - b.y })
-function intersectionSamples(curves: Cubic[]): IntersectionSample[][] {
-  let offset = 0
-  return curves.map(c => {
-    const samples: IntersectionSample[] = []
-    for (let i = 0; i <= 48; i++) {
-      const t = i / 48
-      samples.push({ point: bezierPoint(c, t), t, arc: offset + cubicLength(splitCubic(c, t)[0]) })
-    }
-    offset += cubicLength(c)
-    return samples
-  })
+type Bounds = { minX: number; maxX: number; minY: number; maxY: number }
+type ChainData = { prefixes: number[]; lengths: number[]; bounds: Bounds[]; samples: IntersectionSample[][] }
+const chains = new WeakMap<Cubic[], ChainData>()
+function chainData(curves: Cubic[]): ChainData {
+  const cached = chains.get(curves)
+  if (cached) return cached
+  const prefixes = [0], lengths: number[] = [], bounds: Bounds[] = []
+  for (const c of curves) {
+    const length = cubicLength(c)
+    lengths.push(length)
+    prefixes.push(prefixes[prefixes.length - 1] + length)
+    const points = [c.start, c.c1, c.c2, c.end]
+    // Include floating evaluation error and segmentIntersection's endpoint slack.
+    const pad = Math.max(1, ...points.flatMap(p => [Math.abs(p.x), Math.abs(p.y)])) * 1e-10
+    bounds.push({ minX: Math.min(...points.map(p => p.x)) - pad, maxX: Math.max(...points.map(p => p.x)) + pad,
+      minY: Math.min(...points.map(p => p.y)) - pad, maxY: Math.max(...points.map(p => p.y)) + pad })
+  }
+  const data: ChainData = { prefixes, lengths, bounds, samples: [] }
+  chains.set(curves, data)
+  return data
+}
+function intersectionSamples(curves: Cubic[], data: ChainData, index: number): IntersectionSample[] {
+  if (data.samples[index]) return data.samples[index]
+  const c = curves[index], offset = data.prefixes[index], samples: IntersectionSample[] = []
+  for (let i = 0; i <= 48; i++) {
+    const t = i / 48
+    samples.push({ point: bezierPoint(c, t), t, arc: offset + cubicLength(splitCubic(c, t)[0]) })
+  }
+  data.samples[index] = samples
+  return samples
 }
 function segmentIntersection(a: Point, b: Point, c: Point, d: Point): { u: number; v: number } | null {
   const r = subtract(b, a), s = subtract(d, c), q = subtract(c, a), determinant = cross(r, s)
@@ -179,15 +214,35 @@ function segmentIntersection(a: Point, b: Point, c: Point, d: Point): { u: numbe
 }
 /** Earliest ordinary crossing on a, seeded by 48 line segments per cubic. */
 export function firstIntersection(a: Cubic[], b: Cubic[]): { point: Point; arcA: number; arcB: number } | null {
-  const A = intersectionSamples(a), B = intersectionSamples(b)
+  const A = chainData(a), B = chainData(b)
+  const whole = A.bounds.reduce((box, other) => ({ minX: Math.min(box.minX, other.minX), maxX: Math.max(box.maxX, other.maxX), minY: Math.min(box.minY, other.minY), maxY: Math.max(box.maxY, other.maxY) }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity })
+  const possible: number[] = []
+  for (let ib = 0; ib < b.length; ib++) {
+    const other = B.bounds[ib]
+    if (whole.maxX < other.minX || other.maxX < whole.minX || whole.maxY < other.minY || other.maxY < whole.minY) continue
+    possible.push(ib)
+  }
   let seed: { ia: number; ib: number; a0: IntersectionSample; a1: IntersectionSample; b0: IntersectionSample; b1: IntersectionSample; u: number; v: number; arc: number } | null = null
-  for (let ia = 0; ia < a.length; ia++) for (let i = 1; i <= 48; i++) {
-    const a0 = A[ia][i - 1], a1 = A[ia][i]
-    for (let ib = 0; ib < b.length; ib++) for (let j = 1; j <= 48; j++) {
-      const b0 = B[ib][j - 1], b1 = B[ib][j], hit = segmentIntersection(a0.point, a1.point, b0.point, b1.point)
-      if (!hit) continue
-      const arc = a0.arc + (a1.arc - a0.arc) * hit.u
-      if (!seed || arc < seed.arc) seed = { ia, ib, a0, a1, b0, b1, ...hit, arc }
+  for (let ia = 0; ia < a.length; ia++) {
+    const box = A.bounds[ia], candidates: number[] = []
+    for (const ib of possible) {
+      const other = B.bounds[ib]
+      if (box.maxX < other.minX || other.maxX < box.minX || box.maxY < other.minY || other.maxY < box.minY) continue
+      candidates.push(ib)
+    }
+    if (!candidates.length) continue
+    const samplesA = intersectionSamples(a, A, ia)
+    for (let i = 1; i <= 48; i++) {
+      const a0 = samplesA[i - 1], a1 = samplesA[i]
+      for (const ib of candidates) {
+        const samplesB = intersectionSamples(b, B, ib)
+        for (let j = 1; j <= 48; j++) {
+          const b0 = samplesB[j - 1], b1 = samplesB[j], hit = segmentIntersection(a0.point, a1.point, b0.point, b1.point)
+          if (!hit) continue
+          const arc = a0.arc + (a1.arc - a0.arc) * hit.u
+          if (!seed || arc < seed.arc) seed = { ia, ib, a0, a1, b0, b1, ...hit, arc }
+        }
+      }
     }
   }
   if (!seed) return null

@@ -4,6 +4,8 @@ import { DEFAULT_TUNING, childAngleOf, ranged, type TreeTuning } from './tuning'
 import { chooseForkSide } from './forkSide'
 import { makeWidthAt } from './widthProfile'
 import { startLead } from './startLead'
+import { placeStems } from './stemPlacement'
+import { ordinaryOutline } from './ordinaryOutline'
 import { cubicLength, ellipseSides, sectionSides, outlineCurves, type ClosedPath, type Cubic } from '../geometry/curves'
 import { smoothConnection, roundedBase, type Join } from '../geometry/smoothConnection'
 
@@ -59,6 +61,10 @@ interface LeafGeometry {
   vein: PathGeometry
 }
 interface StemGeometry {
+  width: number
+  outline?: PathGeometry
+  cap?: { cx: number; cy: number; r: number }
+  connection?: { path: ClosedPath; joins: [Join, Join] }
   anchor: Point
   angle: number
   transform: string
@@ -254,9 +260,8 @@ const rotate = (p: Point, angle: number, origin: Point): Point => ({
 })
 const transform = (p: Point, angle: number) => `translate(${p.x} ${p.y}) rotate(${angle * 180 / Math.PI})`
 
-function stemGeometry(p: BranchSection, t: TreeTuning): StemGeometry {
-  const anchor = { x: p.x + p.side * p.nx * p.width * t.stemAnchor, y: p.y + p.side * p.ny * p.width * t.stemAnchor }
-  const tilt = ranged(t, 'stemAngle', p.id) * Math.PI / 180
+function stemGeometry(p: BranchSection, t: TreeTuning, tiltDeg: number, anchor: Point): StemGeometry {
+  const tilt = tiltDeg * Math.PI / 180
   const bend = ranged(t, 'stemBend', p.id)
   const angle = Math.atan2(p.side * p.ny * Math.cos(tilt) + p.ty * Math.sin(tilt), p.side * p.nx * Math.cos(tilt) + p.tx * Math.sin(tilt))
   const length = stemLength(p.twig.durationMs, t)
@@ -277,6 +282,7 @@ function stemGeometry(p: BranchSection, t: TreeTuning): StemGeometry {
       vein: line(t.petioleLength + size * t.veinStart, t.petioleLength + size * t.veinEnd, t.veinWidth) }
   })
   return { anchor, angle, transform: transform(anchor, angle), length, tip, tipRadius: t.modelTipRadius, leaves,
+    width: Math.min(t.stemWidth, t.stemWidthRatio * p.width),
     path: { d: `M 0 0 Q ${control.x} ${control.y} ${tip.x} ${tip.y}`, points: [{ x: 0, y: 0 }, control, tip], stroke: t.stemWidth } }
 }
 
@@ -369,7 +375,6 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
     }
     const totalLength = callDistances[callDistances.length - 1]
     const distanceOfCall = new Map(calls.map((call, index) => [call.id, callDistances[index]]))
-    const pointOfCall = new Map(calls.map((call, index) => [call.id, callPointIndices[index]]))
 
     // Chances sit between calls by time; they do not split a step.
     const chancePositions = new Map<string, number>()
@@ -421,25 +426,38 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
     }
     const widthAt = makeWidthAt(work, total, startWidth, tuning)
 
+    const childPlacements = kids.map(child => {
+      const distance = chancePositions.get(child.chanceId ?? '') ?? 0
+      const point = at(distance), localHeading = headingAt(distance)
+      const pRight = Math.max(0, Math.min(1, .5 - (point.x - NODE_HALF_WIDTH) / (2 * tuning.recenterRange)))
+      const preferred = hash(child.branchId + '/side') < pRight ? 1 : -1
+      const angleDeg = childAngleOf(tuning, child.branchId)
+      return { child, distance, angleDeg, ...chooseForkSide({ heading: localHeading, angleDeg, preferred }) }
+    })
     const sections = contentOf(branch, units, distanceOfCall).map(section => {
-      const stemDistance = section.y
+      const finished = section.twig.events[0]?.finished_at_ms
+      const finish = typeof finished === 'number' && Number.isFinite(finished) ? finished : section.twig.startMs! + (section.twig.durationMs ?? 0)
+      const stemDistance = distanceAtTime(finish)
       const point = at(stemDistance)
-      // Use the exact same sampled normal and width as the closed outline.
-      // A one-sided interval heading is not the outline's tangent at a bend.
-      const pointIndex = pointOfCall.get(section.id)!
-      const normal = normalAt(points, pointIndex, initialAngle)
-      const localHeading = Math.atan2(normal.y, -normal.x)
+      const localHeading = headingAt(stemDistance)
       return {
         ...section,
         side: (hash(`${section.id}/side`) < .5 - tuning.stemOppositeBias * Math.sin(localHeading) ? 1 : -1) as -1 | 1,
         ...point,
+        y: stemDistance,
         tx: Math.sin(localHeading),
         ty: Math.cos(localHeading),
         nx: Math.cos(localHeading),
         ny: -Math.sin(localHeading),
-        width: widthAt(pointDistances[pointIndex]),
+        width: widthAt(stemDistance),
       }
     })
+    const placements = placeStems(sections.map(s => {
+      const base = ranged(tuning, 'stemAngle', s.id)
+      const min = Math.min(tuning.stemAngleMin, tuning.stemAngleMax), max = Math.max(tuning.stemAngleMin, tuning.stemAngleMax)
+      return { id: s.id, distance: s.y, range: stemLength(s.twig.durationMs, tuning), preferred: s.side, base,
+        angles: tuning.stemAngleRandom ? Array.from({ length: 8 }, (_, i) => min + (max - min) * i / 7) : [base] }
+    }), childPlacements)
 
     const forkPoints = new Map<string, Point>()
     const widths = pointDistances.map(widthAt)
@@ -469,7 +487,11 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       },
       chanceCircles: [],
     }
-    sections.forEach(section => { section.shape = stemGeometry(section, tuning) })
+    sections.forEach(section => {
+      const placement = placements.get(section.id)!
+      section.side = placement.side
+      section.shape = stemGeometry(section, tuning, placement.tilt, at(section.y))
+    })
     if (!attach) rootBranches.add(geometry)
     result.set(branch.branchId, geometry)
 
@@ -491,18 +513,30 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       if (outline) geometry.connection = { ...connectionPath(outline), path: outline, rootWidth: W, joins }
     }
 
-    for (const child of kids) {
-      const distance = chancePositions.get(child.chanceId ?? '') ?? 0
+    // The branch outline is final here; every stem reads the same immutable loop.
+    const stemParent = visibleLoop(geometry, tuning)
+    for (const section of sections) {
+      const shape = section.shape!, [origin, control, tip] = shape.path.points
+      const edges: [Point[], Point[]] = [[], []]
+      for (let i = 0; i <= 16; i++) {
+        const u = i / 16, v = 1 - u
+        const center = rotate({ x: v * v * origin.x + 2 * v * u * control.x + u * u * tip.x, y: v * v * origin.y + 2 * v * u * control.y + u * u * tip.y }, shape.angle, shape.anchor)
+        const dx = 2 * v * (control.x - origin.x) + 2 * u * (tip.x - control.x), dy = 2 * v * (control.y - origin.y) + 2 * u * (tip.y - control.y)
+        const derivative = rotate({ x: dx, y: dy }, shape.angle, { x: 0, y: 0 }), length = Math.hypot(dx, dy) || 1
+        for (const side of [0, 1]) { const sign = side === 0 ? 1 : -1; edges[side].push({ x: center.x - sign * derivative.y / length * shape.width / 2, y: center.y + sign * derivative.x / length * shape.width / 2 }) }
+      }
+      const sides: [Cubic[], Cubic[]] = [outlineCurves(edges[0]), outlineCurves(edges[1])]
+      const connected = smoothConnection({ parent: stemParent, childSides: sides, parentDistance: tuning.connectionParentRatio * shape.width, childDistance: tuning.connectionRootRatio * shape.width })
+      shape.outline = connectionPath(connected?.outline ?? ordinaryOutline(sides))
+      if (connected) shape.connection = { path: connected.outline, joins: connected.joins }
+      const cap = rotate(tip, shape.angle, shape.anchor)
+      shape.cap = { cx: cap.x, cy: cap.y, r: shape.width / 2 }
+    }
+
+    for (const { child, distance, side, angle } of childPlacements) {
       const point = at(distance)
       const width = widthAt(distance)
       const localHeading = headingAt(distance)
-      // Siblings leave the parent perpendicular to its local direction. The side
-      // is a stable coin flip, biased by where the fork sits off-centre.
-      const offset = point.x - NODE_HALF_WIDTH
-      const pRight = Math.max(0, Math.min(1, .5 - offset / (2 * tuning.recenterRange)))
-      const preferred = hash(child.branchId + '/side') < pRight ? 1 : -1
-      const { side, angle } = chooseForkSide({ heading: localHeading,
-        angleDeg: childAngleOf(tuning, child.branchId), preferred })
       const childWidth = width * Math.pow(
         count(child) / Math.max(1, remainingAt(distance) + count(child)),
         tuning.widthExponent,
@@ -532,16 +566,6 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
     const ellipsePoints = (e: EllipseGeometry): Point[] => [-1, 1].flatMap(x => [-1, 1].map(y => ({ x: e.cx + x * e.rx, y: e.cy + y * e.ry })))
     // Transform local bounding rectangles as SVG/DOM does, retaining the same
     // control points instead of independently reconstructing curve formulas.
-    const pathPoints = (path: PathGeometry): Point[] => {
-      let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity
-      for (const point of path.points) {
-        left = Math.min(left, point.x)
-        right = Math.max(right, point.x)
-        top = Math.min(top, point.y)
-        bottom = Math.max(bottom, point.y)
-      }
-      return [left, right].flatMap(x => [top, bottom].map(y => ({ x, y })))
-    }
     if (geometry.connection) geometry.connection.points.forEach(point => add(point, 0))
     else if (geometry.calls.length) geometry.trunk.points.forEach(point => add(point, geometry.trunk.stroke / 2))
     else ellipsePoints(geometry.bud.ellipse).forEach(point => add(rotate(point, geometry.bud.angle, geometry.bud.base), 0))
@@ -549,7 +573,8 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
     for (const section of geometry.sections) {
       const shape = section.shape!
       const stemPoint = (point: Point) => rotate(point, shape.angle, shape.anchor)
-      pathPoints(shape.path).forEach(point => add(stemPoint(point), shape.path.stroke / 2))
+      shape.outline!.points.forEach(point => add(point, 0))
+      add({ x: shape.cap!.cx, y: shape.cap!.cy }, shape.cap!.r)
       if (!shape.leaves.length) ellipsePoints({ cx: shape.tip.x, cy: shape.tip.y, rx: shape.tipRadius, ry: shape.tipRadius }).forEach(point => add(stemPoint(point), 0))
       for (const leaf of shape.leaves) {
         const leafPoint = (point: Point) => stemPoint(rotate(point, leaf.angle, leaf.at))

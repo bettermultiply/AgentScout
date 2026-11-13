@@ -10,6 +10,7 @@ const { foldEvents } = await server.ssrLoadModule('/src/fold.ts')
 const { layoutTree, DEFAULT_TUNING, tuningFromSearch } = await server.ssrLoadModule('/src/tree/index.ts')
 const { buildTree } = await server.ssrLoadModule('/src/components/treeGraph.ts')
 const { startLead } = await server.ssrLoadModule('/src/tree/startLead.ts')
+const { sampleGeometry } = await server.ssrLoadModule('/src/tree/geometry.ts')
 test.after(() => server.close())
 
 test('startLead uses initialAngle for a zero first segment without mutation', () => {
@@ -79,15 +80,23 @@ test('missing start timestamps remain visible errors, without dropping calls', (
 })
 
 for (const starts of [[0], [0, 0, 0, 1000, 2000], [0, 1000, 2000, 3000, 4000]]) {
-  test(`stem anchors touch the actual outline: ${starts}`, () => {
+  test(`stem anchors use completion-time centre line: ${starts}`, () => {
     const events = [{ event: 'branch_created', task_id: 'anchors', branch_id: 'root', role: 'authority', parent_branch_id: null, sequence: 1, timestamp_ms: 0 },
       ...starts.map((time, i) => ({ event: 'model_usage', task_id: 'anchors', branch_id: 'root', sequence: i + 2,
         timestamp_ms: time + 500, started_at_ms: time, finished_at_ms: time + 500, duration_ms: 500 }))]
     const g = layoutTree(foldEvents(events).tasks.anchors, { ...DEFAULT_TUNING, rootWidth: 120, turnStepDeg: 40 }).get('root')
     for (const section of g.sections) {
       const anchor = section.shape.anchor
-      assert.ok(g.trunk.points.some(p => Math.hypot(p.x - anchor.x, p.y - anchor.y) < 1e-8),
-        `event ${section.twig.firstSequence} anchor is absent from the drawn outline`)
+      const lengths = starts.map((time, i) => i ? DEFAULT_TUNING.segmentK * Math.log1p((time - starts[i - 1]) / DEFAULT_TUNING.segmentTauMs) : 0)
+      const finish = section.twig.events[0].finished_at_ms
+      let distance = 0
+      for (let i = 1; i < starts.length; i++) {
+        if (finish >= starts[i]) distance += lengths[i]
+        else { distance += lengths[i] * Math.max(0, (finish - starts[i - 1]) / (starts[i] - starts[i - 1])); break }
+      }
+      const expected = sampleGeometry(g, distance)
+      assert.ok(Math.abs(section.y - distance) < 1e-9)
+      assert.ok(Math.hypot(expected.x - anchor.x, expected.y - anchor.y) < 1e-8)
     }
     assert.equal(g.sections.length, starts.length)
     for (let i = 1; i < g.pathDistances.length; i++) assert.ok(g.pathDistances[i] > g.pathDistances[i - 1])
