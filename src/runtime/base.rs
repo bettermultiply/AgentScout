@@ -110,15 +110,15 @@ impl Drop for BaseRuntime {
 
 impl Backend for BaseRuntime {
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        if self.data_plane.is_some() {
-            return Err(BackendError::new("Combined data-plane recovery is not implemented"));
+        if let Some(data_plane)=&self.data_plane {
+            return self.process.with_frozen(||super::recovery::save(path, &[("inner", self.inner.as_ref()), ("data-plane", data_plane.as_ref())], Value::Null));
         }
         self.inner.save_runtime(path)
     }
 
     fn load_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        if self.data_plane.is_some() {
-            return Err(BackendError::new("Combined data-plane recovery is not implemented"));
+        if let Some(data_plane)=&self.data_plane {
+            return super::recovery::load(path, &[("inner", self.inner.as_ref()), ("data-plane", data_plane.as_ref())]).map(|_|());
         }
         self.inner.load_runtime(path)
     }
@@ -593,6 +593,4 @@ impl Backend for BaseRuntime {
         self.stop_agent_process()
     }
 }
-
-
 

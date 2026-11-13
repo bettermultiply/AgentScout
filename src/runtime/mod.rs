@@ -20,6 +20,7 @@ pub mod composite;
 pub mod launch_plan;
 pub mod process;
 pub mod selection;
+mod recovery;
 
 #[cfg(test)]
 mod tests;

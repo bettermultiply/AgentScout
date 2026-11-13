@@ -61,6 +61,31 @@ pub struct ProcessBackend {
 
 
 impl ProcessBackend {
+    /// Temporarily stop all owned execution while filesystem state is copied.
+    /// Thaw even when the copy fails so the user can continue or retry saving.
+    pub(crate) fn with_frozen<T>(&self, operation: impl FnOnce()->Result<T,BackendError>) -> Result<T,BackendError> {
+        let ids:Vec<_>=self.processes.lock().map_err(|_|BackendError::new("Process table poisoned"))?.keys().cloned().collect();
+        let mut frozen:Vec<String>=Vec::new();
+        for id in ids {
+            let running=self.is_running(&id);
+            if let Err(error)=running {
+                for previous in &frozen {let _=self.thaw(previous);}
+                return Err(error);
+            }
+            if !running.unwrap() {continue;}
+            if let Err(error)=self.freeze(&id) {
+                for previous in &frozen {let _=self.thaw(previous);}
+                return Err(error);
+            }
+            frozen.push(id);
+        }
+        let result=operation();
+        let mut thaw_error=None;
+        for id in frozen {if let Err(error)=self.thaw(&id) {thaw_error=Some(error);}}
+        if let Some(error)=thaw_error {return Err(BackendError::new(format!("Recovery process thaw failed: {error}")));}
+        result
+    }
+
     pub fn new(_id: impl Into<String>, bubblewrap_path: impl Into<PathBuf>) -> Self {
         let bubblewrap_path = bubblewrap_path.into();
         let cgroup_root = cgroup::probe_cgroup_root();

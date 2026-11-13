@@ -140,7 +140,11 @@ pub(crate) fn upper_entry_count(path: &Path, limit: usize) -> usize {
 
 /// Clone only one upper directory.  Preserves overlay markers, whiteouts,
 /// modes, symlinks and mtimes.  Never uses hard links.
-pub(crate) fn clone_upper(source: &Path, target: &Path, use_reflink: bool) -> Result<(), BackendError> {    if !path_exists(source) {
+pub(crate) fn clone_upper(source: &Path, target: &Path, use_reflink: bool) -> Result<(), BackendError> {
+    clone_upper_excluding(source,target,use_reflink,&std::collections::BTreeSet::new())
+}
+
+pub(crate) fn clone_upper_excluding(source: &Path, target: &Path, use_reflink: bool, excluded: &std::collections::BTreeSet<PathBuf>) -> Result<(), BackendError> {    if !path_exists(source) {
         return Ok(());
     }
     fs::create_dir_all(target).map_err(error)?;
@@ -165,10 +169,11 @@ pub(crate) fn clone_upper(source: &Path, target: &Path, use_reflink: bool) -> Re
         }
         let from = entry.path();
         let to = target.join(entry.file_name());
+        if excluded.contains(&from) { fs::create_dir_all(&to).map_err(error)?; continue; }
         let metadata = fs::symlink_metadata(&from).map_err(error)?;
         let file_type = metadata.file_type();
         if file_type.is_dir() {
-            clone_upper(&from, &to, use_reflink)?;
+            clone_upper_excluding(&from, &to, use_reflink, excluded)?;
             fs::set_permissions(&to, fs::Permissions::from_mode(metadata.mode() & 0o7777))
                 .map_err(error)?;
             copy_overlay_xattrs(&from, &to)?;
@@ -280,4 +285,3 @@ pub(crate) fn copy_file(source: &Path, target: &Path) -> Result<(), BackendError
     // the complete copy layer is atomically renamed into place.
     Ok(())
 }
-

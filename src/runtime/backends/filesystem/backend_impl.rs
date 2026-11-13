@@ -50,6 +50,10 @@ impl FilesystemBackend {
 }
 
 impl Backend for FilesystemBackend {
+    fn save_runtime(&self, path: &Path) -> Result<(), BackendError> { self.save_recovery(path) }
+
+    fn load_runtime(&self, path: &Path) -> Result<(), BackendError> { self.load_recovery(path) }
+
     fn backend_id(&self) -> &str {
         "filesystem"
     }

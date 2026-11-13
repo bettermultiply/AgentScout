@@ -46,6 +46,7 @@ mod layer;
 mod merge;
 mod replay;
 mod util;
+mod recovery;
 
 pub use config::{FilesystemConfig, FilesystemMechanism, ForkCost};
 use copy::*;

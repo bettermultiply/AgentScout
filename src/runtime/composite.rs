@@ -321,17 +321,23 @@ fn normalize_outputs(
 
 impl Backend for CompositeRuntime {
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        if self.connections.len()!=1 {
-            return Err(BackendError::new("Multiple Backend recovery is not implemented"));
-        }
-        self.connections[0].backend.save_runtime(path)
+        if self.connections.len()==1 { return self.connections[0].backend.save_runtime(path); }
+        let backends: Vec<_> = self.connections.iter().map(|c|(c.id.as_str(),c.backend.as_ref())).collect();
+        super::recovery::save(path, &backends, serde_json::json!({"participants":*self.participants.lock().map_err(|_|BackendError::new("Runtime participants poisoned"))?}))
     }
 
     fn load_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        if self.connections.len()!=1 {
-            return Err(BackendError::new("Multiple Backend recovery is not implemented"));
+        if self.connections.len()==1 { return self.connections[0].backend.load_runtime(path); }
+        let backends: Vec<_> = self.connections.iter().map(|c|(c.id.as_str(),c.backend.as_ref())).collect();
+        let record:Value=serde_json::from_slice(&std::fs::read(path).map_err(|e|BackendError::new(e.to_string()))?).map_err(|e|BackendError::new(e.to_string()))?;
+        let metadata=&record["metadata"];
+        let participants: HashMap<String,BTreeSet<String>>=serde_json::from_value(metadata["participants"].clone()).map_err(|e|BackendError::new(e.to_string()))?;
+        for ids in participants.values() {
+            if ids.iter().any(|id|!self.connections.iter().any(|c| &c.id==id)) {return Err(BackendError::new("Unknown saved runtime participant"));}
         }
-        self.connections[0].backend.load_runtime(path)
+        super::recovery::load(path, &backends)?;
+        *self.participants.lock().map_err(|_|BackendError::new("Runtime participants poisoned"))?=participants;
+        Ok(())
     }
     fn backend_id(&self) -> &str {
         &self.id

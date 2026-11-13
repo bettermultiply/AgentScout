@@ -7,3 +7,4 @@ mod privileged;
 mod process;
 mod support;
 mod trash;
+mod recovery;
