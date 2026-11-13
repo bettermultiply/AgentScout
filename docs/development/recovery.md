@@ -13,7 +13,7 @@ Pi 源码依据（相邻 ../pi checkout）：
 
 ## 已实现的有限路径
 
-控制面的 Shutdown（包括已有退出入口和退出信号）请求 Pi 同时 abort 所有 session。无活动工具等待时，保存原生消息、原 Branch 源、接入状态和 Tree；NLE 保存完整初始 RNG/configuration、动作序列及逐步校验值。保存使用独立目录，最后发布包含三个组件 SHA-256 的 `recovery.json`。恢复校验组件、Policy digest、Runtime 配置内容和能力后加载，等待用户输入，不自动推理。保存失败报告失败并解除保存冻结；不删除原生源。仅单后端 NLE 路径已验证。
+控制面的 Shutdown（包括已有退出入口和退出信号）在无未完成控制操作、无活动/阻塞工具等待时，请求 Pi 同时 abort 所有 session，保存原生消息、原 Branch 源、接入状态和 Tree；NLE 保存完整初始 RNG/configuration、动作序列及逐步校验值。保存使用独立目录，最后发布包含三个组件 SHA-256 的 `recovery.json`。恢复校验组件、Policy digest、Runtime 配置内容和能力后加载，等待用户输入，不自动推理。保存失败报告失败并解除保存冻结；不删除原生源。仅单后端 NLE 路径已验证。
 
 入口（run-dir 为原运行目录，其配置、源文件及工作区必须保留）：
 
@@ -31,6 +31,7 @@ target/debug/ascout-control-plane <run-dir> <pi-root> <policy.yaml> --resume --w
 - `node /tmp/opencode/check-recovery.mjs`：真实 Pi + 本地假 OpenAI SSE 服务 + 真实 NLE；模型流永不自然结束，Shutdown 触发取消并保存退出；跨进程 `--resume` 不请求模型，用户输入后请求第二次并再次保存退出。通过，证据 `/tmp/opencode/control-recovery-wKIQIV`。测试只请求本地假模型。
 - 真实 NLE 手工 JSON-lines 驱动：30 动作、3 环境引用、保存时重建校验、进程退出、加载、observation 连续、下一动作、再次保存，通过；证据 `/tmp/opencode/nle-recovery-final-34_tgbvl`。
 - 原生 SessionTree snapshot/restore 手工检查通过，证据 `/tmp/opencode/recovery-native-z0ck82`。
+- 最后重建后再次执行 `node /tmp/opencode/check-recovery.mjs` 通过，证据 `/tmp/opencode/control-recovery-3xEDZs`；`cargo test --lib runtime::adapter -- --nocapture` 5/5，通过，包括预期注入 panic 的队列恢复。
 
 ## 未完成，不能作为整棵有效执行恢复交付
 

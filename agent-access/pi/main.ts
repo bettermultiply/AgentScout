@@ -196,6 +196,7 @@ function install(session,branch) {
     session.agent.beforeToolCall=async(context,signal)=>{
         if(saving)throw Error('Save requested before tool execution');
         pendingHooks.set(key(branch,context.toolCall.id),{branch,toolCall:structuredClone(context.toolCall)});
+        try {
         const previous=await before?.(context,signal);
         if(previous?.block||signal?.aborted){pendingHooks.delete(key(branch,context.toolCall.id));return previous;}
         let saved, checkpoint;
@@ -224,6 +225,10 @@ function install(session,branch) {
         const toolCheckpoint=prepareCheckpoint();
         await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',result_pending:true,name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
         return previous;
+        } catch(error) {
+            pendingHooks.delete(key(branch,context.toolCall.id));
+            throw error;
+        }
     };
     session.agent.afterToolCall=async(context,signal)=>{
         pendingHooks.delete(key(branch,context.toolCall.id));
