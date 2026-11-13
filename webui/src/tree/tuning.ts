@@ -12,6 +12,7 @@ const EXTRA_DEFAULTS = {
   leafOpacity: 1, veinStart: .1, veinEnd: .85, stemAnchor: .5,
   stemControlX: .5, stemControlY: .1, stemTipY: .14,
   connectionParentRatio: .15, connectionRootRatio: .15,
+  startLeadRatio: .5,
 }
 type ExtraTuning = typeof EXTRA_DEFAULTS
 export interface TuneField { key: keyof TreeTuning; label: string; min: number; max: number; step: number; scale?: number; group: string; mode?: boolean; visibleWhen?: { key: keyof TreeTuning; value: number } }
@@ -19,6 +20,7 @@ const field = (key: keyof ExtraTuning, label: string, min: number, max: number, 
 export const EXTRA_FIELDS: TuneField[] = [
   field('childAngleMin', '子枝夹角下限（°）', 5, 90, 1, '树枝'),
   field('childAngleMax', '子枝夹角上限（°）', 5, 90, 1, '树枝'),
+  field('startLeadRatio', '起点提前量 / 本枝根宽', 0, 3, .05, '树枝'),
   field('connectionParentRatio', '连接父侧距离 / 子枝根宽', 0, 2, .01, '树枝'),
   field('connectionRootRatio', '连接子侧距离 / 子枝根宽', 0, 2, .01, '树枝'),
   field('stemTauMs', '叶茎时间尺度（毫秒）', 1, 300000, 100, '叶茎'),
@@ -140,6 +142,7 @@ export const TUNING_RANGES = Object.fromEntries(TUNE_FIELDS.map(f =>
 
 const TUNING_KEYS: Record<keyof TreeTuning, string> = {
   ...Object.fromEntries(EXTRA_FIELDS.map(f => [f.key, f.key])) as Record<keyof ExtraTuning, string>,
+  startLeadRatio: 'lead',
   segmentK: 'k',
   segmentTauMs: 'tau',
   turnStepDeg: 'turn',

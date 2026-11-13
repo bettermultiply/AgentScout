@@ -14,6 +14,7 @@
 | 根宽 W、宽度指数 e、最小枝宽 m | w=max(m,W(剩余调用数/总调用数)^e)，默认根宽 9、e=0.1、m=1.2。当前位置的调用已从剩余数中扣除，因此实际根部可能略小于 W。 |
 | 子枝夹角范围 | `childAngleMin=30`、`childAngleMax=90`；两个字段各自范围 5–90°、步长 1°。β=min(a,b)+abs(b−a)×stableRandom(`${id}/childAngle`)，交换上下限结果相同。先使用稳定随机偏向选侧；若该侧初始绝对方向超过 90°，选择另一侧，水平允许。范围内夹角用于初始方向；实际首段仍参与逐截方向插值，不保证首段与父枝的实际夹角等于 β。 |
 | 父枝宽度过渡 | 条目位置的宽度取该位置及之前条目扣除后的剩余工作量对应值；条目之间用 smoothstep 平滑过渡，条目位置的数值保持不变。 |
+| 起点提前量 / 本枝根宽 | `startLeadRatio=0.5`，范围 0–3、步长 0.05，URL 短键 `lead`。仅无父连接的多点根枝可见轮廓补入 P0′=P0−unit(P1−P0)×startLeadRatio×trunkWidths[0]；零首段方向回退为 `(sin(initialAngle), cos(initialAngle))`，不抛异常。补点宽度等于首宽。普通根枝轮廓及供子枝连接使用的父闭合轮廓消费同一补点序列；子枝、单点根枝、空芽不加。`lead=0` 不补点。不改变生长路径、距离、宽度、调用点索引、分叉位置、叶茎及 Chance 数值。 |
 | 连接父侧距离比例 | `connectionParentRatio=0.15`，范围 0–2，步长 0.01；W 为子枝原始 `trunkWidths[0]`。从每侧首交点沿父枝实际可见闭合轮廓、远离另一侧交点取单侧距离 0.15W，实际距离上限为父闭合轮廓周长的 1/4。 |
 | 连接子侧距离比例 | `connectionRootRatio=0.15`，范围 0–2，步长 0.01；从每侧首交点沿该子枝外沿向末端取单侧距离 0.15W，受剩余外沿长度限制。两个距离独立；缺少任一侧交点或有效距离为零时连接返回 null，显示普通枝干轮廓。 |
 | 叶茎系数 Ks、时间尺度 τs | S=Ks ln(1+t/τs)，默认 τs=1000ms。 |
@@ -66,3 +67,22 @@ K ln(1+d/τ)=ln((1+d/τ)^K) 的等式成立，但不能消去两个自由参数�
 连接按“每侧首交点 → 两个单侧距离 → 三次相切曲线 → 闭合轮廓”生成；单位置父枝使用 `roundedBase` 圆根，空枝不生成连接。具体公式、null 退化和验收边界见 [根部连接状态](tree-connection-repair.md)。
 
 第二阶段严格验收未通过：V3 有 28 个外部根点，V7 漏盖 8 点且多出 262 点，231 次分叉仅 18 次成功连接；成功连接数量不等于任意交点数量。V11 数量齐全但 null 图缺少标记。第三阶段只同步默认值与文档，不修复上述算法或图示缺口，不宣称整体或视觉验收通过。
+
+## 第四阶段 B：根枝起点提前量（2026-11-13）
+
+本轮只实施起点提前量，不实施 A3/A4，不修改通用求交或圆角公式；收尾仅按用户批准调整多点 authority 根的轮廓点数断言、追加 lead=0 断言和零首段回归用例，其他现有断言不变。根枝身份由 geometry 模块内部 WeakSet 保存，不向返回对象添加字段；`lead=0` 对四树原生基线的完整结果逐字段严格一致，无内部标记字段被忽略。
+
+输入使用 `/tmp/stage2/inputs-ssr.mjs` 的 nested、fourChildren、single、empty；主要效果统计使用完整默认值，包括 `childAngleMin=30、childAngleMax=90` 的稳定随机范围，不固定角度。四树 `lead=0.5` 的 pathPoints、pathDistances、trunkWidths、initialAngle、forkPoints、sections、chancePositions、chanceCircles 和调用点索引均与修改前一致（容差 1e-9）。变化限于根枝可见 trunk、包围盒及其补偿位置、子枝 connection；单点和空枝完整不变。
+
+| 树 / 默认角度范围 | lead=0 成功连接 / 总分叉 | lead=0.5 成功连接 / 总分叉 | 两设置各自根点 inside / boundary / outside |
+| --- | --- | --- | --- |
+| nested / 30–90° | 7/7 | 7/7 | 14/0/0 |
+| fourChildren / 30–90° | 4/4 | 4/4 | 8/0/0 |
+
+根点指子枝两侧外沿的首点，按每 cubic 16 段父闭合环和 1e-6 边界距离分类。本轮默认范围四组共 22 次分叉全部连接，无失败 fork；根点 outside 的 fork 为 0，“至少一侧整条外沿留在父枝内部”的 fork 独立统计也为 0，两者不混同。后者以每 cubic 5000 段独立高密采样及独立线段求交确认：根点 inside、整侧采样点 inside 且无边界接触才计入；这是数值采样结论，不是曲线符号证明。`lead=0.5` 两个多点根轮廓均 finite，每 cubic 64 段、各 12800 段检测到的非相邻线段自交为 0，仍是采样检测。固定 30° 与固定 90° 另作补充共 44/44 连接、根点 outside 和整侧包含 fork 均为 0，不替代默认 30–90° 范围验收。
+
+用户已批准零首段使用初角回退：方向为 `(sin(initialAngle), cos(initialAngle))`，补点为 P0 减去该方向乘以 `startLeadRatio×trunkWidths[0]`，不抛异常；非零首段仍使用真实 P1−P0 的单位方向。新增首两点重合的小测试先复现抛异常，再验证修复后不抛、补点方向及输入不变。此前默认范围四树、lead=0/0.5 的 26 条多点枝样本首段均大于零（最短约 3.92696），现由独立零段用例补足覆盖；单点和空根仍提前返回。
+
+第二阶段的 28 个外部根点属于其参数和测试集的历史结果，不与本轮默认值的 0 个外部根点直接混比；本轮成功率也不证明通用求交算法已修复。针对第四阶段 A1 诊断使用的独立参数输入（nested/A1，根宽 45、K=20、τ=60000ms、宽度指数 0.5、转角 3°、最大倾角 60°、子枝角 90°、lead=0）：已核实：该分叉无交点的原因是一侧整条外沿留在父枝内、另一侧起点在父枝外，并非求交漏检；算法已知限制（重合、相切、同一采样区间多次穿越）未修复，留作观察。
+
+`npm run build` 通过。按用户批准将当前多点 authority 根 fixture 的绘制点数记为 `expectedSamples+(startLeadRatio>0?1:0)`，轮廓控制点数为 `6×绘制点数−4`，另断言 lead=0 时为 `6×expectedSamples−4`。原样运行 `node --test tests/tree-smooth-connection.mjs tests/tree-layout.mjs` 最终 17 项全部通过（原有 16 项及新增零段用例）。lead=0 与加入提前量前的原生基线严格全字段比较，nested／fourChildren／single／empty 分别 8／5／1／1 枝，差异路径均为空，含 trunk、connection 和 Maps。通用 curves、smoothConnection 哈希不变；未宣称第二阶段严格或整体视觉验收通过。此前逐 fork 材料保留在 `/tmp/stage4/report-B.md`；本次完整日志、严格比较和精确收尾 diff 在 `/tmp/stage4/final/report.md`。

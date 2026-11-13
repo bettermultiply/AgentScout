@@ -9,7 +9,25 @@ const server = await createServer({ root: new URL('../webui', import.meta.url).p
 const { foldEvents } = await server.ssrLoadModule('/src/fold.ts')
 const { layoutTree, DEFAULT_TUNING, tuningFromSearch } = await server.ssrLoadModule('/src/tree/index.ts')
 const { buildTree } = await server.ssrLoadModule('/src/components/treeGraph.ts')
+const { startLead } = await server.ssrLoadModule('/src/tree/startLead.ts')
 test.after(() => server.close())
+
+test('startLead uses initialAngle for a zero first segment without mutation', () => {
+  const points = [{ x: 2, y: 3 }, { x: 2, y: 3 }], widths = [10, 4]
+  const beforePoints = structuredClone(points), beforeWidths = [...widths]
+  for (const initialAngle of [0, Math.PI / 3, -Math.PI / 4]) {
+    const ratio = 0.5
+    let drawn
+    assert.doesNotThrow(() => { drawn = startLead(points, widths, initialAngle, ratio) })
+    assert.deepEqual(drawn.points, [{
+      x: points[0].x - Math.sin(initialAngle) * ratio * widths[0],
+      y: points[0].y - Math.cos(initialAngle) * ratio * widths[0],
+    }, ...points])
+    assert.deepEqual(drawn.widths, [widths[0], ...widths])
+    assert.deepEqual(points, beforePoints)
+    assert.deepEqual(widths, beforeWidths)
+  }
+})
 
 // Same 195 model / 194 tool call count as the reported session. Explicit times
 // make the large sampled outline deterministic without private session data.
@@ -33,7 +51,10 @@ for (const [name, tuning] of [
     const geometry = layoutTree(task, tuning).get('authority')
     const expectedSamples = 1 + 388 * Math.max(1, Math.ceil(tuning.segmentK * Math.log1p(15000 / tuning.segmentTauMs) / tuning.sampleGap))
     assert.equal(geometry.pathPoints.length, expectedSamples)
-    assert.equal(geometry.trunk.points.length, 6 * expectedSamples - 4)
+    const drawn = expectedSamples + (tuning.startLeadRatio > 0 ? 1 : 0)
+    assert.equal(geometry.trunk.points.length, 6 * drawn - 4)
+    const lead0 = layoutTree(task, { ...tuning, startLeadRatio: 0 }).get('authority')
+    assert.equal(lead0.trunk.points.length, 6 * expectedSamples - 4)
     assert.equal(geometry.calls.length, 389)
     assert.equal(geometry.sections.length, 195)
     assert.equal(geometry.sections.reduce((n, section) => n + section.leaves.length, 0), 194)

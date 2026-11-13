@@ -3,6 +3,7 @@ import { groupBranchCalls, pairCalls, requiredStart, type CallGroup, type CallUn
 import { DEFAULT_TUNING, childAngleOf, ranged, type TreeTuning } from './tuning'
 import { chooseForkSide } from './forkSide'
 import { makeWidthAt } from './widthProfile'
+import { startLead } from './startLead'
 import { cubicLength, ellipseSides, sectionSides, outlineCurves, type ClosedPath, type Cubic } from '../geometry/curves'
 import { smoothConnection, roundedBase, type Join } from '../geometry/smoothConnection'
 
@@ -153,6 +154,9 @@ function trunkSide(g: BranchGeometry, side: number): Cubic[] {
   }))
 }
 
+// Drawing-only root identity; do not add metadata to the growth geometry.
+const rootBranches = new WeakSet<BranchGeometry>()
+
 /** The parent's real visible outer loop in its own frame. */
 function visibleLoop(g: BranchGeometry, tuning: TreeTuning): Cubic[] {
   if (g.connection) return closedCubics(g.connection.path)
@@ -166,13 +170,16 @@ function visibleLoop(g: BranchGeometry, tuning: TreeTuning): Cubic[] {
     const [upper, lower] = sectionSides(g.pathPoints[0], direction, g.trunkWidths[0], g.trunk.stroke)
     return [...upper, ...[...lower].reverse().map(reverseCubic)]
   }
-  const left = g.pathPoints.map((p, i) => {
-    const n = normalAt(g.pathPoints, i, g.initialAngle)
-    return { x: p.x + n.x * g.trunkWidths[i] / 2, y: p.y + n.y * g.trunkWidths[i] / 2 }
+  const { points, widths } = rootBranches.has(g)
+    ? startLead(g.pathPoints, g.trunkWidths, g.initialAngle, tuning.startLeadRatio)
+    : { points: g.pathPoints, widths: g.trunkWidths }
+  const left = points.map((p, i) => {
+    const n = normalAt(points, i, g.initialAngle)
+    return { x: p.x + n.x * widths[i] / 2, y: p.y + n.y * widths[i] / 2 }
   })
-  const right = g.pathPoints.map((p, i) => {
-    const n = normalAt(g.pathPoints, i, g.initialAngle)
-    return { x: p.x - n.x * g.trunkWidths[i] / 2, y: p.y - n.y * g.trunkWidths[i] / 2 }
+  const right = points.map((p, i) => {
+    const n = normalAt(points, i, g.initialAngle)
+    return { x: p.x - n.x * widths[i] / 2, y: p.y - n.y * widths[i] / 2 }
   })
   // trunkOutline closes both ends with straight caps; the loop needs them too.
   return [
@@ -436,6 +443,7 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
 
     const forkPoints = new Map<string, Point>()
     const widths = pointDistances.map(widthAt)
+    const outline = attach ? { points, widths } : startLead(points, widths, initialAngle, tuning.startLeadRatio)
     const maxStem = calls.reduce((max, call) => call.kind === 'model' ? Math.max(max, stemLength(call.durationMs, tuning)) : max, 0)
     const geometry: BranchGeometry = {
       branchId: branch.branchId,
@@ -453,7 +461,7 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       pathPoints: points,
       pathDistances: pointDistances,
       trunkWidths: widths,
-      trunk: trunkOutline(points, widths, initialAngle, tuning.minTrunkWidth),
+      trunk: trunkOutline(outline.points, outline.widths, initialAngle, tuning.minTrunkWidth),
       bud: {
         base: points[0], tip: rotate({ x: tuning.budLength, y: 0 }, Math.PI / 2 - initialAngle, points[0]),
         angle: Math.PI / 2 - initialAngle, transform: transform(points[0], Math.PI / 2 - initialAngle),
@@ -462,6 +470,7 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       chanceCircles: [],
     }
     sections.forEach(section => { section.shape = stemGeometry(section, tuning) })
+    if (!attach) rootBranches.add(geometry)
     result.set(branch.branchId, geometry)
 
     // Empty buds keep their ordinary outline at the centre-line origin.
