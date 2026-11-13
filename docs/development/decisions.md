@@ -28,7 +28,7 @@
 
 按 6b99d9b 接通独立原生持久 SessionManager，复制 native entries 和 ID；不用消息投影重建 checkpoint，也不在活跃 manager 调用会修改 receiver 的 createBranchedSession。汇总使用临时文件及 rename，校验父引用和循环，只有停止写入且成功汇总的源文件才清理。运行 manager 保留预测上下文；汇总父链单独按真实结果整理。旧 message_end 向共享文件生成新 ID 的方式废弃。
 
-回放在调用前计算既有 requestKey，以 assistant 原生 ID 写入现有 authority custom 元数据；整理文件缺少原始 key 时导出报错，不偷偷以新父链匹配。没有新增 Policy 类别，默认不追加真实结果通知。
+废弃记录（2026-11-13 用户批准清理）：曾在调用前计算 requestKey，以 assistant 原生 ID 写入 authority custom 的 data.requests，并写入恢复快照；导出优先读取这些键。此方案使正常运行依赖系统外回放工具，并为测试额外记录专用数据，现已移除。正常运行只生成原生 session/events，键仅允许在导出产物中生成；新还原方案另行研究确认。当前导出暂时拒绝含 authority 标记的文件，避免静默使用重挂后的错误父链。没有新增 Policy 类别，默认不追加真实结果通知。
 
 同仓库 rollback 验证保留 targetId、ref、repoRoot 与 Git object，可读 blob 且启动 GC 不删引用；不等于跨仓库迁移、执行 restore 或完整任务继续。摘要跨越预测输入、任意 custom 外部引用和机制状态交接仍需收敛，不自行改写摘要或选择新的 Backend。
 

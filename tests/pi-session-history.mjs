@@ -24,12 +24,11 @@ test('native Pi history preserves compaction/custom/IDs, rewires only final hist
         const next=tree.append('candidate',{role:'assistant',content:[{type:'text',text:'continue'}],stopReason:'stop',timestamp:4});
         const real=parent.appendMessage({role:'toolResult',toolCallId:'op',toolName:'read',content:[{type:'text',text:'real'}],timestamp:5});
         tree.inputs.set('candidate',{parent:'authority',operation:'op',prediction,pairedTail:prediction,operations:['op']});
-        tree.requests.set(next,'original-request-key');tree.accepted=new Set(['candidate']);tree.promote('candidate');tree.settle();
+        tree.accepted=new Set(['candidate']);tree.promote('candidate');tree.settle();
         let reopened=SessionManager.open(file);
         assert.equal(reopened.getEntry(next).parentId,real);
         assert.equal(candidate.getEntry(next).parentId,prediction);
         assert.ok(reopened.getEntry(prediction));assert.ok(reopened.getEntry(custom));assert.ok(reopened.getEntry(compact));
-        assert.equal(reopened.getEntries().at(-1).data.requests[next],'original-request-key');
         assert.equal(reopened.buildSessionContext().messages.find(m=>m.role==='toolResult').content[0].text,'real');
         assert.ok(existsSync(candidate.getSessionFile()));
         tree.stop('authority');tree.settle();assert.ok(!existsSync(parent.getSessionFile()));assert.ok(existsSync(candidate.getSessionFile()));

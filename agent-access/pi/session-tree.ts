@@ -12,7 +12,6 @@ export class SessionTree {
         this.tails=new Map();
         this.branches=new Map();
         this.inputs=new Map();
-        this.requests=new Map(manager.getEntries().filter(e=>e.customType==='authority'&&e.data?.requests).flatMap(e=>Object.entries(e.data.requests)));
         this.originalEntries=new Map(manager.getEntries().filter(e=>!(e.type==='custom'&&e.customType==='authority'&&e.data?.branch_id)).map(e=>[e.id,structuredClone(e)]));
         const entries=manager.getEntries(),last=entries.at(-1),marker=[...entries].reverse().find(entry=>entry.type==='custom'&&entry.customType==='authority'&&entry.data?.branch_id&&entry.data?.parentId);
         if(marker){this.authority=marker.data.branch_id;this.tails.set(this.authority,marker.data.parentId)}
@@ -114,7 +113,7 @@ export class SessionTree {
         return {authority:this.authority,manager:sourceFile(this.manager.getSessionFile()),sources,
             branches:[...this.branches].map(([id,{manager,stopped}])=>[id,{file:sourceFile(manager.getSessionFile()),stopped}]),
             inputs:[...this.inputs].map(([id,input])=>[id,{...input,source:input.source?sourceFile(input.source.getSessionFile()):undefined}]),
-            tails:[...this.tails],requests:[...this.requests],originalEntries:[...this.originalEntries],accepted:[...(this.accepted??[])]};
+            tails:[...this.tails],originalEntries:[...this.originalEntries],accepted:[...(this.accepted??[])]};
     }
 
     static restore(record, SessionManager, sessionFile) {
@@ -175,7 +174,7 @@ export class SessionTree {
             if(input.source&&!source)throw Error('Recovery prediction source missing');
             return [id,{...input,source}];
         }));
-        tree.tails=new Map(record.tails);tree.requests=new Map(record.requests);
+        tree.tails=new Map(record.tails);
         tree.originalEntries=new Map(record.originalEntries);tree.accepted=new Set(record.accepted);
         // Keep the saved-file identity map for checkpoints whose source is no
         // longer a live branch but is still needed by a valid continuation.
@@ -256,7 +255,7 @@ export class SessionTree {
                 path.add(current.id);current=entries.get(current.parentId);
             }
         }
-        const tail=this.tail(this.authority),marker={type:'custom',customType:'authority',id:randomUUID(),parentId:tail,timestamp:new Date().toISOString(),data:{branch_id:this.authority,parentId:tail,requests:Object.fromEntries(this.requests)}};
+        const tail=this.tail(this.authority),marker={type:'custom',customType:'authority',id:randomUUID(),parentId:tail,timestamp:new Date().toISOString(),data:{branch_id:this.authority,parentId:tail}};
         this.write(this.manager.getSessionFile(),this.manager.getHeader(),[...entries.values(),marker]);
         // Re-open only the assembly manager. Runtime managers keep their own
         // original predicted contexts, including any inference already in flight.

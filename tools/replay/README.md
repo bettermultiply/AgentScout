@@ -2,6 +2,8 @@
 
 这些脚本只依赖 Node 26，且不接触真实模型。`normalize.mjs` 是导出端和 HTTP 端共享的规范化实现：工具结果键取最近 assistant 后连续的 tool 消息，工具名、参数（JSON 对象按键排序）和 Pi 风格文本结果组成材料；没有工具结果时取最后一条 user 文本。材料使用 SHA-256。id、时间、Branch 名都不进入键。
 
+正常运行不依赖这些脚本，不计算或保存回放键；导出只使用原生 session/events。当前尚未实现历史重挂前关系的还原，导出暂时拒绝所有含 authority 标记的 session（即使没有 Promote），以免误用整理后的父链。B1-PI 实测在此拒绝处失败，B3／深度场景目前也不能完成导出和回放闭环；下列历史结果不代表当前通过。
+
 ```sh
 node tools/replay/export.mjs RUN_DIR RUN_DIR/recording.json
 node tools/replay/serve.mjs RUN_DIR/recording.json 18080

@@ -9,7 +9,6 @@ import { resolve, dirname } from 'node:path';
 import { evaluatePolicyArtifact } from '../../../pi/packages/ascout-agent-access/src/local-policy.ts';
 import { createAgentAccess } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
-import { requestKey } from '../../tools/replay/normalize.mjs';
 import { Notifications } from './notification.ts';
 import {save as saveRecovery,load as loadRecovery} from './recovery.ts';
 import {recoveryBinding,snapshotResources} from './recovery-binding.ts';
@@ -51,7 +50,6 @@ const activeActions = new Map(), reportedActions = new Set();
 const aborting = new Set();
 const modelActions = new Map();
 const transcriptQueues = new Map();
-const replayKeys = new Map();
 const reportedEntries = new Set();
 const candidateWaiters = new Map();
 const branchTasks = new Map();
@@ -115,10 +113,6 @@ function syncTranscript(branch) {
         if(!entry)continue;
         queue.splice(queue.indexOf(item),1);
         reportedEntries.add(entry.id);
-        if(item.message.role==='assistant'){
-            const request_key=replayKeys.get(branch)?.shift();
-            if(request_key)tree.requests.set(entry.id,request_key);
-        }
         tree.tails.set(branch,manager.getLeafId());
         pending.push({message:'transcript',branch_id:branch,entry:item.message,session_entry_id:entry.id});
     }
@@ -178,7 +172,6 @@ function tools(branch) {
 }
 async function beforeModelInference(branch, modelValue, context, signal) {
     syncTranscript(branch);
-    const keys=replayKeys.get(branch)??[];keys.push(requestKey(context.messages));replayKeys.set(branch,keys);
     // Model inference is a PURE step: the generic layer evaluates `admit` but
     // never applies the effect gate, reports an admission, or counts extent.
     if(saving||closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
