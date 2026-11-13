@@ -5,6 +5,7 @@ import {spawn} from "node:child_process";
 import {once} from "node:events";
 import {execFileSync} from "node:child_process";
 import assert from "node:assert/strict";
+import {exportContent} from "./export-content.mjs";
 
 const source = process.argv[2];
 assert.ok(source, "usage: node tools/replay/verify/b3-repeat.mjs EXISTING_RUN_DIR");
@@ -74,7 +75,7 @@ try {
     await post(controlPort,"/api/request",JSON.stringify({action:"shutdown"})); assert.equal(await wait(control),0,`run ${i} control exit: ${controlErr}`); await stop(server); server=null;
     const actual=audit(dir); assert.deepEqual(actual,baseline,`run ${i} differs from recorded B3`);
     const reexport=spawn(process.execPath,["tools/replay/export.mjs",dir,`${dir}/recording.json`],{cwd:project,stdio:"inherit"}); children.push(reexport); assert.equal(await wait(reexport),0,"replay export failed");
-    const content=file=>JSON.parse(fs.readFileSync(file)).map(({key,branch_id,reply})=>({key,branch_id,reply}));
+    const content=file=>exportContent(JSON.parse(fs.readFileSync(file)));
     assert.deepEqual(content(`${dir}/recording.json`),content(recording),"replay exported inputs/replies differ");
     const report=JSON.parse(fs.readFileSync(`${dir}/report.json`)), count=depth*3+1; assert.equal(JSON.parse(fs.readFileSync(recording)).length,count); assert.equal(report.total_requests,count); assert.equal(report.hits,count); assert.equal(report.consumed,count); assert.equal(report.misses,0); assert.equal(report.exhausted,0); assert.equal(report.unconsumed,0); assert.deepEqual(report.missing_keys,{}); assert.deepEqual(report.unconsumed_keys,{});
     results.push({run:i,actual,report:{hits:report.hits,misses:report.misses,exhausted:report.exhausted,consumed:report.consumed,unconsumed:report.unconsumed}});

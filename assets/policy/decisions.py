@@ -60,6 +60,8 @@ def predict(data, *, policy_config, capabilities):
         candidates = list(policy_config["candidates"])
         count = min(policy_config.get("sample_count", len(candidates)), len(candidates))
         selected = secrets.SystemRandom().sample(candidates, count)
+        # Sampling chooses membership, not the identity order of proposals.
+        selected.sort(key=candidates.index)
         return {"proposals": [{"payload": value} for value in selected], "generation": "batch"}
     context = data.get("process_context") or {}
     if "observation" not in context:

@@ -64,7 +64,7 @@ Promote 和 2 个 applied Discard；每个后续 Chance 都在其祖先 Candidat
 
 ## NLE 核实（2026-11-13）
 
-### 已定位的初始化回归与剩余阻塞
+### 已定位的初始化回归与旧基线失败
 
 `e89533d` 的保存／恢复实现把原先 `seed(core)` 改成了
 `seed(core, random_disp, False, random_lgen)`，同时启用 `fix_moon_phase=True`。
@@ -93,13 +93,62 @@ misses/exhausted/unconsumed 均 0，结构与动作结果恢复，但全部严�
 四层另有权威历史差异：源文件链中是预测 `moved`，当前整理后的链中是真实工具结果；
 这符合当前已确认语义，不通过改回运行语义或弱化 audit 绕过。脚本遇到首个严格差异即
 退出，所以一次 `b3-deep.mjs` 的三轮内部循环未完成；三次独立调用不等于三轮验收通过。
-完整整链交付处于阻塞，需先决定旧日期环境如何重建及旧历史与当前语义如何验收。
+这些旧基线的严格比较仍失败；不兼容旧日期或旧权威历史语义。当前语义的重复验收另用下述已存在原生 run，不把新结果冒充旧基线通过。
 
 原始证据：`/tmp/opencode/nle-initialization-before.log`、`nle-initialization-after.log`、
 `nle-fixed-b3.log`、`nle-fixed-b3-three.log`、`nle-b3-final-3.log`、
 `nle-fixed-deep4.log`、`nle-deep4-final-2.log`、`nle-deep4-final-3.log`。
 各日志的 artifacts 目录保留原生 session/events、requests、report 及 cleanup.json；
 均确认子进程及端口清理。未重新录制，未修改源记录，模型端点仅 loopback。
+
+### 当前语义重复验收（2026-11-13）
+
+基线来自前轮已经真实完成、但与旧源比较失败的原生回放记录：单层
+`/tmp/opencode/ascout-replay-b3-repeat-bIAF7f/run-1`，四层
+`/tmp/opencode/ascout-replay-b3-repeat-K0uZLH/run-1`。不是新调用模型录制，旧源不变。
+为适配脚本既定的父目录配置位置，使用 `/tmp/opencode/prepare-current-replay-bundles.py`
+复制到 `/tmp/opencode/current-replay-inputs-0k1c9rtd/{single,deep4}/source`；普通文件逐字节核对，
+不复制已失效的 Unix socket。`provenance.json` 保存来源和 SHA-256，原始 policy/runtime/decisions
+也原样保留在 source 中，父目录提供同次配置副本。每轮仅重定位 runtime 路径和 control_socket。
+
+本轮复现并最小修复两项：
+- 单层同次 Policy 用 SystemRandom.sample 排列完整候选集，导致 moved/blocked 的 Candidate 身份交换。
+  Policy 仍随机选择子集，但按配置顺序排列已选结果。先失败后通过的回归为
+  `tests/policy-proposal-order.py`；仅 single 父目录 decisions.py 同步此修复，
+  `policy-fix.json` 保存前后哈希，source 不变。四层原配置已使用 candidates[:count]，未改。
+- 并行不同键的完成顺序可以交换；验收脚本原来比较导出整个数组，错误地要求跨键总顺序相同。
+  现在严格比较键集合及每个键的完整 branch/reply 队列，保留同键顺序、数量、分支和全部回复断言；
+  不改导出器或端点顺序。`export-content.test.mjs` 先失败后通过，含同键反序／增删／正文变化拒绝。
+  初次失败证据为 `/tmp/opencode/current-single-5.log`（OTCm8H）和修正比较后
+  `/tmp/opencode/ascout-replay-b3-repeat-9WDxkS`（Policy 身份交换，4/4 命中）。
+
+精确验收命令（仓库根目录）：
+
+```sh
+node tools/replay/verify/b3-repeat.mjs /tmp/opencode/current-replay-inputs-0k1c9rtd/single/source
+DEEP_ROUNDS=4 node tools/replay/verify/b3-deep.mjs /tmp/opencode/current-replay-inputs-0k1c9rtd/deep4/source
+node --test tools/replay/verify/export-content.test.mjs
+python3 tests/policy-proposal-order.py
+/home/betmul/BETMUL/AgentScout-suit/nle-313/bin/python tests/nle-initialization.py
+/home/betmul/BETMUL/AgentScout-suit/nle-313/bin/python /tmp/opencode/current-disp-probe.py
+node tools/replay/verify/native.mjs
+node tools/replay/verify/b1.mjs
+```
+
+单层 5/5 完整通过，每轮 Chance=1、Proposal/Candidate=2、Promote=1、applied Discard=2、
+NLE action=1、hits/consumed=4；四层 3/3 完整通过，每轮 4、8、4、8、4、13。
+所有轮次 misses/exhausted/unconsumed=0、missing_keys/unconsumed_keys 为空。
+Chance 父结构、Proposal/Candidate/处置事实、权威父链 role/text、真实 NLE before/after、
+导出键及完整回复队列全部严格比较通过；不是时间戳或全部原生日志字节相同的承诺。
+`repeat-report.json` 和 `cleanup.json` 分别在
+`/tmp/opencode/ascout-replay-b3-repeat-tsCtg4`、`/tmp/opencode/ascout-replay-b3-repeat-OhpcwY`，
+进程和端口清理均通过；日志为 `/tmp/opencode/current-single-5-final.log`、`current-deep4-3-final.log`。
+
+上述小回归、native、B1 均通过。`current-disp-probe.json` 记录 disp=11/22/99 对已有
+单层动作 [1] 和四层 [1,2,3,4] 共六次真实 NLE 轨迹的全部 before/after 严格一致；
+不能据此声称任意长轨迹或全游戏不受 disp 影响。全程无真实模型请求，只有 loopback 回放。
+剩余范围是长轨迹、自然重复键及并发／重试／取消时序、活跃祖先被丢弃的嵌套端到端覆盖，
+不以本轮短轨迹通过宣称这些已验收。
 
 实际路径：`src/runtime/backends/nle.rs:69-108` 启动配置的 Python 与 `examples/nle-runtime-bridge.py`，通过 stdin/stdout JSONL 逐请求调用，Mutex 串行化请求（114-138）。`invoke_tool` 只把 bridge 的 result/evidence 包装回传（270-299）。Runtime 配置可由 `ASCOUT_RUNTIME_CONFIG` 覆盖，或由 task 绑定 Policy 的 runtime 路径选择（`src/bin/ascout-control-plane.rs:292-296`）；不是每个 Prompt 的参数。
 
@@ -128,7 +177,7 @@ explicit core+disp changed byte_equal= False bytes= 49961 51146
 
 Candidate 不取得 NLE 快照、不 fork 进程、不重放动作。Runtime 声明 shared_environment=true、branch_environment=false（nle.rs:189-190），Controller 将操作映射到同一个 authority 环境（coordination/controller.rs:14-18）。候选复制 Agent checkpoint 并注入预测工具结果（main.ts:247-278），推进推理；真实工具在接受前 gate，tools.execute 还有角色检查（main.ts:86-90）。所有 Branch 实际共享一个 NLE 进程和 RNG，没有独立复制的 RNG 状态；bridge 的 branch 操作本身也只是 World 别名（187-194），不是实际隔离能力。
 
-结论：仅替换模型输出在限定动作轨迹上可行，但不能无条件保证旧运行逐字复现。需固定完整 RNG 配置、NLE/NetHack 版本、日期策略、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。bridge 的运行恢复保存已包含 initial 种子、kwargs、版本和配置，但旧 run 没有这些原生保存资料；不能向 session/events 补写测试专用元数据。日期与权威历史阻塞如上。异步调度不因模型输出固定就自动稳定。
+结论：仅替换模型输出在限定动作轨迹上可行，但不能无条件保证旧运行逐字复现。需固定完整 RNG 配置、NLE/NetHack 版本、日期策略、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。bridge 的运行恢复保存已包含 initial 种子、kwargs、版本和配置，但旧 run 没有这些原生保存资料；不能向 session/events 补写测试专用元数据。旧日期与旧权威历史失败仍保留，当前语义的短轨迹重复验收如上。异步调度不因模型输出固定就自动稳定。
 
 ## Pi 端点核实
 
