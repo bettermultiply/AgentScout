@@ -336,6 +336,22 @@ impl Backend for CompositeRuntime {
             if ids.iter().any(|id|!self.connections.iter().any(|c| &c.id==id)) {return Err(BackendError::new("Unknown saved runtime participant"));}
         }
         super::recovery::load(path, &backends)?;
+        let validation=(|| {
+            for (environment,ids) in &participants {
+                if ids.is_empty() {return Err(BackendError::new("Empty saved runtime participant set"));}
+                for connection in &self.connections {
+                    let present=connection.backend.environments().iter().any(|id|id==environment);
+                    if present!=ids.contains(&connection.id) {return Err(BackendError::new(format!("Runtime participant environment mismatch: {environment}/{}",connection.id)));}
+                }
+            }
+            for connection in &self.connections {
+                for environment in connection.backend.environments() {
+                    if !participants.get(&environment).is_some_and(|ids|ids.contains(&connection.id)) {return Err(BackendError::new(format!("Untracked runtime participant: {environment}/{}",connection.id)));}
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error)=validation {for connection in &self.connections {let _=connection.backend.shutdown();}return Err(error);}
         *self.participants.lock().map_err(|_|BackendError::new("Runtime participants poisoned"))?=participants;
         Ok(())
     }

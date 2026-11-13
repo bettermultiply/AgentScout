@@ -242,6 +242,7 @@ impl FilesystemBackend {
                 }
                 let unit = MountUnit {
                     target: mount.target.clone(),
+                    saved_base: mount.saved_base.clone(),
                     upper: child_root.join(&mount.layer_key).join("upper"),
                     work: child_root.join(&mount.layer_key).join("work"),
                     lower,

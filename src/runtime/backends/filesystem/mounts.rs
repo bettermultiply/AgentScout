@@ -11,7 +11,7 @@ impl FilesystemBackend {
         {
             return targets.clone();
         }
-        let targets: Vec<PathBuf> = real_writable_mounts()
+        let targets: Vec<PathBuf> = self.config.isolated_paths.clone().unwrap_or_else(real_writable_mounts)
             .into_iter()
             .filter(|target| self.probe_mount_target(target))
             .collect();
@@ -109,7 +109,7 @@ impl FilesystemBackend {
     }
 
     pub(super) fn launch_lowers(&self, mount: &MountUnit) -> Vec<PathBuf> {
-        let mut lowers = vec![mount.target.clone()];
+        let mut lowers = vec![mount.saved_base.as_ref().unwrap_or(&mount.target).clone()];
         for layer in &mount.lower {
             lowers.push(mount.layer_upper(layer));
         }
@@ -207,6 +207,7 @@ impl FilesystemBackend {
                     upper: environment.root.join(&layer_key).join("upper"),
                     work: environment.root.join(&layer_key).join("work"),
                     target,
+                    saved_base: None,
                     lower: Vec::new(),
                     layer_key,
                     volume_is_subvolume: self.uses_btrfs_storage(),
@@ -287,8 +288,8 @@ impl FilesystemBackend {
         self.append_state_masks(&mut fragment);
         fragment.mounts.sort_by_key(|entry| match entry {
             MountEntry::RoBind { .. } | MountEntry::Proc { .. } | MountEntry::Dev { .. } => 0,
-            MountEntry::Overlay { .. } => 1,
-            MountEntry::Bind { .. } => 2,
+            MountEntry::Bind { .. } => 1,
+            MountEntry::Overlay { .. } => 2,
             MountEntry::Tmpfs { .. }
             | MountEntry::RemountRo { .. }
             | MountEntry::Dir { .. } => 3,

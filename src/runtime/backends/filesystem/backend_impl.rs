@@ -50,6 +50,9 @@ impl FilesystemBackend {
 }
 
 impl Backend for FilesystemBackend {
+    fn launch_fragment(&self, context:&BackendContext, launch:&crate::protocol::contract::AgentLaunch)->Result<LaunchFragment,BackendError> {
+        FilesystemBackend::launch_fragment(self,context,launch)
+    }
     fn save_runtime(&self, path: &Path) -> Result<(), BackendError> { self.save_recovery(path) }
 
     fn load_runtime(&self, path: &Path) -> Result<(), BackendError> { self.load_recovery(path) }
@@ -117,6 +120,7 @@ impl Backend for FilesystemBackend {
                     upper: root.join(&layer_key).join("upper"),
                     work: root.join(&layer_key).join("work"),
                     target,
+                    saved_base: None,
                     lower: Vec::new(),
                     layer_key,
                     volume_is_subvolume: self.uses_btrfs_storage(),

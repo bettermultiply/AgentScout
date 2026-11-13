@@ -33,6 +33,13 @@ pub(super) fn load(path: &Path, backends: &[(&str, &dyn Backend)]) -> Result<Val
         if part["sha256"] != format!("{:x}", Sha256::digest(bytes)) { return Err(error("Runtime component checksum mismatch")); }
         files.push(file);
     }
-    for ((_, backend), file) in backends.iter().zip(files) { backend.load_runtime(&file)?; }
+    for ((_, backend), file) in backends.iter().zip(files) {
+        if let Err(failure)=backend.load_runtime(&file) {
+            // A failed load is not a runnable execution. Release every component,
+            // including the failing one which may have created partial resources.
+            let cleanup:Vec<_>=backends.iter().filter_map(|(id,b)|b.shutdown().err().map(|e|format!("{id}: {e}"))).collect();
+            return Err(error(format!("{failure}; load cleanup: {cleanup:?}")));
+        }
+    }
     Ok(record["metadata"].clone())
 }

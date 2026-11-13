@@ -48,6 +48,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|v| v.as_str())
             .ok_or("filesystem missing state_directory")?;
         let mut filesystem_config = FilesystemConfig::new(state);
+        if let Some(paths)=config.get("passthrough_rw") {filesystem_config.passthrough_rw=serde_json::from_value(paths.clone())?;}
+        if let Some(paths) = config.get("isolated_paths") {
+            let paths: Vec<PathBuf> = serde_json::from_value(paths.clone())?;
+            if paths.is_empty() || paths.iter().any(|p| !p.is_absolute() || p == std::path::Path::new("/") || !p.is_dir()) {
+                return Err("filesystem isolated_paths must contain existing absolute non-root directories".into());
+            }
+            filesystem_config.isolated_paths = Some(paths);
+        }
         if let Some(path) = config.get("bubblewrap_path").and_then(|v| v.as_str()) {
             filesystem_config.bubblewrap_path = PathBuf::from(path);
         }

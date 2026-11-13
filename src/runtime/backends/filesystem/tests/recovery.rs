@@ -5,6 +5,7 @@ use super::support::*;
 fn recovery_overlay_executes_independently_and_rejects_corruption() {
     let root=tempfile::Builder::new().prefix("fs-recovery-").tempdir_in("/tmp/opencode").unwrap();
     let workspace=root.path().join("workspace");fs::create_dir(&workspace).unwrap();
+    fs::write(workspace.join("inherited"),"original lower").unwrap();
     let backend=new_overlay_backend(root.path());
     // Isolate this temporary workspace only; never modify the repository or host lowers.
     *backend.overlay_targets.lock().unwrap()=Some(vec![workspace.clone()]);
@@ -13,11 +14,14 @@ fn recovery_overlay_executes_independently_and_rejects_corruption() {
     wait_until_for(||upper_at(&backend,"authority",&workspace.join("value")).exists(),3000);
     process.stop_all();
     let saved=root.path().join("saved.json");backend.save_runtime(&saved).unwrap();
+    fs::write(workspace.join("inherited"),"changed in place").unwrap();
     let original=upper_at(&backend,"authority",&workspace.join("value"));
     fs::write(&original,"after").unwrap();
     backend.load_runtime(&saved).unwrap();
     let restored=upper_at(&backend,"authority",&workspace.join("value"));
     assert_ne!(restored,original);assert_eq!(fs::read_to_string(&restored).unwrap(),"before\n");
+    let output=backend.operate("authority",&["/bin/sh".into(),"-c".into(),format!("cat {}/inherited",workspace.display())],&CancelHandle::default()).unwrap();
+    assert_eq!(output.stdout,"original lower");
     let (resumed,_,_)=spawn_in_environment(&backend,"authority",&workspace,"echo continued > value");
     wait_until_for(||fs::read_to_string(&restored).unwrap_or_default()=="continued\n",3000);resumed.stop_all();
     backend.load_runtime(&saved).unwrap();
@@ -53,4 +57,27 @@ fn combined_save_failure_thaws_process_and_preserves_previous_generation() {
     let at_failure=fs::read_to_string(&upper).unwrap();wait_until_for(||fs::read_to_string(&upper).unwrap_or_default()!=at_failure,3000);
     process.stop_all();backend.load_runtime(&previous).unwrap();
     assert!(fs::read_to_string(upper_at(&backend,"authority",&workspace.join("counter"))).unwrap().trim().parse::<u64>().unwrap()>0);
+}
+
+#[test]
+fn recovery_btrfs_and_snapshot_copy_layouts() {
+    for force_overlay in [false,true] {
+        let root=tempfile::Builder::new().prefix("ascout-recovery-btrfs-").tempdir_in("/var/tmp").unwrap();
+        let workspace=root.path().join("workspace");fs::create_dir(&workspace).unwrap();
+        let mut config=FilesystemConfig::new(root.path().join("state"));
+        config.force_overlay=force_overlay;config.isolated_paths=Some(vec![workspace.clone()]);
+        let backend=FilesystemBackend::new(config).unwrap();
+        if force_overlay {assert_eq!(backend.mechanism,FilesystemMechanism::Overlay);}
+        else if !backend.uses_btrfs_storage() {panic!("btrfs storage unavailable in {}",root.path().display());}
+        backend.establish("authority").unwrap();
+        let (process,_,_)=spawn_in_environment(&backend,"authority",&workspace,"echo saved > value");
+        wait_until_for(||upper_at(&backend,"authority",&workspace.join("value")).exists(),3000);process.stop_all();
+        backend.fork("authority","candidate",&[]).unwrap();
+        let save=root.path().join("saved.json");backend.save_runtime(&save).unwrap();backend.load_runtime(&save).unwrap();
+        assert_eq!(fs::read_to_string(upper_at(&backend,"authority",&workspace.join("value"))).unwrap(),"saved\n");
+        backend.fork("authority","after-restore",&[]).unwrap();
+        backend.save_runtime(&root.path().join("again.json")).unwrap();
+        println!("PASS recovery mechanism={} snapshot_copies={} {}",backend.mechanism.as_str(),backend.snapshot_copies,root.path().display());
+        backend.shutdown().unwrap();
+    }
 }

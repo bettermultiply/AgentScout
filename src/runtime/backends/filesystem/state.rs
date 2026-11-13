@@ -15,6 +15,9 @@ use crate::runtime::backend::BackendError;
 pub(crate) struct MountUnit {
     /// Canonical absolute mount point, for example `/home` or `/var/tmp`.
     pub(crate) target: PathBuf,
+    /// Saved independent bottom layer. The target remains the sandbox mount point.
+    #[serde(default)]
+    pub(crate) saved_base: Option<PathBuf>,
     /// Writable upper tree for this environment and mount.
     pub(crate) upper: PathBuf,
     /// Overlay work tree for this environment and mount.
@@ -219,6 +222,7 @@ impl EnvironmentMetadata {
                         upper: root.join(key).join("upper"),
                         work: root.join(key).join("work"),
                         target: target.clone(),
+                        saved_base: None,
                         lower: layers.clone(),
                         layer_key: key.clone(),
                         volume_is_subvolume: true,

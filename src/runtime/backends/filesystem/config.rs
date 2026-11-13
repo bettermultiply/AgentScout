@@ -10,6 +10,9 @@ pub struct FilesystemConfig {
     /// Force the portable overlay data plane even when btrfs is available.
     /// Used by tests that exercise overlay semantics on a btrfs host.
     pub force_overlay: bool,
+    /// Explicit directory isolation, with all other host paths read-only.
+    /// None retains automatic writable-mount discovery.
+    pub isolated_paths: Option<Vec<PathBuf>>,
     /// Paths explicitly allowed to pass through read-write to the host.
     pub passthrough_rw: Vec<PathBuf>,
     /// Make unmanaged writable mounts read-only inside the sandbox.
@@ -35,6 +38,7 @@ impl FilesystemConfig {
             bubblewrap_path: PathBuf::from("bwrap"),
             btrfs_path: PathBuf::from("btrfs"),
             force_overlay: false,
+            isolated_paths: None,
             passthrough_rw: Vec::new(),
             isolate_unmanaged_mounts: true,
             allow_overlapping_state_directory: false,
@@ -77,4 +81,3 @@ impl ForkCost {
         }
     }
 }
-

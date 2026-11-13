@@ -90,7 +90,9 @@ impl Shared {
                     self.runtime.save_runtime(path)
                 } else {
                     self.preserving.store(true, std::sync::atomic::Ordering::SeqCst);
-                    self.runtime.load_runtime(path)
+                    let result=self.runtime.load_runtime(path);
+                    if result.is_err() {let _=self.runtime.shutdown();}
+                    result
                 };
                 match result {
                     Ok(()) => make_result(request, ResultStatus::Completed, self.runtime.state(environment_id), false),
