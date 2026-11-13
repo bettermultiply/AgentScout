@@ -12,6 +12,7 @@ import { SessionTree } from './session-tree.ts';
 import { Notifications } from './notification.ts';
 import {save as saveRecovery,load as loadRecovery} from './recovery.ts';
 import {recoveryBinding,snapshotResources} from './recovery-binding.ts';
+import { createReplay } from '../replay/index.mjs';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
@@ -20,6 +21,7 @@ const { createAgentSession, SessionManager, ModelRuntime, resolveCliModel } = re
 const sessionFile = process.env.ASCOUT_SESSION_FILE;
 if (!sessionFile) throw Error('ASCOUT_SESSION_FILE is required');
 let tree = new SessionTree(SessionManager.open(sessionFile));
+const replay=process.env.ASCOUT_REPLAY?createReplay(process.env.ASCOUT_REPLAY):null;
 const { Type } = require('typebox');
 const args = process.argv.slice(2);
 const socketPath = args.shift();
@@ -37,8 +39,31 @@ while (args.length) {
 }
 if (!['off','minimal','low','medium','high','xhigh'].includes(thinkingLevel)) throw Error('Invalid thinking level');
 let modelRuntime, model;
+if(replay)modelPattern='replay/recorded';
 if (modelPattern) {
     modelRuntime = await ModelRuntime.create();
+    if(replay) {
+        const { AssistantMessageEventStream }=require(resolve(root,'packages/ai/src/utils/event-stream.ts'));
+        modelRuntime.registerProvider('replay',{
+            api:'ascout-replay',apiKey:'local',baseUrl:'http://127.0.0.1',
+            models:[{id:'recorded',name:'Recorded replies',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:1000000,maxTokens:100000}],
+            streamSimple:(model,context)=>{
+                const stream=new AssistantMessageEventStream();
+                queueMicrotask(()=>{
+                    const usage={input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}};
+                    const message={role:'assistant',api:model.api,provider:model.provider,model:model.id,usage,timestamp:Date.now(),content:[],stopReason:'stop'};
+                    try {
+                        message.content=replay.next(context.messages);
+                        message.stopReason=message.content.some(p=>p.type==='toolCall')?'toolUse':'stop';
+                        stream.push({type:'start',partial:message});
+                        stream.push({type:'done',reason:message.stopReason,message});
+                    }catch(error){message.stopReason='error';message.errorMessage=String(error.message);stream.push({type:'error',reason:'error',error:message});}
+                    stream.end();
+                });
+                return stream;
+            },
+        });
+    }
     const resolved = resolveCliModel({ cliModel:modelPattern, cliThinking:thinkingLevel, modelRuntime });
     if (resolved.error || !resolved.model) throw Error(resolved.error ?? 'Unknown model');
     model = resolved.model;
@@ -300,7 +325,8 @@ async function run(session,branch,operation) {
     try { await operation(); }
     finally { syncTranscript(branch);await finishActions(branch,saving||cancelled.has(branch)||aborting.has(branch)?'cancelled':'failed'); }
     const last=[...session.messages].reverse().find(m=>m.role==='assistant');
-    if(last?.stopReason==='error'&&!saving)await report({message:'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
+    if(last?.stopReason==='error'&&!saving)await report({message:branch===authority?'turn_failed':'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
+    if(replay)await report({message:'replay_status',...replay.status()});
     await report({message:'turn_completed',branch_id:branch});
     if(branch===authority)tree.settle();
 }
@@ -320,6 +346,18 @@ async function handle(command) {
     // generic access layer; each product only connects its own execution points.
     if(command.command!=='start_candidate')await access.control(command);
     switch(command.command){
+        case 'model': {
+            try {
+                if(branch!==authority)throw Error('Only the authority accepts model changes');
+                const session=sessions.get(branch);if(!session)throw Error('Session missing');
+                if(branchTasks.has(branch)||setupTasks.size)throw Error('Model change requires an idle authority');
+                const resolved=resolveCliModel({cliModel:command.model,cliThinking:session.thinkingLevel,modelRuntime:session.modelRuntime});
+                if(resolved.error||!resolved.model)throw Error(resolved.error??'Unknown model');
+                await session.setModel(resolved.model);model=resolved.model;modelPattern=command.model;
+                await report({message:'model_changed',branch_id:branch,model:command.model,error:null});
+            } catch(error){await report({message:'model_changed',branch_id:branch,model:command.model,error:String(error.message)});}
+            return;
+        }
         case 'cancel_save':
             saving=false;
             recoveryPaused=true;
@@ -590,6 +628,7 @@ function startSetup(command){
 }
 await report({message:'agent_connected',agent_id:agentId,capabilities});
 await report({message:'agent_ready',agent_id:agentId});
+if(replay)await report({message:'replay_inputs',inputs:replay.inputs.map(input=>input.prompt)});
 let buffer=Buffer.alloc(0);const tasks=new Set();
 let commandQueue: Promise<unknown>=Promise.resolve();
 try{

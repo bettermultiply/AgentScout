@@ -6,25 +6,30 @@
 
 通用回放工具的已批准目标是：指定已有运行目录，每次重新读取原生 session/events，用已记录的 assistant 输出替换模型服务，由正常系统按真实用户输入及交互顺序重新执行工具，在正常 WebUI 观察全过程。结束或匹配失败后系统不退出，用户可通过正常模型切换继续输入；真实模型只能由用户之后手动选择。回放不评价 Agent、不证明性能收益。
 
-源目录只读。本次回放及随后继续输入的 session/events 状态只保存在内存，除非用户显式要求持久化；不得另建持久或临时记录目录、副本，也不得把上次回放输出当下次输入。socket 等必要临时资源不属于会话记录，必须清理。没有层数参数、固定 prompt、候选或步数；B3 只能作为工具的验收使用者。
+源目录只读。每次直接读取指定源目录，在内存准备回复队列，不生成额外 recording、导出缓存或源记录副本。正常系统使用独立新 run，照常持久化 session/events、Policy、日志和主动退出恢复资料；不把新 run 自动当作下次回放源。没有层数参数、固定 prompt、候选或步数；B3 只是场景验收工具。
 
 导出与伪造端点放在 [`tools/replay/`](../../tools/replay/README.md)，使用 Node 26，只读取已有 run 内 `events.jsonl` 和 `session.jsonl`。记录是系统原生能力，测试套件不执行录制：B3、repeat、deep 均须提供已有 run，先导出再执行一次、五次或三次回放；低层 B1／B1-PI 保留手构造原生数据验证，B1-PI 也可接收已有样例目录。
 
-### 通用入口实施前核查（2026-11-13）
+### 通用入口（2026-11-13）
 
-当前尚未交付满足上述边界的通用启动入口。源码核查发现以下前提，不能把既有 NLE 验收脚本包装为该入口：
+```sh
+mkdir /tmp/opencode/replay-run
+target/debug/ascout-control-plane /tmp/opencode/replay-run ../pi \
+  --replay /path/to/source-run --runtime /path/to/runtime.json \
+  --web 127.0.0.1:8080
+```
 
-| 核查项 | 当前原生能力及缺失 |
-|---|---|
-| Policy 与 Runtime 启动信息 | 正常启动已原生保存完整 `policy.json`：同次加载的 YAML、声明源码/资源、Decision 绑定及编译结果和原来源，恢复优先读取，详见 [Policy 实现](policy-engine.md)。Runtime 仍只绑定配置路径、摘要和能力，不保证运行目录包含完整 Runtime 配置；历史目录缺少 artifact 时不能凭摘要还原内容。 |
-| 初始环境 | NLE 主动退出保存的 `worlds[].initial` 包含完整种子、环境参数及版本，另有动作和检查；这比普通 session/events 完整，但只在成功保存后存在。FS 恢复保存的是退出时环境及其 lower，不保证包含整次运行开始前可独立重建的工作区。主动退出状态不能直接当作从头回放的初始状态。 |
-| 用户输入与交互顺序 | 原生 `message.role=user` 可区别于 `custom_message` 通知；导出不能把通知当用户。`execution.rs` 收到 Prompt 只调用 `queue_prompt`，不记录接收事件；`commands.rs` 直到 authority ready 且不运行时才取出输入。transcript 记录实际进入 session 的顺序，不能恢复运行中追加输入的接收时刻及其相对其他交互的顺序；被中断/退出清除的排队输入可能根本没有 user 记录。 |
-| 正常模型切换与错误恢复 | `ui::Request` 仅有 Prompt/Interrupt/Shutdown，Pi main 只在启动解析 `--model`，没有运行中模型切换 API。Pi 上报 `branch_failed` 后，`execution.rs` 的 authority_failure 返回错误，执行循环调用 begin_shutdown；当前不是模型错误后保持可用。必须修改正常系统功能，不得藏在回放专用切换内。 |
-| 不落盘状态 | Ledger 必须打开追加文件；Pi main 必须提供 `ASCOUT_SESSION_FILE`，SessionTree.createBranch 创建 `sessions/*.jsonl`，settle 汇总文件。正常 Shutdown 还创建 recovery generation。必须增加真正的内存承载，不能改用临时 run 目录冒充。 |
+源 run 的 `policy.json` 优先；不存在时必须显式提供第三个位置参数 `original-policy.yaml`，不得回退默认策略。若两者都提供，核对编译 digest。Runtime 选择沿用正常系统：`--runtime`、`ASCOUT_RUNTIME_CONFIG`、Policy 的原 runtime 引用；缺失直接报错。配置须使用新 control_socket，不得位于源目录。新 run 不得位于源目录内。Runtime 的其他可写路径和初始环境由调用方明确提供，系统不会猜测测试目录上一级布局或拿退出快照当初始状态。
 
-核查样例 `/tmp/opencode/current-replay-inputs-0k1c9rtd/single/source` 的主动退出代为 `recovery-1794548537681811948`：tree 的 Policy/Runtime 绑定仍指向原 `bIAF7f/run-1`，NLE runtime 保存完整 initial；目录内另有 policy.yaml/runtime.json/decisions.py 是历史验收布局，不能据此认定任意正常 run 均具备这些内容。此轮只读核查，没有启动模型、环境或回放，也没有创建记录副本。
+`agent-access/replay/` 是运行侧与导出工具共同使用的无依赖模块，运行侧不导入 tools 测试代码。每次启动读取当前原生 session/events，恢复候选实际模型上下文，在进程内注册本地 `replay/recorded` provider。原生记录不增加回放匹配键。按 events 文件顺序、原生 ID 去重，仅将已消费 `message.role=user` 的纯文本输入送入当前权威；通知不作为用户输入。不重现输入被接收的墙钟时刻、Interrupt 或未消费队列；每轮等待权威空闲且控制工作/命令收齐再送下一条。
 
-**2026-11-13 已批准的配置边界**：目录优先，缺失原配置允许调用方显式补充，不能猜测或采用当前默认策略。当前仅落实正常运行的完整 Policy 留档；通用交互回放、完整 Runtime 保存、可验证初始环境和输入接收时序仍有上述缺口，下一节点由用户决定。不新增回放专用 session/events 字段；正常运行原生持久化与未来回放不落盘是不同边界。
+自动输入完成或任意匹配缺失/耗尽时保留系统，不退回真实模型；错误与消费数量可从 events、API notice 检查。用户手动输入或请求模型切换会停止剩余自动输入。浏览器权威窗口可输入 `provider/model` 切换，API 为 `POST /api/request` 的 `{"action":"model","model":"provider/model"}`；须等权威空闲，不能在 Promote/Runtime 工作/恢复中改模型。解析或认证失败只报告错误，保留原模型和会话；候选保留自己的模型，新候选继承实际 parent。真实模型仅由用户主动选择，认证仍使用正常 Pi 配置。
+
+普通模型请求失败以 turn_failed 报告并结束本轮，权威会话保留；候选执行失败和 Runtime/协议故障仍走原 Branch 生命周期，不扩大为任意故障恢复。主动退出与 `--resume` 保持正常持久路径。当前回放模型本身未持久化队列：退出后若要接着交互，使用普通 `--resume --model provider/model`，不承诺恢复自动回放进度。
+
+**本轮实测**：手造原生多用户输入→真实 bash→工具结果续跑，3/3 回复；结束与缺键两种情况均保持 WebUI/API，未知模型切换失败后仍能切到本地 HTTP 伪模型并继续；正常新 run 保存、原 Policy artifact 优先、普通重启恢复后继续输入通过。源 session/events 的 SHA-256 与 mtime 未变，无额外 recording 缓存。命令 `node /tmp/opencode/check-general-replay.mjs`，最终复跑资料 `/tmp/opencode/general-replay-keCEWl/result.json`。NLE 通用入口单层 4/4、四层 13/13 回复、1/4 Chance 与 1/4 Promote，零剩余/失败，最终复跑资料 `/tmp/opencode/general-nle-AyrZyk/report.json`；首次使用全局 Pi 扩展时上下文改变导致缺键，独立空 `PI_CODING_AGENT_DIR` 后通过；扩展环境也必须与源一致。
+
+相关检查：Rust library 148/148、Pi 接入/历史/通知/恢复 25/25、主动恢复 4/4、native/B1/B1-PI 通过；前端构建通过（保留 >500KB bundle 警告）。未调用真实模型。完整 Runtime 留档、初始环境自动重建、非文本输入、长历史同键碰撞和取消时序仍不保证。
 
 ## 记录来源
 
@@ -40,7 +45,7 @@
 
 整理后恢复上下文可能不同于原始运行上下文；compaction/custom 必须保存，但引用、摘要、在飞推理与 rollback 外部资源关联仍有未决实现差距，详见 [接入实现](agent-access.md) §4。是否追加真实结果通知由 Policy 决定，默认完全不追加，不是空消息。
 
-**模型回放边界**：正常运行仅生成原生 session/events，不为回放计算或持久化匹配键，不依赖 `tools/replay`；键只在系统外导出产物中生成。导出按 events 文件序建立 transcript 原生 ID 的 Branch 归属，以 candidate_created 的 parent/chance 和 chance_created 的 operation_id 核对候选注入批次；由原生 toolCall ID 验证整批（包括并行 sibling），applied Promote 后将第一后续记录的父边仅在内存中接回预测批次尾部。嵌套候选按创建顺序还原。无正文相似度、命名解析或时间近似匹配，源文件不变。
+**模型回放边界**：正常运行仅生成原生 session/events，不为回放计算或持久化匹配键，不依赖 `tools/replay`；键仅在回放内存或显式导出产物中生成。导出按 events 文件序建立 transcript 原生 ID 的 Branch 归属，以 candidate_created 的 parent/chance 和 chance_created 的 operation_id 核对候选注入批次；由原生 toolCall ID 验证整批（包括并行 sibling），applied Promote 后将第一后续记录的父边仅在内存中接回预测批次尾部。嵌套候选按创建顺序还原。无正文相似度、命名解析或时间近似匹配，源文件不变。
 
 第一后续记录可以是 custom、compaction、context_edit 或 custom_message，不限 assistant。通知以 details.command_id 关联 applied Promote。还原后按最新 compaction 的保留区间、context_edit replacement、branch_summary/custom_message 构造当前 Pi 模型上下文；失败 assistant 排除，当前待决调用的较早同 toolCallId 结果被后续结果替换。缺原生引用、注入批次不全、未知消息角色或无法唯一确定重挂边时明确失败，不加旧格式回退。未持久化的扩展改写及任意 provider 转换不在保证内。
 

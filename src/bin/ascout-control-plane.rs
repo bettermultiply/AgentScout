@@ -268,12 +268,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = take_option(&mut args, "--model")?;
     let thinking = take_option(&mut args, "--thinking")?;
     let web_address = take_option(&mut args, "--web")?;
+    let replay = take_option(&mut args,"--replay")?.map(std::path::PathBuf::from).map(fs::canonicalize).transpose()?;
+    let runtime_option=take_option(&mut args,"--runtime")?;
     let resume = if let Some(index)=args.iter().position(|value|value=="--resume") {args.remove(index);true} else {false};
+    if replay.is_some() && resume {return Err("--replay and --resume cannot be combined".into());}
     if !(2..=3).contains(&args.len())
         || (web_address.is_none() && (!io::stdin().is_terminal() || !io::stdout().is_terminal()))
     {
         return Err(
-            "usage: ascout-control-plane <run-dir> <pi-root> [policy.yaml] [--resume] [--web 127.0.0.1:8080] [--model <provider/model>] [--thinking <level>]".into(),
+            "usage: ascout-control-plane <new-run-dir> <pi-root> [policy.yaml] [--replay <source-run-dir> | --resume] [--runtime <runtime.json>] [--web 127.0.0.1:8080] [--model <provider/model>] [--thinking <level>]".into(),
         );
     }
     // 运行目录由调用方（实验脚手架）创建，控制面只使用它。
@@ -282,6 +285,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("{} is not a run directory", run_dir.display()).into());
     }
     let pi_root = fs::canonicalize(&args[1])?;
+    if replay.as_ref().is_some_and(|source|run_dir.starts_with(source)) {
+        return Err("Replay requires a new run directory outside the read-only source".into());
+    }
     let artifact_path = run_dir.join("policy.json");
     if !resume && ["policy.json", "events.jsonl", "session.jsonl", "recovery.json", "agent.sock"]
         .iter().any(|name| run_dir.join(name).symlink_metadata().is_ok()) {
@@ -300,14 +306,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SpeculativeTree::with_workspace("agent", &run_dir)?
     };
     let engine = PolicyEngine::default();
-    let artifact_bytes = if !resume { None } else { match fs::read(&artifact_path) {
+    let source_artifact=replay.as_ref().map(|run|run.join("policy.json")).unwrap_or_else(||artifact_path.clone());
+    let artifact_bytes = if !resume && replay.is_none() { None } else { match fs::read(&source_artifact) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("Policy artifact {}: {error}", artifact_path.display()).into()),
+        Err(error) => return Err(format!("Policy artifact {}: {error}", source_artifact.display()).into()),
     }};
-    let policy = if resume && artifact_bytes.is_some() {
+    let policy = if artifact_bytes.is_some() {
         let bytes = artifact_bytes.as_ref().unwrap();
-        if tree.policy_binding.as_ref().and_then(|binding| binding.get("sha256"))
+        if resume && tree.policy_binding.as_ref().and_then(|binding| binding.get("sha256"))
             != Some(&json!(format!("{:x}", Sha256::digest(bytes))))
         {
             return Err("Recovery Policy artifact changed".into());
@@ -322,17 +329,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         saved
     } else {
         let path = args.get(2).map(String::as_str).or_else(|| {
-            if resume { None } else { Some("assets/policy/policy.yaml") }
+            if resume||replay.is_some() { None } else { Some("assets/policy/policy.yaml") }
         }).ok_or("Saved Policy artifact missing; supply policy.yaml explicitly")?;
         engine.compile(std::path::Path::new(path))?
     };
     // Policy references a Runtime configuration, not a saved Runtime. Preserve
     // the original cwd resolution even when the artifact lives inside the run.
-    let config_path = env::var_os("ASCOUT_RUNTIME_CONFIG")
+    let config_path = runtime_option.map(std::ffi::OsString::from).or_else(||env::var_os("ASCOUT_RUNTIME_CONFIG"))
         .map(std::path::PathBuf::from)
         .or_else(|| if resume { tree.runtime_binding.as_ref()?.get("config_path")?.as_str().map(std::path::PathBuf::from) } else { None })
         .or_else(|| policy.runtime_config_path().map(std::path::PathBuf::from))
         .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
+    if let Some(source)=&replay {
+        let config:Value=serde_json::from_slice(&fs::read(&config_path)?)?;
+        let socket=config.get("control_socket").and_then(Value::as_str).ok_or("Runtime requires control_socket")?;
+        let path=std::path::Path::new(socket);
+        let parent=fs::canonicalize(path.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")))?;
+        if parent.starts_with(source) {return Err("Runtime control_socket is inside the read-only replay source; supply --runtime with a new socket path".into());}
+    }
     tree.execution_id = run_dir.display().to_string();
     if resume && tree.local_policy_digest.as_deref()!=Some(policy.digest()) {return Err("Recovery Policy changed".into());}
     if resume && tree.runtime_binding.as_ref().and_then(|v|v.get("config_path"))!=Some(&json!(config_path)) {return Err("Recovery Runtime binding changed".into());}
@@ -341,12 +355,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let artifact_digest = if let Some(bytes) = artifact_bytes {
         format!("{:x}", Sha256::digest(bytes))
     } else {
-        policy.save(&artifact_path)?;
+        if replay.is_none() {policy.save(&artifact_path)?;}
         // Hash the exact deterministic bytes published by save, not a second
         // read of a file another process could have changed in the meantime.
         format!("{:x}", Sha256::digest(serde_json::to_vec_pretty(&policy)?))
     };
     let policy_binding = json!({"source": policy.source(), "artifact": "policy.json", "sha256": artifact_digest});
+    if replay.is_some() {policy.save(&artifact_path)?;}
     let socket = run_dir.join("agent.sock");
     let _ = fs::remove_file(&socket);
     let listener = UnixListener::bind(&socket)?;
@@ -392,6 +407,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("ASCOUT_RUNTIME_TOOLS".into(), runtime_tools),
             ("ASCOUT_PI_ROOT".into(), pi_root.display().to_string()),
             ("ASCOUT_TASK_ID".into(), tree.execution_id.clone()),
+            ("ASCOUT_REPLAY".into(), replay.as_ref().map(|run|run.display().to_string()).unwrap_or_default()),
             (
                 "ASCOUT_SESSION_FILE".into(),
                 session_file.display().to_string(),

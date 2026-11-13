@@ -103,6 +103,7 @@ export function ChatPane() {
   const conversation = explicitAuthority ? branchConversation : authorityConversation
 
   const [prompt, setPrompt] = useState('')
+  const [model, setModel] = useState('')
   const [busy, setBusy] = useState(false)
   const [requestError, setRequestError] = useState<string | null>(null)
   const [pendingMessages, setPendingMessages] = useState<ConversationMessage[]>([])
@@ -216,6 +217,10 @@ export function ChatPane() {
           {connectionLabel(connection)}
         </span>
         <div className="header-actions">
+          <input aria-label="模型 provider/model" placeholder="provider/model" value={model} onChange={event => setModel(event.target.value)} />
+          <button type="button" disabled={!connected || !model.trim()} onClick={() => {
+            void sendRequest({ action: 'model', model: model.trim() }).catch(error => setRequestError(String(error)))
+          }}>切换模型</button>
           <button
             type="button"
             onClick={interrupt}

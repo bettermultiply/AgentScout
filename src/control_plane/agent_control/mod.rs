@@ -542,6 +542,7 @@ fn deserialize_notification<'de, D: serde::Deserializer<'de>>(deserializer: D) -
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AgentCommand {
+    Model { branch_id: String, model: String },
     SuspendRecovery { branch_id: String },
     CancelSave { branch_id: String },
     Save { branch_id: String, path: PathBuf },
@@ -630,6 +631,10 @@ pub enum AgentCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AgentMessage {
+    TurnFailed { branch_id: String, reason: String },
+    ModelChanged { branch_id: String, model: String, error: Option<String> },
+    ReplayInputs { inputs: Vec<String> },
+    ReplayStatus { total: usize, consumed: usize, remaining: usize, failure: Option<String> },
     RecoverySuspended,
     RecoverySaved { path: PathBuf, error: Option<String> },
     RecoveryLoaded { error: Option<String> },

@@ -25,6 +25,12 @@ struct Task<'a> {
     suspended: bool,
     save_requested: bool,
     loaded: bool,
+    replay_inputs: std::collections::VecDeque<String>,
+    replay_started: bool,
+    replay_stopped: bool,
+    replay_status: String,
+    pending_model: Option<String>,
+    model_changing: bool,
 }
 
 impl Task<'_> {
@@ -59,11 +65,22 @@ impl Task<'_> {
                     ..Default::default()
                 }
             },
-            Event::Request(ui::Request::Interrupt) => ControlActions {
-                commands: if self.tree.recovering {vec![]} else {self.tree.interrupt()?},
-                ..Default::default()
+            Event::Request(ui::Request::Interrupt) => {
+                self.replay_stopped=true;
+                ControlActions {
+                    commands: if self.tree.recovering {vec![]} else {self.tree.interrupt()?},
+                    ..Default::default()
+                }
             },
+            Event::Request(ui::Request::Model { model }) => {
+                self.replay_stopped=true;
+                if self.tree.recovering || self.tree.authority_running() || self.tree.pending_work() || self.tree.recovery_pending_commands() || self.model_changing {
+                    self.notice="Model change failed: wait for an idle authority".into();
+                } else {self.pending_model=Some(model);}
+                ControlActions::default()
+            }
             Event::Request(ui::Request::Prompt { prompt }) => {
+                self.replay_stopped=true;
                 if self.tree.recovering {
                     if !self.loaded {return Ok(Some(ControlActions::default()));}
                     if let Some(at)=self.tree.recovery_paused_at.take() {
@@ -97,6 +114,16 @@ impl Task<'_> {
                 let AgentWireMessage::Message(message) = message else {
                     return Err(io::Error::other("Agent sent a control-plane command"));
                 };
+                match &message {
+                    AgentMessage::ReplayInputs {inputs} => {self.replay_inputs=inputs.clone().into();self.replay_started=true;}
+                    AgentMessage::ReplayStatus {total,consumed,remaining,failure} => {
+                        self.replay_status=format!("Replay: {consumed}/{total} replies consumed; {remaining} remaining; {} user inputs remaining",self.replay_inputs.len());
+                        if let Some(error)=failure {self.replay_stopped=true;self.replay_status.push_str(&format!("; {error}"));}
+                    }
+                    AgentMessage::TurnFailed {reason,..} => {self.replay_stopped=true;self.notice=format!("Turn failed; session retained: {reason}");}
+                    AgentMessage::ModelChanged {model,error,..} => {self.model_changing=false;self.notice=match error {Some(error)=>format!("Model change failed: {error}"),None=>format!("Model changed: {model}")};}
+                    _=>{}
+                }
                 if let AgentMessage::RecoverySaved { path, error } = &message {
                     if path != &self.recovery_path {return Err(io::Error::other("Recovery path mismatch"));}
                     if let Some(error) = error {
@@ -151,10 +178,27 @@ impl Task<'_> {
         {
             return Err(io::Error::other(reason.to_string()));
         }
-        let progress = self.tree.progress(self.capabilities)?;
+        let progress = if self.model_changing || self.pending_model.is_some() {ControlActions::default()} else {self.tree.progress(self.capabilities)?};
         actions.commands.extend(progress.commands);
         actions.operations.extend(progress.operations);
         actions.records.extend(progress.records);
+        // Do not change a model beneath in-flight work or a pending Promote.
+        // Descendants retain their own model; newly forked sessions inherit
+        // the model from their actual parent, never a global replacement.
+        let idle=!self.tree.recovering&&!self.model_changing&&self.tree.authority_ready()&&!self.tree.authority_running()&&!self.tree.pending_work()&&!self.tree.recovery_pending_commands();
+        if idle {
+            if let Some(model)=self.pending_model.take() {
+                self.model_changing=true;
+                actions.commands.push(AgentCommand::Model {branch_id:self.tree.authority_branch_id.clone().unwrap(),model});
+            } else if self.replay_started&&!self.replay_stopped {
+                if let Some(prompt)=self.replay_inputs.front().cloned() {
+                    if let Some(command)=self.tree.continue_authority(prompt)? {self.replay_inputs.pop_front();actions.commands.push(command);}
+                } else {
+                    self.replay_stopped=true;
+                    self.notice=format!("Replay automatic input finished; {}. Session retained for manual input",self.replay_status);
+                }
+            }
+        }
         Ok(Some(actions))
     }
 
@@ -214,6 +258,12 @@ pub fn run(
         suspended: false,
         save_requested: false,
         loaded: false,
+        replay_inputs: Default::default(),
+        replay_started:false,
+        replay_stopped:false,
+        replay_status:String::new(),
+        pending_model:None,
+        model_changing:false,
     };
     let result = thread::scope(|scope| {
         let sender = events.clone();
@@ -341,7 +391,7 @@ pub fn run(
                     task.stream.shutdown(std::net::Shutdown::Write)?;
                     task.draining = true;
                 }
-                if !task.notice.starts_with("Save failed") {task.notice = if task.tree.is_stopping() {
+                if !task.notice.starts_with("Save failed") && !task.notice.starts_with("Turn failed") && !task.notice.starts_with("Model ") && !task.notice.starts_with("Replay ") {task.notice = if task.tree.is_stopping() {
                     "Stopping"
                 } else if task.tree.authority_running() {
                     "Agent running"

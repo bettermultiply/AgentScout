@@ -1,11 +1,21 @@
 # 模型输出记录与回放工具
 
-记录是系统原生能力。验收从已有运行的 `session.jsonl`、`events.jsonl` 开始，第一步导出，然后回放核对；不先执行一次模型录制。正常运行不依赖这些工具，不计算或保存回放专用键。
+记录是系统原生能力。通用运行入口从指定已有 run 直接读取 `session.jsonl`、`events.jsonl` 并在内存准备回复；正常新 run 仍按通常方式保存自己的原生记录。不会额外生成 recording 缓存。
 
 ```sh
 node tools/replay/export.mjs RUN_DIR OUTPUT/recording.json
 node tools/replay/serve.mjs OUTPUT/recording.json 18080
 ```
+
+通用交互回放由控制面启动，不需要先运行导出或服务脚本：
+
+```sh
+mkdir /tmp/opencode/replay-run
+target/debug/ascout-control-plane /tmp/opencode/replay-run ../pi \
+  --replay /path/to/source-run --runtime /path/to/runtime.json --web 127.0.0.1:8080
+```
+
+Policy 首选源 run 的 `policy.json`，否则显式给出原 YAML；Runtime 配置及初始环境也必须来自原配置或显式参数，不能从目录布局猜测。新 run 与源目录必须分开，Runtime 的 control socket 不得写到源目录。回放结束或缺键后 WebUI 保持运行，用户可切到正常配置的 `provider/model` 后继续。
 
 只依赖 Node 26。导出只读源文件，在内存中按 transcript 原生 ID、Candidate/Chance 关系和 applied Promote 还原预测批次后的第一条父边（也可能是 custom、摘要或编辑记录）。events 按文件序处理，不按恢复后会重置的 `t_ms` 排序。不解析命名、不比较正文相似度、不按时间猜测；缺引用、批次不完整或关系歧义直接报错。只处理当前 Pi 记录格式。
 

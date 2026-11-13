@@ -269,6 +269,7 @@ export interface Conversation {
 }
 
 export type Request =
+  | { action: 'model'; model: string }
   | { action: 'prompt'; prompt: string }
   | { action: 'interrupt' }
   | { action: 'shutdown' }
