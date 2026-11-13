@@ -323,6 +323,7 @@ async function handle(command) {
                 const snapshot=tree.snapshot(dirname(command.path),[...checkpoints.values()].map(c=>c.manager));
                 const sourceFiles=new Map(snapshot.sources.map(source=>[source.originalFile,source.file]));
                 saveRecovery(command.path,{version:1,taskId,tree:snapshot,authority,nextAction,
+                    executionConfig:{model:model??null,modelPattern:modelPattern??null,thinkingLevel,runtimeTools},
                     access:access.snapshot(),generations:[...generations],results:[...results],
                     cancelled:[...cancelled],reportedEntries:[...reportedEntries],commands:commandRecords,
                     checkpoints:[...checkpoints].map(([id,c])=>[id,{...c,manager:sourceFiles.get(c.manager.getSessionFile())}])});
@@ -339,6 +340,16 @@ async function handle(command) {
                 if(sessions.size)throw Error('Load requires an empty Agent adapter');
                 const record=loadRecovery(command.path);
                 if(record.taskId!==taskId)throw Error('Recovery task identity mismatch');
+                const executionConfig={model:model??null,modelPattern:modelPattern??null,thinkingLevel,runtimeTools};
+                if(record.executionConfig&&JSON.stringify(record.executionConfig)!==JSON.stringify(executionConfig))throw Error('Recovery model, thinking level or tool configuration changed');
+                if(record.authority!==record.tree.authority)throw Error('Recovery authority identity mismatch');
+                const sources=new Map(record.tree.sources.map(source=>[source.file,source]));
+                for(const [id,checkpoint] of record.checkpoints){
+                    const [owner,operation]=JSON.parse(id),source=sources.get(checkpoint.manager);
+                    if(!source||!record.tree.branches.some(([branch])=>branch===owner))throw Error('Recovery checkpoint owner missing');
+                    const entry=source.entries.find(entry=>entry.id===checkpoint.treeTail);
+                    if(entry?.type!=='message'||JSON.stringify(entry.message)!==JSON.stringify(checkpoint.saved.at(-1))||!entry.message.content?.some(part=>part.type==='toolCall'&&part.id===operation))throw Error('Recovery checkpoint context mismatch');
+                }
                 const restored=SessionTree.restore(record.tree,SessionManager,sessionFile);
                 const managers=restored.recoveryManagers;
                 for(const [,checkpoint] of record.checkpoints)if(!managers.has(checkpoint.manager))throw Error('Recovery checkpoint manager missing');
