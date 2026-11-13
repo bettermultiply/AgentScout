@@ -1,6 +1,6 @@
 # 控制面 WebUI（2026-11-10）
 
-2026-11-13 固定分叉平滑根部连接使用纯几何模块，保留 React Flow + SVG；连接与 bounds 共用控制点。当前流程为首交点、单侧距离、三次相切与闭合轮廓，子枝起点在父中心线、Chance 在父外沿。实现和严格验收缺口见 [连接状态](tree-connection-repair.md)；参数与公式见 [投机树绘制参数](tree-parameters.md#固定分叉平滑连接2026-11-13)。V3、V7、V11 未通过，不宣称整体或视觉验收完成。
+2026-11-13 根部连接采用实际可见父边界位置映射与有限子侧过渡，直接构造两条三次曲线和闭合填充，保留 React Flow + SVG；连接与 bounds 共用控制点。子枝起点在父中心线、Chance 在父外沿，叶茎 placement 不变。当前是待用户视觉验收原型，公式与限制见 [连接状态](tree-connection-repair.md)、[投机树绘制参数](tree-parameters.md#固定分叉平滑连接2026-11-13)。
 
 控制面 WebUI 是 `--web` 模式下的正式浏览器界面。它只读取控制面已经发布的观察事实与按 Branch 的对话接口，不接触 Speculative Tree、控制命令或 Runtime 内部对象；输入仍走 `POST /api/request`。
 

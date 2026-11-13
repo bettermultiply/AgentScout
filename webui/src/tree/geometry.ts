@@ -6,8 +6,9 @@ import { makeWidthAt } from './widthProfile'
 import { startLead } from './startLead'
 import { placeStems } from './stemPlacement'
 import { ordinaryOutline } from './ordinaryOutline'
-import { cubicLength, ellipseSides, sectionSides, outlineCurves, type ClosedPath, type Cubic } from '../geometry/curves'
-import { smoothConnection, roundedBase, type Join } from '../geometry/smoothConnection'
+import { ellipseSides, sectionSides, outlineCurves, type ClosedPath, type Cubic } from '../geometry/curves'
+import type { Join } from '../geometry/smoothConnection'
+import { connectionSide, connectSides, type ConnectionSides } from '../geometry/connection'
 
 /**
  * Static, observation-time geometry. A Branch owns its path; there is no subtree
@@ -160,58 +161,6 @@ function trunkSide(g: BranchGeometry, side: number): Cubic[] {
   }))
 }
 
-// Drawing-only root identity; do not add metadata to the growth geometry.
-const rootBranches = new WeakSet<BranchGeometry>()
-
-/** The parent's real visible outer loop in its own frame. */
-function visibleLoop(g: BranchGeometry, tuning: TreeTuning): Cubic[] {
-  if (g.connection) return closedCubics(g.connection.path)
-  if (!g.calls.length) {
-    const direction = { x: Math.sin(g.initialAngle), y: Math.cos(g.initialAngle) }
-    const [upper, lower] = ellipseSides(g.bud.base, direction, tuning.budLength, tuning.budWidth)
-    return [...upper, ...[...lower].reverse().map(reverseCubic)]
-  }
-  if (g.pathPoints.length === 1) {
-    const direction = { x: Math.sin(g.initialAngle), y: Math.cos(g.initialAngle) }
-    const [upper, lower] = sectionSides(g.pathPoints[0], direction, g.trunkWidths[0], g.trunk.stroke)
-    return [...upper, ...[...lower].reverse().map(reverseCubic)]
-  }
-  const { points, widths } = rootBranches.has(g)
-    ? startLead(g.pathPoints, g.trunkWidths, g.initialAngle, tuning.startLeadRatio)
-    : { points: g.pathPoints, widths: g.trunkWidths }
-  const left = points.map((p, i) => {
-    const n = normalAt(points, i, g.initialAngle)
-    return { x: p.x + n.x * widths[i] / 2, y: p.y + n.y * widths[i] / 2 }
-  })
-  const right = points.map((p, i) => {
-    const n = normalAt(points, i, g.initialAngle)
-    return { x: p.x - n.x * widths[i] / 2, y: p.y - n.y * widths[i] / 2 }
-  })
-  // trunkOutline closes both ends with straight caps; the loop needs them too.
-  return [
-    ...outlineCurves(left), lineCubic(left[left.length - 1], right[right.length - 1]),
-    ...[...outlineCurves(right)].reverse().map(reverseCubic), lineCubic(right[0], left[0]),
-  ]
-}
-function lineCubic(start: Point, end: Point): Cubic {
-  return { start, c1: { x: start.x + (end.x - start.x) / 3, y: start.y + (end.y - start.y) / 3 },
-    c2: { x: start.x + (end.x - start.x) * 2 / 3, y: start.y + (end.y - start.y) * 2 / 3 }, end }
-}
-const reverseCubic = (c: Cubic): Cubic => ({ start: c.end, c1: c.c2, c2: c.c1, end: c.start })
-function closedCubics(path: ClosedPath): Cubic[] {
-  const out: Cubic[] = []; let start = path.start
-  for (const segment of path.segments) {
-    const end = segment.end
-    if (segment.kind === 'cubic') out.push({ start, c1: segment.c1, c2: segment.c2, end })
-    else if (cubicLength({ start, c1: start, c2: end, end }) > 0) out.push({
-      start, c1: { x: start.x + (end.x - start.x) / 3, y: start.y + (end.y - start.y) / 3 },
-      c2: { x: start.x + (end.x - start.x) * 2 / 3, y: start.y + (end.y - start.y) * 2 / 3 }, end,
-    })
-    start = end
-  }
-  return out
-}
-
 function connectionPath(path: ClosedPath): PathGeometry {
   const points = [path.start]
   const parts = [`M ${path.start.x} ${path.start.y}`]
@@ -305,21 +254,15 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
   const NODE_HALF_WIDTH = tuning.nodeOrigin
   const NODE_WIDTH = NODE_HALF_WIDTH * 2
   const result = new Map<string, BranchGeometry>()
-  // Read only after a branch's connection is final. Reuse the exact loop for
-  // its stems and children; keep this cache scoped to this layout/tuning.
-  const loops = new WeakMap<BranchGeometry, Cubic[]>()
-  const loopOf = (g: BranchGeometry): Cubic[] => {
-    let loop = loops.get(g)
-    if (!loop) { loop = visibleLoop(g, tuning); loops.set(g, loop) }
-    return loop
-  }
+  // Final visible sides and their source positions, scoped to this layout.
+  const boundaries = new WeakMap<BranchGeometry, ConnectionSides>()
   const branches = task.branchOrder.map(id => task.branches[id]).filter(Boolean)
   const children = (id: string) => branches.filter(b => b.parentBranchId === id)
   const count = (b: BranchState): number =>
     groupBranchCalls(b).length + children(b.branchId).reduce((sum, child) => sum + count(child), 0)
 
   const place = (branch: BranchState, root: Point, initialAngle: number, startWidth: number,
-    attach?: { parent: BranchGeometry; fork: Point; center: Point; width: number; side: -1 | 1; heading: number },
+    attach?: { parent: BranchGeometry; fork: Point; center: Point; distance: number; width: number; side: -1 | 1; heading: number },
     ): void => {
     const calls = [...groupBranchCalls(branch)].sort(
       (a, b) => (a.startMs ?? 0) - (b.startMs ?? 0) || a.firstSequence - b.firstSequence,
@@ -500,7 +443,19 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       section.side = placement.side
       section.shape = stemGeometry(section, tuning, placement.tilt, at(section.y))
     })
-    if (!attach) rootBranches.add(geometry)
+    let boundary: ConnectionSides
+    if (points.length > 1) {
+      const positions = outline.points.length > points.length
+        ? [-tuning.startLeadRatio * widths[0], ...pointDistances] : pointDistances
+      boundary = [1, -1].map(side => connectionSide(outlineCurves(outline.points.map((p, i) => {
+        const n = normalAt(outline.points, i, initialAngle)
+        return { x: p.x + side * n.x * outline.widths[i] / 2, y: p.y + side * n.y * outline.widths[i] / 2 }
+      })), positions)) as ConnectionSides
+    } else {
+      boundary = [connectionSide(trunkSide(geometry, 1)), connectionSide(trunkSide(geometry, -1))]
+      // Centre the zero-length section's coordinate on its visible side.
+      for (const side of boundary) { const half = side.positions.at(-1)! / 2; side.positions = side.positions.map(p => p - half) }
+    }
     result.set(branch.branchId, geometry)
 
     // Empty buds keep their ordinary outline at the centre-line origin.
@@ -508,21 +463,18 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       const { parent, center } = attach
       const convert = (p: Point): Point => ({ x: p.x - center.x + NODE_HALF_WIDTH, y: p.y - center.y })
       const W = geometry.trunkWidths[0]
-      const sides: [Cubic[], Cubic[]] = [trunkSide(geometry, 1), trunkSide(geometry, -1)]
-      const pointParent = parent.pathPoints.length === 1
       let outline: ClosedPath | undefined, joins: [Join, Join] | undefined
-      if (pointParent) outline = roundedBase(sides)
-      else {
-        const loop = loopOf(parent).map(c => ({ start: convert(c.start), c1: convert(c.c1), c2: convert(c.c2), end: convert(c.end) }))
-        const r = smoothConnection({ parent: loop, childSides: sides,
+      {
+        const r = connectSides({ parent: boundaries.get(parent)!, child: boundary,
+          position: attach.distance, anchor: center, convert,
           parentDistance: tuning.connectionParentRatio * W, childDistance: tuning.connectionRootRatio * W })
-        if (r) { outline = r.outline; joins = r.joins }
+        if (r) { outline = r.outline; joins = r.joins; boundary = r.sides }
       }
       if (outline) geometry.connection = { ...connectionPath(outline), path: outline, rootWidth: W, joins }
     }
 
-    // The branch outline is final here; every stem reads the same immutable loop.
-    const stemParent = loopOf(geometry)
+    // The branch outline is final here; hidden ordinary root sides are gone.
+    boundaries.set(geometry, boundary)
     for (const section of sections) {
       const shape = section.shape!, [origin, control, tip] = shape.path.points
       const edges: [Point[], Point[]] = [[], []]
@@ -534,7 +486,9 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
         for (const side of [0, 1]) { const sign = side === 0 ? 1 : -1; edges[side].push({ x: center.x - sign * derivative.y / length * shape.width / 2, y: center.y + sign * derivative.x / length * shape.width / 2 }) }
       }
       const sides: [Cubic[], Cubic[]] = [outlineCurves(edges[0]), outlineCurves(edges[1])]
-      const connected = smoothConnection({ parent: stemParent, childSides: sides, parentDistance: tuning.connectionParentRatio * shape.width, childDistance: tuning.connectionRootRatio * shape.width })
+      const connected = connectSides({ parent: boundary, position: section.y, anchor: shape.anchor,
+        child: [connectionSide(sides[0]), connectionSide(sides[1])],
+        parentDistance: tuning.connectionParentRatio * shape.width, childDistance: tuning.connectionRootRatio * shape.width })
       shape.outline = connectionPath(connected?.outline ?? ordinaryOutline(sides))
       if (connected) shape.connection = { path: connected.outline, joins: connected.joins }
       const cap = rotate(tip, shape.angle, shape.anchor)
@@ -550,7 +504,7 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
         tuning.widthExponent,
       )
       place(child, { x: geometry.x + point.x, y: geometry.y + point.y }, angle, childWidth,
-        { parent: geometry, fork: point, center: point, width, side, heading: localHeading })
+        { parent: geometry, fork: point, center: point, distance, width, side, heading: localHeading })
     }
   }
 
