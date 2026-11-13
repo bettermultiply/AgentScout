@@ -98,4 +98,3 @@ pub struct ControlActions {
     pub operations: Vec<(u64, ControlOperation)>,
     pub records: Vec<Value>,
 }
-

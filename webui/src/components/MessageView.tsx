@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useRef } from 'react'
 import { formatJson } from '../format'
 import type { ConversationMessage } from '../types'
 
@@ -94,16 +94,18 @@ function MessageParts({ content }: { content: unknown }) {
   )
 }
 
-export function MessageView({ message }: { message: ConversationMessage }) {
+export const MessageView = memo(function MessageView({ message }: { message: ConversationMessage }) {
   const role = typeof message.role === 'string' ? message.role : ''
+  const pending = message.pending === true
   const toolName =
     typeof message.toolName === 'string' ? message.toolName : null
   const errorMessage =
     typeof message.errorMessage === 'string' ? message.errorMessage : null
   return (
-    <article className={`message message-${role || 'unknown'}`}>
+    <article className={`message message-${role || 'unknown'}${pending ? ' message-pending' : ''}`}>
       <header className="message-head">
         <strong>{roleLabel(role)}</strong>
+        {pending ? <span className="message-status">发送中</span> : null}
         {toolName ? <span className="message-tool">{toolName}</span> : null}
       </header>
       <MessageParts content={message.content} />
@@ -112,7 +114,7 @@ export function MessageView({ message }: { message: ConversationMessage }) {
       ) : null}
     </article>
   )
-}
+})
 
 export function useStickyScroll(
   dependency: unknown,

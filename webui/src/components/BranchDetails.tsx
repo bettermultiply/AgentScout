@@ -20,7 +20,7 @@ import {
   formatTimestamp,
   formatTokens,
 } from '../format'
-import { toolName } from '../treeLayout'
+import { toolName } from '../tree'
 import { useConversation, useNow } from '../useConversation'
 import type { DetailAnchor } from '../store'
 import { ConversationView } from './ConversationView'

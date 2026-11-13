@@ -1,13 +1,27 @@
+import type { ConversationMessage } from '../types'
 import type { ConversationEntry } from '../useConversation'
 import { MessageView, useStickyScroll } from './MessageView'
+
+function stableMessageKey(message: ConversationMessage, index: number): string {
+  const value = message.id ?? message.timestamp ?? message.ts ?? message.message_id
+  return typeof value === 'string' || typeof value === 'number'
+    ? String(value)
+    : `${index}:${JSON.stringify(message)}`
+}
 
 interface Props {
   entry: ConversationEntry
   variant: 'main' | 'detail'
   emptyText: string
+  pendingMessages?: ConversationMessage[]
 }
 
-export function ConversationView({ entry, variant, emptyText }: Props) {
+export function ConversationView({
+  entry,
+  variant,
+  emptyText,
+  pendingMessages = [],
+}: Props) {
   const data = entry.data
   const scrollRef = useStickyScroll(
     `${data?.inherited.length ?? 0}:${data?.messages.length ?? 0}:${data?.streaming.length ?? 0}:${entry.status}`,
@@ -22,6 +36,9 @@ export function ConversationView({ entry, variant, emptyText }: Props) {
           <span />
           <span />
         </div>
+        {pendingMessages.map((message, index) => (
+          <MessageView key={`pending-loading-${index}`} message={message} />
+        ))}
       </div>
     )
   }
@@ -38,12 +55,15 @@ export function ConversationView({ entry, variant, emptyText }: Props) {
     return (
       <div className={variant === 'main' ? 'conversation-scroll' : ''}>
         <div className="muted conversation-empty">{emptyText}</div>
+        {pendingMessages.map((message, index) => (
+          <MessageView key={`pending-empty-${index}`} message={message} />
+        ))}
       </div>
     )
   }
 
   const hasContent =
-    data.inherited.length > 0 || data.messages.length > 0 || Boolean(data.streaming)
+    data.inherited.length > 0 || data.messages.length > 0 || Boolean(data.streaming) || pendingMessages.length > 0
 
   return (
     <div
@@ -60,11 +80,15 @@ export function ConversationView({ entry, variant, emptyText }: Props) {
       ) : null}
 
       {data.inherited.map((message, index) => (
-        <MessageView key={`inherited-${index}`} message={message} />
+        <MessageView key={`inherited-${stableMessageKey(message, index)}`} message={message} />
       ))}
 
       {data.messages.map((message, index) => (
-        <MessageView key={`message-${index}`} message={message} />
+        <MessageView key={`message-${stableMessageKey(message, index)}`} message={message} />
+      ))}
+
+      {pendingMessages.map((message, index) => (
+        <MessageView key={`pending-${index}`} message={message} />
       ))}
 
       {data.streaming ? (

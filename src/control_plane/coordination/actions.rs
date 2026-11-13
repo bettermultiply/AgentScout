@@ -358,7 +358,8 @@ impl SpeculativeTree {
             }
             _ => unreachable!(),
         };
-        self.record_authority_outcome(&chance_id, outcome.clone(), Some(evidence))?;
+        self.record_authority_outcome(&chance_id, outcome.clone(), Some(evidence.clone()))?;
+        self.record_public_nle_map_action(&branch_id, &operation_id, &evidence)?;
         if self.chance(&chance_id)?.branch_ids.is_empty() {
             // No Proposal was tested; nothing was speculated on this Chance.
             self.change_chance_stage(

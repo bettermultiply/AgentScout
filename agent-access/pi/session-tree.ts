@@ -71,6 +71,8 @@ export class SessionTree {
         this.authority=branchId;
     }
 
+    /** Explicit control-plane authority takes precedence over a previous run. */
+    adoptAuthority(branchId) { this.authority=branchId; }
 
     context(branchId) {
         const manager=this.branches.get(branchId)?.manager??this.manager,tail=this.tail(branchId);

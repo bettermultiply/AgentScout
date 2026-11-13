@@ -424,6 +424,10 @@ async function handle(command) {
             await report({message:'recovery_suspended'});return;
         }
         case 'start_branch': {
+            // The control plane explicitly starts this Branch as the authority;
+            // a leftover authority marker in a reused session file must not
+            // keep a previous run's winner in charge.
+            if(command.role==='authority'){authority=branch;tree.adoptAuthority(branch)}
             const manager=tree.createBranch(branch,command.workspace,tree.manager,tree.tail(branch)??tree.manager.getLeafId());
             const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}

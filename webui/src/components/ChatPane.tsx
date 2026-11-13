@@ -9,8 +9,9 @@ import {
 import { shortId } from '../format'
 import { PanelIcon, SendIcon } from '../icons'
 import { useAppStore } from '../store'
-import type { BranchRole, BranchStatus } from '../types'
+import type { BranchRole, BranchStatus, ConversationMessage } from '../types'
 import { useConversation } from '../useConversation'
+import { useAuthorityConversation } from '../useAuthorityConversation'
 import { ConversationView } from './ConversationView'
 
 function connectionLabel(connection: string): string {
@@ -34,6 +35,25 @@ function connectionLabel(connection: string): string {
   }
 }
 
+function messageText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part
+      if (part && typeof part === 'object' && 'text' in part) {
+        const text = (part as { text?: unknown }).text
+        return typeof text === 'string' ? text : ''
+      }
+      return ''
+    })
+    .join('')
+}
+
+function isMatchingUserMessage(message: ConversationMessage, text: string): boolean {
+  return message.role === 'user' && messageText(message.content).trim() === text.trim()
+}
+
 function BranchBadges({
   role,
   status,
@@ -46,7 +66,8 @@ function BranchBadges({
   if (!isCurrent) {
     return (
       <span className="badges">
-        <span className="badge badge-history">历史权威</span>
+        <span className={`badge badge-role-${role}`}>{roleLabel(role)}</span>
+        <span className={`badge badge-status-${status}`}>{statusLabel(status)}</span>
       </span>
     )
   }
@@ -77,11 +98,14 @@ export function ChatPane() {
     ? task?.branches[explicitAuthority] ?? current
     : current
   const windows = useMemo(() => authorityWindows(task), [task])
-  const conversation = useConversation(selected?.branchId ?? null, Boolean(selected))
+  const branchConversation = useConversation(selected?.branchId ?? null, Boolean(selected))
+  const authorityConversation = useAuthorityConversation(task)
+  const conversation = explicitAuthority ? branchConversation : authorityConversation
 
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
   const [requestError, setRequestError] = useState<string | null>(null)
+  const [pendingMessages, setPendingMessages] = useState<ConversationMessage[]>([])
   const textarea = useRef<HTMLTextAreaElement>(null)
 
   const connected = connection === 'open'
@@ -91,6 +115,40 @@ export function ChatPane() {
   )
   const canSend = Boolean(selected && isCurrent && connected && ready && !busy)
   const notice = state.runStatus?.notice ?? ''
+
+  useEffect(() => {
+    if (!conversation.data || pendingMessages.length === 0) return
+    setPendingMessages((messages) => {
+      const unmatched = [...conversation.data!.messages]
+      let removed = false
+      const remaining = messages.filter((pending) => {
+        const index = unmatched.findIndex((message) =>
+          isMatchingUserMessage(message, messageText(pending.content)),
+        )
+        if (index < 0) return true
+        unmatched.splice(index, 1)
+        removed = true
+        return false
+      })
+      return removed ? remaining : messages
+    })
+  }, [conversation.data, pendingMessages.length])
+
+  useEffect(() => {
+    if (pendingMessages.length === 0) return
+    const timers = pendingMessages.map((pending) => {
+      const sentAt =
+        typeof pending.pendingAt === 'number' ? pending.pendingAt : Date.now()
+      return window.setTimeout(() => {
+        setPendingMessages((messages) => {
+          if (!messages.includes(pending)) return messages
+          setRequestError('消息等待确认超时')
+          return messages.filter((message) => message !== pending)
+        })
+      }, Math.max(0, sentAt + 15_000 - Date.now()))
+    })
+    return () => timers.forEach((timer) => window.clearTimeout(timer))
+  }, [pendingMessages])
 
   useEffect(() => {
     if (!requestError) return
@@ -103,11 +161,19 @@ export function ChatPane() {
     if (!text || !canSend) return
     setBusy(true)
     setRequestError(null)
+    const pending: ConversationMessage = {
+      role: 'user',
+      content: text,
+      pending: true,
+      pendingAt: Date.now(),
+    }
+    setPendingMessages((messages) => [...messages, pending])
     try {
       await sendRequest({ action: 'prompt', prompt: text })
       setPrompt('')
       textarea.current?.focus()
     } catch (failure) {
+      setPendingMessages((messages) => messages.filter((message) => message !== pending))
       setRequestError(failure instanceof Error ? failure.message : String(failure))
     } finally {
       setBusy(false)
@@ -207,18 +273,17 @@ export function ChatPane() {
               selectAuthorityWindow(event.target.value || null)
             }
           >
-            <option value="">
-              当前权威窗口{current ? ` · ${shortId(current.branchId)}` : ''}
-            </option>
+             <option value="">权威窗口</option>
             {windows.map((window) => (
               <option key={window.branchId} value={window.branchId}>
-                {shortId(window.branchId)} ·{' '}
-                {window.branchId === current?.branchId ? '当前权威' : '历史权威'}
+                {window.branchId === current?.branchId
+                  ? `当前权威窗口 · ${shortId(window.branchId)}`
+                  : `${shortId(window.branchId)} · ${statusLabel(window.status)}`}
               </option>
             ))}
           </select>
         </label>
-        {selected ? (
+        {selected && explicitAuthority ? (
           <div className="window-identity">
             <code title={selected.branchId}>{shortId(selected.branchId)}</code>
             <BranchBadges
@@ -256,9 +321,10 @@ export function ChatPane() {
       ) : null}
 
       {selected ? (
-        <ConversationView
-          entry={conversation}
-          variant="main"
+         <ConversationView
+           entry={conversation}
+           variant="main"
+           pendingMessages={isCurrent ? pendingMessages : []}
           emptyText={
             isCurrent
               ? '当前权威窗口尚无消息。'
@@ -326,4 +392,3 @@ export function ChatPane() {
     </section>
   )
 }
-

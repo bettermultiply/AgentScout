@@ -108,6 +108,16 @@ pub enum ObservationContent {
         finished_at_ms: Option<u64>,
         duration_ms: Option<u64>,
     },
+    /// NLE workload's public observation before and after one real action.
+    /// The Runtime bridge is the authority for these values; the control plane
+    /// only forwards the already-public chars/blstats payload.
+    NleMapAction {
+        branch_id: String,
+        action_id: String,
+        action: u64,
+        before: Value,
+        after: Value,
+    },
     Settlement {
         branch_id: String,
         hit: bool,

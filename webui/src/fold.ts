@@ -44,6 +44,8 @@ export interface ChanceState {
   proposalIds: string[]
   branchIds: string[]
   lastEventSequence: number
+  createdSequence: number | null
+  createdTimestampMs: number | null
 }
 
 export interface BranchState {
@@ -157,6 +159,8 @@ function newChance(chanceId: string, sequence: number): ChanceState {
     proposalIds: [],
     branchIds: [],
     lastEventSequence: sequence,
+    createdSequence: null,
+    createdTimestampMs: null,
   }
 }
 
@@ -229,6 +233,8 @@ export function applyEvent(state: RunState, event: ObservationEvent): RunState {
         chance.toolName = event.tool_name
         chance.stage = event.stage
         chance.authorityState = event.authority_state
+        chance.createdSequence = event.sequence
+        chance.createdTimestampMs = event.timestamp_ms
         break
       case 'chance_stage_changed':
         chance.stage = event.stage
@@ -316,6 +322,9 @@ export function applyEvent(state: RunState, event: ObservationEvent): RunState {
         break
       case 'tool_finished':
         branch.tools = [...branch.tools, event]
+        break
+      case 'nle_map_action':
+        // Map replay consumes this public workload event independently.
         break
       case 'settlement':
         branch.settlements = [...branch.settlements, event]
@@ -440,18 +449,18 @@ export function statusLabel(status: BranchStatus): string {
     case 'discarding':
       return '正在丢弃'
     case 'discarded':
-      return '已丢弃'
+      return '未采纳'
     case 'cleaning':
       return '正在清理'
     case 'cleaned':
-      return '已清理'
+      return '已结束'
   }
 }
 
 export function chanceStageLabel(stage: ChanceStage): string {
   if (typeof stage === 'object') {
     if ('accepted' in stage) return `已接受 ${stage.accepted}`
-    return `已抛弃：${discardedReasonLabel(stage.discarded)}`
+    return `未采纳：${discardedReasonLabel(stage.discarded)}`
   }
   switch (stage) {
     case 'pending':
@@ -525,7 +534,7 @@ export function runtimeStateLabel(state: RuntimeExecutionState): string {
     case 'terminated':
       return '已终止'
     case 'cleaned':
-      return '已清理'
+      return '已结束'
     case 'failed':
       return '失败'
   }

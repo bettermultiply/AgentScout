@@ -14,6 +14,9 @@
   --text: #16212c;
   --text-soft: #33485b;
   --muted: #607285;
+  --tree-abandoned: #52606e;
+  --tree-dry: #8a7a5c;
+  --leaf-candidate: #a83a7e;
   --accent: #0a6c68;
   --accent-strong: #07524f;
   --accent-contrast: #ffffff;
@@ -42,6 +45,9 @@
     --text: #e4edf6;
     --text-soft: #c3d1de;
     --muted: #92a4b6;
+    --tree-abandoned: #9aa8b8;
+    --tree-dry: #9c8a6e;
+    --leaf-candidate: #f0a2d2;
     --accent: #62dccd;
     --accent-strong: #9af4e9;
     --accent-contrast: #052220;
@@ -80,6 +86,28 @@ body {
   color: var(--text);
   -webkit-font-smoothing: antialiased;
 }
+
+/* ---------------------------------------------------------- NLE map replay --- */
+.nle-map-page { min-height: 100dvh; padding: clamp(20px, 4vw, 52px); background: radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--accent-soft) 72%, transparent), transparent 34%), var(--bg); }
+.nle-map-header { max-width: 1320px; margin: 0 auto 24px; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+.nle-map-header h1 { margin: 2px 0 4px; font-size: clamp(25px, 3vw, 38px); letter-spacing: -.03em; }
+.eyebrow, .card-label { margin: 0; color: var(--accent); font-size: 11px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+.nle-map-subtitle { margin: 0; color: var(--muted); }
+.nle-map-source { padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text-soft); line-height: 1.45; text-align: right; }
+.nle-map-source small { color: var(--muted); }.status-dot { display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%; background: var(--warning); }
+.source-real .status-dot { background: var(--success, #2f9e6d); }.source-demo .status-dot, .source-unavailable .status-dot { background: var(--warning); }.source-loading .status-dot { background: var(--accent); }
+.nle-map-layout { max-width: 1320px; margin: auto; display: grid; grid-template-columns: minmax(0, 1fr) minmax(285px, 360px); gap: 20px; align-items: start; }
+.nle-map-card, .nle-history-card, .nle-action-card, .nle-boundary-card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.nle-map-card { overflow: hidden; }.nle-map-toolbar { display: flex; align-items: center; gap: 18px; padding: 14px 18px; border-bottom: 1px solid var(--border); color: var(--muted); }.nle-map-toolbar strong { color: var(--text); }.coordinate-readout { margin-left: auto; font-family: var(--font-mono); color: var(--accent); font-size: 12px; }
+.nle-map-viewport { position: relative; min-height: min(62vh, 620px); display: grid; place-items: center; padding: 52px; overflow: auto; background: linear-gradient(var(--tree-grid) 1px, transparent 1px), linear-gradient(90deg, var(--tree-grid) 1px, transparent 1px); background-size: 38px 38px; background-color: var(--surface-sunken); }
+.nle-map-grid { width: min(100%, 620px); aspect-ratio: 8 / 6; display: grid; grid-template-rows: repeat(6, 1fr); border: 2px solid var(--border-strong); box-shadow: 0 0 0 10px color-mix(in srgb, var(--surface) 65%, transparent); }
+.nle-cell { position: relative; display: grid; place-items: center; min-width: 38px; min-height: 38px; border: 1px solid color-mix(in srgb, var(--border) 55%, transparent); font-family: var(--font-mono); font-size: 20px; transition: background .16s; }.nle-cell.is-unknown { background: color-mix(in srgb, var(--surface-sunken) 72%, transparent); color: transparent; }.nle-cell.is-explored { background: color-mix(in srgb, var(--accent-soft) 32%, var(--surface)); color: var(--muted); }.nle-cell.is-visible { background: color-mix(in srgb, #f3c969 25%, var(--surface)); color: var(--text); }.nle-cell.is-player { background: var(--accent); color: var(--accent-contrast); font-weight: 800; box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent-contrast) 70%, transparent); z-index: 1; }.nle-cell i { position: absolute; right: 2px; bottom: 0; color: var(--muted); font: 8px var(--font-mono); opacity: .7; }
+.nle-map-axis { position: absolute; color: var(--muted); font-size: 11px; }.axis-x { right: 22px; bottom: 20px; }.axis-y { left: 20px; top: 20px; writing-mode: vertical-rl; }
+.nle-map-legend { display: flex; flex-wrap: wrap; gap: 12px 20px; padding: 14px 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }.legend-swatch { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -2px; border: 1px solid var(--border-strong); border-radius: 3px; }.legend-swatch.visible { background: #f3c969; }.legend-swatch.explored { background: var(--accent-soft); }.legend-swatch.unknown { background: var(--surface-sunken); }.legend-player { display: inline-grid; place-items: center; width: 14px; height: 14px; margin-right: 5px; border-radius: 3px; background: var(--accent); color: white; font: 11px var(--font-mono); }
+.nle-map-sidebar { display: grid; gap: 14px; }.nle-history-card, .nle-action-card, .nle-boundary-card { padding: 18px; }.step-count { display: flex; align-items: baseline; gap: 7px; margin: 8px 0 12px; }.step-count strong { font-size: 32px; color: var(--accent); }.step-count span { color: var(--muted); }.history-track { height: 6px; margin-bottom: 15px; border-radius: 99px; background: var(--surface-sunken); overflow: hidden; }.history-track div { height: 100%; border-radius: inherit; background: var(--accent); transition: width .18s; }.history-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }.history-actions button:nth-child(3) { grid-column: 2; grid-row: 1; }.history-actions button:nth-child(4) { grid-column: 1; grid-row: 2; }.readonly-note { margin: 14px 0 0; color: var(--muted); font-size: 12px; }.nle-action-card h2 { margin: 7px 0 2px; font-size: 20px; }.nle-action-card p { margin: 0 0 14px; color: var(--muted); }.nle-action-card dl { display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; margin: 0; font-size: 13px; }.nle-action-card dt { color: var(--muted); }.nle-action-card dd { margin: 0; font-family: var(--font-mono); }.nle-boundary-card { border-left: 3px solid var(--warning); font-size: 12px; }.nle-boundary-card p { margin: 6px 0 0; color: var(--muted); }
+.map-meta { margin: 6px 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }.map-meta code { color: var(--text-soft); font-family: var(--font-mono); }
+@media (max-width: 820px) { .nle-map-header { align-items: stretch; flex-direction: column; }.nle-map-source { text-align: left; }.nle-map-layout { grid-template-columns: 1fr; }.nle-map-viewport { min-height: 55vh; padding: 34px 24px; }.nle-map-toolbar { flex-wrap: wrap; gap: 8px 14px; }.coordinate-readout { margin-left: 0; width: 100%; } }
+@media (max-width: 520px) { .nle-map-page { padding: 16px 12px 28px; }.nle-map-header { margin-bottom: 14px; }.nle-map-header h1 { font-size: 26px; }.nle-map-subtitle { font-size: 13px; }.nle-map-toolbar { padding: 12px 14px; font-size: 12px; }.nle-map-viewport { min-height: 380px; padding: 34px 12px; }.nle-map-grid { min-width: 300px; }.nle-map-legend { gap: 9px 14px; padding: 12px 14px; font-size: 11px; }.nle-history-card, .nle-action-card, .nle-boundary-card { padding: 14px; }.history-actions button { min-height: 40px; }.nle-map-axis { font-size: 10px; }.axis-x { right: 12px; bottom: 12px; }.axis-y { left: 10px; top: 12px; } }
 
 code,
 pre {
@@ -141,7 +169,38 @@ select {
 }
 
 .app.app-panel-open {
-  grid-template-columns: minmax(0, 1fr) clamp(410px, 34vw, 620px);
+  grid-template-columns: minmax(0, 1fr) 8px min(var(--panel-width, clamp(410px, 34vw, 620px)), calc(100% - 488px));
+}
+
+.panel-resizer {
+  position: relative;
+  z-index: 3;
+  cursor: col-resize;
+  touch-action: none;
+  background: var(--surface-sunken);
+}
+
+.panel-resizer::after {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: var(--border-strong);
+}
+
+.panel-resizer:hover::after,
+.panel-resizer:focus-visible::after,
+.app-resizing .panel-resizer::after {
+  background: var(--accent);
+}
+
+.panel-resizer:focus-visible {
+  outline-offset: -2px;
+}
+
+.app-resizing,
+.app-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .panel-scrim {
@@ -483,6 +542,15 @@ select {
   font-weight: 600;
 }
 
+.message-status {
+  color: var(--accent-strong);
+  font-size: 10px;
+}
+
+.message-pending {
+  opacity: 0.78;
+}
+
 .message-tool {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -664,7 +732,7 @@ select {
   min-width: 0;
   min-height: 54px;
   max-height: 190px;
-  resize: vertical;
+  resize: none;
   border: 0;
   outline: none;
   padding: 6px 8px;
@@ -674,6 +742,9 @@ select {
 
 .composer textarea:disabled {
   cursor: not-allowed;
+  color: var(--muted);
+  background: var(--surface-sunken);
+  opacity: 1;
 }
 
 .send-button {
@@ -691,6 +762,14 @@ select {
 .send-button:hover:not(:disabled) {
   background: var(--accent-strong);
   border-color: var(--accent-strong);
+}
+
+.send-button:disabled {
+  border-color: var(--border-strong);
+  background: var(--surface-sunken);
+  color: var(--muted);
+  opacity: .45;
+  cursor: not-allowed;
 }
 
 .composer-hint,
@@ -1031,20 +1110,25 @@ select {
 }
 
 .legend-trunk-authority {
-  width: 12px;
-  background: var(--accent);
-  border: 2px solid var(--accent);
+  width: 9px;
+  background: color-mix(in srgb, var(--text) 85%, var(--accent));
 }
 
 .legend-trunk-candidate {
-  background: var(--surface);
-  border: 2px solid var(--accent);
+  width: 4.5px;
+  background: color-mix(in srgb, var(--text-soft) 65%, var(--accent));
+  opacity: 0.62;
+}
+
+.legend-trunk-finished {
+  width: 7px;
+  background: color-mix(in srgb, color-mix(in srgb, var(--text) 85%, var(--accent)) 72%, var(--surface));
 }
 
 .legend-trunk-abandoned {
-  background: var(--surface);
-  border: 2px solid var(--muted);
-  opacity: 0.5;
+  width: 4.5px;
+  background: var(--muted);
+  opacity: 0.4;
 }
 
 .legend-head {
@@ -1135,6 +1219,11 @@ select {
   background: currentColor;
 }
 
+.legend-leaf .leaf-shape.leaf-hollow {
+  background: transparent;
+  border: 1.2px solid currentColor;
+}
+
 .legend-leaf-note {
   display: block;
   color: var(--muted);
@@ -1206,40 +1295,68 @@ select {
   pointer-events: none;
 }
 
-/* A Branch is one capsule-trunk; candidates are hollow, authority is filled. */
+.tree-chance {
+  fill: #008b9a;
+  stroke: none;
+  stroke-width: 0;
+  opacity: 1;
+  pointer-events: all;
+  cursor: pointer;
+}
+
+.tree-chance-hit {
+  fill: transparent;
+  stroke: transparent;
+  pointer-events: all;
+  cursor: pointer;
+}
+
+.tree-empty-bud {
+  fill: currentColor;
+  stroke: none;
+  opacity: 1;
+}
+
+.head-child {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Branch forks and trunks use exactly the same solid rounded strokes. */
+.tree-fork {
+  fill: none;
+  stroke-linejoin: round;
+}
+
 .tree-trunk {
+  fill: currentColor;
   stroke-linecap: round;
-  transition:
-    stroke 0.32s ease,
-    stroke-width 0.32s ease,
-    opacity 0.32s ease;
+  stroke-linejoin: round;
+  transition: fill 0.32s ease, opacity 0.32s ease;
+  stroke: none;
 }
 
-.tree-trunk-authority {
-  stroke: var(--accent);
-  stroke-width: 9;
-}
+.tree-trunk-cap { fill: currentColor; stroke: none; pointer-events: none; }
 
-.tree-trunk-candidate {
-  stroke: var(--accent);
-  stroke-width: 6.5;
-  opacity: 0.5;
-}
-
-.tree-trunk-core {
-  stroke: var(--surface);
-  stroke-width: 3.2;
-  stroke-linecap: round;
-}
-
-.tree-trunk-abandoned {
-  stroke: var(--muted);
-  stroke-width: 4.5;
-  opacity: 0.4;
+.tree-ink-authority { color: #16212c; }
+/* Historical authority is a paler solid, not a translucent one: a translucent
+   trunk would let the child's colour show through at every junction. */
+.tree-ink-authority-finished { color: color-mix(in srgb, #16212c 72%, var(--surface)); }
+.tree-ink-candidate { color: #8f2d72; }
+.tree-ink-aborted { color: #52606e; }
+/* Aborted work is the only ink that dries out and fades as a whole. */
+.tree-ink.tree-ink-aborted { opacity: 0.4; }
+.tree-head-hit { stroke: transparent; fill: none; pointer-events: stroke; cursor: pointer; }
+.tree-model-tip { fill: currentColor; }
+@media (prefers-color-scheme: dark) {
+  .tree-ink-authority { color: #f4f8fc; }
+  .tree-ink-authority-finished { color: color-mix(in srgb, #f4f8fc 72%, var(--surface)); }
+  .tree-ink-candidate { color: #e98acb; }
+  .tree-ink-aborted { color: #9aa8b8; }
 }
 
 .tree-trunk-live {
-  animation: trunk-pulse 2.6s ease-in-out infinite;
+  animation: none;
 }
 
 .branch-head {
@@ -1247,9 +1364,9 @@ select {
   z-index: 3;
   padding: 0;
   border-radius: 50%;
-  border: 1.5px solid var(--accent);
-  background: var(--surface);
-  color: var(--accent);
+  border: 0;
+  background: var(--text-soft);
+  color: var(--surface);
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -1269,40 +1386,36 @@ select {
 }
 
 .head-authority {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-contrast);
+  background: var(--text);
+  color: var(--surface);
 }
 
 .head-abandoned {
   color: var(--muted);
   border-color: var(--muted);
   background: var(--surface);
-  opacity: 0.5;
+  opacity: 1;
 }
 
-.head-live::after {
+.branch-head::before {
   content: '';
   position: absolute;
-  inset: -4px;
+  inset: -6px;
   border-radius: 50%;
-  border: 1.2px solid var(--accent);
-  animation: node-pulse 2s ease-out infinite;
-  pointer-events: none;
 }
 
 .head-reason {
   position: absolute;
-  right: -6px;
-  bottom: -5px;
-  width: 9px;
-  height: 9px;
+  right: -8px;
+  bottom: -3px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  border: 1px solid var(--accent);
-  background: var(--surface-raised);
-  color: var(--accent);
+  border: 0;
+  background: transparent;
+  color: var(--muted);
   pointer-events: none;
 }
 
@@ -1343,8 +1456,9 @@ select {
   color: var(--muted);
 }
 
-/* A model call is a small twig: a rounded outward bend and a hanging stem. */
-.tree-twig-group {
+/* Model petioles carry tool leaf clusters at their tips. */
+.tree-twig-group,
+.tree-leaf-group {
   cursor: pointer;
   outline: none;
   pointer-events: auto;
@@ -1352,6 +1466,8 @@ select {
 
 .tree-twig-visual {
   fill: none;
+  stroke: currentColor;
+  stroke-width: var(--twig-stem-width, 2);
   stroke-linecap: round;
   stroke-linejoin: round;
   transition:
@@ -1360,47 +1476,59 @@ select {
     opacity 0.32s ease;
 }
 
-.tree-twig-authority .tree-twig-visual {
-  stroke: var(--accent);
-  stroke-width: 2.2;
+.tree-leaf-visual {
+  fill: currentColor;
+  stroke: color-mix(in srgb, currentColor 85%, black);
+  stroke-width: 1;
+  opacity: 1;
+  stroke-linejoin: round;
+  pointer-events: none;
 }
 
-.tree-twig-candidate .tree-twig-visual {
-  stroke: var(--accent);
-  stroke-width: 1.6;
-  opacity: 0.55;
+.tree-leaf-vein {
+  stroke: color-mix(in srgb, currentColor 85%, black);
+  stroke-width: 1px;
+  stroke-linecap: round;
+  opacity: 1;
+  pointer-events: none;
 }
 
-.tree-twig-abandoned .tree-twig-visual {
-  stroke: var(--muted);
-  stroke-width: 1.3;
-  opacity: 0.4;
-}
-
-.tree-twig-hit {
+.tree-leaf-petiole {
+  stroke: currentColor;
+  stroke-width: 1.5;
   fill: none;
-  stroke: transparent;
-  stroke-width: 14;
-  pointer-events: stroke;
 }
 
-.tree-twig-authority .tree-twig-tip {
-  fill: var(--accent);
+/* Tool status is its own channel: hue and fill, never branch tint alone. */
+.tree-leaf-group.tone-success { color: var(--success); }
+.tree-leaf-group.tone-danger { color: var(--danger); }
+.tree-leaf-group.tone-cancelled { color: var(--muted); }
+.tree-leaf-group.tone-timeout { color: var(--warning); }
+
+/* A successful call on a candidate Branch takes the candidate's own hue, so a
+   pink Branch never grows green leaves. Other tool states keep their colour. */
+.tree-twig-group.tree-ink-candidate .tree-leaf-group.tone-success {
+  color: var(--leaf-candidate);
 }
 
-.tree-twig-candidate .tree-twig-tip {
-  fill: var(--accent);
-  opacity: 0.55;
+/* Cancelled and timed-out calls are hollow, so an abort reads without colour. */
+.tree-leaf-group.tone-cancelled .tree-leaf-visual,
+.tree-leaf-group.tone-timeout .tree-leaf-visual {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.1;
 }
 
-.tree-twig-abandoned .tree-twig-tip {
-  fill: var(--muted);
-  opacity: 0.4;
+/* Everything on an aborted Branch dries out, including otherwise green leaves. */
+.tree-ink-aborted .tree-leaf-group { color: var(--tree-dry); }
+.tree-ink-aborted .tree-leaf-group.tone-cancelled .tree-leaf-visual,
+.tree-ink-aborted .tree-leaf-group.tone-timeout .tree-leaf-visual {
+  fill: none;
+  stroke: var(--tree-dry);
 }
 
 .tree-twig-group:hover .tree-twig-visual,
 .tree-twig-group:focus-visible .tree-twig-visual {
-  stroke-width: 2.8;
   opacity: 1;
 }
 
@@ -1417,13 +1545,13 @@ select {
 .tree-stem-candidate {
   stroke: var(--accent);
   stroke-width: 1.3;
-  opacity: 0.55;
+  opacity: 1;
 }
 
 .tree-stem-abandoned {
-  stroke: var(--muted);
+  stroke: var(--tree-abandoned);
   stroke-width: 1.1;
-  opacity: 0.4;
+  opacity: 1;
 }
 
 /* Leaves: tool calls on the trunk or on a model twig. */
@@ -1452,11 +1580,13 @@ select {
 
 .tree-leaf .leaf-shape {
   display: block;
-  width: 10px;
-  height: 6px;
+  width: 16px;
+  height: 3.5px;
   border-radius: 50%;
   background: currentColor;
-  box-shadow: 0 0 0 1px var(--surface);
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: none;
   transform: rotate(var(--leaf-angle, 0deg));
   transition:
     transform 0.16s ease,
@@ -1474,12 +1604,12 @@ select {
 }
 
 .leaf-candidate .leaf-shape {
-  opacity: 0.82;
+  opacity: 0;
 }
 
 .leaf-abandoned .leaf-shape {
-  background: var(--muted);
-  opacity: 0.4;
+  background: var(--tree-abandoned);
+  opacity: 0;
 }
 
 .leaf-count {
@@ -1546,6 +1676,14 @@ select {
 
 .tone-muted {
   color: var(--muted);
+}
+
+.tone-cancelled {
+  color: var(--muted);
+}
+
+.tone-timeout {
+  color: var(--warning);
 }
 
 .tree-handle {
@@ -1640,6 +1778,87 @@ select {
   box-shadow: var(--shadow);
 }
 
+.tree-tune-toggle {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  z-index: 6;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow);
+}
+
+.tree-tune-panel {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 6;
+  width: 286px;
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  padding: 10px 12px 12px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  font-size: 11.5px;
+}
+
+.tree-tune-panel header {
+  position: sticky;
+  top: -10px;
+  z-index: 1;
+  background: var(--surface-raised);
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.tree-tune-panel header div {
+  display: flex;
+  gap: 5px;
+}
+
+.tree-tune-panel header button {
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
+.tree-tune-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  margin-bottom: 7px;
+  color: var(--muted);
+}
+
+.tree-tune-row output {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.tree-tune-row input[type="number"] { width: 86px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px; }
+.tree-tune-group { min-width: 0; margin: 10px 0 0; padding: 8px 0 0; border: 0; border-top: 1px solid var(--border); }
+.tree-tune-group legend { padding-right: 8px; color: var(--text); font-weight: 650; }
+.tree-tune-row select { min-width: 86px; padding: 2px 4px; font-size: inherit; }
+.tree-tune-resize { position: sticky; top: 0; float: right; width: 8px; height: 36px; margin-right: -10px; background: var(--border-strong); cursor: ew-resize; touch-action: none; border-radius: 4px; }
+
+.tree-tune-row input[type="range"] {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 0;
+}
+
+.tree-tune-note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .tree-empty {
   height: 100%;
   display: flex;
@@ -1661,6 +1880,13 @@ select {
   max-width: 320px;
   color: var(--text-soft);
   font-size: 12px;
+}
+
+@media (min-width: 1280px) {
+  .chat-pane > :is(.chat-header, .window-bar, .notice, .conversation-scroll, .composer) {
+    padding-left: max(16px, calc((100% - 1120px) / 2));
+    padding-right: max(16px, calc((100% - 1120px) / 2));
+  }
 }
 
 /* ------------------------------------------------------------- details --- */
@@ -1902,6 +2128,10 @@ select {
 /* --------------------------------------------------------- responsive ---- */
 
 @media (max-width: 1020px) {
+  .panel-resizer {
+    display: none;
+  }
+
   .app.app-panel-open {
     grid-template-columns: minmax(0, 1fr);
   }

@@ -5,8 +5,8 @@ use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-// The Vite build is committed under webui/dist and embedded here so `cargo
-// build` does not need Node or a separate asset step.
+// Generate webui/dist with `npm run build` in webui before `cargo build`.
+// These build artifacts are embedded here but are not committed to the repository.
 const INDEX_HTML: &[u8] = include_bytes!("../../../webui/dist/index.html");
 const APP_JS: &[u8] = include_bytes!("../../../webui/dist/assets/app.js");
 const APP_CSS: &[u8] = include_bytes!("../../../webui/dist/assets/app.css");
@@ -82,7 +82,7 @@ fn serve(
         return reply(stream, "403 Forbidden", "text/plain", b"Invalid host");
     }
     match fields.as_slice() {
-        ["GET", "/", _] | ["GET", "/index.html", _] => {
+        ["GET", "/", _] | ["GET", "/index.html", _] | ["GET", "/map", _] => {
             reply(stream, "200 OK", "text/html; charset=utf-8", INDEX_HTML)
         }
         ["GET", "/assets/app.js", _] => {

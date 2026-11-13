@@ -252,6 +252,52 @@ impl SpeculativeTree {
         self.change_authority_state(chance_id, AuthorityState::Arrived)
     }
 
+    /// Copy only the NLE bridge's explicitly public map evidence into the
+    /// read-only observation stream. Missing or non-NLE evidence is ignored.
+    pub(crate) fn record_public_nle_map_action(
+        &mut self,
+        branch_id: &str,
+        action_id: &str,
+        evidence: &Value,
+    ) -> io::Result<()> {
+        let Some(action) = evidence.get("action").and_then(Value::as_u64) else {
+            return Ok(());
+        };
+        let Some(before) = evidence.get("before") else {
+            return Ok(());
+        };
+        let Some(after) = evidence.get("after") else {
+            return Ok(());
+        };
+        let public_observation = |observation: &Value| {
+            let chars = observation.get("chars")?.as_array()?;
+            let blstats = observation.get("blstats")?.as_array()?;
+            if !chars.iter().all(Value::is_string) || !blstats.iter().all(Value::is_number) {
+                return None;
+            }
+            let mut value = serde_json::Map::new();
+            value.insert("chars".into(), Value::Array(chars.clone()));
+            value.insert("blstats".into(), Value::Array(blstats.clone()));
+            if let Some(message) = observation.get("message").and_then(Value::as_str) {
+                value.insert("message".into(), Value::String(message.into()));
+            }
+            Some(Value::Object(value))
+        };
+        let (Some(before), Some(after)) = (public_observation(before), public_observation(after)) else {
+            return Ok(());
+        };
+        self.pending_observations.push(
+            crate::control_plane::observation::ObservationContent::NleMapAction {
+                branch_id: branch_id.into(),
+                action_id: action_id.into(),
+                action,
+                before,
+                after,
+            },
+        );
+        Ok(())
+    }
+
     /// 丢弃失去权威等待点的 Chance，并释放已经收敛且无人引用的记录。
     pub(crate) fn sweep_chances(&mut self) -> io::Result<()> {
         let ids: Vec<String> = self.chances.keys().cloned().collect();

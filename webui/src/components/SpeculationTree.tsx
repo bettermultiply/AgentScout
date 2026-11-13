@@ -1,216 +1,94 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
-  BaseEdge,
   Controls,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
-  type Edge,
-  type EdgeProps,
   type NodeTypes,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import {
-  authorityPath,
-  isActiveCandidate,
-  type BranchState,
-  type TaskState,
-} from '../fold'
+import type { TaskState } from '../fold'
 import { LatestIcon } from '../icons'
-import {
-  NODE_HALF_WIDTH,
-  NODE_WIDTH,
-  layoutTree,
-} from '../treeLayout'
-import { BranchNode, type BranchFlowNode } from './BranchNode'
+import { type TreeTuning } from '../tree'
+import { buildTree, type TreeGraph } from './treeGraph'
+import { useTreeTuning } from '../useTreeTuning'
+import { BranchNode } from './BranchNode'
+import { TreeTuningPanel } from './TreeTuningPanel'
 
 const nodeTypes: NodeTypes = { branch: BranchNode }
 
-/**
- * A fork leaves the parent trunk downward-outward, then turns vertical into
- * the child head. The default bezier leaves the trunk vertically first, which
- * makes a wide, wire-like S over the long horizontal run between lanes.
- */
-function ForkEdge({
-  sourceX,
-  sourceY,
-  targetX,
-  targetY,
-  style,
-}: EdgeProps) {
-  const dx = targetX - sourceX
-  const sign = dx >= 0 ? 1 : -1
-  // Drop a few pixels while still hidden by the parent trunk, then run just
-  // below the fork slot until the edge is clear of the parent's own twigs and
-  // leaves. Only then does it dive outward into the child head. Leaving at the
-  // fork row would cut through calls the parent made after the fork.
-  const startY = sourceY + 6
-  const out = Math.min(Math.abs(dx) * 0.6, 52)
-  const path = [
-    `M ${sourceX} ${sourceY}`,
-    `L ${sourceX} ${startY}`,
-    `C ${sourceX + sign * out} ${startY}`,
-    `${targetX - sign * 6} ${targetY - Math.max(14, (targetY - startY) * 0.35)}`,
-    `${targetX} ${targetY}`,
-  ].join(' ')
-  return <BaseEdge path={path} style={style} />
-}
+function TreeCanvas({ graph, tuning, onTuning }: { graph: TreeGraph; tuning: TreeTuning; onTuning: (next: TreeTuning) => void }) {
+  const { fitView, getViewport, setViewport } = useReactFlow()
+  const [open, setOpen] = useState(() => new URLSearchParams(window.location.search).has('tune'))
+  const nodes = graph.nodes
+  // Refit when the set of Branches changes, not while tuning geometry.
+  const fitKey = nodes.map(node => node.id).join('|')
 
-const edgeTypes = { fork: ForkEdge }
-
-interface TreeGraph {
-  nodes: BranchFlowNode[]
-  edges: Edge[]
-  latestNodeId: string | null
-}
-
-function isAbandoned(status: BranchState['status']): boolean {
-  return status === 'discarded' || status === 'cleaned'
-}
-
-function forkStyle(branch: BranchState, authority: boolean) {
-  if (isAbandoned(branch.status)) {
-    return {
-      stroke: 'var(--muted)',
-      strokeWidth: 3,
-      strokeDasharray: '5 4',
-      opacity: 0.3,
-    }
-  }
-  if (authority) {
-    return { stroke: 'var(--accent)', strokeWidth: 7, opacity: 0.9 }
-  }
-  return { stroke: 'var(--accent)', strokeWidth: 5.5, opacity: 0.45 }
-}
-
-function buildTree(task: TaskState | null): TreeGraph {
-  if (!task) return { nodes: [], edges: [], latestNodeId: null }
-  const path = authorityPath(task)
-  const geometry = layoutTree(task)
-  const nodes: BranchFlowNode[] = []
-  const edges: Edge[] = []
-  let latestNodeId: string | null = null
-  let latestSequence = -1
-
-  for (const branchId of task.branchOrder) {
-    const branch = task.branches[branchId]
-    const layout = geometry.get(branchId)
-    if (!branch || !layout) continue
-
-    const isAuthorityPath = path.has(branchId)
-    const isCurrentAuthority = task.authority === branchId
-    let authorityForkY: number | null = null
-    if (isAuthorityPath && !isCurrentAuthority) {
-      const authorityChild = task.branchOrder.find(
-        (childId) =>
-          path.has(childId) &&
-          task.branches[childId]?.parentBranchId === branchId,
-      )
-      if (authorityChild) {
-        authorityForkY = layout.forks.get(authorityChild) ?? null
-      }
-    }
-
-    nodes.push({
-      id: `branch:${branchId}`,
-      type: 'branch',
-      position: {
-        x: layout.x - NODE_HALF_WIDTH,
-        y: layout.y,
-      },
-      width: NODE_WIDTH,
-      height: layout.height,
-      data: {
-        branch,
-        chance: branch.chanceId
-          ? task.chances[branch.chanceId] ?? null
-          : null,
-        geometry: layout,
-        isAuthorityPath,
-        isCurrentAuthority,
-        isLive: isActiveCandidate(branch),
-        authorityForkY,
-      },
-      draggable: false,
-      selectable: false,
-      focusable: false,
-      zIndex: 10,
-    })
-
-    if (branch.lastEventSequence > latestSequence) {
-      latestSequence = branch.lastEventSequence
-      latestNodeId = `branch:${branchId}`
-    }
-  }
-
-  for (const branchId of task.branchOrder) {
-    const branch = task.branches[branchId]
-    if (!branch?.parentBranchId) continue
-    if (!task.branches[branch.parentBranchId]) continue
-    const forkY = geometry.get(branch.parentBranchId)?.forks.get(branchId)
-    if (forkY === undefined) continue
-    edges.push({
-      id: `fork:${branchId}`,
-      source: `branch:${branch.parentBranchId}`,
-      sourceHandle: `fork:${branchId}`,
-      target: `branch:${branchId}`,
-      targetHandle: 'in',
-      // The child head sits FORK_DROP below the parent's fork slot. A smooth
-      // curve from the slot to that head is the only line crossing lanes.
-      type: 'fork',
-      style: forkStyle(branch, path.has(branchId)),
-      zIndex: 0,
-    })
-  }
-
-  return { nodes, edges, latestNodeId }
-}
-
-function TreeCanvas({ graph }: { graph: TreeGraph }) {
-  const { fitView } = useReactFlow()
+  useEffect(() => {
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      const canvas = document.querySelector('.tree-canvas')?.getBoundingClientRect()
+      const rects = [...document.querySelectorAll('.tree-trunk, .tree-empty-bud, .tree-trunk-cap, .tree-leaf-visual, .tree-chance, .tree-leaf-petiole')]
+        .map(element => element.getBoundingClientRect())
+      if (!canvas || !rects.length || cancelled) return
+      const left = Math.min(...rects.map(rect => rect.left))
+      const right = Math.max(...rects.map(rect => rect.right))
+      const top = Math.min(...rects.map(rect => rect.top))
+      const bottom = Math.max(...rects.map(rect => rect.bottom))
+      const current = getViewport()
+      const factor = Math.min((canvas.width - 88) / (right - left), (canvas.height - 100) / (bottom - top))
+      const target = Math.min(1, current.zoom * factor)
+      void setViewport({
+        zoom: target,
+        x: canvas.width / 2 - ((left + right) / 2 - canvas.left - current.x) / current.zoom * target,
+        y: canvas.height / 2 - ((top + bottom) / 2 - canvas.top - current.y) / current.zoom * target,
+      })
+    }, 100)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitKey, getViewport, setViewport])
 
   return (
     <div className="tree-canvas">
       <ReactFlow
-        nodes={graph.nodes}
-        edges={graph.edges}
+        nodes={nodes}
+        edges={[]}
         nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
         fitView
-        fitViewOptions={{ padding: 0.3, maxZoom: 1 }}
-        minZoom={0.08}
-        maxZoom={1.8}
+        fitViewOptions={{ padding: 0.12, maxZoom: 1 }}
+        minZoom={0.008}
+        maxZoom={4}
         nodesDraggable={false}
         nodesConnectable={false}
         nodesFocusable={false}
         elementsSelectable={false}
-        onlyRenderVisibleElements
+        onlyRenderVisibleElements={false}
         panOnScroll
         zoomOnDoubleClick={false}
         proOptions={{ hideAttribution: true }}
         aria-label="投机树"
       >
-        <Background
-          variant={BackgroundVariant.Dots}
-          gap={20}
-          size={1}
-          color="var(--tree-grid)"
-        />
+        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="var(--tree-grid)" />
         <Controls showInteractive={false} />
       </ReactFlow>
+      {!open ? <button
+        type="button"
+        className="tree-tune-toggle"
+        onClick={() => setOpen(value => !value)}
+        aria-expanded={open}
+        aria-controls="tree-tuning-panel"
+      >
+        调参
+      </button> : null}
+      {open ? <TreeTuningPanel tuning={tuning} onChange={onTuning} onClose={() => setOpen(false)} /> : null}
       <button
         type="button"
         className="tree-latest-button"
         onClick={() => {
           if (!graph.latestNodeId) return
-          void fitView({
-            nodes: [{ id: graph.latestNodeId }],
-            duration: 320,
-            padding: 2.4,
-            maxZoom: 1.1,
-          })
+          void fitView({ nodes: [{ id: graph.latestNodeId }], duration: 320, padding: 2.4, maxZoom: 1.1 })
         }}
         disabled={!graph.latestNodeId}
         title="定位到最新事件"
@@ -223,23 +101,31 @@ function TreeCanvas({ graph }: { graph: TreeGraph }) {
 }
 
 export function SpeculationTree({ task }: { task: TaskState | null }) {
-  const graph = useMemo(() => buildTree(task), [task])
+  const [tuning, setTuning] = useTreeTuning()
+  const graph = useMemo(() => buildTree(task, tuning), [task, tuning])
+
+  if (graph.error) {
+    return (
+      <div className="tree-empty">
+        <h3>投机树绘制失败</h3>
+        <p>{graph.error}</p>
+      </div>
+    )
+  }
 
   if (graph.nodes.length === 0) {
     return (
       <div className="tree-empty">
         <h3>还没有 Branch 事件</h3>
         <p>控制面创建 Branch 后，投机树会在这里自上而下生长。</p>
-        <p className="muted">
-          树枝头部、模型小枝条和工具叶子可以点击进入该 Branch 的只读详情。
-        </p>
+        <p className="muted">枝头、模型叶茎和工具叶片可以点击进入该 Branch 的只读详情。</p>
       </div>
     )
   }
 
   return (
     <ReactFlowProvider>
-      <TreeCanvas graph={graph} />
+      <TreeCanvas graph={graph} tuning={tuning} onTuning={setTuning} />
     </ReactFlowProvider>
   )
 }

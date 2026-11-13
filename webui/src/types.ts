@@ -177,6 +177,21 @@ export interface ToolFinishedEvent extends EventBase {
   duration_ms: number | null
 }
 
+export interface NleMapActionEvent extends EventBase {
+  event: 'nle_map_action'
+  branch_id: string
+  action_id: string
+  action: number
+  before: NlePublicObservation
+  after: NlePublicObservation
+}
+
+export interface NlePublicObservation {
+  chars: string[]
+  blstats: number[]
+  message?: string
+}
+
 export interface SettlementEvent extends EventBase {
   event: 'settlement'
   branch_id: string
@@ -203,6 +218,7 @@ export type BranchObservationEvent =
   | ConversationUpdatedEvent
   | ModelUsageEvent
   | ToolFinishedEvent
+  | NleMapActionEvent
   | SettlementEvent
 
 export type ChanceObservationEvent =

@@ -1,4 +1,5 @@
 /target/
+/webui/dist/
 /assets/
 /docs/survey/[0-9]*.pdf
 /docs/survey/[0-9]*.txt
