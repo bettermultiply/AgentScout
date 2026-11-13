@@ -38,5 +38,11 @@ target/debug/ascout-control-plane <run-dir> <pi-root> <policy.yaml> --resume --w
 - 活动或阻塞工具批次、等待 sibling result 的候选、未完成控制操作目前直接拒绝保存并保留执行。这不满足完整目标，尤其尚未通过“authority + 两个有效候选含阻塞候选”的跨进程验收。
 - FS 执行承载重新挂载、多后端组合保存尚未实现，明确拒绝；不能声称保存了任意子进程内存。
 - 活跃命令/工具的等待关系重建、恢复前整棵 Tree/Chance/Proposal/环境关联的全面校验仍缺失。当前采取拒绝而非盲重放。
-- 失败后继续运行会改变原生源，旧保存不能保证仍可恢复；需进一步独立复制源并完善保存事务。模型/extension 配置版本绑定尚不完整。
+- Pi 原生源在保存时复制到该代 `sources/`，恢复时再复制为独立可写源，checkpoint 按保存源身份重新关联；继续原运行或恢复运行不会改写该代 Pi 源。环境与外部 extension 资源仍需独立保护；这项修复不代表完整保存事务已实现。模型/extension 配置版本绑定尚不完整。
 - 通知仅有既有 18 项回归，不代表已验证跨恢复的全部不丢不重场景。
+
+## 原生源独立性修复（2026-11-13）
+
+`node --test tests/pi-recovery-sources.mjs` 先复现继续原运行后 `Recovery source changed`；修复后验证原运行追加、恢复后追加及再次从同一代恢复，保存副本内容不变。恢复前检查源唯一性、完整记录数、引用、父链环、Branch tail 与预测源关系，checkpoint 仅引用的源也纳入保存。该用例使用真实 Pi SessionManager，不调用模型。
+
+`node --test tests/pi-recovery-sources.mjs tests/pi-access.mjs tests/pi-session-history.mjs tests/pi-notification.mjs tests/pi-notification-adapter.mjs`：19/19；`node /tmp/opencode/check-recovery.mjs`：真实 Pi + 真实 NLE + 本地假模型跨进程中断／等待输入／继续／再次退出通过，证据 `/tmp/opencode/control-recovery-Pzx5zV`。本轮尚未验证 authority + 两候选含阻塞等待。

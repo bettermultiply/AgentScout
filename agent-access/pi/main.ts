@@ -5,7 +5,7 @@
 // @ts-nocheck
 import { connect } from 'node:net';
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { evaluatePolicyArtifact } from '../../../pi/packages/ascout-agent-access/src/local-policy.ts';
 import { createAgentAccess } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
@@ -320,10 +320,12 @@ async function handle(command) {
                     if(['save','load'].includes(value.command))continue;
                     commandRecords.push([id,{serialized:item.serialized,reply:await item.result}]);
                 }
-                saveRecovery(command.path,{version:1,taskId,tree:tree.snapshot(),authority,nextAction,
+                const snapshot=tree.snapshot(dirname(command.path),[...checkpoints.values()].map(c=>c.manager));
+                const sourceFiles=new Map(snapshot.sources.map(source=>[source.originalFile,source.file]));
+                saveRecovery(command.path,{version:1,taskId,tree:snapshot,authority,nextAction,
                     access:access.snapshot(),generations:[...generations],results:[...results],
                     cancelled:[...cancelled],reportedEntries:[...reportedEntries],commands:commandRecords,
-                    checkpoints:[...checkpoints].map(([id,c])=>[id,{...c,manager:c.manager.getSessionFile()}])});
+                    checkpoints:[...checkpoints].map(([id,c])=>[id,{...c,manager:sourceFiles.get(c.manager.getSessionFile())}])});
             }catch(reason){error=String(reason)}
             await report({message:'recovery_saved',path:command.path,error:error??null});
             if(error)saving=false;
@@ -337,8 +339,8 @@ async function handle(command) {
                 if(sessions.size)throw Error('Load requires an empty Agent adapter');
                 const record=loadRecovery(command.path);
                 if(record.taskId!==taskId)throw Error('Recovery task identity mismatch');
-                const restored=SessionTree.restore(record.tree,SessionManager);
-                const managers=new Map([...restored.branches.values()].map(b=>[b.manager.getSessionFile(),b.manager]));
+                const restored=SessionTree.restore(record.tree,SessionManager,sessionFile);
+                const managers=restored.recoveryManagers;
                 for(const [,checkpoint] of record.checkpoints)if(!managers.has(checkpoint.manager))throw Error('Recovery checkpoint manager missing');
                 tree=restored;authority=record.authority;nextAction=record.nextAction;
                 access.restore(record.access);

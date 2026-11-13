@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { mkdirSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, renameSync, unlinkSync, copyFileSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -88,35 +88,77 @@ export class SessionTree {
     stop(branchId) { const branch=this.branches.get(branchId);if(branch)branch.stopped=true; }
 
     /** Original native indexes are separate from the assembled final history. */
-    snapshot() {
+    snapshot(directory, checkpointManagers=[]) {
         const managers=new Map([[this.manager.getSessionFile(),this.manager]]);
         for(const {manager} of this.branches.values())managers.set(manager.getSessionFile(),manager);
         for(const input of this.inputs.values())if(input.source)managers.set(input.source.getSessionFile(),input.source);
-        const sources=[...managers].map(([file,manager])=>({file,leaf:manager.getLeafId(),
+        for(const manager of checkpointManagers)managers.set(manager.getSessionFile(),manager);
+        const copies=new Map();
+        if(directory){
+            const sourcesDirectory=join(directory,'sources');mkdirSync(sourcesDirectory,{recursive:true});
+            for(const file of managers.keys()){
+                const target=join(sourcesDirectory,`${randomUUID()}.jsonl`);
+                copyFileSync(file,target);
+                const descriptor=openSync(target,'r');try{fsyncSync(descriptor)}finally{closeSync(descriptor)}
+                copies.set(file,target);
+            }
+            const descriptor=openSync(sourcesDirectory,'r');try{fsyncSync(descriptor)}finally{closeSync(descriptor)}
+        }
+        const sourceFile=file=>copies.get(file)??file;
+        const sources=[...managers].map(([file,manager])=>({file:sourceFile(file),originalFile:file,leaf:manager.getLeafId(),
             header:manager.getHeader(),entries:structuredClone(manager.getEntries()),
             checksum:checksum(readFileSync(file))}));
-        return {authority:this.authority,manager:this.manager.getSessionFile(),sources,
-            branches:[...this.branches].map(([id,{manager,stopped}])=>[id,{file:manager.getSessionFile(),stopped}]),
-            inputs:[...this.inputs].map(([id,input])=>[id,{...input,source:input.source?.getSessionFile()}]),
+        return {authority:this.authority,manager:sourceFile(this.manager.getSessionFile()),sources,
+            branches:[...this.branches].map(([id,{manager,stopped}])=>[id,{file:sourceFile(manager.getSessionFile()),stopped}]),
+            inputs:[...this.inputs].map(([id,input])=>[id,{...input,source:input.source?sourceFile(input.source.getSessionFile()):undefined}]),
             tails:[...this.tails],requests:[...this.requests],originalEntries:[...this.originalEntries],accepted:[...(this.accepted??[])]};
     }
 
-    static restore(record, SessionManager) {
+    static restore(record, SessionManager, sessionFile) {
         const managers=new Map();
         // Validate the entire set before opening any manager or selecting paths.
         for(const source of record.sources){
             if(checksum(readFileSync(source.file))!==source.checksum)throw Error(`Recovery source changed: ${source.file}`);
             const records=readFileSync(source.file,'utf8').trim().split('\n').map(JSON.parse);
             const ids=new Set(source.entries.map(e=>e.id));
+            const entries=new Map(source.entries.map(e=>[e.id,e]));
             if(ids.size!==source.entries.length||source.leaf&&!ids.has(source.leaf))throw Error('Invalid recovery Pi index');
+            if(records.length!==source.entries.length+1)throw Error('Recovery Pi index length mismatch');
             if(JSON.stringify(records[0])!==JSON.stringify(source.header))throw Error('Recovery Pi header mismatch');
             for(const entry of source.entries){
                 if(!records.some(e=>e.id===entry.id&&JSON.stringify(e)===JSON.stringify(entry)))throw Error(`Recovery entry missing: ${entry.id}`);
                 if(entry.parentId&&!ids.has(entry.parentId))throw Error(`Recovery parent missing: ${entry.parentId}`);
+                for(const field of ['targetId','firstKeptEntryId','fromId'])if(entry[field]&&entry[field]!=='root'&&!ids.has(entry[field]))throw Error(`Recovery ${field} missing: ${entry[field]}`);
+                const seen=new Set();let current=entry;
+                while(current){
+                    if(seen.has(current.id))throw Error('Cyclic recovery Pi index');
+                    seen.add(current.id);current=entries.get(current.parentId);
+                }
             }
         }
+        if(!record.sources.some(s=>s.file===record.manager))throw Error('Recovery assembly source missing');
+        const sources=new Map(record.sources.map(s=>[s.file,s]));
+        if(sources.size!==record.sources.length)throw Error('Duplicate recovery Pi source');
+        const branches=new Map(record.branches),tails=new Map(record.tails);
+        if(branches.size!==record.branches.length||tails.size!==record.tails.length)throw Error('Duplicate recovery branch or tail');
+        if(!branches.has(record.authority))throw Error('Recovery authority source missing');
+        for(const [id,branch] of branches){
+            const source=sources.get(branch.file);
+            if(!source)throw Error('Recovery branch source missing');
+            const tail=tails.get(id);
+            if(tail&&!source.entries.some(e=>e.id===tail))throw Error('Recovery branch tail missing');
+        }
+        for(const [id,input] of record.inputs){
+            if(!branches.has(id)||!branches.has(input.parent)||input.source&&!sources.has(input.source))throw Error('Recovery prediction source missing');
+        }
+        const activeDirectory=join(dirname(sessionFile??record.manager),'sessions',`restored-${randomUUID()}`);
+        mkdirSync(activeDirectory,{recursive:true});
         for(const source of record.sources){
-            const manager=SessionManager.open(source.file);
+            // Saved generations are immutable. Every restore gets fresh writable
+            // sources, including indexes used only by prediction checkpoints.
+            const target=source.file===record.manager&&sessionFile?sessionFile:join(activeDirectory,`${randomUUID()}.jsonl`);
+            copyFileSync(source.file,target);
+            const manager=SessionManager.open(target);
             if(source.leaf)manager.branch(source.leaf);else manager.resetLeaf();
             managers.set(source.file,manager);
         }
@@ -132,6 +174,9 @@ export class SessionTree {
         }));
         tree.tails=new Map(record.tails);tree.requests=new Map(record.requests);
         tree.originalEntries=new Map(record.originalEntries);tree.accepted=new Set(record.accepted);
+        // Keep the saved-file identity map for checkpoints whose source is no
+        // longer a live branch but is still needed by a valid continuation.
+        tree.recoveryManagers=managers;
         return tree;
     }
 
