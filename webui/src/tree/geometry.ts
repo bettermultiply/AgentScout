@@ -305,6 +305,14 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
   const NODE_HALF_WIDTH = tuning.nodeOrigin
   const NODE_WIDTH = NODE_HALF_WIDTH * 2
   const result = new Map<string, BranchGeometry>()
+  // Read only after a branch's connection is final. Reuse the exact loop for
+  // its stems and children; keep this cache scoped to this layout/tuning.
+  const loops = new WeakMap<BranchGeometry, Cubic[]>()
+  const loopOf = (g: BranchGeometry): Cubic[] => {
+    let loop = loops.get(g)
+    if (!loop) { loop = visibleLoop(g, tuning); loops.set(g, loop) }
+    return loop
+  }
   const branches = task.branchOrder.map(id => task.branches[id]).filter(Boolean)
   const children = (id: string) => branches.filter(b => b.parentBranchId === id)
   const count = (b: BranchState): number =>
@@ -505,7 +513,7 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       let outline: ClosedPath | undefined, joins: [Join, Join] | undefined
       if (pointParent) outline = roundedBase(sides)
       else {
-        const loop = visibleLoop(parent, tuning).map(c => ({ start: convert(c.start), c1: convert(c.c1), c2: convert(c.c2), end: convert(c.end) }))
+        const loop = loopOf(parent).map(c => ({ start: convert(c.start), c1: convert(c.c1), c2: convert(c.c2), end: convert(c.end) }))
         const r = smoothConnection({ parent: loop, childSides: sides,
           parentDistance: tuning.connectionParentRatio * W, childDistance: tuning.connectionRootRatio * W })
         if (r) { outline = r.outline; joins = r.joins }
@@ -514,7 +522,7 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
     }
 
     // The branch outline is final here; every stem reads the same immutable loop.
-    const stemParent = visibleLoop(geometry, tuning)
+    const stemParent = loopOf(geometry)
     for (const section of sections) {
       const shape = section.shape!, [origin, control, tip] = shape.path.points
       const edges: [Point[], Point[]] = [[], []]
