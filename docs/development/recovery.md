@@ -13,7 +13,7 @@ Pi 源码依据（相邻 ../pi checkout）：
 
 ## 当前实现
 
-控制面的 Shutdown（包括已有退出入口和退出信号）立即请求 Pi 同时 abort 所有 session，停止调度新工作，收齐已发出控制操作和命令的确定回执，然后保存原生消息、原 Branch 源、接入状态和 Tree；NLE 保存完整初始 RNG/configuration、动作序列及逐步校验值。保存使用独立目录，最后发布包含三个组件 SHA-256 的 `recovery.json`。恢复校验组件、Policy digest、Runtime 配置内容和能力后加载，等待用户输入，不自动推理或处置候选。保存失败报告失败并保留状态，原生执行已取消，后续输入重新连接等待；不删除唯一原生源。仅单后端 NLE 路径已验证。
+控制面的 Shutdown（包括已有退出入口和退出信号）立即请求 Pi 同时 abort 所有 session，停止调度新工作，收齐已发出控制操作和命令的确定回执，然后保存原生消息、原 Branch 源、接入状态和 Tree；NLE 保存完整初始 RNG/configuration、动作序列及逐步校验值。保存使用独立目录，最后发布包含三个组件 SHA-256 的 `recovery.json`。恢复校验组件、Policy digest、Runtime 配置内容和能力后加载，等待用户输入，不自动推理或处置候选。保存失败报告失败并保留状态，原生执行已取消，后续输入重新连接等待；不删除唯一原生源。单 NLE 与两个 NLE backend 组合均已通过真实入口恢复验证。
 
 ### 活动工具与候选等待（2026-11-13）
 
@@ -46,12 +46,12 @@ target/debug/ascout-control-plane <run-dir> <pi-root> <policy.yaml> --resume --w
 ## 验收与剩余边界
 
 - `node --test tests/recovery-active.mjs` 先在原实现复现 Shutdown 不退出（证据 `/tmp/opencode/recovery-active-8zpJIk`），实现后通过真实 Pi + 真实 NLE + 本地假模型：authority 同一 assistant 发两个工具，两个有效候选等待 sibling，真实 sibling NLE 动作在途时退出，收齐一项动作后保存，所有任务进程关闭；重启不请求模型，用户继续后三个 Branch 实际请求模型、两个候选获得真实 sibling 配对结果，原两个动作最终恰执行两次，再次保存退出且保存源不变。最终联合回归证据 `/tmp/opencode/recovery-active-6rDa6i`。这验证了核心等待恢复，不代表全部 backend／extension 恢复。
-- FS 执行承载重新挂载、多后端组合保存尚未实现，明确拒绝；不能声称保存了任意子进程内存。
-- 恢复前整棵 Tree/Chance/Proposal/环境关联的全面校验仍需加强。无限阻塞 Runtime 或故障导致的回执无法收齐目前不能保存成功；外部原生工具只保留 Pi 取消终态，不承诺恢复子进程内存。
-- Pi 原生源在保存时复制到该代 `sources/`，恢复时再复制为独立可写源，checkpoint 按保存源身份重新关联；继续原运行或恢复运行不会改写该代 Pi 源。环境与外部 extension 资源仍需独立保护；这项修复不代表完整保存事务已实现。模型/extension 配置版本绑定尚不完整。
-- 通知仅有既有 18 项回归，不代表已验证跨恢复的全部不丢不重场景。
+- FS portable overlay 保存与独立可写恢复已实现并经过真实 shell 执行验证；btrfs 原生子卷及 snapshot-copy 布局明确拒绝。尚未完成 FS + Pi 控制面主入口整链，不声称保存任意子进程内存。
+- 恢复检查 task/authority、存活 Branch 的原生 session、Chance/Proposal 引用、已支持 Runtime 的环境存在性和 NLE world 索引；全面关联校验仍有缺口（例如复杂混合路由的参与环境集合、深层父链语义）。无限阻塞 Runtime 或故障导致的回执无法收齐目前不能保存成功；外部原生工具只保留 Pi 取消终态，不承诺恢复子进程内存。
+- Pi 原生源在保存时复制到该代 `sources/`，恢复时再复制为独立可写源，checkpoint 按保存源身份重新关联；继续原运行或恢复运行不会改写该代 Pi 源。本地扩展/配置与代码绑定及外部 Git snapshot 保留见下方，包管理扩展尚不支持。
+- Promote notification 已在真实 main 入口、真实 Pi + NLE + 假模型的保存失败后继续／晋级／再次保存／恢复中验证最终历史恰一次；尚未验证所有通知交付时刻的跨恢复组合。
 
-本轮 `cargo build --bins`、`cargo test --lib control_plane -- --nocapture`（26/26）、Pi 联合回归含新整链用例（20/20）通过。既有无工具、永不自然结束模型流 `/tmp/opencode/check-recovery.mjs` 再次通过，证据 `/tmp/opencode/control-recovery-wiBhe4`。没有调用真实模型。FS、多 backend、extension 配置与外部资源绑定继续保留为下一阶段范围。
+早期 `cargo build --bins`、`cargo test --lib control_plane -- --nocapture`（26/26）、Pi 联合回归含新整链用例（20/20）通过。既有无工具、永不自然结束模型流 `/tmp/opencode/check-recovery.mjs` 通过，证据 `/tmp/opencode/control-recovery-wiBhe4`。没有调用真实模型；后续扩展验证见下方。
 
 ## 原生源独立性修复（2026-11-13）
 
@@ -59,4 +59,22 @@ target/debug/ascout-control-plane <run-dir> <pi-root> <policy.yaml> --resume --w
 
 `node --test tests/pi-recovery-sources.mjs tests/pi-access.mjs tests/pi-session-history.mjs tests/pi-notification.mjs tests/pi-notification-adapter.mjs`：19/19；`node /tmp/opencode/check-recovery.mjs`：真实 Pi + 真实 NLE + 本地假模型跨进程中断／等待输入／继续／再次退出通过，证据 `/tmp/opencode/control-recovery-Pzx5zV`。本轮尚未验证 authority + 两候选含阻塞等待。
 
-新增保存代还绑定解析后的模型对象、模型选择参数、thinking level 和 Runtime tools；恢复在建立 session 前检查上述内容及 authority/checkpoint owner/调用身份与原生末条消息。旧格式缺少该字段时仍按旧格式读取，不追认其配置保证。extension 配置、代码版本与外部资源绑定仍缺失。新增绑定后再次执行 `node /tmp/opencode/check-recovery.mjs` 通过，证据 `/tmp/opencode/control-recovery-Z1vV5T`。
+新增保存代还绑定解析后的模型对象、模型选择参数、thinking level 和 Runtime tools；恢复在建立 session 前检查上述内容及 authority/checkpoint owner/调用身份与原生末条消息。旧格式缺少该字段时仍按旧格式读取，不追认其配置保证。新增绑定后再次执行 `node /tmp/opencode/check-recovery.mjs` 通过，证据 `/tmp/opencode/control-recovery-Z1vV5T`。
+
+## 多组件、失败继续与资源绑定（2026-11-13）
+
+CompositeRuntime 多连接与 BaseRuntime inner/data-plane 分别写入本代私有 `*.components/`；所有子组件成功才写父组件索引，最后控制面发布总 manifest。索引绑定 backend 顺序、身份、组件 SHA-256 与参与环境集合。加载先检查同级所有组件字节，再逐个重建；失败不会启动 Agent 推理，不提供已加载组件的内存事务回滚。
+
+FS portable overlay 复制存活环境、lower/snapshot 与已执行操作回执；保存数据树校验文件内容、类型/权限、symlink、OverlayFS opaque/whiteout/redirect/metacopy。OverlayFS 内部 work 目录不复制，恢复重建。BaseRuntime 复制期间冻结拥有的执行进程，失败也尝试 thaw。每次恢复另建 `restored-*` 可写副本；保存代和旧运行目录均不覆盖。外部 lower 挂载保留原路径及 dev/inode 并验证可用；这不等于冻结整个宿主 lower 内容，也不承诺支持可变宿主 lower 的任意漂移。
+
+Pi SDK 默认使用 DefaultResourceLoader 自动加载全局/项目扩展，因此保存绑定 Node 版本、Pi 与接入代码内容、模型配置、全局和项目 settings/extension/skill/prompt/system prompt/AGENTS 资源。恢复在创建 session、执行扩展代码前验证；变化明确拒绝。当前只接受显式本地资源；package-managed 扩展与 glob 声明保存明确失败，不静默忽略。绑定不覆盖任意第三方扩展的传递依赖或外部服务配置，不能作为完整 extension 环境部署方案。
+
+`rollback-snapshot` 绑定 repoRoot、Git directory、原 ref、tree/commit，并建立独立 `refs/ascout/recovery/<digest>` 保留对象可达性；只执行读取和 update-ref，不 reset/checkout 工作区。恢复验证原 ref 及保留 ref 均匹配，缺失明确失败。保留 ref 目前没有自动回收，保存失败可能留下安全但冗余的 ref。复制 session 不代表复制 Git 对象。
+
+故障整链通过占用 `recovery.tmp` 让中断后最终发布失败：进程留在暂停，manifest 字节不变；分别验证直接重试及用户继续、全部三个 Branch 继续、两个原动作总共恰执行两次，再次保存退出、旧保存代独立恢复。该用例还复现并修复已晋级候选保留原生预测源、父 Branch/其他候选已清理时被错误拒绝恢复的问题；重试开始显式清除旧 saved 标记。
+
+实际命令：`cargo test --lib recovery_overlay_executes -- --nocapture`（1/1，隔离 `/tmp/opencode/fs-recovery-*` 真实 shell）；`node --test tests/recovery-active.mjs tests/pi-recovery-binding.mjs`（5/5）。最新整链证据分别为 `/tmp/opencode/recovery-active-kkS0PZ`（原路径）、`recovery-active-t4UK1Q`（失败重试及模型配置变化拒绝）、`recovery-active-xRogpp`（失败继续与 notification）、`recovery-active-qFyc9n`（两个 NLE backend）。所有模型请求均为本地假服务。
+
+补充执行 `cargo test --lib recovery -- --nocapture`（2/2）：第二项在真实 sandbox writer 运行时冻结复制、注入复制失败、验证 thaw 后计数继续增长及上一代恢复；`cargo test --lib control_plane -- --nocapture`（26/26）；Pi access/history/notification/recovery-sources/recovery-binding 联合回归（20/20）。
+
+仍需完成：FS + Pi 主入口组合验收；btrfs 保存恢复；多 backend 中间组件保存失败的整链注入；扩展代码变化的真实入口拒绝；更完整的跨组件关联检查与复杂路由支持。当前不能将上述部分交付称为全部验收。

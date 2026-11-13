@@ -46,6 +46,7 @@ impl Task<'_> {
             Event::Request(ui::Request::Shutdown) => {
                 if self.tree.recovering && !self.loaded {return Ok(Some(ControlActions::default()));}
                 self.loaded=false;
+                self.saved=false;
                 let directory=self.recovery_path.parent().unwrap().join(format!("recovery-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
                 std::fs::create_dir(&directory)?;
                 self.recovery_path=directory.join("agent.json");

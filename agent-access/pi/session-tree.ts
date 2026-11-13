@@ -150,7 +150,7 @@ export class SessionTree {
             if(tail&&!source.entries.some(e=>e.id===tail))throw Error('Recovery branch tail missing');
         }
         for(const [id,input] of record.inputs){
-            if(!branches.has(id)||!branches.has(input.parent)||input.source&&!sources.has(input.source))throw Error('Recovery prediction source missing');
+            if((!branches.has(input.parent)&&!input.source)||input.source&&!sources.has(input.source))throw Error('Recovery prediction source missing');
         }
         const activeDirectory=join(dirname(sessionFile??record.manager),'sessions',`restored-${randomUUID()}`);
         mkdirSync(activeDirectory,{recursive:true});
