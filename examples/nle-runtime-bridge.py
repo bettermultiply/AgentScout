@@ -26,8 +26,12 @@ command.  Agent permission and Policy admission remain outside this bridge.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import json
+import os
 import re
+import secrets
 import sys
 import time
 from dataclasses import dataclass, field
@@ -42,6 +46,73 @@ class World:
     references: int = 1
     state: str = "available"
     closed: bool = False
+    initial: dict[str, Any] = field(default_factory=dict)
+    actions: list[int] = field(default_factory=list)
+    checks: list[str] = field(default_factory=list)
+
+
+def fingerprint(environment, observation) -> str:
+    """Check every public array plus the native RNG state, not just the screen."""
+    result = hashlib.sha256()
+    for key, value in sorted(observation.items()):
+        result.update(key.encode())
+        result.update(str(value.dtype).encode())
+        result.update(str(value.shape).encode())
+        result.update(value.tobytes())
+    result.update(json.dumps(environment.unwrapped.get_seeds()).encode())
+    return result.hexdigest()
+
+
+def new_world(gym, env_id, seed=None, initial=None):
+    # Installed NLE has no public native save/restore API. Disable reseeding
+    # and derive time-dependent effects from the explicit initial RNGs.
+    if initial is None:
+        core = int(seed) if seed is not None else secrets.randbits(63)
+        initial = {"env_id": env_id, "seeds": [core, secrets.randbits(63), False, secrets.randbits(63)],
+                   "kwargs": {"fix_moon_phase": True}, "nle_version": importlib.metadata.version("nle")}
+    if initial["nle_version"] != importlib.metadata.version("nle"):
+        raise ValueError("NLE version differs from saved environment")
+    environment = gym.make(initial["env_id"], **initial["kwargs"])
+    try:
+        environment.unwrapped.seed(*initial["seeds"])
+        observation, _ = environment.reset()
+        config = {"options": environment.unwrapped.nethack.options,
+                  "actions": [int(action) for action in environment.unwrapped.actions],
+                  "max_episode_steps": environment.unwrapped._max_episode_steps}
+        if "config" in initial and initial["config"] != config:
+            raise ValueError("NLE configuration differs from saved environment")
+        initial["config"] = config
+        return World(environment, digest(observation), initial=initial,
+                     checks=[fingerprint(environment, observation)])
+    except Exception:
+        environment.close()
+        raise
+
+
+def step(world, action):
+    result = world.environment.step(action)
+    world.actions.append(action)
+    world.checks.append(fingerprint(world.environment, result[0]))
+    world.observation = digest(result[0])
+    return result
+
+
+def restore_world(gym, record):
+    world = new_world(gym, record["initial"]["env_id"], initial=record["initial"])
+    try:
+        if world.checks[0] != record["checks"][0]:
+            raise ValueError("NLE initial state verification failed")
+        if len(record["checks"]) != len(record["actions"]) + 1:
+            raise ValueError("NLE action/check sequence is incomplete")
+        for index, action in enumerate(record["actions"]):
+            step(world, action)
+            if world.checks[-1] != record["checks"][index + 1]:
+                raise ValueError(f"NLE replay verification failed at action {index}")
+        world.state = record["state"]
+        return world
+    except Exception:
+        world.environment.close()
+        raise
 
 
 def digest(observation: dict[str, Any]) -> dict[str, Any]:
@@ -175,14 +246,7 @@ def main() -> int:
             if operation == "establish":
                 if name in worlds:
                     raise ValueError("environment already exists")
-                environment = gym.make(args.env_id)
-                seed = request.get("seed")
-                # NLE ignores reset(seed=...); it only reseeds through its own
-                # seed() method.
-                if seed is not None:
-                    environment.unwrapped.seed(int(seed))
-                observation, _ = environment.reset()
-                worlds[name] = World(environment, digest(observation))
+                worlds[name] = new_world(gym, args.env_id, request.get("seed"))
                 reply(sys.stdout, request_id, ok=True, state="available", observation=worlds[name].observation)
             elif operation == "branch":
                 world = require(worlds, name)
@@ -205,7 +269,7 @@ def main() -> int:
                     raise ValueError("action is outside the NLE action space")
                 if args.delay > 0:
                     time.sleep(args.delay)
-                observation, reward, terminated, truncated, _ = world.environment.step(action)
+                observation, reward, terminated, truncated, _ = step(world, action)
                 world.observation = digest(observation)
                 reply(
                     sys.stdout,
@@ -234,7 +298,7 @@ def main() -> int:
                     before = world.observation
                     if args.delay > 0:
                         time.sleep(args.delay)
-                    observation, _reward, _terminated, _truncated, _ = world.environment.step(action)
+                    observation, _reward, _terminated, _truncated, _ = step(world, action)
                     after = digest(observation)
                     world.observation = after
                     reply(
@@ -275,6 +339,45 @@ def main() -> int:
                     raise ValueError("environment is not available for suspend/resume")
                 world.state = "suspended" if operation == "suspend" else "available"
                 reply(sys.stdout, request_id, ok=True, state=world.state)
+            elif operation == "save":
+                unique = list({id(world): world for world in worlds.values()}.values())
+                records = [{"initial": world.initial, "actions": world.actions,
+                            "checks": world.checks, "state": world.state} for world in unique]
+                record = {"version": 1, "worlds": records,
+                          "environments": {key: unique.index(world) for key, world in worlds.items()}}
+                # Verify reconstruction before replacing the previous save.
+                for saved in records:
+                    probe = restore_world(gym, saved)
+                    probe.environment.close()
+                path = Path(request["path"])
+                temporary = path.with_name(path.name + ".tmp")
+                with temporary.open("x") as output:
+                    json.dump(record, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, path)
+                reply(sys.stdout, request_id, ok=True)
+            elif operation == "load":
+                if worlds:
+                    raise ValueError("load requires an empty bridge")
+                record = json.loads(Path(request["path"]).read_text())
+                if record["version"] != 1:
+                    raise ValueError("unsupported NLE save version")
+                restored = []
+                try:
+                    for saved in record["worlds"]:
+                        restored.append(restore_world(gym, saved))
+                    names = {key: restored[index] for key, index in record["environments"].items()}
+                    for world in restored:
+                        world.references = sum(value is world for value in names.values())
+                        if not world.references:
+                            raise ValueError("unreferenced saved NLE world")
+                    worlds.update(names)
+                except Exception:
+                    for world in restored:
+                        world.environment.close()
+                    raise
+                reply(sys.stdout, request_id, ok=True, states={key: world.state for key, world in worlds.items()})
             elif operation == "terminate":
                 world = require(worlds, name)
                 release(worlds, name)

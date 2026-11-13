@@ -104,3 +104,6 @@ Agent 接入侧可以在执行环境中按需要建立其本地承载，并由 A
 - [Branch 语义设计](branch-semantics.md)：Agent-facing operation 所受的 lifecycle 约束
 - [控制面设计](control-plane.md)：Agent Control Gateway 后的控制路径
 - [Agent 接入状态](../usage/agent-guide.md)：当前实现与可用性
+## 5. 主动退出与恢复
+
+主动退出立即请求 Agent 原生中断，等待取消完成及状态持久化，保留有效候选。恢复必须使用各 Branch 的原运行上下文及其等待关系，并与控制面和环境状态校验对应关系；不能从整理后的最终历史推定原上下文，也不能因缺少回执重试可能已经执行的工具。恢复完成后等待用户输入，与 Pi 原生重新打开 session 的体验一致。实现状态与边界见 [恢复](../development/recovery.md)。
