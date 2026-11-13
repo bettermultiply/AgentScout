@@ -68,7 +68,10 @@ def new_world(gym, env_id, seed=None, initial=None):
     # and derive time-dependent effects from the explicit initial RNGs.
     if initial is None:
         core = int(seed) if seed is not None else secrets.randbits(63)
-        initial = {"env_id": env_id, "seeds": [core, secrets.randbits(63), False, secrets.randbits(63)],
+        # None keeps level generation on the core RNG, as seed(core) did
+        # before save/restore was added. A separate random lgen seed changes
+        # the dungeon even when the configured core seed is unchanged.
+        initial = {"env_id": env_id, "seeds": [core, secrets.randbits(63), False, None],
                    "kwargs": {"fix_moon_phase": True}, "nle_version": importlib.metadata.version("nle")}
     if initial["nle_version"] != importlib.metadata.version("nle"):
         raise ValueError("NLE version differs from saved environment")

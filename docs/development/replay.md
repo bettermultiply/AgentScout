@@ -62,11 +62,48 @@ Promote 和 2 个 applied Discard；每个后续 Chance 都在其祖先 Candidat
 
 端点、导出和一次 B3 闭环已由上述脚本验证；重复回放脚本逐次比较 Chance/Proposal/Candidate 数量、Promote、applied Discard、权威父链 role/text、真实 NLE 观察及命中/缺失/耗尽报告。它仍不证明模型推理质量或性能收益。
 
-## NLE 核实（2026-11-12）
+## NLE 核实（2026-11-13）
+
+### 已定位的初始化回归与剩余阻塞
+
+`e89533d` 的保存／恢复实现把原先 `seed(core)` 改成了
+`seed(core, random_disp, False, random_lgen)`，同时启用 `fix_moon_phase=True`。
+独立 lgen RNG 会改变地图生成，不是 core seed 没有生效。当前最小修复保留
+`lgen=None`（沿用 core RNG）；不删除保存／恢复、指纹或版本检查，已保存记录仍按其
+完整 initial 重建。`tests/nle-initialization.py` 在修复前稳定失败（lgen=11），修复后
+通过，覆盖 seed=7 初始位置 `(26,5)`、四步和真实保存状态重建。无需模型调用。
+
+源配置和重跑配置均为 NetHackScore-v0、seed=7、action_delay_seconds=0，指向同一个
+Python 和仓库 bridge；套件只替换 control_socket。实际路径为 NleBackend::new 启动
+配置中的 bridge，establish 下发 seed，bridge 的 new_world 调用 NLE seed 后 reset。
+本机 NLE=1.3.0、Gymnasium=1.2.0，库文件时间早于三个源 run，但源 run 没有原生版本
+记录，不能据此声称已证明原二进制身份。成功工具结果没有添加墙钟或回放键。
+
+小型对照 `/tmp/opencode/nle-probe.py` 与 `nle-probe.log` 直接用真实 NLE 执行已有
+单层／四层／十层动作，分别改变 disp=11/22、lgen=None/7/99、fix_moon_phase=false/true。
+只有 lgen=None 的每一步 after 与三个源 run 全字段一致；改变 disp 未改变这些轨迹。
+这不是任意长轨迹确定性保证。原生 before 的差异明确在 message：单层为
+`Watch out!  Bad things can happen on Friday the 13th.`，四层和十层为
+`Be careful!  New moon tonight.`；当前固定日期效果为普通欢迎消息。关闭固定日期效果
+在当前系统日期 2026-11-13 只能匹配单层 before，四层仍不匹配。日期差异尚未修复；
+不伪造观察、不篡改源 run，不擅自引入进程时钟替换技术。
+
+修复后单层三次独立尝试均 4 hits/4 consumed、四层三次均 13 hits/13 consumed，
+misses/exhausted/unconsumed 均 0，结构与动作结果恢复，但全部严格验收仍失败。
+四层另有权威历史差异：源文件链中是预测 `moved`，当前整理后的链中是真实工具结果；
+这符合当前已确认语义，不通过改回运行语义或弱化 audit 绕过。脚本遇到首个严格差异即
+退出，所以一次 `b3-deep.mjs` 的三轮内部循环未完成；三次独立调用不等于三轮验收通过。
+完整整链交付处于阻塞，需先决定旧日期环境如何重建及旧历史与当前语义如何验收。
+
+原始证据：`/tmp/opencode/nle-initialization-before.log`、`nle-initialization-after.log`、
+`nle-fixed-b3.log`、`nle-fixed-b3-three.log`、`nle-b3-final-3.log`、
+`nle-fixed-deep4.log`、`nle-deep4-final-2.log`、`nle-deep4-final-3.log`。
+各日志的 artifacts 目录保留原生 session/events、requests、report 及 cleanup.json；
+均确认子进程及端口清理。未重新录制，未修改源记录，模型端点仅 loopback。
 
 实际路径：`src/runtime/backends/nle.rs:69-108` 启动配置的 Python 与 `examples/nle-runtime-bridge.py`，通过 stdin/stdout JSONL 逐请求调用，Mutex 串行化请求（114-138）。`invoke_tool` 只把 bridge 的 result/evidence 包装回传（270-299）。Runtime 配置可由 `ASCOUT_RUNTIME_CONFIG` 覆盖，或由 task 绑定 Policy 的 runtime 路径选择（`src/bin/ascout-control-plane.rs:292-296`）；不是每个 Prompt 的参数。
 
-`NleConfig.seed` 默认 None（nle.rs:30-37），establish 才下发（200-205）；bridge:178-184 调用 `environment.unwrapped.seed(int(seed))` 后 reset。已安装 NLE 的 `nle/env/base.py:480-513` 表明这只设置 core，disp=None 会随机选取，reseed 默认 False；未配置 seed 时 core 也不固定。当前配置不能单独指定 disp、reseed 或 lgen。因此不能把配置一个 seed 当作完整 RNG 可复现保证。
+`NleConfig.seed` 默认 None，establish 才下发；当前 bridge 显式保存 core、随机 disp、reseed=False、lgen=None，并固定日期效果。NLE `nle/env/base.py:480-513` 说明 None 的 disp 随机选取，lgen=None 不启用独立地图生成 RNG。未配置 seed 时 core 也随机。当前配置不能单独指定 disp、reseed、lgen 或日期策略；固定一个 core seed 不代表整个游戏的完整复现保证。
 
 逐项检查结果构造：bridge:47-93 只输出 chars、blstats、message，并从这些观测渲染 position/hp/depth/turn/hunger/map；invoke:237-250 返回 result 及 before/after/action/is_error。成功工具内容不加入墙钟、随机 id、绝对路径、PID 或耗时；turn 是游戏回合，不是墙钟。延迟仅 sleep。传输 id 是请求计数（Rust:119-121），不进入 result；错误文字可能包含 Guidebook 路径（bridge:254），不能推广成功结果结论到错误路径。Pi 的消息 timestamp、Ledger 时刻与模型耗时另行生成，不属于工具内容，不纳入内容键。
 
@@ -91,7 +128,7 @@ explicit core+disp changed byte_equal= False bytes= 49961 51146
 
 Candidate 不取得 NLE 快照、不 fork 进程、不重放动作。Runtime 声明 shared_environment=true、branch_environment=false（nle.rs:189-190），Controller 将操作映射到同一个 authority 环境（coordination/controller.rs:14-18）。候选复制 Agent checkpoint 并注入预测工具结果（main.ts:247-278），推进推理；真实工具在接受前 gate，tools.execute 还有角色检查（main.ts:86-90）。所有 Branch 实际共享一个 NLE 进程和 RNG，没有独立复制的 RNG 状态；bridge 的 branch 操作本身也只是 World 别名（187-194），不是实际隔离能力。
 
-结论：仅替换模型输出在限定动作轨迹上可行，但当前不能无条件保证整个运行逐字复现。需要固定 core、disp、禁止 reseed，固定 NLE/NetHack/环境配置、工具内容、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。NLE 构造默认 `fix_moon_phase=False`（`nle/env/base.py:195-202`）；本轮未追踪其跨日期／初始化时间影响，因此不能声称时间因素已全部排除。建议后续允许显式配置 disp/reseed（必要时 lgen），保存实际种子及环境版本，并扩大轨迹核实；当前仅记录上述实现缺口，不修改实现。异步调度不因模型输出固定就自动稳定。
+结论：仅替换模型输出在限定动作轨迹上可行，但不能无条件保证旧运行逐字复现。需固定完整 RNG 配置、NLE/NetHack 版本、日期策略、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。bridge 的运行恢复保存已包含 initial 种子、kwargs、版本和配置，但旧 run 没有这些原生保存资料；不能向 session/events 补写测试专用元数据。日期与权威历史阻塞如上。异步调度不因模型输出固定就自动稳定。
 
 ## Pi 端点核实
 
