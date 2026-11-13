@@ -438,6 +438,8 @@ pub struct SpeculativeTree {
     #[serde(default)]
     pub recovering: bool,
     #[serde(default)]
+    pub recovery_paused_at: Option<u64>,
+    #[serde(default)]
     shutdown_deadline: Option<u64>,
     #[serde(default = "first_id")]
     next_generation: u64,
@@ -474,6 +476,7 @@ impl SpeculativeTree {
             rebalance_epoch: None,
             stopping: false,
             recovering: false,
+            recovery_paused_at: None,
             shutdown_deadline: None,
             next_generation: 1,
             next_command_id: 1,
@@ -539,6 +542,7 @@ fn deserialize_notification<'de, D: serde::Deserializer<'de>>(deserializer: D) -
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AgentCommand {
+    SuspendRecovery { branch_id: String },
     CancelSave { branch_id: String },
     Save { branch_id: String, path: PathBuf },
     Load { branch_id: String, path: PathBuf },
@@ -626,6 +630,7 @@ pub enum AgentCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AgentMessage {
+    RecoverySuspended,
     RecoverySaved { path: PathBuf, error: Option<String> },
     RecoveryLoaded { error: Option<String> },
     Output {

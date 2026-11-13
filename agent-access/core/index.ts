@@ -37,6 +37,8 @@ export type ExecutionPoint = {
     /** Extra product facts copied into `speculative_admission_request`. */
     admissionFacts?: Record<string, unknown> | (() => Record<string, unknown>);
     signal?: AbortSignal;
+    /** Reconnect an already admitted hook; do not count or admit it twice. */
+    admitted?: boolean;
 };
 
 export type Disposition =
@@ -244,6 +246,11 @@ export function createAgentAccess({ taskId, report, evaluate, now = Date.now }: 
             const effectful = point.actionKind === 'tool_execution';
             if (effectful) await effectGate(point);
             await pauseGate(point.branch, point.signal);
+            if (point.admitted) {
+                const hold = extentHolds.get(point.branch);
+                if (hold) await waitFor(hold, point.signal, 'Extent stop cancelled');
+                return {kind:'allow'};
+            }
 
             const admit = typeof point.admit === 'function' ? point.admit() : point.admit;
             if (!admit || !policies.has(point.branch)) return { kind: 'allow' };

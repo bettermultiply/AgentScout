@@ -57,6 +57,29 @@ const branchTasks = new Map();
 const setupTasks = new Map();
 let saving=false;
 const pendingHooks=new Map();
+const suspendedHooks=new Map(), candidateSetups=new Map();
+const reconnectControllers=new Map();
+const interruptedBranches=new Set();
+let recoveryPaused=false;
+function captureHooks(){
+    for(const branch of branchTasks.keys())interruptedBranches.add(branch);
+    for(const [id,hook] of pendingHooks){
+        // Native non-Runtime tools have Pi's terminal cancellation result.
+        // A started external action cannot safely be replayed after restart.
+        if(hook.started&&!runtimeTools.some(spec=>spec.name===hook.toolCall.name))continue;
+        suspendedHooks.set(id,{...hook,admitted:checkpoints.has(id)});
+    }
+    for(const [branch,session] of sessions){
+        const assistant=[...session.messages].reverse().find(m=>m.role==='assistant');
+        if(!assistant?.content?.some(p=>p.type==='toolCall'))continue;
+        const position=session.messages.indexOf(assistant),following=session.messages.slice(position+1);
+        for(const part of assistant.content)if(part.type==='toolCall'&&!following.some(m=>m.role==='toolResult'&&m.toolCallId===part.id)){
+            const id=key(branch,part.id);
+            if(pendingHooks.get(id)?.started&&!runtimeTools.some(spec=>spec.name===part.name))continue;
+            if(!suspendedHooks.has(id))suspendedHooks.set(id,{branch,toolCall:structuredClone(part),args:structuredClone(part.arguments),assistantMessage:structuredClone(assistant),admitted:checkpoints.has(id)});
+        }
+    }
+}
 const notifications = new Notifications();
 async function stopSession(branch) {
     const session=sessions.get(branch);
@@ -195,17 +218,23 @@ function install(session,branch) {
     const before=session.agent.beforeToolCall, after=session.agent.afterToolCall;
     session.agent.beforeToolCall=async(context,signal)=>{
         if(saving)throw Error('Save requested before tool execution');
-        pendingHooks.set(key(branch,context.toolCall.id),{branch,toolCall:structuredClone(context.toolCall)});
+        const hookKey=key(branch,context.toolCall.id);
+        pendingHooks.set(hookKey,{branch,toolCall:structuredClone(context.toolCall),args:structuredClone(context.args),assistantMessage:structuredClone(context.assistantMessage)});
         try {
         const previous=await before?.(context,signal);
         if(previous?.block||signal?.aborted){pendingHooks.delete(key(branch,context.toolCall.id));return previous;}
         let saved, checkpoint;
         const prepareCheckpoint=()=>{
             if(checkpoint)return checkpoint;
+            if(suspendedHooks.get(hookKey)?.admitted)return checkpoints.get(hookKey).checkpoint;
             syncTranscript(branch);
-            saved=structuredClone(session.messages);
+            const reconnect=suspendedHooks.get(hookKey);
+            const index=reconnect?session.messages.findIndex(m=>m.role==='assistant'&&m.content?.some(p=>p.type==='toolCall'&&p.id===context.toolCall.id)):-1;
+            saved=structuredClone(index>=0?session.messages.slice(0,index+1):session.messages);
             checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${context.toolCall.id}:${saved.length}`};
-            const treeTail=tree.assertCheckpoint(branch,saved);
+            const manager=tree.branches.get(branch).manager;
+            const treeTail=reconnect?manager.getEntries().find(e=>e.type==='message'&&JSON.stringify(e.message)===JSON.stringify(saved.at(-1)))?.id:tree.assertCheckpoint(branch,saved);
+            if(!treeTail)throw Error('Suspended tool checkpoint missing');
             checkpoints.set(key(branch,context.toolCall.id),{saved,checkpoint,treeTail,manager:tree.branches.get(branch).manager});
             return checkpoint;
         };
@@ -219,18 +248,21 @@ function install(session,branch) {
             contractContext:{arguments:context.args,runtime_capabilities:runtimeTools},
             admit:()=>branch===authority,
             admissionFacts:()=>({checkpoint:prepareCheckpoint()}),
+            admitted:suspendedHooks.get(hookKey)?.admitted??false,
             signal,
         });
         if(signal?.aborted||branch!==authority)return previous;
         const toolCheckpoint=prepareCheckpoint();
         await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',result_pending:true,name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
+        const hook=pendingHooks.get(hookKey);if(hook)hook.started=true;
         return previous;
         } catch(error) {
-            pendingHooks.delete(key(branch,context.toolCall.id));
+            if(!saving)pendingHooks.delete(key(branch,context.toolCall.id));
             throw error;
         }
     };
     session.agent.afterToolCall=async(context,signal)=>{
+        if(saving&&signal?.aborted)return;
         pendingHooks.delete(key(branch,context.toolCall.id));
         const previous=await after?.(context,signal);
         const content=previous?.content??context.result.content,isError=previous?.isError??context.isError;
@@ -272,9 +304,9 @@ function install(session,branch) {
 }
 async function run(session,branch,operation) {
     try { await operation(); }
-    finally { syncTranscript(branch);await finishActions(branch,cancelled.has(branch)||aborting.has(branch)?'cancelled':'failed'); }
+    finally { syncTranscript(branch);await finishActions(branch,saving||cancelled.has(branch)||aborting.has(branch)?'cancelled':'failed'); }
     const last=[...session.messages].reverse().find(m=>m.role==='assistant');
-    if(last?.stopReason==='error')await report({message:'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
+    if(last?.stopReason==='error'&&!saving)await report({message:'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
     await report({message:'turn_completed',branch_id:branch});
     if(branch===authority)tree.settle();
 }
@@ -282,7 +314,7 @@ async function run(session,branch,operation) {
 // Abort). Keep setup ordered, but never hold the command queue for the turn.
 function executeTurn(session,branch,operation) {
     const task=run(session,branch,operation)
-        .catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error instanceof Error?error.message:error)}));
+        .catch(error=>saving?undefined:report({message:'branch_failed',branch_id:branch,reason:String(error instanceof Error?error.message:error)}));
     tasks.add(task);
     const running=branchTasks.get(branch)??new Set();running.add(task);branchTasks.set(branch,running);
     void task.finally(()=>{running.delete(task);if(!running.size)branchTasks.delete(branch)}).catch(()=>socket.destroy());
@@ -296,23 +328,22 @@ async function handle(command) {
     switch(command.command){
         case 'cancel_save':
             saving=false;
+            recoveryPaused=true;
             return;
         case 'save': {
             saving=true;
             let error;
             try {
-                // Until a suspended native tool frame can be reconstructed,
-                // refuse this case before changing its original wait state.
-                if(pendingHooks.size||setupTasks.size||candidateWaiters.size||waiters.size||resultWaiters.size)
-                    throw Error('Recovery of an active or blocked tool batch is not implemented; execution retained');
+                captureHooks();
+                for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
                 // Cancellation is requested concurrently on every session,
                 // before waiting for any individual inference to settle.
                 const aborts=[...sessions.values()].map(session=>session.abort());
+                for(const controller of reconnectControllers.values())controller.abort();
                 await Promise.all(aborts);
                 await commandQueue;
                 await Promise.all([...branchTasks.values()].flatMap(set=>[...set]));
-                if(setupTasks.size||candidateWaiters.size)throw Error('Pending candidate setup cannot yet be saved');
-                if(waiters.size||resultWaiters.size)throw Error('Unresolved tool batch cannot yet be saved');
+                await Promise.allSettled([...setupTasks.values()]);
                 for(const [branch,session] of sessions){await notifications.drain(session);syncTranscript(branch)}
                 const commandRecords=[];
                 for(const [id,item] of commands){
@@ -326,10 +357,12 @@ async function handle(command) {
                     executionConfig:{model:model??null,modelPattern:modelPattern??null,thinkingLevel,runtimeTools},
                     access:access.snapshot(),generations:[...generations],results:[...results],
                     cancelled:[...cancelled],reportedEntries:[...reportedEntries],commands:commandRecords,
+                    suspendedHooks:[...suspendedHooks],candidateSetups:[...candidateSetups],
+                    interruptedBranches:[...interruptedBranches],
                     checkpoints:[...checkpoints].map(([id,c])=>[id,{...c,manager:sourceFiles.get(c.manager.getSessionFile())}])});
             }catch(reason){error=String(reason)}
             await report({message:'recovery_saved',path:command.path,error:error??null});
-            if(error)saving=false;
+            if(error){saving=false;recoveryPaused=true;}
             return;
         }
         case 'load': {
@@ -361,17 +394,30 @@ async function handle(command) {
                 for(const value of record.reportedEntries)reportedEntries.add(value);
                 for(const [id,value] of record.commands)commands.set(id,{serialized:value.serialized,result:Promise.resolve(value.reply)});
                 for(const [id,c] of record.checkpoints)checkpoints.set(id,{...c,manager:managers.get(c.manager)});
+                for(const [id,hook] of record.suspendedHooks??[])suspendedHooks.set(id,hook);
+                for(const [id,setup] of record.candidateSetups??[])candidateSetups.set(id,setup);
+                for(const branch of record.interruptedBranches??[])interruptedBranches.add(branch);
                 for(const [branch,{manager,stopped}] of tree.branches){
-                    if(stopped)continue;
+                    if(stopped||candidateSetups.has(branch))continue;
                     const {session}=await createAgentSession({cwd:manager.getHeader().cwd,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
                     sessions.set(branch,session);install(session,branch);
                 }
                 saving=false;
+                recoveryPaused=true;
             }catch(reason){error=String(reason)}
             await report({message:'recovery_loaded',error:error??null});return;
         }
         case 'local_policy':
             return;
+        case 'suspend_recovery': {
+            saving=true;
+            captureHooks();
+            for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
+            for(const controller of reconnectControllers.values())controller.abort();
+            await Promise.all([...sessions.values()].map(session=>session.abort()));
+            await Promise.allSettled([...setupTasks.values()]);
+            await report({message:'recovery_suspended'});return;
+        }
         case 'start_branch': {
             const manager=tree.createBranch(branch,command.workspace,tree.manager,tree.tail(branch)??tree.manager.getLeafId());
             const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
@@ -387,14 +433,60 @@ async function handle(command) {
             if(saving)throw Error('Execution is saved and waiting for exit');
             if(branch!==authority)throw Error('Only the authority accepts user input');
             const session=sessions.get(branch);if(!session)throw Error('Session missing');
+            if(recoveryPaused){
+                recoveryPaused=false;
+                // Native cancelled tool results remain in history. Reconnect
+                // only suspended calls, appending their eventual real result;
+                // never replay the already issued Runtime action.
+                for(const [id,setup] of [...candidateSetups])startSetup(setup);
+                const grouped=new Map();
+                for(const [id,hook] of suspendedHooks){const hooks=grouped.get(hook.branch)??[];hooks.push([id,hook]);grouped.set(hook.branch,hooks)}
+                for(const [owner,hooks] of grouped){
+                    const target=sessions.get(owner);if(!target||cancelled.has(owner))continue;
+                    executeTurn(target,owner,async()=>{
+                        const {runToolCall}=require(resolve(root,'packages/agent/src/index.ts'));
+                        const controller=new AbortController();
+                        reconnectControllers.set(owner,controller);
+                        await Promise.all(hooks.map(async([id,hook])=>{
+                            const outcome=await runToolCall(hook.toolCall,{tools:target.agent.state.tools,assistantMessage:hook.assistantMessage,context:{messages:target.messages,tools:target.agent.state.tools},signal:controller.signal,
+                                beforeToolCall:target.agent.beforeToolCall,afterToolCall:target.agent.afterToolCall});
+                            if(saving)return;
+                            const message={role:'toolResult',toolCallId:hook.toolCall.id,toolName:hook.toolCall.name,content:outcome.result.content,isError:outcome.isError,timestamp:Date.now()};
+                            const entry=tree.append(owner,message);target.agent.state.messages=tree.context(owner).messages;
+                            suspendedHooks.delete(id);pendingHooks.delete(id);
+                            await report({message:'transcript',branch_id:owner,entry:message,session_entry_id:entry});
+                        }));
+                        reconnectControllers.delete(owner);
+                        if(saving||controller.signal.aborted)return;
+                        const operations=new Set(hooks.map(([,hook])=>hook.toolCall.id));
+                        const latest=new Map();
+                        for(const message of target.messages)if(message.role==='toolResult'&&operations.has(message.toolCallId))latest.set(message.toolCallId,message);
+                        target.agent.state.messages=target.messages.filter(message=>
+                            !(message.role==='toolResult'&&operations.has(message.toolCallId)&&latest.get(message.toolCallId)!==message)
+                            && !(message.role==='assistant'&&['aborted','error'].includes(message.stopReason)));
+                        if(owner===authority)await target.prompt(command.prompt,{streamingBehavior:'followUp'});else await target.continue();
+                    });
+                }
+                for(const [owner,target] of sessions)if(owner!==authority&&interruptedBranches.has(owner)&&!grouped.has(owner)&&!candidateSetups.has(owner)&&!cancelled.has(owner)){
+                    const last=target.messages.at(-1);
+                    // Pi excludes aborted assistant output from model context;
+                    // keep its native record but continue from its prior input.
+                    if(last?.role==='assistant'&&['aborted','error'].includes(last.stopReason))target.agent.state.messages=target.messages.slice(0,-1);
+                    if(target.messages.at(-1)?.role!=='assistant')executeTurn(target,owner,()=>target.continue());
+                }
+                interruptedBranches.clear();
+                if(grouped.has(branch))return;
+            }
             executeTurn(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));return;
         }
         case 'start_candidate': {
+            candidateSetups.set(branch,structuredClone(command));
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
             const messages=structuredClone(checkpoint.saved),last=messages.at(-1);
             if(last?.role!=='assistant'||!last.content.some(p=>p.type==='toolCall'&&p.id===command.operation_id&&p.name===command.tool_name))throw Error('Invalid pending checkpoint');
-            const manager=tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail);
+            const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail);
+            if(saving)return;
             const paired: any[]=[];
             for(const part of last.content){
                 if(part.type!=='toolCall')continue;
@@ -422,12 +514,13 @@ async function handle(command) {
             const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
             sessions.set(branch,session);install(session,branch);
+            candidateSetups.delete(branch);
             await report({message:'branch_created',branch_id:branch});
             // Injected result is new candidate content, not copied from the Parent.
             for(let i=0;i<paired.length;i++)await report({message:'transcript',branch_id:branch,entry:paired[i],session_entry_id:pairedEntryIds[i]});
             await report({message:'branch_started',branch_id:branch});
             await report({message:'branch_ready',branch_id:branch});
-            executeTurn(session,branch,()=>session.continue());return;
+            if(!saving&&!recoveryPaused)executeTurn(session,branch,()=>session.continue());return;
         }
         case 'pause':
         case 'resume':
@@ -456,12 +549,15 @@ async function handle(command) {
             return;
         case 'abort':
             aborting.add(branch);
+            reconnectControllers.get(branch)?.abort();
             try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled'); }
             finally { aborting.delete(branch); }
             return;
-        case 'discard': cancelled.add(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;
+        case 'discard': cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;
         case 'cleanup':
             cancelled.add(branch);releaseCandidateWaiters(branch);
+            reconnectControllers.get(branch)?.abort();
+            candidateSetups.delete(branch);
             await setupTasks.get(branch)?.catch(()=>{});
             await stopSession(branch);
             await finishActions(branch,'cancelled');
@@ -476,7 +572,7 @@ async function dispatch(command){
     let reason;
     const acknowledgement=status=>({message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status,generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{})});
     try{
-        if(saving&&!['save','cancel_save'].includes(command.command))throw Error('Save in progress; command not applied');
+        if(saving&&!['save','suspend_recovery','cancel_save','resolve_pending','promote','discard','cleanup','start_candidate'].includes(command.command))throw Error('Save in progress; command not applied');
         const generation=generations.get(command.branch_id);
         if(generation!==undefined&&command.generation!==undefined&&generation!==command.generation)throw Error('Stale command generation');
         if(command.generation!==undefined)generations.set(command.branch_id,command.generation);
@@ -484,7 +580,11 @@ async function dispatch(command){
         await handle(command);
     }catch(error){reason=String(error instanceof Error?error.message:error)}
     if(operation&&command.command_id)return {message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status:reason?'failed':'applied',generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{}),...(reason?{reason}:{})};
-    if(reason)return {message:'branch_failed',branch_id:command.branch_id,reason};
+    if(reason&&!(saving&&command.command==='start_candidate'))return {message:'branch_failed',branch_id:command.branch_id,reason};
+}
+function startSetup(command){
+    const task=dispatch(command);setupTasks.set(command.branch_id,task);
+    void task.then(reply=>reply?report(reply):undefined).finally(()=>setupTasks.delete(command.branch_id));
 }
 await report({message:'agent_connected',agent_id:agentId,capabilities});
 await report({message:'agent_ready',agent_id:agentId});
@@ -505,7 +605,7 @@ try{
             // A candidate may wait for sibling tool results. It must not hold
             // up resolve_pending / cleanup on the transport's command queue.
             // Save must interrupt immediately even if setup is awaiting a tool.
-            const result=old?.result??(command.command==='save'
+            const result=old?.result??(['save','suspend_recovery'].includes(command.command)
                 ?dispatch(command):command.command==='start_candidate'
                 ?commandQueue.then(()=>dispatch(command))
                 :(commandQueue=commandQueue.then(()=>dispatch(command))));

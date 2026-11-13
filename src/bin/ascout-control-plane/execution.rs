@@ -22,6 +22,9 @@ struct Task<'a> {
     draining: bool,
     recovery_path: std::path::PathBuf,
     saved: bool,
+    suspended: bool,
+    save_requested: bool,
+    loaded: bool,
 }
 
 impl Task<'_> {
@@ -41,17 +44,17 @@ impl Task<'_> {
     fn handle(&mut self, event: Event) -> io::Result<Option<ControlActions>> {
         let mut actions = match event {
             Event::Request(ui::Request::Shutdown) => {
-                if self.tree.recovering {return Ok(Some(ControlActions::default()));}
-                if self.tree.pending_work() || self.tree.recovery_pending_commands() {
-                    self.notice="Save failed; a control operation is still pending; execution retained".into();
-                    return Ok(Some(ControlActions::default()));
-                }
+                if self.tree.recovering && !self.loaded {return Ok(Some(ControlActions::default()));}
+                self.loaded=false;
                 let directory=self.recovery_path.parent().unwrap().join(format!("recovery-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
                 std::fs::create_dir(&directory)?;
                 self.recovery_path=directory.join("agent.json");
+                self.suspended=false;
+                self.save_requested=false;
                 self.tree.recovering = true;
+                self.tree.recovery_paused_at.get_or_insert(now_ms());
                 ControlActions {
-                    commands: vec![AgentCommand::Save {branch_id:self.tree.authority_branch_id.clone().unwrap_or_default(),path:self.recovery_path.clone()}],
+                    commands: vec![AgentCommand::SuspendRecovery {branch_id:self.tree.authority_branch_id.clone().unwrap_or_default()}],
                     ..Default::default()
                 }
             },
@@ -60,7 +63,18 @@ impl Task<'_> {
                 ..Default::default()
             },
             Event::Request(ui::Request::Prompt { prompt }) => {
-                if self.tree.recovering {return Ok(Some(ControlActions::default()));}
+                if self.tree.recovering {
+                    if !self.loaded {return Ok(Some(ControlActions::default()));}
+                    if let Some(at)=self.tree.recovery_paused_at.take() {
+                        let elapsed=now_ms().saturating_sub(at);
+                        for branch in self.tree.branches.values_mut() {
+                            for operation in &mut branch.pending_operations {
+                                if let Some(deadline)=&mut operation.deadline_at {*deadline=deadline.saturating_add(elapsed);}
+                            }
+                        }
+                    }
+                    self.tree.recovering=false;
+                }
                 self.tree.queue_prompt(prompt);
                 ControlActions::default()
             }
@@ -85,16 +99,22 @@ impl Task<'_> {
                 if let AgentMessage::RecoverySaved { path, error } = &message {
                     if path != &self.recovery_path {return Err(io::Error::other("Recovery path mismatch"));}
                     if let Some(error) = error {
-                        self.tree.recovering = false;
+                        // Pi has already cancelled. Retain the tree frozen
+                        // until another user prompt or save attempt.
+                        self.tree.recovering = true;
+                        self.loaded=true;
                         self.saved = false;
+                        self.suspended=false;
+                        self.save_requested=false;
                         self.notice = format!("Save failed; still running: {error}");
                     } else {self.saved = true;}
                 }
+                if matches!(message,AgentMessage::RecoverySuspended) {self.suspended=true;}
                 if let AgentMessage::RecoveryLoaded {error:Some(error)} = &message {
                     return Err(io::Error::other(format!("Recovery load failed: {error}")));
                 }
                 if let AgentMessage::RecoveryLoaded {error:None} = &message {
-                    self.tree.recovering=false;
+                    self.loaded=true;
                 }
                 let commands =
                     if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
@@ -190,6 +210,9 @@ pub fn run(
         draining: false,
         recovery_path: run_dir.join("agent-recovery.json"),
         saved: false,
+        suspended: false,
+        save_requested: false,
+        loaded: false,
     };
     let result = thread::scope(|scope| {
         let sender = events.clone();
@@ -275,6 +298,11 @@ pub fn run(
                         let _ = sender.send(Event::Completed(id, result));
                     });
                 }
+                if task.tree.recovering && task.suspended && !task.save_requested
+                    && !task.tree.pending_work() && !task.tree.recovery_pending_commands() {
+                    task.save_requested=true;
+                    send(task.stream,AgentCommand::Save {branch_id:task.tree.authority_branch_id.clone().unwrap_or_default(),path:task.recovery_path.clone()})?;
+                }
                 if task.saved && !task.draining && !task.tree.pending_work() {
                     let save_result=(||->io::Result<()> {
                         let generation=task.recovery_path.parent().unwrap();
@@ -287,7 +315,8 @@ pub fn run(
                         task.notice=format!("Save failed; execution retained: {error}");
                         task.saved=false;
                         send(task.stream,AgentCommand::CancelSave {branch_id:task.tree.authority_branch_id.clone().unwrap_or_default()})?;
-                        task.tree.recovering=false;
+                        task.tree.recovering=true;
+                        task.loaded=true;
                     } else {
                         task.stream.shutdown(std::net::Shutdown::Write)?;
                         task.draining=true;

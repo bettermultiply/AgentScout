@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { mkdirSync, writeFileSync, renameSync, unlinkSync, copyFileSync, openSync, fsyncSync, closeSync } from 'node:fs';
+import { mkdirSync, writeFileSync, renameSync, unlinkSync, copyFileSync, openSync, fsyncSync, closeSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -98,7 +98,8 @@ export class SessionTree {
             const sourcesDirectory=join(directory,'sources');mkdirSync(sourcesDirectory,{recursive:true});
             for(const file of managers.keys()){
                 const target=join(sourcesDirectory,`${randomUUID()}.jsonl`);
-                copyFileSync(file,target);
+                if(existsSync(file))copyFileSync(file,target);
+                else {const manager=managers.get(file);this.write(target,manager.getHeader(),manager.getEntries());}
                 const descriptor=openSync(target,'r');try{fsyncSync(descriptor)}finally{closeSync(descriptor)}
                 copies.set(file,target);
             }
@@ -107,7 +108,7 @@ export class SessionTree {
         const sourceFile=file=>copies.get(file)??file;
         const sources=[...managers].map(([file,manager])=>({file:sourceFile(file),originalFile:file,leaf:manager.getLeafId(),
             header:manager.getHeader(),entries:structuredClone(manager.getEntries()),
-            checksum:checksum(readFileSync(file))}));
+            checksum:checksum(readFileSync(sourceFile(file)))}));
         return {authority:this.authority,manager:sourceFile(this.manager.getSessionFile()),sources,
             branches:[...this.branches].map(([id,{manager,stopped}])=>[id,{file:sourceFile(manager.getSessionFile()),stopped}]),
             inputs:[...this.inputs].map(([id,input])=>[id,{...input,source:input.source?sourceFile(input.source.getSessionFile()):undefined}]),

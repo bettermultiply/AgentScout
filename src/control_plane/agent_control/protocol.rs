@@ -6,7 +6,7 @@ impl SpeculativeTree {
     /// 接收 Pi 报告的启动事实。
     pub fn handle_message(&mut self, message: AgentMessage) -> io::Result<Vec<AgentCommand>> {
         match message {
-            AgentMessage::RecoverySaved { .. } | AgentMessage::RecoveryLoaded { .. } => Ok(vec![]),
+            AgentMessage::RecoverySuspended | AgentMessage::RecoverySaved { .. } | AgentMessage::RecoveryLoaded { .. } => Ok(vec![]),
             AgentMessage::AgentConnected { agent_id, .. } if agent_id == self.agent_id => {
                 Ok(vec![])
             }
@@ -254,6 +254,11 @@ impl SpeculativeTree {
             .entry(branch_id.to_string())
             .or_default()
             .insert(operation_id.to_string(), timestamp_ms);
+        if self.recovering && status == ActionStatus::Cancelled {
+            // Native cancellation ends a Pi frame, not the Chance's real
+            // Runtime operation. Its result/receipt is collected separately.
+            return Ok(vec![]);
+        }
         self.complete_operation(
             branch_id,
             Some(operation_id),
