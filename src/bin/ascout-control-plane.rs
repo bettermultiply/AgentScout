@@ -34,6 +34,7 @@ use ascout::protocol::contract::{AgentLaunch, Operation, RuntimeCapabilities};
 use ascout::protocol::transport;
 use serde_json::Value;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 static SIGNAL_FD: AtomicI32 = AtomicI32::new(-1);
 
@@ -281,22 +282,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("{} is not a run directory", run_dir.display()).into());
     }
     let pi_root = fs::canonicalize(&args[1])?;
-    let policy = PolicyEngine::default().compile(std::path::Path::new(
-        args.get(2)
-            .map(String::as_str)
-            .unwrap_or("assets/policy/policy.yaml"),
-    ))?;
-
-    let socket = run_dir.join("agent.sock");
-    let _ = fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket)?;
-    listener.set_nonblocking(true)?;
-
-    // Policy 可以选择 Runtime；环境变量保留给部署时覆盖。
-    let config_path = env::var_os("ASCOUT_RUNTIME_CONFIG")
-        .map(std::path::PathBuf::from)
-        .or_else(|| policy.runtime().map(std::path::PathBuf::from))
-        .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
+    let artifact_path = run_dir.join("policy.json");
+    if !resume && ["policy.json", "events.jsonl", "session.jsonl", "recovery.json", "agent.sock"]
+        .iter().any(|name| run_dir.join(name).symlink_metadata().is_ok()) {
+        return Err("Saved Policy exists; refusing to overwrite run data".into());
+    }
     // Establish task control state before starting its execution infrastructure.
     let recovered=if resume {Some(recovery::load(&run_dir)?)} else {None};
     let recovery_generation=recovered.as_ref().map(|(_,path)|path.clone());
@@ -309,15 +299,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if run_dir.join("recovery.json").exists() {return Err("Saved execution exists; use --resume".into());}
         SpeculativeTree::with_workspace("agent", &run_dir)?
     };
+    let engine = PolicyEngine::default();
+    let artifact_bytes = if !resume { None } else { match fs::read(&artifact_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Policy artifact {}: {error}", artifact_path.display()).into()),
+    }};
+    let policy = if resume && artifact_bytes.is_some() {
+        let bytes = artifact_bytes.as_ref().unwrap();
+        if tree.policy_binding.as_ref().and_then(|binding| binding.get("sha256"))
+            != Some(&json!(format!("{:x}", Sha256::digest(bytes))))
+        {
+            return Err("Recovery Policy artifact changed".into());
+        }
+        let saved = CompiledPolicy::from_bytes(bytes)?;
+        if let Some(path) = args.get(2) {
+            let supplied = engine.compile(std::path::Path::new(path))?;
+            if supplied.digest() != saved.digest() {
+                return Err("Recovery Policy changed".into());
+            }
+        }
+        saved
+    } else {
+        let path = args.get(2).map(String::as_str).or_else(|| {
+            if resume { None } else { Some("assets/policy/policy.yaml") }
+        }).ok_or("Saved Policy artifact missing; supply policy.yaml explicitly")?;
+        engine.compile(std::path::Path::new(path))?
+    };
+    // Policy references a Runtime configuration, not a saved Runtime. Preserve
+    // the original cwd resolution even when the artifact lives inside the run.
+    let config_path = env::var_os("ASCOUT_RUNTIME_CONFIG")
+        .map(std::path::PathBuf::from)
+        .or_else(|| if resume { tree.runtime_binding.as_ref()?.get("config_path")?.as_str().map(std::path::PathBuf::from) } else { None })
+        .or_else(|| policy.runtime_config_path().map(std::path::PathBuf::from))
+        .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
     tree.execution_id = run_dir.display().to_string();
     if resume && tree.local_policy_digest.as_deref()!=Some(policy.digest()) {return Err("Recovery Policy changed".into());}
     if resume && tree.runtime_binding.as_ref().and_then(|v|v.get("config_path"))!=Some(&json!(config_path)) {return Err("Recovery Runtime binding changed".into());}
     let config_digest=recovery::digest(&config_path)?;
     if resume && tree.runtime_binding.as_ref().and_then(|v|v.get("sha256"))!=Some(&json!(config_digest)) {return Err("Recovery Runtime configuration changed".into());}
+    let artifact_digest = if let Some(bytes) = artifact_bytes {
+        format!("{:x}", Sha256::digest(bytes))
+    } else {
+        policy.save(&artifact_path)?;
+        // Hash the exact deterministic bytes published by save, not a second
+        // read of a file another process could have changed in the meantime.
+        format!("{:x}", Sha256::digest(serde_json::to_vec_pretty(&policy)?))
+    };
+    let policy_binding = json!({"source": policy.source(), "artifact": "policy.json", "sha256": artifact_digest});
+    let socket = run_dir.join("agent.sock");
+    let _ = fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket)?;
+    listener.set_nonblocking(true)?;
     let (mut adapter, session, runtime_capabilities) = start_adapter(&config_path, &run_dir)?;
     if resume && tree.capability_view.as_ref()!=Some(&serde_json::to_value(&runtime_capabilities)?) {return Err("Recovery Runtime capabilities changed".into());}
     tree.bind_execution(
-        json!({"source": args.get(2).map(String::as_str).unwrap_or("assets/policy/policy.yaml")}),
+        policy_binding,
         json!({"config_path": config_path,"sha256":config_digest}),
         serde_json::to_value(&runtime_capabilities)?,
     );

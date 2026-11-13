@@ -25,14 +25,16 @@ Pi 源码依据（相邻 ../pi checkout）：
 
 已经释放的 Branch 仍可能被 checkpoint／后代输入引用。保存时若其原生源已由成功汇总清理，则从仍保留的原生 SessionManager 完整 entries/header 生成保存副本；其内容校验仍按保存副本计算，恢复继续复制成独立可写源。
 
-入口（run-dir 为原运行目录，其配置、源文件及工作区必须保留）：
+入口（run-dir 为原运行目录，保留原生 artifact、恢复资料、Runtime 配置及工作区）：
 
 ```sh
 cargo build --bins
-target/debug/ascout-control-plane <run-dir> <pi-root> <policy.yaml> --resume --web 127.0.0.1:8080 --model <provider/model>
+target/debug/ascout-control-plane <run-dir> <pi-root> --resume --web 127.0.0.1:8080 --model <provider/model>
 ```
 
 退出仍使用现有 Shutdown；保存后目录包含 `recovery-<timestamp>/{tree,agent,runtime}.json` 和 `recovery.json`。恢复不能只复制最终 `session.jsonl`；`sessions/` 保存各 Branch 的原上下文。NLE 重建只在固定版本和固定配置下校验，不声称公共 observation/RNG 校验是任意隐藏状态等价的数学证明。任意外部工具副作用不能靠此重放。
+
+正常启动原生保存完整 `policy.json`，恢复默认使用它，外部原 YAML/脚本不再必需；显式传入 Policy 时核对相同 digest。缺失 artifact 必须显式补充原 YAML，不能采用当前默认策略；损坏或绑定不符直接失败。Runtime 未显式覆盖时使用原 binding，路径/内容/能力校验保持。精确保存范围与验证见 [Policy 实现](policy-engine.md)；完整 Runtime 配置保存不在此轮范围。
 
 ## 实际验证（2026-11-13）
 

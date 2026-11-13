@@ -4,9 +4,27 @@
 
 ## 目标与边界
 
-降低 NLE 深度投机验证的模型推理成本。回放只用录制的 assistant 输出替换模型服务，检验系统的投机、Promote、Discard 与 single-winner 反应；不评价 Agent、不证明性能收益。NLE 工具真实重新执行，不以录制的工具结果代替执行。
+通用回放工具的已批准目标是：指定已有运行目录，每次重新读取原生 session/events，用已记录的 assistant 输出替换模型服务，由正常系统按真实用户输入及交互顺序重新执行工具，在正常 WebUI 观察全过程。结束或匹配失败后系统不退出，用户可通过正常模型切换继续输入；真实模型只能由用户之后手动选择。回放不评价 Agent、不证明性能收益。
+
+源目录只读。本次回放及随后继续输入的 session/events 状态只保存在内存，除非用户显式要求持久化；不得另建持久或临时记录目录、副本，也不得把上次回放输出当下次输入。socket 等必要临时资源不属于会话记录，必须清理。没有层数参数、固定 prompt、候选或步数；B3 只能作为工具的验收使用者。
 
 导出与伪造端点放在 [`tools/replay/`](../../tools/replay/README.md)，使用 Node 26，只读取已有 run 内 `events.jsonl` 和 `session.jsonl`。记录是系统原生能力，测试套件不执行录制：B3、repeat、deep 均须提供已有 run，先导出再执行一次、五次或三次回放；低层 B1／B1-PI 保留手构造原生数据验证，B1-PI 也可接收已有样例目录。
+
+### 通用入口实施前核查（2026-11-13）
+
+当前尚未交付满足上述边界的通用启动入口。源码核查发现以下前提，不能把既有 NLE 验收脚本包装为该入口：
+
+| 核查项 | 当前原生能力及缺失 |
+|---|---|
+| Policy 与 Runtime 启动信息 | 正常启动已原生保存完整 `policy.json`：同次加载的 YAML、声明源码/资源、Decision 绑定及编译结果和原来源，恢复优先读取，详见 [Policy 实现](policy-engine.md)。Runtime 仍只绑定配置路径、摘要和能力，不保证运行目录包含完整 Runtime 配置；历史目录缺少 artifact 时不能凭摘要还原内容。 |
+| 初始环境 | NLE 主动退出保存的 `worlds[].initial` 包含完整种子、环境参数及版本，另有动作和检查；这比普通 session/events 完整，但只在成功保存后存在。FS 恢复保存的是退出时环境及其 lower，不保证包含整次运行开始前可独立重建的工作区。主动退出状态不能直接当作从头回放的初始状态。 |
+| 用户输入与交互顺序 | 原生 `message.role=user` 可区别于 `custom_message` 通知；导出不能把通知当用户。`execution.rs` 收到 Prompt 只调用 `queue_prompt`，不记录接收事件；`commands.rs` 直到 authority ready 且不运行时才取出输入。transcript 记录实际进入 session 的顺序，不能恢复运行中追加输入的接收时刻及其相对其他交互的顺序；被中断/退出清除的排队输入可能根本没有 user 记录。 |
+| 正常模型切换与错误恢复 | `ui::Request` 仅有 Prompt/Interrupt/Shutdown，Pi main 只在启动解析 `--model`，没有运行中模型切换 API。Pi 上报 `branch_failed` 后，`execution.rs` 的 authority_failure 返回错误，执行循环调用 begin_shutdown；当前不是模型错误后保持可用。必须修改正常系统功能，不得藏在回放专用切换内。 |
+| 不落盘状态 | Ledger 必须打开追加文件；Pi main 必须提供 `ASCOUT_SESSION_FILE`，SessionTree.createBranch 创建 `sessions/*.jsonl`，settle 汇总文件。正常 Shutdown 还创建 recovery generation。必须增加真正的内存承载，不能改用临时 run 目录冒充。 |
+
+核查样例 `/tmp/opencode/current-replay-inputs-0k1c9rtd/single/source` 的主动退出代为 `recovery-1794548537681811948`：tree 的 Policy/Runtime 绑定仍指向原 `bIAF7f/run-1`，NLE runtime 保存完整 initial；目录内另有 policy.yaml/runtime.json/decisions.py 是历史验收布局，不能据此认定任意正常 run 均具备这些内容。此轮只读核查，没有启动模型、环境或回放，也没有创建记录副本。
+
+**2026-11-13 已批准的配置边界**：目录优先，缺失原配置允许调用方显式补充，不能猜测或采用当前默认策略。当前仅落实正常运行的完整 Policy 留档；通用交互回放、完整 Runtime 保存、可验证初始环境和输入接收时序仍有上述缺口，下一节点由用户决定。不新增回放专用 session/events 字段；正常运行原生持久化与未来回放不落盘是不同边界。
 
 ## 记录来源
 

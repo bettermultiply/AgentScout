@@ -34,11 +34,16 @@ pub(super) struct Definition {
     pub(super) decisions: BTreeMap<String, Value>,
 }
 
-/// Fixed source, bindings and Python environment identity. No author-side paths.
+/// Fixed source, bindings, Python identity and author-side provenance.
 /// Deserialize only from an authenticated source; the digest is not authentication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledPolicy {
+    // Provenance is retained from the same reads used by compilation. It does
+    // not enter the executable digest, which remains the Decision identity.
+    pub(super) source: std::path::PathBuf,
+    pub(super) definition: String,
+    pub(super) runtime_config_path: Option<std::path::PathBuf>,
     pub(super) version: u32,
     pub(super) python: String,
     pub(super) files: BTreeMap<String, String>,
@@ -49,6 +54,41 @@ pub struct CompiledPolicy {
 }
 
 impl CompiledPolicy {
+    pub fn source(&self) -> &std::path::Path {
+        &self.source
+    }
+
+    /// Deployment path resolved at compilation, not relative to the artifact.
+    pub fn runtime_config_path(&self) -> Option<&std::path::Path> {
+        self.runtime_config_path.as_deref()
+    }
+
+    pub fn load(path: &std::path::Path) -> io::Result<Self> {
+        Self::from_bytes(&std::fs::read(path)?)
+    }
+
+    /// Decode the very bytes whose artifact identity the caller checked.
+    pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
+        let policy: Self = serde_json::from_slice(bytes).map_err(invalid)?;
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    /// Publish only complete artifacts, and never replace an existing run's data.
+    pub fn save(&self, path: &std::path::Path) -> io::Result<()> {
+        use std::io::Write;
+        self.validate()?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        file.write_all(&serde_json::to_vec_pretty(self).map_err(invalid)?)?;
+        file.as_file().sync_all()?;
+        file.persist_noclobber(path).map_err(|error| error.error)?;
+        std::fs::File::open(parent)?.sync_all()
+    }
+
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -112,4 +152,3 @@ impl CompiledPolicy {
         )
     }
 }
-

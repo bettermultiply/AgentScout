@@ -95,6 +95,12 @@ impl PolicyEngine {
     }
 
     pub fn compile(&self, path: &Path) -> io::Result<CompiledPolicy> {
+        let source_cwd = env::current_dir()?;
+        let source_path_absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            source_cwd.join(path)
+        };
         let root = File::open(
             path.parent()
                 .filter(|p| !p.as_os_str().is_empty())
@@ -104,7 +110,9 @@ impl PolicyEngine {
             .file_name()
             .and_then(|v| v.to_str())
             .ok_or_else(|| invalid("invalid YAML filename"))?;
-        let text = read_limited(open_source(&root, filename)?, MAX_BYTES)?;
+        let text = open_source(&root, filename)
+            .and_then(|file| read_limited(file, MAX_BYTES))
+            .map_err(|e| io::Error::new(e.kind(), format!("Policy YAML {}: {e}", path.display())))?;
         let text = std::str::from_utf8(&text).map_err(invalid)?;
         check_yaml(text)?;
         let definition: Definition = serde_yaml::from_str(text).map_err(invalid)?;
@@ -131,7 +139,9 @@ impl PolicyEngine {
         let mut total = 0;
         for name in definition.files {
             source_path(&name)?;
-            let source = read_limited(open_source(&root, &name)?, MAX_BYTES - total)?;
+            let source = open_source(&root, &name)
+                .and_then(|file| read_limited(file, MAX_BYTES - total))
+                .map_err(|e| io::Error::new(e.kind(), format!("Policy source {name} ({}): {e}", path.display())))?;
             total += source.len();
             let source = String::from_utf8(source).map_err(invalid)?;
             require(files.insert(name, source).is_none(), "duplicate file")?;
@@ -165,6 +175,18 @@ impl PolicyEngine {
             "unknown Decision or admit entry",
         )?;
         let mut policy = CompiledPolicy {
+            source: source_path_absolute,
+            definition: text.to_owned(),
+            // Preserve existing semantics: relative Runtime paths are relative
+            // to the launch cwd, not the Policy's directory.
+            runtime_config_path: definition.runtime.as_ref().map(|runtime| {
+                let path = PathBuf::from(runtime);
+                if path.is_absolute() {
+                    path
+                } else {
+                    source_cwd.join(path)
+                }
+            }),
             version: 1,
             python: String::new(),
             files,
@@ -385,4 +407,3 @@ mod tests {
         assert!(error.to_string().contains("ASCOUT_POLICY_BWRAP"), "{error}");
     }
 }
-

@@ -10,6 +10,18 @@
 
 `PolicyEngine::evaluate` 对已编译结果求值，不再读取作者 YAML 或原始源码。每次调用创建新进程，返回检查后的 JSON 值；Engine 不创建 Branch、不做效果操作，也不应用返回的选择。
 
+### 正常运行的 Policy 留档（2026-11-13）
+
+控制面在启动 Adapter 前保存 run 内 `policy.json`，复用 `CompiledPolicy` artifact。它包含同次编译读取的原 YAML 文本、原来源绝对路径、`files` 声明的完整 UTF-8 源码/资源、所有 Decision 绑定和配置、Python 标识、digest，以及 Runtime 引用按启动工作目录解析的路径。不是加载完成后重新读取外部文件；`files` 中的包与相对 import 继续由既有内嵌 source loader 解析。源码在编译期间逐个读取，不承诺外部多文件编辑的事务快照。
+
+保存使用同目录私有临时文件、sync 和不覆盖发布；失败明确返回错误，不启动 Adapter。已有 `policy.json` 的普通启动拒绝覆盖。保存成功但后续基础设施启动失败会留下完整 artifact，不自动删除运行资料。`CompiledPolicy::load` 校验既有 executable digest，Tree 的原生 Policy binding 另外绑定 artifact 字节 SHA-256；YAML/来源元数据不改变原 Decision digest 算法。
+
+`--resume` 无 Policy 参数时读取 run 内 artifact，不重新编译外部源。有显式 Policy 参数时先编译核对 digest，仍使用留档版本；artifact 存在但损坏或绑定不符直接失败。artifact 缺失时要求显式提供 YAML，原 digest 与 Runtime 路径/内容检查通过才保存补充的 artifact，不回退默认策略。不提供旧 artifact 格式兼容。
+
+Runtime 环境变量仍是显式覆盖入口；恢复未指定时使用保存的 Runtime binding，照旧校验路径、内容和能力。普通启动的 Policy Runtime 相对路径仍按启动 cwd 解析，artifact 中另存解析路径，避免误改为 run 目录或 YAML 目录。Runtime 配置文件及环境仍需保留；本轮不复制完整 Runtime。自包含范围为 YAML 与已声明文件，不包括 Python 可执行文件、标准库、动态库、第三方服务或未声明动态依赖；现有隔离与明确拒绝规则不变。
+
+验证：`cargo check --all-targets`、`cargo build --bins --example policy`、`cargo test --test policy`（1/1）、Policy 模块已有测试（3/3）、`node --test tests/recovery-active.mjs`（4/4）通过，无真实模型请求。手构造 `/tmp/opencode/check-policy-record.py` 验证原 YAML/源码逐字一致、声明包相对导入、源删除后求值、已有 artifact 不覆盖及临时文件清理；删除 `/tmp/opencode/recovery-active-owpWLQ/policy` 后不传 Policy/Runtime 覆盖，真实恢复并再次保存通过；追加验证 artifact 篡改、缺失、显式策略 digest 变化、已有运行保护与源码缺失时不发布 artifact/不启动基础设施均通过，最终证据 `/tmp/opencode/policy-record-o7sd7v9d`。该脚本前两轮在恢复握手完成前请求 Shutdown 超时，最终等待本轮 recovery_loaded 后通过；不据此声称启动期退出竞态已修复。
+
 ```rust
 use std::path::Path;
 use ascout::control_plane::policy::{Decision, PolicyEngine};

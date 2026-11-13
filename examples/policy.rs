@@ -13,11 +13,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
         Some("compile") if args.len() == 3 => {
             let policy = engine.compile(Path::new(&args[1]))?;
-            fs::write(&args[2], serde_json::to_vec_pretty(&policy)?)?;
+            policy.save(Path::new(&args[2]))?;
             println!("{}", policy.digest());
         }
         Some("evaluate") if args.len() == 4 => {
-            let policy: CompiledPolicy = serde_json::from_slice(&fs::read(&args[1])?)?;
+            let policy = CompiledPolicy::load(Path::new(&args[1]))?;
             let decision: Decision = serde_json::from_value(args[2].clone().into())?;
             let bytes = if args[3] == "-" {
                 let mut bytes = Vec::new();
