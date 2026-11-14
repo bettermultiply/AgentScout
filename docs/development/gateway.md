@@ -51,7 +51,7 @@ Runtime 仍通过 OperateEnvironment 的 AgentLaunch 实际启动 Agent，负责
 
 当时的首错为 replay 校验器在匹配和请求日志之前拒绝合法纯工具调用消息，而非 NLE 观察缺键。格式拒绝不计入报告的 total_requests，不能将报告误读为实际 HTTP 请求总量。
 
-直接因果证据：`/tmp/opencode/gateway-request-probe.mjs` 从两份 session 只读取 user、首个 assistant 与三个工具结果，经当前 Pi provider 向独立 loopback HTTP 捕获服务发送六次请求（无 Gateway、无模型）。六次唯一不符合 `isMessage` 的消息均为 assistant `content:null` 加合法 tool_calls；Pi `openai-completions.ts:1284` 正是这样初始化纯工具调用消息。git HEAD `61c3f09` 的 `types.ts` 不接受 null；该格式兼容修复属于独立任务，不包含在 Gateway 提交中。六次 requestKey 对应源 recording 中的 moved、blocked 和真实工具结果键（11a578d9…、ab63bfc1…、05ee5348…），不是此处工具内容漂移。捕获正文及日志：`/tmp/opencode/gateway-request-probe-0dDZ1C/requests.json`、`/tmp/opencode/gateway-request-probe.log`。探针不修改源文件，未重建或冒称完整重构前运行对照；格式修复不等于机制整链验收通过。
+直接因果证据：`/tmp/opencode/gateway-request-probe.mjs` 从两份 session 只读取 user、首个 assistant 与三个工具结果，经当前 Pi provider 向独立 loopback HTTP 捕获服务发送六次请求（无 Gateway、无模型）。六次唯一不符合 `isMessage` 的消息均为 assistant `content:null` 加合法 tool_calls；Pi `openai-completions.ts:1284` 正是这样初始化纯工具调用消息。git HEAD `61c3f09` 的 `types.ts` 不接受 null；后续已由 [replay 格式修复](replay.md#2026-11-14assistant-null-正文兼容修复)补齐，并有 HTTP 回归覆盖。六次 requestKey 对应源 recording 中的 moved、blocked 和真实工具结果键（11a578d9…、ab63bfc1…、05ee5348…），不是此处工具内容漂移。捕获正文及日志：`/tmp/opencode/gateway-request-probe-0dDZ1C/requests.json`、`/tmp/opencode/gateway-request-probe.log`。探针不修改源文件，未重建或冒称完整重构前运行对照；格式修复不等于机制整链验收通过。
 
 移除冗余通信路径的依据及弃用记录见 [开发决策](decisions.md#2026-11-14gateway-审查收尾)。审查未把已存在的 Policy 目录迁移、树图、恢复入口目标变化计为 Gateway 成果。
 

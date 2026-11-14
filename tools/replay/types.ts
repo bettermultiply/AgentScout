@@ -10,7 +10,7 @@ export interface ContentPart {
 }
 export interface Message {
   role?: string;
-  content?: string | ContentPart[];
+  content?: string | ContentPart[] | null;
   tool_calls?: ContentPart[];
   toolCallId?: string;
   tool_call_id?: string;
@@ -59,7 +59,10 @@ function isPart(value: unknown): value is ContentPart {
 
 export function isMessage(value: unknown): value is Message {
   if (!isObject(value) || typeof value.role !== 'string') return false;
-  if (value.content !== undefined && typeof value.content !== 'string' &&
+  // Pi's OpenAI provider uses null for assistant messages containing only tool calls.
+  const toolOnly = value.role === 'assistant' && Array.isArray(value.tool_calls) && value.tool_calls.length > 0;
+  if (value.content === null && !toolOnly) return false;
+  if (value.content !== undefined && value.content !== null && typeof value.content !== 'string' &&
       !(Array.isArray(value.content) && value.content.every(isPart))) return false;
   if (value.tool_calls !== undefined && !(Array.isArray(value.tool_calls) && value.tool_calls.every(isPart))) return false;
   return ['toolCallId', 'tool_call_id', 'toolName', 'stopReason', 'errorMessage'].every(
