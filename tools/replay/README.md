@@ -41,6 +41,8 @@ AScout 保存追加 provider 配置内容，普通恢复不依赖工具临时目
 
 端点只接受 `POST /v1/chat/completions`，成功项在输出任何响应前等待一次 500ms，再以 SSE 返回全部内容。取消期间清理定时器，停止写入连接。缺键或耗尽返回 HTTP 400，不回退真实模型。独立 `serve.ts` 可直接接收源 run，也可供低层检查接收显式导出文件；原生 run 模式默认不写报告，显式 `REPLAY_REPORT` 可指定验收报告，`REPLAY_REQUEST_LOG` 可记录请求；通用入口也支持这两个选项。`missing_keys` 统计缺键／耗尽，`unconsumed_keys` 统计剩余项。端口可省略，自动选择并打印 URL。Pi 配置见 `models.json`，dummy key 仅用于本地服务。
 
+消息边界接受 Pi 的纯工具调用格式：assistant 的 `content:null` 必须伴随非空、通过既有字段校验的 `tool_calls`；其他角色的 null、非法正文和非法工具调用字段仍返回 HTTP 400。此兼容不改变匹配键、消费顺序或取消行为。HTTP 回归见 `verify/messages.test.ts`。
+
 独立 `serve.ts` 的文件输入保持只读：文件名恰为 `recording.json` 时默认报告为同目录 `report.json`；其他文件名在完整路径后追加 `.report.json`，例如 `capture.json.report.json`、`report.json.report.json`。显式 `REPLAY_REPORT` 或默认报告若指向源文件本身（包括符号链接、硬链接），启动时拒绝。
 
 导出项按 session 文件序保存成功和明确 `stopReason=aborted` 的 assistant；成功 reply 保留 text/toolCall 和原 toolCall ID，取消项只保留取消状态及匹配信息。其他 error 或带 errorMessage 的失败项跳过，stderr 分别报告数量。成功与取消项均要求 transcript 原生引用，同键按源顺序消费。取消项命中后不返回回答，等待 AScout 取消 HTTP 请求；30 秒仍未取消则返回 HTTP 504 `replay_cancel_timeout` 并通知自动输入失败。`createReplayServer` 的 `cancelTimeoutMs` 可供验证调整有界超时。报告的 `pending`、`cancelled`、`cancel_timeouts` 分别表示等待、客户端取消、取消超时数量；`hits` 和 `consumed` 包括取消项。
@@ -53,15 +55,9 @@ node tools/replay/verify/native.ts
 node --test tools/replay/verify/cancellation.test.ts
 node --test tools/replay/verify/report-path.test.ts
 node tools/replay/verify/b1-pi.ts EXISTING_B1_PI_RUN
-node tools/replay/verify/b3.ts EXISTING_B3_RUN
-node tools/replay/verify/b3-repeat.ts EXISTING_B3_RUN
-DEEP_ROUNDS=4 node tools/replay/verify/b3-deep.ts EXISTING_DEEP_RUN
+node --test tools/replay/verify/messages.test.ts
 ```
 
 B1 保留手构造低层规范化、顺序消费、缺失/耗尽和报告检查。B1-PI 支持从已有 B1-PI run 开始，省略参数则使用手构造原生记录，验证真实 Pi provider 对并行工具调用及后续回放请求的解析。所有路径均不调用真实模型。
 
-B3、重复和深度入口必须提供已有原生 run，不会创建录制运行。已有实验布局要求 run 上一级包含该次运行的 `runtime.json`、`b3-policy.yaml`、`decisions.py`；使用其配置与采样规则，不重新选择预测。输出写全新 `/tmp/opencode/ascout-replay-b3-repeat-*`，不覆盖源 run；B3 回放一次，repeat 五次，deep 三次，深度支持 3/4/10。这些是既有 NLE 场景验收入口，不是任意任务恢复器。
-
-逐次严格核对 Chance 父关系、每 Chance 两 Proposal/Candidate、单 Promote、两个 applied Discard、完整权威 role/text、NLE 观察和报告的 hits/consumed/misses/exhausted/unconsumed。工具仍真实执行，NLE 环境或取消时序改变可使回放失败，不得弱化检查以得到通过。
-
-本轮实测：B1、B1-PI 通过；已有并行恢复记录导出成功，四层记录导出 13 项。真实 NLE 的 B3 和四层整链回放尝试均因工具内容变化后的缺键失败，没有完成严格整链验收。精确证据见 [回放开发说明](../../docs/development/replay.md)。
+2026-11-14 格式修复验证：类型检查、15 项 Node 回归、B1、native、B1-PI 通过。套件只提供已有响应，机制正确性仍须另行验证；候选数量与嵌套、活跃祖先丢弃、跨组件取消／超时、最终回答交付及长轨迹环境复现仍有覆盖缺口。请求命中／消费不代表回答已交付，也不证明性能收益。范围及证据见 [回放开发说明](../../docs/development/replay.md)。

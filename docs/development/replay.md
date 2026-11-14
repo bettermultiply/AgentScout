@@ -1,16 +1,26 @@
 # 模型输出记录与回放
 
+## 2026-11-14：assistant null 正文兼容修复
+
+本次仅修复 replay 拒绝 Pi 合法纯工具调用请求的问题。Gateway 首错调查的六次本地捕获中，唯一不符合 `isMessage` 的消息均为 assistant `content:null` 加 `tool_calls`；证据为 `/tmp/opencode/gateway-request-probe.log` 和 `/tmp/opencode/gateway-request-probe-0dDZ1C/requests.json`，原调查见 [Gateway 核查](gateway.md#收尾审查与首错归因)。格式拒绝发生在请求匹配及日志之前。
+
+新增 `tools/replay/verify/messages.test.ts`，通过实际 HTTP 发送 Pi 格式并匹配由原生 toolCall/toolResult 上下文生成的键。修前稳定得到 HTTP 400 `messages must be an array of messages`（`/tmp/opencode/replay-null-fix/red.log`）；修后返回 200 SSE、正确正文及 DONE，恰消费一项。另检查 15 种非法消息仍在匹配之前返回 400。`Message.content` 增加 null；边界仅允许带非空 tool_calls 的 assistant 使用 null，仍逐项执行原字段检查。未扩大既有工具调用校验规则。`normalize.ts` 的文本／调用／回复读取已有 string／Array 判断；`recording.ts` 的 checkpoint 有 Array 判断，用户输入仍明确拒绝非文本，无需修改这些消费者。
+
+类型检查通过，全部 Node 回归 15/15；B1、native、已有源 B1-PI 均通过。日志集中在 `/tmp/opencode/replay-null-fix/{typecheck,green,b1,native,b1-pi}.log`。未修改匹配键、原生读取、同键顺序、500ms 延迟、取消处理或任何源记录。
+
+请求命中或 consumed 只表示回复项已被取用，不代表最终回答已经交付。取消请求时序、剩余项解释及最终回答交付仍须结合实际执行验证；不能以格式修复或局部回归推断完整机制整链通过。格式修复的初始工作区快照、独立 diff 和源文件哈希核对保存在 `/tmp/opencode/replay-null-fix/`；没有真实模型调用。
+
 ## 2026-11-14：TypeScript 迁移与维护性检查
 
 `tools/replay` 核心与全部 verify 入口现由 Node 26 直接执行 `.ts`；局部 ESM package、`strict` / `noEmit` / `erasableSyntaxOnly` 检查独立于 WebUI，无运行时库及构建步骤。开发依赖版本沿用仓库已有 TypeScript 5.9 和 Node 26 类型；本机检查复用已安装包。命令见 [工具说明](../../tools/replay/README.md)。
 
-删除了 `loadRecording().inputs` 内无人消费的 `id` 字段和仅包装正文的对象，现在直接返回正文字符串；原生 ID 仍用于读取阶段去重。导出 `branch_id` 被 B1／B1-PI／内容比较消费，`session_entry_id` 被源序回归消费，均保留；`messageBody` 由跨仓 Pi notification 回归使用，保留。去掉 requestKey 回归中的无效恒等 map，改为 `structuredClone`；JSON map 使用单参数调用，Promise 初始化直接使用 Node 的 `withResolvers`。B1 使用独立临时目录与自动分配端口，避免共享固定目录与端口。既有取消、UTF-8、报告路径保护及上轮删除闲置策略夹具均保留。
+删除了 `loadRecording().inputs` 内无人消费的 `id` 字段和仅包装正文的对象，现在直接返回正文字符串；原生 ID 仍用于读取阶段去重。导出 `branch_id` 被 B1／B1-PI 消费，`session_entry_id` 被源序回归消费，均保留；`messageBody` 由跨仓 Pi notification 回归使用，保留。去掉 requestKey 回归中的无效恒等 map，改为 `structuredClone`；JSON map 使用单参数调用，Promise 初始化直接使用 Node 的 `withResolvers`。B1 使用独立临时目录与自动分配端口，避免共享固定目录与端口。既有取消、UTF-8、报告路径保护及上轮删除闲置策略夹具均保留。
 
 验证：`npm run check --prefix tools/replay` 通过；现有 Node 回归 14/14，加 `tests/pi-notification.mjs` 共 15/15；B1、native、B1-PI 通过。native 产物 `/tmp/opencode/replay-native-KpiYwi`；B1-PI 产物 `/tmp/opencode/ascout-replay-b1-pi-pFLH3Q`，两请求命中、并行调用及后续请求解析、报告计数、四子进程退出和两个动态端口关闭均通过。
 
 `/tmp/opencode/replay-ts-run1.mjs` 在 `/tmp/opencode/replay-ts-run1-ruRFrZ` 对已有 `/tmp/opencode/run-1` 跑两个全新环境：每轮 40 hits/consumed、23 成功、17 客户端取消、2 输入完成，misses/exhausted/pending/unconsumed/cancel_timeouts 均 0；启动 pause 零输入、resume 后完成，完成后保持交互。一轮工具 quit、另一轮 AScout API shutdown，双方退出 0 且 recovery 文件存在；源 session/events/policy 哈希未变，运行目录相关子进程无残留。只使用本地录制输出，未接触用户 8180 服务或调用真实模型。
 
-此验收不扩大既有保证：任意源的工具环境重建、扩展未持久化改写、非文本输入、同键碰撞与取消调度仍受原限制。B3/repeat/deep 全部迁移并纳入类型检查，本轮未重新执行其旧 NLE 整链场景；此前失败证据继续保留，不能以 run-1 两轮替代全部 B3 验收。普通模型／恢复仍使用原系统实现，本轮没有修改对应控制面或 Pi 行为。
+此验收不扩大既有保证：任意源的工具环境重建、扩展未持久化改写、非文本输入、同键碰撞与取消调度仍受原限制。run-1 两轮不能替代机制的全部端到端验收。普通模型／恢复仍使用原系统实现，本轮没有修改对应控制面或 Pi 行为。
 
 收尾增加 Runtime 配置及 input-status 响应结构检查、B1 动态端口后，再跑严格类型检查、B1 和 run-1 两轮均通过；最终端到端证据为 `/tmp/opencode/replay-ts-run1-REI1bp`。正式引用跨本仓与 `../pi` 搜索无旧 replay 入口；工具源码无 `any`、`@ts-ignore` 或 `@ts-nocheck`；`git diff --check` 通过。
 
@@ -22,9 +32,9 @@
 
 通用回放工具的已批准目标是：指定已有运行目录，每次重新读取原生 session/events，用已记录的 assistant 输出替换模型服务，由正常系统按真实用户输入及交互顺序重新执行工具，在正常 WebUI 观察全过程。结束或匹配失败后系统不退出，用户可通过正常模型切换继续输入；真实模型只能由用户之后手动选择。回放不评价 Agent、不证明性能收益。
 
-源目录只读。每次直接读取指定源目录，在内存准备回复队列，不生成额外 recording、导出缓存或源记录副本。正常系统使用独立新 run，照常持久化 session/events、Policy、日志和主动退出恢复资料；不把新 run 自动当作下次回放源。没有层数参数、固定 prompt、候选或步数；B3 只是场景验收工具。
+源目录只读。每次直接读取指定源目录，在内存准备回复队列，不生成额外 recording、导出缓存或源记录副本。正常系统使用独立新 run，照常持久化 session/events、Policy、日志和主动退出恢复资料；不把新 run 自动当作下次回放源。没有层数参数、固定 prompt、候选或步数。
 
-导出与伪造端点放在 [`tools/replay/`](../../tools/replay/README.md)，使用 Node 26，只读取已有 run 内 `events.jsonl` 和 `session.jsonl`。记录是系统原生能力，测试套件不执行录制：B3、repeat、deep 均须提供已有 run，先导出再执行一次、五次或三次回放；低层 B1／B1-PI 保留手构造原生数据验证，B1-PI 也可接收已有样例目录。
+导出与伪造端点放在 [`tools/replay/`](../../tools/replay/README.md)，使用 Node 26，只读取已有 run 内 `events.jsonl` 和 `session.jsonl`。记录是系统原生能力，测试套件不执行录制；低层 B1／B1-PI 保留手构造原生数据验证，B1-PI 也可接收已有样例目录。
 
 ### 通用入口（2026-11-14）
 
@@ -52,13 +62,13 @@ HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已�
 
 ### 独立服务报告路径修复（2026-11-14）
 
-`report-path.test.ts` 使用临时手造录制文件，修复前六项中五项稳定复现源文件被报告覆盖（`capture.json`、`report.json`、显式同源路径及其符号链接／硬链接），`recording.json` 原调用通过。默认规则现为：`recording.json` 写同目录 `report.json`，其他文件名追加 `.report.json`；显式或默认报告与源文件为同一文件时启动拒绝。原生 run 默认仍不写报告。修后六项全部通过，连同已有取消／内容比较回归共 14/14 通过，B1、native 也通过，全部使用手造记录和本地服务。规则及命令见 [工具说明](../../tools/replay/README.md)。
+`report-path.test.ts` 使用临时手造录制文件，修复前六项中五项稳定复现源文件被报告覆盖（`capture.json`、`report.json`、显式同源路径及其符号链接／硬链接），`recording.json` 原调用通过。默认规则现为：`recording.json` 写同目录 `report.json`，其他文件名追加 `.report.json`；显式或默认报告与源文件为同一文件时启动拒绝。原生 run 默认仍不写报告。修后六项全部通过，当时合计 14/14 通过，B1、native 也通过，全部使用手造记录和本地服务。规则及命令见 [工具说明](../../tools/replay/README.md)。
 
 ### 取消请求与响应延迟修复（2026-11-14）
 
 原生明确 aborted 的 assistant 按源 session 顺序保留为取消项，与成功项共同组成同键队列。匹配取消项后等待 AScout 自行取消 HTTP 请求，不产生回答；默认 30 秒未取消以 HTTP 504 `replay_cancel_timeout` 明确失败并停止自动输入。真正缺键／耗尽仍为 HTTP 400，其他 error 不视为取消。成功项每次请求在响应输出前等待一次 500ms；客户端取消会清理等待定时器和响应监听，不再写连接。
 
-`cancellation.test.ts` 的四项取消／延迟回归修前全部失败，修后通过；端到端又发现跨 HTTP chunk 的 UTF-8 字符被 Buffer 字符串拼接损坏，新增真实分块请求回归先得到 400，改用 `req.setEncoding("utf8")` 后通过。归一化及上下文重建规则保持原有行为。取消比较、同键顺序、缺失／耗尽断言均保留。
+`cancellation.test.ts` 的四项取消／延迟回归修前全部失败，修后通过；端到端又发现跨 HTTP chunk 的 UTF-8 字符被 Buffer 字符串拼接损坏，新增真实分块请求回归先得到 400，改用 `req.setEncoding("utf8")` 后通过。归一化及上下文重建规则保持原有行为。
 
 独立真实 NLE 验证 `/tmp/opencode/run1-cancel-STTMVB`：源 `/tmp/opencode/run-1` 的两条输入 `cd8248f0`、`fdbd1515` 顺序完成，`finished=true`、`sequence=2`、`error=null`；40 requests/hits/consumed，23 成功、17 客户端取消，misses/exhausted/unconsumed/pending/cancel_timeouts 均为 0。原首错 `bc8aef78…` 正常命中；中途新增缺键 `813e77c9…` 的 UTF-8 根因也已消除。使用原 `nle-runtime.json` 的初始配置，仅更换 control_socket；保留正常 Pi 环境，模型服务均为本地录制回复。源 session/events/policy SHA-256 前后一致。`result.json`、`report.json`、`requests.jsonl`、原生 run 和日志保留证据，`cleanup.json` 确认退出码 0 和正常 recovery 保存。原 8180 实例未操作。
 
@@ -80,7 +90,7 @@ HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已�
 
 第一后续记录可以是 custom、compaction、context_edit 或 custom_message，不限 assistant。通知以 details.command_id 关联 applied Promote。还原后按最新 compaction 的保留区间、context_edit replacement、branch_summary/custom_message 构造当前 Pi 模型上下文；失败 assistant 排除，当前待决调用的较早同 toolCallId 结果被后续结果替换。缺原生引用、注入批次不全、未知消息角色或无法唯一确定重挂边时明确失败，不加旧格式回退。未持久化的扩展改写及任意 provider 转换不在保证内。
 
-本轮验证：B1 与 B1-PI 通过，后者从已有 `/tmp/opencode/ascout-replay-b1-pi-hyZBIv` 开始导出、经真实 Pi stream 消费两个输出，hits/consumed=2、misses/exhausted/unconsumed=0；`native.ts` 覆盖自定义首后续、反序并行完成、嵌套、compaction/edit/notification、时钟重置、源文件不变与歧义报错。已有 `/tmp/opencode/recovery-active-BITw2r` 并行恢复样例导出成功，candidate-2 的 4b5fdb14 上下文使用预测批次 02901c7e → 204d72b4；四层 `/tmp/ascout-replay/b3-deep-4/deep-recording` 导出 13 项，十层记录导出 31 项。B3 真实工具回放尝试 3 hit／1 miss，四层也因缺键失败，不能宣称严格整链通过。B3 新运行 NLE 初始地图／位置与源记录不同，严格保留 400 及所有结构、正文、观测和消费断言；不重新录制或弱化匹配。日志 `/tmp/opencode/native-b3.log`、`/tmp/opencode/native-deep4.log`。所有模型请求仅到 loopback。
+本轮验证：B1 与 B1-PI 通过，后者从已有 `/tmp/opencode/ascout-replay-b1-pi-hyZBIv` 开始导出、经真实 Pi stream 消费两个输出，hits/consumed=2、misses/exhausted/unconsumed=0；`native.ts` 覆盖自定义首后续、反序并行完成、嵌套、compaction/edit/notification、时钟重置、源文件不变与歧义报错。已有 `/tmp/opencode/recovery-active-BITw2r` 并行恢复样例导出成功，candidate-2 的 4b5fdb14 上下文使用预测批次 02901c7e → 204d72b4。所有模型请求仅到 loopback。
 
 失败 Branch 对有效执行、成功产物和副作用的影响须等效于没有创建过，但审计记录必须存在；旁支不得重新执行或对权威生效。
 
@@ -96,25 +106,13 @@ HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已�
 
 ## 回放风险（实测）
 
-取消请求是否已经发出取决于取消发生时的时序。若录制中取消请求尚未发出，而回放运行发出了该请求，回放端点会返回 HTTP 400；B3 与深度回放的三次全新 run 必须以实际请求报告为准，不猜测取消是否发生。
+取消请求是否已经发出取决于取消发生时的时序。若录制中取消请求尚未发出，而回放运行发出了该请求，回放端点会返回 HTTP 400；必须以实际请求报告为准，不猜测取消是否发生。
 
 ## 当前边界与核实
 
-### 深度回放结构（2026-11-12）
-
-`b3-deep.ts` 从 `chance_created` observation 的 `parent_branch_id` 与
-`parent_chance_id` 识别嵌套 Chance，而不是从 `candidate_created` 推断。N=3 的结构为：
-`chance-1` 的 parent 为 `authority`，`chance-2` 的 parent 为 `candidate-2/chance-1`，
-`chance-3` 的 parent 为 `candidate-4/chance-2`；N=4 再增加
-`chance-4` 的 parent 为 `candidate-6/chance-3`。每个 Chance 有 2 个 Candidate、1 个
-Promote 和 2 个 applied Discard；每个后续 Chance 都在其祖先 Candidate 已 Promote 后产生。
-因此本次没有“祖先 Candidate 被 Discard 后其嵌套 Chance”的案例。导出修复后录制为 10
-条（N=3 为 10，N=4 为 13；旧记录曾显示 14），三次回放均应为 `unconsumed=0`，并核对 hits/misses/exhausted、authority chain、NLE
-及事件结构。
+候选数量与嵌套、活跃祖先 Candidate 被 Discard 后的后代失效、跨组件取消／超时、最终回答交付和可重复演示仍有端到端验证缺口。嵌套失效的单元回归不能替代完整机制验收；套件从已有运行提供响应，本身不评价投机策略或证明机制正确。
 
 原生 SessionManager 已持久化的 compaction/custom 等可随完整索引汇总保留，导出处理其上下文语义；未落盘的变化不能恢复。Ledger 的其他 action／Runtime 事实仍可能保存完整工具参数与结果，不能把 transcript 去重说成 Ledger 完全没有这些正文。
-
-端点、导出和一次 B3 闭环已由上述脚本验证；重复回放脚本逐次比较 Chance/Proposal/Candidate 数量、Promote、applied Discard、权威父链 role/text、真实 NLE 观察及命中/缺失/耗尽报告。它仍不证明模型推理质量或性能收益。
 
 ## NLE 核实（2026-11-13）
 
@@ -127,8 +125,8 @@ Promote 和 2 个 applied Discard；每个后续 Chance 都在其祖先 Candidat
 完整 initial 重建。`tests/nle-initialization.py` 在修复前稳定失败（lgen=11），修复后
 通过，覆盖 seed=7 初始位置 `(26,5)`、四步和真实保存状态重建。无需模型调用。
 
-源配置和重跑配置均为 NetHackScore-v0、seed=7、action_delay_seconds=0，指向同一个
-Python 和仓库 bridge；套件只替换 control_socket。实际路径为 NleBackend::new 启动
+小型对照使用 NetHackScore-v0、seed=7、action_delay_seconds=0，指向同一个
+Python 和仓库 bridge。实际路径为 NleBackend::new 启动
 配置中的 bridge，establish 下发 seed，bridge 的 new_world 调用 NLE seed 后 reset。
 本机 NLE=1.3.0、Gymnasium=1.2.0，库文件时间早于三个源 run，但源 run 没有原生版本
 记录，不能据此声称已证明原二进制身份。成功工具结果没有添加墙钟或回放键。
@@ -142,69 +140,11 @@ Python 和仓库 bridge；套件只替换 control_socket。实际路径为 NleBa
 在当前系统日期 2026-11-13 只能匹配单层 before，四层仍不匹配。日期差异尚未修复；
 不伪造观察、不篡改源 run，不擅自引入进程时钟替换技术。
 
-修复后单层三次独立尝试均 4 hits/4 consumed、四层三次均 13 hits/13 consumed，
-misses/exhausted/unconsumed 均 0，结构与动作结果恢复，但全部严格验收仍失败。
-四层另有权威历史差异：源文件链中是预测 `moved`，当前整理后的链中是真实工具结果；
-这符合当前已确认语义，不通过改回运行语义或弱化 audit 绕过。脚本遇到首个严格差异即
-退出，所以一次 `b3-deep.ts` 的三轮内部循环未完成；三次独立调用不等于三轮验收通过。
-这些旧基线的严格比较仍失败；不兼容旧日期或旧权威历史语义。当前语义的重复验收另用下述已存在原生 run，不把新结果冒充旧基线通过。
+初始化修复的小回归证据为 `/tmp/opencode/nle-initialization-before.log`、`/tmp/opencode/nle-initialization-after.log`；`/tmp/opencode/current-disp-probe.json` 记录 disp=11/22/99 对动作 [1] 和 [1,2,3,4] 共六次短轨迹的全部 before/after 一致。这不构成任意长轨迹或全游戏保证。
 
-原始证据：`/tmp/opencode/nle-initialization-before.log`、`nle-initialization-after.log`、
-`nle-fixed-b3.log`、`nle-fixed-b3-three.log`、`nle-b3-final-3.log`、
-`nle-fixed-deep4.log`、`nle-deep4-final-2.log`、`nle-deep4-final-3.log`。
-各日志的 artifacts 目录保留原生 session/events、requests、report 及 cleanup.json；
-均确认子进程及端口清理。未重新录制，未修改源记录，模型端点仅 loopback。
+Policy 随机子集仍按配置顺序输出的回归见 `tests/policy-proposal-order.py`。该局部回归不代表完整机制验收。
 
-### 当前语义重复验收（2026-11-13）
-
-基线来自前轮已经真实完成、但与旧源比较失败的原生回放记录：单层
-`/tmp/opencode/ascout-replay-b3-repeat-bIAF7f/run-1`，四层
-`/tmp/opencode/ascout-replay-b3-repeat-K0uZLH/run-1`。不是新调用模型录制，旧源不变。
-为适配脚本既定的父目录配置位置，使用 `/tmp/opencode/prepare-current-replay-bundles.py`
-复制到 `/tmp/opencode/current-replay-inputs-0k1c9rtd/{single,deep4}/source`；普通文件逐字节核对，
-不复制已失效的 Unix socket。`provenance.json` 保存来源和 SHA-256，原始 policy/runtime/decisions
-也原样保留在 source 中，父目录提供同次配置副本。每轮仅重定位 runtime 路径和 control_socket。
-
-本轮复现并最小修复两项：
-- 单层同次 Policy 用 SystemRandom.sample 排列完整候选集，导致 moved/blocked 的 Candidate 身份交换。
-  Policy 仍随机选择子集，但按配置顺序排列已选结果。先失败后通过的回归为
-  `tests/policy-proposal-order.py`；仅 single 父目录 decisions.py 同步此修复，
-  `policy-fix.json` 保存前后哈希，source 不变。四层原配置已使用 candidates[:count]，未改。
-- 并行不同键的完成顺序可以交换；验收脚本原来比较导出整个数组，错误地要求跨键总顺序相同。
-  现在严格比较键集合及每个键的完整 branch/reply 队列，保留同键顺序、数量、分支和全部回复断言；
-  不改导出器或端点顺序。`export-content.test.ts` 先失败后通过，含同键反序／增删／正文变化拒绝。
-  初次失败证据为 `/tmp/opencode/current-single-5.log`（OTCm8H）和修正比较后
-  `/tmp/opencode/ascout-replay-b3-repeat-9WDxkS`（Policy 身份交换，4/4 命中）。
-
-精确验收命令（仓库根目录）：
-
-```sh
-node tools/replay/verify/b3-repeat.ts /tmp/opencode/current-replay-inputs-0k1c9rtd/single/source
-DEEP_ROUNDS=4 node tools/replay/verify/b3-deep.ts /tmp/opencode/current-replay-inputs-0k1c9rtd/deep4/source
-node --test tools/replay/verify/export-content.test.ts
-python3 tests/policy-proposal-order.py
-/home/betmul/BETMUL/AgentScout-suit/nle-313/bin/python tests/nle-initialization.py
-/home/betmul/BETMUL/AgentScout-suit/nle-313/bin/python /tmp/opencode/current-disp-probe.py
-node tools/replay/verify/native.ts
-node tools/replay/verify/b1.ts
-```
-
-单层 5/5 完整通过，每轮 Chance=1、Proposal/Candidate=2、Promote=1、applied Discard=2、
-NLE action=1、hits/consumed=4；四层 3/3 完整通过，每轮 4、8、4、8、4、13。
-所有轮次 misses/exhausted/unconsumed=0、missing_keys/unconsumed_keys 为空。
-Chance 父结构、Proposal/Candidate/处置事实、权威父链 role/text、真实 NLE before/after、
-导出键及完整回复队列全部严格比较通过；不是时间戳或全部原生日志字节相同的承诺。
-`repeat-report.json` 和 `cleanup.json` 分别在
-`/tmp/opencode/ascout-replay-b3-repeat-tsCtg4`、`/tmp/opencode/ascout-replay-b3-repeat-OhpcwY`，
-进程和端口清理均通过；日志为 `/tmp/opencode/current-single-5-final.log`、`current-deep4-3-final.log`。
-
-上述小回归、native、B1 均通过。`current-disp-probe.json` 记录 disp=11/22/99 对已有
-单层动作 [1] 和四层 [1,2,3,4] 共六次真实 NLE 轨迹的全部 before/after 严格一致；
-不能据此声称任意长轨迹或全游戏不受 disp 影响。全程无真实模型请求，只有 loopback 回放。
-剩余范围是长轨迹、自然重复键及并发／重试／取消时序、活跃祖先被丢弃的嵌套端到端覆盖，
-不以本轮短轨迹通过宣称这些已验收。
-
-实际路径：`src/runtime/backends/nle.rs:69-108` 启动配置的 Python 与 `examples/nle-runtime-bridge.py`，通过 stdin/stdout JSONL 逐请求调用，Mutex 串行化请求（114-138）。`invoke_tool` 只把 bridge 的 result/evidence 包装回传（270-299）。Runtime 配置可由 `ASCOUT_RUNTIME_CONFIG` 覆盖，或由 task 绑定 Policy 的 runtime 路径选择（`src/bin/ascout-control-plane.rs:292-296`）；不是每个 Prompt 的参数。
+实际路径：`src/runtime/backends/nle.rs:69-108` 启动配置的 Python 与 `examples/nle-runtime-bridge.py`，通过 stdin/stdout JSONL 逐请求调用，Mutex 串行化请求（114-138）。`invoke_tool` 只把 bridge 的 result/evidence 包装回传（270-299）。Runtime 配置可由 `ASCOUT_RUNTIME_CONFIG` 覆盖，或由启动时加载的 Policy 的 runtime 路径选择（`src/bin/ascout-control-plane.rs:292-296`）；不是每个 Prompt 的参数。此为已有实现路径记录；当前首版同一 session 的 Policy 固定，不实现修改或切换，保存／恢复须保持一致，范围见 [Policy 开发说明](policy-engine.md)。
 
 `NleConfig.seed` 默认 None，establish 才下发；当前 bridge 显式保存 core、随机 disp、reseed=False、lgen=None，并固定日期效果。NLE `nle/env/base.py:480-513` 说明 None 的 disp 随机选取，lgen=None 不启用独立地图生成 RNG。未配置 seed 时 core 也随机。当前配置不能单独指定 disp、reseed、lgen 或日期策略；固定一个 core seed 不代表整个游戏的完整复现保证。
 
@@ -231,7 +171,7 @@ explicit core+disp changed byte_equal= False bytes= 49961 51146
 
 Candidate 不取得 NLE 快照、不 fork 进程、不重放动作。Runtime 声明 shared_environment=true、branch_environment=false（nle.rs:189-190），Controller 将操作映射到同一个 authority 环境（coordination/controller.rs:14-18）。候选复制 Agent checkpoint 并注入预测工具结果（main.ts:247-278），推进推理；真实工具在接受前 gate，tools.execute 还有角色检查（main.ts:86-90）。所有 Branch 实际共享一个 NLE 进程和 RNG，没有独立复制的 RNG 状态；bridge 的 branch 操作本身也只是 World 别名（187-194），不是实际隔离能力。
 
-结论：仅替换模型输出在限定动作轨迹上可行，但不能无条件保证旧运行逐字复现。需固定完整 RNG 配置、NLE/NetHack 版本、日期策略、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。bridge 的运行恢复保存已包含 initial 种子、kwargs、版本和配置，但旧 run 没有这些原生保存资料；不能向 session/events 补写测试专用元数据。旧日期与旧权威历史失败仍保留，当前语义的短轨迹重复验收如上。异步调度不因模型输出固定就自动稳定。
+结论：仅替换模型输出在限定动作轨迹上可行，但不能无条件保证旧运行逐字复现。需固定完整 RNG 配置、NLE/NetHack 版本、日期策略、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。bridge 的运行恢复保存已包含 initial 种子、kwargs、版本和配置，但旧 run 没有这些原生保存资料；不能向 session/events 补写测试专用元数据。异步调度不因模型输出固定就自动稳定。
 
 ## Pi 端点核实
 
