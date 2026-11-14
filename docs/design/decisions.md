@@ -308,7 +308,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **选择**：`admit` 只决定投机机会是否进入待选集合，不决定立即启动。其粗判识别可能的投机入口，精判决定机会是否值得登记和保留；通过精判后不在 `select` 前重复精判。控制面 Speculation Coordinator 拥有待选集合并维护机会有效性。
 
-新增独立的 `select(frontier_view, scheduling_context)` Policy Decision。一个 task / AScoutAgent 绑定的 Policy 在该 task 内所有仍有效的待选 Chance 之间进行全局权衡，直接选择当前希望启动的有序子集，可以选择一个、多个或暂时不选。未被选择的机会继续保留，直到后来被选择或因 pending result 到达、任务结束、祖先依赖否定等客观原因失效；不需要额外的主动放弃接口。
+新增独立的 `select(frontier_view, scheduling_context)` Policy Decision。Policy 在同一 AScoutAgent 内所有仍有效的待选 Chance 之间进行全局权衡，直接选择当前希望启动的有序子集，可以选择一个、多个或暂时不选。未被选择的机会继续保留，直到后来被选择或因 pending result 到达、任务结束、祖先依赖否定等客观原因失效；不需要额外的主动放弃接口。
 
 **机制边界**：Speculation Coordinator 向 Policy 提供集合快照和可观察调度事实，并在资源、Contract 与正确性硬约束内落实选择。启动前只做有效性与硬约束复核，不进行第二次 Policy 精判，也不使用固定价值公式替代 Policy 的跨 Chance 排序。best-first、具体排序公式、浅层分叉、深层单链和 breadth/depth 分配均为可选 Policy，不能成为 AScout 固定规则。`select` 只处理尚未启动的机会，不负责已经运行工作的状态调整。
 
@@ -316,7 +316,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-044：已启动投机工作由 rebalance 决定暂停、恢复和抢占
 
-**选择**：新增 `rebalance(active_view, paused_view, scheduling_context)` Policy Decision。它面向同一 task / AScoutAgent 中已经运行或暂停的投机 Branch，由 Policy 决定哪些工作暂停、恢复或抢占；尚未启动的机会仍只由 `select` 处理。
+**选择**：新增 `rebalance(active_view, paused_view, scheduling_context)` Policy Decision。它面向同一 AScoutAgent 中已经运行或暂停的投机 Branch，由 Policy 决定哪些工作暂停、恢复或抢占；尚未启动的机会仍只由 `select` 处理。
 
 **与其他决策的关系**：`extent` 根据单个过程自身进展决定推进边界，`rebalance` 根据多个已启动工作的相对价值与资源条件调整运行分配。`rebalance` 的 `preempt` 只触发 `resolution = preempted`，后续丢弃、Salvage、补偿和清理由 `dispose` 决定。
 

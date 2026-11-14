@@ -6,23 +6,32 @@ import {once} from 'node:events';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
-for(const failureMode of ['none','retry','continue','multiple']) test(`active tools and candidates survive recovery: ${failureMode}`, {timeout:120000}, async t=>{
+for(const failureMode of ['none','retry','continue','multiple','filesystem']) test(`active tools and candidates survive recovery: ${failureMode}`, {timeout:120000}, async t=>{
  const project=process.cwd(),root=fs.mkdtempSync('/tmp/opencode/recovery-active-');
  console.log('evidence',root);
  fs.mkdirSync(root+'/workspace');fs.mkdirSync(root+'/pi');fs.mkdirSync(root+'/policy');
- let requests=[];
+  let requests=[];
+  let promotedWrite=false;
  const fake=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{
   const input=JSON.parse(body);requests.push(input);fs.appendFileSync(root+'/requests.jsonl',body+'\n');
   res.writeHead(200,{'content-type':'text/event-stream'});
-  const toolCall=requests.length===1;
-  const delta=toolCall?{tool_calls:[0,1].map(i=>({index:i,id:'op'+i,type:'function',function:{name:'nle_action',arguments:JSON.stringify({action:0})}}))}:{content:'candidate advanced after recovery'};
+   const writeTool=failureMode==='filesystem'&&!promotedWrite&&input.messages.some(m=>m.role==='user'&&JSON.stringify(m.content).includes('verify promoted filesystem'));
+   if(writeTool)promotedWrite=true;
+   const toolCall=requests.length===1||writeTool;
+   const delta=writeTool?{tool_calls:[{index:0,id:'promoted-write',type:'function',function:{name:'bash',arguments:JSON.stringify({command:'printf promoted > promoted-file'})}}]}:toolCall?{tool_calls:[0,1].map(i=>({index:i,id:'op'+i,type:'function',function:{name:'nle_action',arguments:JSON.stringify({action:0})}}))}:{content:'candidate advanced after recovery'};
   res.write(`data: ${JSON.stringify({id:'fixture',object:'chat.completion.chunk',created:0,model:'fixture',choices:[{index:0,delta}]})}\n\n`);
   res.end(`data: ${JSON.stringify({id:'fixture',object:'chat.completion.chunk',created:0,model:'fixture',choices:[{index:0,delta:{},finish_reason:toolCall?'tool_calls':'stop'}]})}\n\ndata: [DONE]\n\n`);
  })});
  await new Promise(r=>fake.listen(0,'127.0.0.1',r));
  const port=await new Promise(resolve=>{const s=http.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>resolve(p))})});
  fs.writeFileSync(root+'/pi/models.json',JSON.stringify({providers:{recovery:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
- fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_socket:root+'/runtime.sock',adapter_instance:'nle',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,action_delay_seconds:2,env_id:'NetHackScore-v0'}));
+  fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_socket:root+'/runtime.sock',adapter_instance:'nle',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,action_delay_seconds:2,env_id:'NetHackScore-v0'}));
+  if(failureMode==='filesystem') {
+   fs.mkdirSync(root+'/tmp');
+   const config=JSON.parse(fs.readFileSync(root+'/runtime.json'));
+   config.filesystem={state_directory:root+'/fs-state',isolated_paths:[root+'/workspace'],passthrough_rw:[root]};
+   fs.writeFileSync(root+'/runtime.json',JSON.stringify(config));
+  }
  if(failureMode==='multiple') {
   const config=JSON.parse(fs.readFileSync(root+'/runtime.json'));
   fs.writeFileSync(root+'/runtime.json',JSON.stringify({control_socket:config.control_socket,adapter_instance:'multiple',backends:[{id:'first',type:'nle',config},{id:'second',type:'nle',config:{...config,seed:8}}],policy:{default:['first','second'],routes:[{operation:'invoke_tool',backends:['first'],output_backend:'first'}]}}));
@@ -33,26 +42,43 @@ for(const failureMode of ['none','retry','continue','multiple']) test(`active to
  const children=[];
  t.after(()=>{for(const p of children)if(p.exitCode===null)p.kill('SIGKILL');fake.closeAllConnections();fake.close()});
  const wait=async(fn,label)=>{const end=Date.now()+30000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,20))}throw Error('Timeout '+label+' '+root)};
- const events=()=>fs.existsSync(root+'/events.jsonl')?fs.readFileSync(root+'/events.jsonl','utf8').trim().split('\n').filter(Boolean).map(JSON.parse):[];
+  // The writer may be between writes of a JSON line. Only complete records
+  // are observable; malformed complete records still fail this regression.
+  const events=()=>fs.existsSync(root+'/events.jsonl')?fs.readFileSync(root+'/events.jsonl','utf8').split('\n').slice(0,-1).filter(Boolean).map(JSON.parse):[];
  const post=async body=>(await fetch(`http://127.0.0.1:${port}/api/request`,{method:'POST',headers:{origin:`http://127.0.0.1:${port}`,'content-type':'application/json'},body:JSON.stringify(body)})).status;
- const start=async resume=>{
-  const p=spawn(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','recovery/fixture',...(resume?['--resume']:[])],{env:{...process.env,ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','pipe','pipe']});children.push(p);
+  const start=async resume=>{
+   const loaded=events().filter(e=>e.message==='recovery_loaded').length;
+   const p=spawn(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','recovery/fixture',...(resume?['--resume']:[])],{env:{...process.env,...(failureMode==='filesystem'?{TMPDIR:root+'/tmp'}:{}),ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','pipe','pipe']});children.push(p);
   p.stderr.on('data',b=>fs.appendFileSync(root+'/stderr.log',b));
-  await wait(async()=>{assert.equal(p.exitCode,null,fs.existsSync(root+'/stderr.log')?fs.readFileSync(root+'/stderr.log','utf8'):'');try{return(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).ok}catch{return false}},'start');return p;
- };
+   await wait(async()=>{assert.equal(p.exitCode,null,fs.existsSync(root+'/stderr.log')?fs.readFileSync(root+'/stderr.log','utf8'):'');try{return(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).ok&&(!resume||events().filter(e=>e.message==='recovery_loaded').length>loaded)}catch{return false}},'start');return p;
+  };
+  // Pause publishes a generation without exiting. End only this fixture's
+  // controller afterwards; adapter EOF reaps its owned processes. Shutdown
+  // intentionally terminates/materializes the task and is not a save request.
+  const endPaused=async p=>{
+   assert.equal(p.exitCode,null,'Pause keeps the controller alive');
+   const done=once(p,'exit');p.kill('SIGKILL');await done;assert.equal(p.signalCode,'SIGKILL');
+   await wait(()=>!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)),'paused task processes exited');
+  };
+  const pause=async()=>{
+   const previous=fs.existsSync(root+'/recovery.json')?fs.readFileSync(root+'/recovery.json','utf8'):null;
+   assert.equal(await post({action:'pause'}),202);
+   await wait(async()=>fs.existsSync(root+'/recovery.json')&&fs.readFileSync(root+'/recovery.json','utf8')!==previous&&JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Paused; enter input to continue'),'Pause published');
+  };
  let p=await start(false);
  let baseline;
  if(['retry','continue'].includes(failureMode)) {
-  const initialExit=once(p,'exit');await post({action:'shutdown'});await initialExit;assert.equal(p.exitCode,0);
+   await pause();await endPaused(p);
   baseline=fs.readFileSync(root+'/recovery.json','utf8');p=await start(true);
   await wait(()=>events().some(e=>e.message==='recovery_loaded'),'baseline loaded');
  }
  await post({action:'prompt',prompt:'Start parallel fixture'});
  await wait(()=>events().filter(e=>e.message==='candidate_created').length===2,'two candidates');
- await wait(()=>events().some(e=>e.message==='action_started'&&e.action_id==='op1'),'active sibling tool');
+  await wait(()=>events().some(e=>e.message==='action_started'&&e.action_id==='op1'),'active sibling tool');
+  await wait(()=>events().some(e=>e.message==='runtime_event'&&e.event.payload.event==='operation_started'&&e.event.payload.operation?.operation==='invoke_tool'),'real Runtime action in flight');
  assert.equal(requests.length,1,'candidates should still be waiting for sibling result');
  if(['retry','continue'].includes(failureMode))fs.mkdirSync(root+'/recovery.tmp');
- const exited=once(p,'exit');await post({action:'shutdown'});
+  if(['retry','continue'].includes(failureMode))await post({action:'pause'});else await pause();
  if(['retry','continue'].includes(failureMode)) {
   await wait(async()=>JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Save failed'),'injected publish failure');
   assert.equal(p.exitCode,null,'failed save remains paused and alive');
@@ -63,11 +89,10 @@ for(const failureMode of ['none','retry','continue','multiple']) test(`active to
    await post({action:'prompt',prompt:'Continue after failed save'});
    await wait(()=>requests.length>=4,'all branches continue after failed save');
   }
-  await post({action:'shutdown'});
+   await pause();
  }
- await wait(()=>p.exitCode!==null||events().some(e=>e.message==='recovery_saved'&&e.error),'shutdown');
- const failure=events().find(e=>e.message==='recovery_saved'&&e.error);assert.equal(failure,undefined,JSON.stringify(failure));
- await exited;assert.equal(p.exitCode,0,fs.readFileSync(root+'/stderr.log','utf8'));
+  const failure=events().find(e=>e.message==='recovery_saved'&&e.error);assert.equal(failure,undefined,JSON.stringify(failure));
+  await endPaused(p);
  assert.ok(!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)),'all task processes exited');
  const manifest=JSON.parse(fs.readFileSync(root+'/recovery.json')),saved=JSON.parse(fs.readFileSync(manifest.files['agent.json'].path));
  assert.equal(saved.candidateSetups.length,failureMode==='continue'?0:2,'persist sibling waiting relations');
@@ -92,8 +117,17 @@ for(const failureMode of ['none','retry','continue','multiple']) test(`active to
  // Candidate model requests must contain paired real sibling results, not abort errors.
  const candidateRequests=requests.slice(1,failureMode==='continue'?count:undefined).filter(r=>r.messages.some(m=>m.role==='tool'&&['moved','blocked'].includes(m.content)));
  assert.equal(candidateRequests.length,2);
- for(const request of candidateRequests){const results=request.messages.filter(m=>m.role==='tool');assert.equal(results.length,2);assert.ok(!JSON.stringify(results).includes('cancelled'));}
- const again=once(p,'exit');await post({action:'shutdown'});await wait(()=>p.exitCode!==null||events().some(e=>e.message==='recovery_saved'&&e.error),'second shutdown');await again;assert.equal(p.exitCode,0);
+  for(const request of candidateRequests){const results=request.messages.filter(m=>m.role==='tool');assert.equal(results.length,2);assert.ok(!JSON.stringify(results).includes('cancelled'));}
+  if(failureMode==='filesystem') {
+   await wait(()=>events().some(e=>e.message==='task_completed'&&e.branch_id!=='authority'),'promoted task materialized');
+   const before=events().filter(e=>e.message==='task_completed').length;
+   await post({action:'prompt',prompt:'verify promoted filesystem'});
+   await wait(()=>events().filter(e=>e.message==='task_completed').length>before,'promoted file task');
+   assert.equal(fs.readFileSync(root+'/workspace/promoted-file','utf8'),'promoted');
+   const write=events().find(e=>e.message==='action_started'&&e.action_id==='promoted-write');
+   assert.ok(write&&write.branch_id!=='authority','file tool belongs to promoted Branch');
+  }
+  await pause();await endPaused(p);
  const afterManifest=JSON.parse(fs.readFileSync(root+'/recovery.json'));
  if(failureMode==='continue') {
   const entries=fs.readFileSync(root+'/session.jsonl','utf8').trim().split('\n').map(JSON.parse);
@@ -106,7 +140,7 @@ for(const failureMode of ['none','retry','continue','multiple']) test(`active to
  if(baseline) {
   fs.writeFileSync(root+'/recovery.json',baseline);
   const oldCount=requests.length;p=await start(true);await new Promise(r=>setTimeout(r,100));assert.equal(requests.length,oldCount);
-  const oldExit=once(p,'exit');await post({action:'shutdown'});await oldExit;assert.equal(p.exitCode,0,'previous generation independently restores');
+   await pause();await endPaused(p);
  }
  console.log('PASS active/sibling recovery',root,identities);
 });

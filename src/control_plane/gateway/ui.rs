@@ -25,6 +25,7 @@ pub enum Request {
     Model { model: String },
     Prompt { prompt: String },
     Interrupt,
+    Pause,
     Shutdown,
 }
 

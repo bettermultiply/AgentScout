@@ -3,6 +3,54 @@
 use super::*;
 
 impl SpeculativeTree {
+    pub fn recovering(&self) -> bool { self.recovering }
+
+    pub fn task_finishing(&self) -> bool { self.task_finishing }
+
+    pub fn load_recovery(&mut self) { self.recovering = true; }
+
+    pub(crate) fn pause_recovery(&mut self, at: u64) -> AgentCommand {
+        self.recovering = true;
+        self.recovery_paused_at.get_or_insert(at);
+        AgentCommand::SuspendRecovery {
+            branch_id: self.authority_branch_id.clone().unwrap_or_default(),
+        }
+    }
+
+    pub(crate) fn continue_recovery(&mut self, at: u64) {
+        if let Some(paused) = self.recovery_paused_at.take() {
+            let elapsed = at.saturating_sub(paused);
+            for branch in self.branches.values_mut() {
+                for operation in &mut branch.pending_operations {
+                    if let Some(deadline) = &mut operation.deadline_at {
+                        *deadline = deadline.saturating_add(elapsed);
+                    }
+                }
+            }
+        }
+        self.recovering = false;
+    }
+
+    pub(crate) fn finish_task(&mut self) { self.task_finishing = true; }
+
+    pub(crate) fn cancel_task(&mut self) -> io::Result<Vec<AgentCommand>> {
+        self.recovering = false;
+        self.task_finishing = true;
+        self.interrupt()
+    }
+
+    pub(crate) fn complete_task(&mut self) { self.task_finishing = false; }
+
+    pub fn task_writers_drained(&self) -> bool {
+        self.active_actions.values().all(|actions| actions.is_empty())
+            && !self.pending_work() && !self.recovery_pending_commands()
+            && self.branches.values().all(|branch| {
+                branch.role == BranchRole::Authority ||
+                (branch.status == BranchStatus::Cleaned &&
+                 (self.capability_view.as_ref().and_then(|v|v["shared_environment"].as_bool()) == Some(true)
+                  || branch.execution_state.runtime == RuntimeExecutionState::Cleaned))
+            })
+    }
     pub fn drain_observations(
         &mut self,
     ) -> Vec<crate::control_plane::observation::ObservationContent> {

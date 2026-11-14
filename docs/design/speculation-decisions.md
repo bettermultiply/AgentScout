@@ -201,7 +201,7 @@ IRREVERSIBLE                      // 不可投机，硬闸
 **选择**：
 
 1. **成本是速率界，不是组合界** —— 分支只在投机或真实调用返回时才延伸、不一致子树立即剪枝 ⟹ 系统最多领先 `a/b` 步，活跃分支数与视界 `T` 无关。真正的约束是"权威路径还剩多少 wall-clock ÷ 投机器延迟"。
-2. **机制提供 task 内待选集合** —— 嵌套 Chance 通过 `admit` 后可以暂存而不立即启动，由该 task / AScoutAgent 绑定的 Policy 通过 `select` 与 task 内其他待选 Chance 一起权衡。AScout 维护机会有效性并在硬约束内执行选择。
+2. **机制提供 AScoutAgent 内待选集合** —— 嵌套 Chance 通过 `admit` 后可以暂存而不立即启动，由 Policy 通过 `select` 与同一 AScoutAgent 内其他待选 Chance 一起权衡。AScout 维护机会有效性并在硬约束内执行选择。
 3. **树形扩展方式属于 Policy** —— best-first、`P(存活) × 期望延迟节省 / 资源成本` 排序、浅层分叉后沿单链深入以及显式 depth 都是可选策略。AScout 必须能够承载这些策略，但不固定其中任何一种。
 4. **已启动工作的调整另行决策** —— `rebalance` 在同一 task 内决定投机 Branch 的暂停、恢复与抢占，不扩大 `select` 的职责；抢占后的处置继续由 `dispose` 决定。
 

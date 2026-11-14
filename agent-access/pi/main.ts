@@ -13,6 +13,7 @@ import { Notifications } from './notification.ts';
 import {save as saveRecovery,load as loadRecovery} from './recovery.ts';
 import {recoveryBinding,snapshotResources} from './recovery-binding.ts';
 import { readFileSync } from 'node:fs';
+import {filesystemTools} from './filesystem-tools.ts';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
@@ -168,7 +169,9 @@ async function finishActions(branch,status) {
         await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:action.action_kind,status,result:null,timestamp_ms:Date.now()});
 }
 function tools(branch) {
-    return runtimeTools.map(spec=>({name:spec.name,label:spec.name,description:spec.description,parameters:Type.Unsafe(spec.parameters),execute:async(operation,_args,signal)=>{
+    const cwd=tree.branches.get(branch)?.manager.getHeader().cwd??process.cwd();
+    const fileTools=filesystemTools(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS,branch,cwd,require(resolve(root,'packages/coding-agent/src/core/tools/index.ts')));
+    return [...fileTools,...runtimeTools.map(spec=>({name:spec.name,label:spec.name,description:spec.description,parameters:Type.Unsafe(spec.parameters),execute:async(operation,_args,signal)=>{
         if (branch!==authority) throw Error('Candidate action is unavailable before acceptance');
         const id=key(branch,operation);
         let value;
@@ -180,8 +183,14 @@ function tools(branch) {
             if(signal?.aborted||closing)abort();
         });
         return {content:[{type:'text',text:text(value)}],details:undefined};
-    }}));
+    }}))];
 }
+// FS execution must never fall back to host implementations selected through
+// user settings or extensions. Only the isolated built-ins and Runtime tools
+// have an execution plan in this integration.
+const filesystemToolSelection=process.env.ASCOUT_FILESYSTEM_TOOL_PLANS
+    ? {tools:['read','bash','edit','write',...runtimeTools.map(tool=>tool.name)]}
+    : {};
 async function beforeModelInference(branch, modelValue, context, signal) {
     syncTranscript(branch);
     // Model inference is a PURE step: the generic layer evaluates `admit` but
@@ -424,7 +433,7 @@ async function handle(command) {
                 for(const branch of record.interruptedBranches??[])interruptedBranches.add(branch);
                 for(const [branch,{manager,stopped}] of tree.branches){
                     if(stopped||candidateSetups.has(branch))continue;
-                    const {session}=await createAgentSession({cwd:manager.getHeader().cwd,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+                    const {session}=await createAgentSession({...filesystemToolSelection,cwd:manager.getHeader().cwd,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
                     sessions.set(branch,session);install(session,branch);
                 }
                 saving=false;
@@ -449,7 +458,7 @@ async function handle(command) {
             // keep a previous run's winner in charge.
             if(command.role==='authority'){authority=branch;tree.adoptAuthority(branch)}
             const manager=tree.createBranch(branch,command.workspace,tree.manager,tree.tail(branch)??tree.manager.getLeafId());
-            const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+            const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
             sessions.set(branch,session);install(session,branch);
             await report({message:'branch_created',branch_id:branch});
@@ -540,7 +549,7 @@ async function handle(command) {
             tree.inputs.set(branch,{parent:command.parent_branch_id,source:checkpoint.manager,operation:command.operation_id,checkpoint:checkpoint.treeTail,prediction:pairedEntryIds[paired.findIndex(e=>e.toolCallId===command.operation_id)],pairedTail:pairedEntryIds.at(-1),operations:paired.map(e=>e.toolCallId)});
             tree.settle();
             await access.control(command);
-            const {session}=await createAgentSession({cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+            const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
             sessions.set(branch,session);install(session,branch);
             candidateSetups.delete(branch);
@@ -579,7 +588,7 @@ async function handle(command) {
         case 'abort':
             aborting.add(branch);
             reconnectControllers.get(branch)?.abort();
-            try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled'); }
+            try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');await report({message:'turn_completed',branch_id:branch}); }
             finally { aborting.delete(branch); }
             return;
         case 'discard': cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;

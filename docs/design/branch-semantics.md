@@ -32,7 +32,7 @@ Branch(r_n)     = r_n 及其全部 descendants 构成的子树
 children(r_n)   = r_n 的直接 child Branch Root 集合
 ```
 
-因此，`local state of r_n` 不包含 child Branch Root；`Branch r_n` 则包含 `r_n` 以及它的全部 descendants。Speculative Tree 从 root Authority Instance 对应的 root Branch Root 开始；状态本身不是另一棵独立的树。权威 session 文件中记录的父子关系表达整理后的执行历史，不是第二棵控制 Tree，不取代 Branch identity、Instance 或所有权。历史父链按真实结果整理的规则见 [Agent 接入设计](agent-integration.md) §3，不由控制树拓扑直接推导。
+因此，`local state of r_n` 不包含 child Branch Root；`Branch r_n` 则包含 `r_n` 以及它的全部 descendants。一个 session 对应一个 AScoutAgent 和一棵 Speculative Tree，多轮 task 在同一树中继续；Agent 完成本轮工作并开始等待用户输入时，task 完成。Speculative Tree 从 root Authority Instance 对应的 root Branch Root 开始；状态本身不是另一棵独立的树。权威 session 文件中记录的父子关系表达整理后的执行历史，不是第二棵控制 Tree，不取代 Branch identity、Instance 或所有权。历史父链按真实结果整理的规则见 [Agent 接入设计](agent-integration.md) §3，不由控制树拓扑直接推导。
 
 一个 AScoutAgent 恰好拥有一棵控制面 Speculative Tree。Branch Root identity、candidate handle、capability、commit/discard 和 resolution 都只在这棵 tree 内有意义；同一部署承载多个 AScoutAgent 不形成更高层的 Branch 关系。
 
@@ -102,6 +102,8 @@ Proposal 必须声明与真实 outcome 的 compatibility 条件，可以是 exac
 Accept 是 resolution 为 `accepted` 时的落实，不等于必然替换 parent。按处置意图分为 `Promote` 和 `Reuse`。
 
 `Promote` 后 candidate 保留自己的 Branch identity，并替换 parent 在 Speculative Tree 中的位置。若 parent 是 root，candidate 成为新的 root；否则 candidate 连接到原 parent 的 parent。旧 parent 和 candidate 的 sibling subtrees 失效，candidate 原有 descendants 及其内部关系保持不变。
+
+Candidate 承接后续执行时保留并继续使用自己的环境，不默认把其改动复制回 parent。环境保留不能绕过 commit/discard、single-winner 或必要状态交接；嵌套接受不能清除祖先未决依赖，也不能据此取得整棵树的权威或物化资格。
 
 Promote 不以 candidate 会话或当前模型请求结束为前提；已满足提交、依赖和效果条件的在飞 candidate 可以在保留执行进展的情况下转为权威延续。用户端维持同一 AScoutAgent 视图，只更新该视图对应的权威执行及受控输入输出路由；不能因用户会话切换而取消或重启 winner。此保证不取消 resolution barrier，也不豁免旧 parent 和其他 loser 的停止、效果收敛与清理责任。
 

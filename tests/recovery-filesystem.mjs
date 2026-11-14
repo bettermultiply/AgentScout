@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import net from 'node:net';
 
-test('filesystem main entry resumes independent lower and rejects changed package code',{timeout:120000},async t=>{
+test('filesystem main entry restores managed upper with current host lower and rejects changed package code',{timeout:120000},async t=>{
  const project=process.cwd(),root=fs.mkdtempSync('/tmp/opencode/recovery-filesystem-');console.log('evidence',root);
  for(const name of ['workspace','pi','policy','tmp','package/extensions'])fs.mkdirSync(root+'/'+name,{recursive:true});
  fs.writeFileSync(root+'/workspace/lower','saved lower');
@@ -36,19 +36,27 @@ test('filesystem main entry resumes independent lower and rejects changed packag
  fs.writeFileSync(root+'/stderr.log','');
  const wait=async(fn,label)=>{const deadline=Date.now()+30000;while(Date.now()<deadline){if(await fn())return;await new Promise(r=>setTimeout(r,20))}throw Error('Timeout '+label+' '+root)};
  const post=async body=>fetch(`http://127.0.0.1:${port}/api/request`,{method:'POST',headers:{origin:`http://127.0.0.1:${port}`,'content-type':'application/json'},body:JSON.stringify(body)});
- const launch=resume=>{const p=spawn(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','recovery/fixture',...(resume?['--resume']:[])],{env:{...process.env,TMPDIR:root+'/tmp',ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','ignore','pipe']});children.push(p);p.stderr.on('data',b=>fs.appendFileSync(root+'/stderr.log',b));return p};
- const ready=async p=>wait(async()=>{assert.equal(p.exitCode,null,fs.readFileSync(root+'/stderr.log','utf8'));try{return(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).ok}catch{return false}},'ready');
- const stop=async p=>{const done=once(p,'exit');await post({action:'shutdown'});await done;assert.equal(p.exitCode,0,fs.readFileSync(root+'/stderr.log','utf8'));assert.ok(!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)))};
+  const loadedCount=()=>fs.existsSync(root+'/events.jsonl')?fs.readFileSync(root+'/events.jsonl','utf8').split('\n').filter(line=>line&&JSON.parse(line).message==='recovery_loaded').length:0;
+  const launch=resume=>{const previous=loadedCount();const p=spawn(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','recovery/fixture',...(resume?['--resume']:[])],{env:{...process.env,TMPDIR:root+'/tmp',ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','ignore','pipe']});p.recoveryCount=resume?previous:null;children.push(p);p.stderr.on('data',b=>fs.appendFileSync(root+'/stderr.log',b));return p};
+  const ready=async p=>wait(async()=>{assert.equal(p.exitCode,null,fs.readFileSync(root+'/stderr.log','utf8'));try{return(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).ok&&(p.recoveryCount===null||loadedCount()>p.recoveryCount)}catch{return false}},'ready');
+  const stop=async p=>{
+   const previous=fs.existsSync(root+'/recovery.json')?fs.readFileSync(root+'/recovery.json','utf8'):null;
+   const response=await post({action:'pause'});assert.equal(response.status,202);
+   await wait(async()=>fs.existsSync(root+'/recovery.json')&&fs.readFileSync(root+'/recovery.json','utf8')!==previous&&JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Paused; enter input to continue'),'Pause published');
+   assert.equal(p.exitCode,null,'Pause saves without exiting');
+   const done=once(p,'exit');p.kill('SIGKILL');await done;assert.equal(p.signalCode,'SIGKILL');
+   await wait(()=>!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)),'paused task processes exited');
+  };
  let p=launch(false);await ready(p);await new Promise(r=>setTimeout(r,200));await stop(p);
  const baseline=fs.readFileSync(root+'/recovery.json','utf8');
  p=launch(true);await ready(p);await new Promise(r=>setTimeout(r,200));await post({action:'prompt',prompt:'write fixture'});await wait(()=>requests===2,'shell completed, stream active');
  // The inner NLE save succeeds before the data-plane hits an unsavable socket.
  const socket=net.createServer();t.after(()=>socket.close());
  const currentBase=fs.readdirSync(root+'/fs-state').filter(n=>n.startsWith('restored-')).sort().at(-1);
- const baseDirectory=root+'/fs-state/'+currentBase+'/bases';
- const base=baseDirectory+'/'+fs.readdirSync(baseDirectory)[0];
+  const findUpper=dir=>{for(const e of fs.readdirSync(dir,{withFileTypes:true})){const path=dir+'/'+e.name;if(e.isDirectory()){if(e.name==='upper')return path;const found=findUpper(path);if(found)return found}}};
+  const base=findUpper(root+'/fs-state/'+currentBase);assert.ok(base);
  await new Promise(r=>socket.listen(root+'/s',r));fs.renameSync(root+'/s',base+'/s');
- await post({action:'shutdown'});
+  await post({action:'pause'});
  await wait(()=>fs.readFileSync(root+'/events.jsonl','utf8').includes('Save failed'),'middle component save failure');
  assert.equal(fs.readFileSync(root+'/recovery.json','utf8'),baseline);assert.equal(p.exitCode,null);assert.equal(requests,2);
  await new Promise(r=>socket.close(r));
@@ -66,7 +74,17 @@ test('filesystem main entry resumes independent lower and rejects changed packag
  fs.writeFileSync(extension,'export default ()=>{return 1}');p=launch(true);await once(p,'exit');assert.equal(p.exitCode,1);assert.match(fs.readFileSync(root+'/stderr.log','utf8'),/resources changed/);assert.equal(requests,2);fs.writeFileSync(extension,'export default ()=>{}');
  p=launch(true);await ready(p);await new Promise(r=>setTimeout(r,200));assert.equal(requests,2,'no automatic inference');await post({action:'prompt',prompt:'continue fixture'});await wait(()=>requests===4,'continued shell');await stop(p);
  const find=(dir,name)=>{for(const e of fs.readdirSync(dir,{withFileTypes:true})){if(e.name==='work')continue;const path=dir+'/'+e.name;if(e.isDirectory()){const found=find(path,name);if(found)return found}else if(e.name===name)return path}};
- const continued=find(root+'/fs-state','continued');assert.ok(continued);assert.equal(fs.readFileSync(continued,'utf8'),'saved lowersaved lowerfirst');assert.equal(digest(generation),original);
- fs.writeFileSync(root+'/recovery.json',manifest);p=launch(true);await ready(p);await wait(()=>fs.readFileSync(root+'/events.jsonl','utf8').includes('recovery_loaded'),'old generation loaded');await new Promise(r=>setTimeout(r,200));assert.equal(requests,4);await stop(p);
+  // Contract explicitly changed by the user on 2026-11-14: ordinary lower
+  // uses current host data; managed upper and saved sources stay independent.
+  const continued=find(root+'/fs-state','continued');assert.ok(continued);assert.equal(fs.readFileSync(continued,'utf8'),'mutated original lowersaved lowerfirst');assert.equal(digest(generation),original);
+  fs.writeFileSync(root+'/recovery.json',manifest);p=launch(true);await ready(p);await wait(()=>fs.readFileSync(root+'/events.jsonl','utf8').includes('recovery_loaded'),'old generation loaded');await new Promise(r=>setTimeout(r,200));assert.equal(requests,4);await stop(p);
+  // Shutdown has its own terminate/materialize/cleanup path. It must finish
+  // successfully without replacing the generation just validated above.
+  const preserved=fs.readFileSync(root+'/recovery.json','utf8');
+  p=launch(true);await ready(p);await new Promise(r=>setTimeout(r,200));
+  const done=once(p,'exit');await post({action:'shutdown'});await done;
+  assert.equal(p.exitCode,0,fs.readFileSync(root+'/stderr.log','utf8'));
+  assert.equal(fs.readFileSync(root+'/recovery.json','utf8'),preserved,'Shutdown does not save');
+  assert.ok(!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)),'Shutdown reaps task processes');
  console.log('PASS FS main entry',root);
 });

@@ -2,6 +2,10 @@
 
 本文记录当前代码，不替代 [Policy Engine 目标语义](../design/control-plane/policy-engine.md)。
 
+当前首版范围：一个 session 对应一个 AScoutAgent 和一棵树，同一 session 加载的 Policy 固定，多轮 task 使用同一份 Policy，不实现运行期间修改或切换。端侧交付、异步求值及保存／恢复必须保持该 Policy 一致；本轮仅收敛文档，不宣称代码已全部对齐。
+
+长期设计保留 Policy 修改能力；切换时机及活动 Chance 如何使用旧／新 Policy 留到后续支持该能力时确定，不再作为首版待定或阻塞项。已有编译产物、留档与恢复验证不证明运行期间修改已支持。
+
 ## 1. 已实现的路径
 
 `src/control_plane/policy/` 导出的 `PolicyEngine` 可以读取 YAML，检查九类 Decision 的十个函数入口（`admit` 有两个），固定声明的文件内容和各函数的参数，在隔离环境中检查 Python 语法、导入及函数签名，生成 `CompiledPolicy`。编译不调用 Decision 函数体，但会在隔离环境中执行模块顶层代码。

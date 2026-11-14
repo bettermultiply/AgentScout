@@ -8,3 +8,4 @@ mod process;
 mod support;
 mod trash;
 mod recovery;
+mod materialize;

@@ -25,13 +25,13 @@ impl SpeculativeTree {
 
     /// A prompt starts a turn on the confirmed authority, never on an intended winner.
     pub fn input_ready(&self) -> bool {
-        !self.recovering && !self.stopping && self.queued_prompts.is_empty()
+        !self.task_finishing && !self.recovering && !self.stopping && self.queued_prompts.is_empty()
             && self.authority_ready() && !self.authority_running()
             && !self.branches.values().any(|branch| branch.status == BranchStatus::Promoting)
     }
 
     pub fn continue_authority(&mut self, prompt: String) -> io::Result<Option<AgentCommand>> {
-        if !self.authority_ready()
+        if self.task_finishing || !self.authority_ready()
             || self.authority_running()
             || self
                 .branches

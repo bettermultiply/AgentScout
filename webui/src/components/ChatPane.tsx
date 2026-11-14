@@ -168,7 +168,7 @@ export function ChatPane() {
       pending: true,
       pendingAt: Date.now(),
     }
-    setPendingMessages((messages) => [...messages, pending])
+    if (text !== '/pause') setPendingMessages((messages) => [...messages, pending])
     try {
       await sendRequest({ action: 'prompt', prompt: text })
       setPrompt('')
@@ -217,6 +217,9 @@ export function ChatPane() {
           {connectionLabel(connection)}
         </span>
         <div className="header-actions">
+          <button type="button" disabled={!connected} onClick={() => {
+            void sendRequest({ action: 'pause' }).catch(error => setRequestError(String(error)))
+          }}>暂停</button>
           <input aria-label="模型 provider/model" placeholder="provider/model" value={model} onChange={event => setModel(event.target.value)} />
           <button type="button" disabled={!connected || !model.trim()} onClick={() => {
             void sendRequest({ action: 'model', model: model.trim() }).catch(error => setRequestError(String(error)))

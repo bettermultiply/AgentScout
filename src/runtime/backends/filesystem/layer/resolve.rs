@@ -213,7 +213,7 @@ pub(crate) fn resolve_path_in_layers(
         }
     }
     // The bottom of every mount-backed chain is the host mount point itself.
-    match resolve_path_in_upper(&mount.target, &lookup)? {
+    match resolve_path_in_upper(mount.saved_base.as_deref().unwrap_or(&mount.target), &lookup)? {
         PathResolution::Node(node) => Ok(Some(node)),
         PathResolution::Hidden | PathResolution::NotPresent => Ok(None),
     }
@@ -246,14 +246,8 @@ pub(crate) fn resolve_path_in_environment(
         PathResolution::Hidden => return Ok(None),
         PathResolution::NotPresent => {}
     }
-    match resolve_path_in_layers(&mount.lower, mount, path)? {
-        Some(node) => Ok(Some(node)),
-        None => match resolve_path_in_upper(&mount.target, path)? {
-            PathResolution::Node(node) => Ok(Some(node)),
-            PathResolution::Hidden => Ok(None),
-            PathResolution::NotPresent => Ok(None),
-        },
-    }
+    let lookup = redirected_lookup(&mount.upper, path)?.unwrap_or_else(|| path.to_string());
+    resolve_path_in_layers(&mount.lower, mount, &lookup)
 }
 
 pub(crate) fn ancestors(path: &str) -> Vec<String> {
@@ -267,4 +261,3 @@ pub(crate) fn ancestors(path: &str) -> Vec<String> {
     }
     result
 }
-

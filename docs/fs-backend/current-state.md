@@ -2,6 +2,44 @@
 
 本文只记录实现事实，不定义目标语义。末尾逐条标注“实测”或“推断”。
 
+## Authority 物化实现与验收边界（2026-11-14）
+
+Pi 会话宿主不再持有 Authority overlay，Branch 内建文件工具按对应 Runtime 计划
+建立独立挂载。shell 使用私有 PID namespace 的 PID 1 supervisor 等待所有后代；
+同 Branch 工具操作串行使用 upper/work。常驻 Pi 不作为活跃写者，其他直接受管进程
+仍保留物化安全门槛。成功后创建新 upper/work，不清空 live upper。
+
+恢复允许普通宿主 lower，使用恢复时内容，不保存整个挂载；受管增量、候选、
+Agent/Policy 状态独立保存，保存代和代码/配置/依赖校验保留。
+
+新建环境不复制宿主挂载或建立全量物化基准。物化从增量层选取路径，使用只读
+overlay 内核视图导出受影响节点；opaque/redirect 才展开对应子树。所有挂载先导出，
+再逐路径写回；失败保留包与已成功路径回执，不检测或报告冲突。
+
+定向回归覆盖启动无挂载副本、最终视图权限/删除/目录/符号链接边界、
+重复选择子树不会覆盖导出数据、部分失败重试不重复清理已完成 opaque 目录、
+过期增量子路径不会沿最终视图的祖先符号链接读取挂载外内容。
+`cargo check --all-targets` 通过。验证数据全部位于 `/tmp/opencode`，未调用真实模型。
+物化以 `O_PATH|O_NOFOLLOW` 固定目录 inode，因此可遍历/修改但不可读的已有目录仍可
+作为路径父级并设置权限位；不临时放宽权限。目录子树清理仍需读取目录项，缺少读权限时
+会失败并保留已完成回执，修复访问条件后可重试。符号链接仍不作为目录跟随。
+普通用户回归还验证了 `0300` 宿主根和嵌套父目录上的文件写入，以及后续失败/重试期间
+这些目录权限不被提前改动；重试跳过已有文件回执。
+
+`tests/authority-filesystem.mjs` 覆盖后台写者等待、两个 task 不重放、文件工具、取消、
+部分失败重试与 SIGINT。`tests/recovery-filesystem.mjs` 当前宿主 lower 加独立 upper
+恢复通过。FS 候选暂停、恢复、晋级、旧父清理后工具写入及再次保存通过，证据
+`/tmp/opencode/authority-active-final5.log` 与 `/tmp/opencode/authority-e2e-final6.log`。
+saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败保留旧代和回执由库
+回归覆盖，`/tmp/opencode/authority-lib-final5.log` 为 161/161（包含环境条件跳过的项，
+不代表原生 btrfs 特权验收）。原生 btrfs incremental 本机未通过探测。
+最终联合验证 `node --test --test-concurrency=1 tests/authority-filesystem.mjs tests/recovery-filesystem.mjs tests/recovery-active.mjs`
+7/7 通过，日志 `/tmp/opencode/authority-e2e-final7.log`。证据分别为
+`authority-filesystem-tSXSIp`、`recovery-active-GmHpEZ`、`recovery-filesystem-fyfaLL`
+（均位于 `/tmp/opencode`）。取消与 SIGINT 夹具等待实际写入标记，不以固定延时
+假设工具已开始。`cargo check --all-targets`、`cargo build --bins`、`git diff --check`
+通过。任意扩展宿主代码、深层候选组合及所有属性/链接组合不在此验收覆盖范围。
+
 ## 已实现
 
 - **overlay fork（逐挂载 Chain / Flatten）**
@@ -366,11 +404,26 @@ EINVAL；读取成功但目标未齐时，轮询遗漏检查 child 退出。两�
 | ps 计数 | 466 | 467 | 部分一致（多 bwrap/子进程） |
 | inotify | ok | ok | 一致（lower 文件被 upper 修改后收到事件） |
 
-权威写入留在 branch upper，宿主观察者看不到。物化是可选能力，不在关键路径上；
-运行阶段物化后重置 authority 的基准，任务结束即结束 authority 的使命。宿主写回
-要求写前逐文件与基准比对再原子替换，并检查性能（先比大小和修改时间，仅在不一致
-时算哈希）。冲突倾向让 authority 覆盖，尚未最终确认；暂不为被覆盖的宿主版本保留
-可恢复副本。以上均未实现。
+当前权威写入留在 branch upper，宿主观察者看不到。系统最终必须物化到现实；
+正常完成须在任务完成、没有存活候选且任务相关写入完成后物化并重置基准，
+不为物化暂停执行。取消、失败、主动退出立即进入物化处理，但写回仍须满足无候选
+及任务相关写入完成。暂停任务保留环境等待继续；旧环境与基准无人引用时释放。
+Agent 完成本轮工作并开始等待用户输入时，task 完成；一个 session 对应一个
+AScoutAgent 和一棵树。候选被接受后继续使用候选环境，必要状态交接与引用保护
+仍需实现核查。Agent 常用 Ctrl-C 或退出均终止任务；暂停由 AScout 独立接口提供，
+保留树、候选和环境。已有退出保存入口尚未对齐，恢复能力保留；接口名称及 UI 待定。
+宿主写回按 Authority 增量最终视图覆盖，不做宿主与共同祖先比较或冲突报告，
+不新增全量哈希，不复制整个挂载。运行期间不编辑宿主目录仅为
+使用约定；不为被覆盖的宿主版本保留可恢复副本。目标写回覆盖工作目录及任务
+允许修改的其他挂载，只落实 Authority 相对基准的改动；属性变更首版仅支持权限位，
+其他属性不新增修改支持，也不允许破坏原文件未改属性或链接结构；
+暂允许中间态，失败保留已写部分并重试剩余，
+不承诺回滚；失败阻止任务成功报告。写入完成后正常退出可见，不新增掉电保证。
+这些物化要求及基准重置、引用保护和资源释放仍待实现验证，不能以 accept 或退出
+恢复已有实现代替。Runtime 向控制面报告物化完成／失败，物化失败等同操作失败，
+控制面必须等物化成功后才能宣告任务成功；具体报告与协调路径仍待实现核查，
+本轮不新增接口。具体边界见
+[物化提案](materialize-proposal.md)。
 
 ## 成本表（实测/推断）
 

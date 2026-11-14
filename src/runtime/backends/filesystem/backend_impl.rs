@@ -50,7 +50,26 @@ impl FilesystemBackend {
 }
 
 impl Backend for FilesystemBackend {
+    fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
+        self.materialize_authority(&context.environment_id)
+    }
     fn launch_fragment(&self, context:&BackendContext, launch:&crate::protocol::contract::AgentLaunch)->Result<LaunchFragment,BackendError> {
+        if launch.env.get("ASCOUT_PI_SESSION_HOST").is_some_and(|value|value=="1") {
+            let environment=Self::resolve_environment(&*self.lock()?,&context.environment_id)?;
+            self.persist_tool_plan(&environment)?;
+            let mut fragment=LaunchFragment {mounts:crate::runtime::launch_plan::base_mount_entries(),..Default::default()};
+            for path in &self.config.passthrough_rw {if path.exists(){fragment.mounts.push(MountEntry::Bind {source:path.clone(),target:path.clone()});}}
+            // Session artifacts are writable, but the Runtime's owned state is
+            // only readable to the integration host and masked in tool mounts.
+            if let Some(parent)=launch.log.parent(){
+                fragment.mounts.push(MountEntry::Bind {source:parent.into(),target:parent.into()});
+                let temporary=parent.join("agent-tmp");
+                fs::create_dir_all(&temporary).map_err(error)?;
+                fragment.env.insert("TMPDIR".into(),temporary.display().to_string());
+            }
+            fragment.env.insert("ASCOUT_FILESYSTEM_TOOL_PLANS".into(),self.config.state_directory.join("tool-plans").display().to_string());
+            return Ok(fragment);
+        }
         FilesystemBackend::launch_fragment(self,context,launch)
     }
     fn save_runtime(&self, path: &Path) -> Result<(), BackendError> { self.save_recovery(path) }
@@ -318,11 +337,7 @@ impl Backend for FilesystemBackend {
                     "filesystem cleanup requires a terminated environment",
                 ));
             }
-            remove_path(
-                &self.config.btrfs_path,
-                &environment.root,
-                self.uses_btrfs_storage(),
-            )?;
+            self.retain_retired_root(&mut state, &environment.root)?;
             state.environments.remove(id);
             let garbage = self.refresh_references(&mut state)?;
             (environment, garbage)

@@ -182,7 +182,9 @@ fn run(interface: &Interface, connection: &Connection, reader: &LedgerReader) ->
                         let line = String::from_utf8_lossy(&input).trim().to_string();
                         input.clear();
                         scroll = 0;
-                        if line == "/ascout" {
+                        if line == "/pause" {
+                            let _ = connection.request(Request::Pause);
+                        } else if line == "/ascout" {
                             observing = true;
                             events = false;
                             selected = None;

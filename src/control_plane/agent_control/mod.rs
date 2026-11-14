@@ -436,9 +436,11 @@ pub struct SpeculativeTree {
     #[serde(default)]
     pub(crate) stopping: bool,
     #[serde(default)]
-    pub recovering: bool,
+    pub(crate) recovering: bool,
     #[serde(default)]
-    pub recovery_paused_at: Option<u64>,
+    pub(crate) task_finishing: bool,
+    #[serde(default)]
+    pub(crate) recovery_paused_at: Option<u64>,
     #[serde(default)]
     shutdown_deadline: Option<u64>,
     #[serde(default = "first_id")]
@@ -476,6 +478,7 @@ impl SpeculativeTree {
             rebalance_epoch: None,
             stopping: false,
             recovering: false,
+            task_finishing: false,
             recovery_paused_at: None,
             shutdown_deadline: None,
             next_generation: 1,

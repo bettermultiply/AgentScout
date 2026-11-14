@@ -6,3 +6,4 @@ pub mod gateway;
 pub mod ledger;
 pub mod observation;
 pub mod policy;
+pub mod recovery;

@@ -70,6 +70,11 @@ use serde_json::json;
             })
             .unwrap();
         assert!(commands.iter().any(|command| matches!(command, AgentCommand::Discard { branch_id, .. } if branch_id == &sibling)));
+        // A finished winner ends this task. Promotion confirmation alone must
+        // not let the next prompt bypass writer drain and materialization.
+        assert!(tree.task_finishing());
+        assert!(tree.next_prompt().unwrap().is_none());
+        tree.complete_task();
         assert!(
             matches!(tree.next_prompt().unwrap(), Some(AgentCommand::Prompt { branch_id, .. }) if branch_id == winner)
         );
@@ -151,4 +156,3 @@ use serde_json::json;
             assert_eq!(tree.branches["candidate"].status, status);
         }
     }
-

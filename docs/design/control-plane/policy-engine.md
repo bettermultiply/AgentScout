@@ -20,6 +20,8 @@ Policy Engine 不决定 Decision 在哪里运行，也不负责向 Agent 接入�
 
 ## 2. 编译 Policy
 
+长期设计允许修改 Policy，变更后的 Policy 同样须通过编译与契约校验；这不改变 Policy Engine 只负责编译和求值的职责。该能力不属于当前首版；同一 session 加载的 Policy 固定、不实现修改或切换的开发范围见 [Policy 开发说明](../../development/policy-engine.md)。后续支持修改时再确定切换规则，不从编译产物内容固定推导出长期禁止修改。
+
 编译职责是把 `PolicyDefinition` 转换为 AScout 可以直接运行的 Policy Decision。它以 Policy DSL 为输入，以经过检查的可执行逻辑为输出。
 
 ### 2.1 输入

@@ -47,6 +47,8 @@ mod merge;
 mod replay;
 mod util;
 mod recovery;
+mod materialize;
+mod tool_execution;
 
 pub use config::{FilesystemConfig, FilesystemMechanism, ForkCost};
 use copy::*;
@@ -459,7 +461,8 @@ impl FilesystemBackend {
         self.write_json(
             &self.environment_metadata_path(&environment.id),
             &EnvironmentMetadata::from_environment(environment),
-        )
+        )?;
+        self.persist_tool_plan(environment)
     }
 
     pub(super) fn persist_snapshot(&self, snapshot: &SnapshotRecord) -> Result<(), BackendError> {
@@ -511,7 +514,12 @@ impl FilesystemBackend {
 
     pub(super) fn prepare_mount_dirs(mounts: &[MountUnit]) -> Result<(), BackendError> {
         for mount in mounts {
+            let existed = mount.upper.exists();
             fs::create_dir_all(&mount.upper).map_err(error)?;
+            if !existed {
+                let base = mount.saved_base.as_deref().unwrap_or(&mount.target);
+                fs::set_permissions(&mount.upper, fs::metadata(base).map_err(error)?.permissions()).map_err(error)?;
+            }
             reset_dir(&mount.work)?;
             ensure_overlay_work(&mount.upper, &mount.work)?;
         }

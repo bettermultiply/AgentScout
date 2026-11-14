@@ -15,6 +15,31 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[test]
+fn base_runtime_cleanup_accepts_removed_data_plane_and_retained_cleaned_inner() {
+    struct Lifecycle(Mutex<Option<EnvironmentState>>, bool);
+    impl Backend for Lifecycle {
+        fn establish(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn operate(&self, _: &str, _: &[String], _: &CancelHandle) -> Result<CommandOutput, BackendError> { Err(BackendError::new("unused")) }
+        fn branch(&self, _: &str, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn suspend(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn resume(&self, _: &str) -> Result<(), BackendError> { Ok(()) }
+        fn terminate(&self, _: &str) -> Result<(), BackendError> { *self.0.lock().unwrap()=Some(EnvironmentState::Terminated); Ok(()) }
+        fn cleanup(&self, _: &str) -> Result<(), BackendError> { *self.0.lock().unwrap()=if self.1 {None} else {Some(EnvironmentState::Cleaned)}; Ok(()) }
+        fn state(&self, _: &str) -> Option<EnvironmentState> { *self.0.lock().unwrap() }
+        fn environments(&self) -> Vec<String> { vec!["env".into()] }
+    }
+    let inner=Arc::new(Lifecycle(Mutex::new(Some(EnvironmentState::Available)),false));
+    let plane=Arc::new(Lifecycle(Mutex::new(Some(EnvironmentState::Available)),true));
+    let runtime=BaseRuntime::new("runtime",inner).with_data_plane(plane.clone());
+    assert_eq!(runtime.state("env"),Some(EnvironmentState::Available));
+    runtime.terminate("env").unwrap();
+    assert_eq!(runtime.state("env"),Some(EnvironmentState::Terminated));
+    runtime.cleanup("env").unwrap();
+    assert_eq!(plane.state("env"),None);
+    assert_eq!(runtime.state("env"),Some(EnvironmentState::Cleaned));
+}
+
     struct MockBackend {
         id: String,
         calls: AtomicUsize,
@@ -171,6 +196,23 @@ use std::sync::{Arc, Mutex};
             )
             .unwrap();
         assert!(!result.confirmation.writers_quiesced);
+    }
+
+    #[test]
+    fn materialization_refuses_active_managed_writer_without_stopping_it() {
+        let root = tempfile::Builder::new().prefix("materialize-writer-").tempdir_in("/tmp/opencode").unwrap();
+        let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"))
+            .with_data_plane(MockBackend::new("plane"));
+        let context = BackendContext::new("materialize-active");
+        let launch = AgentLaunch {
+            command: "/bin/sleep".into(), args: vec!["30".into()], cwd: root.path().into(),
+            log: root.path().join("agent.log"), instance_id: None, env: BTreeMap::new(),
+        };
+        runtime.launch_agent(&context, &launch).unwrap();
+        let failure = runtime.materialize(&context).unwrap_err();
+        assert!(failure.to_string().contains("writers have not been confirmed drained"));
+        assert!(runtime.process.is_running(&context.environment_id).unwrap());
+        runtime.process.cleanup(&context.environment_id).unwrap();
     }
 
     fn launch_test_agent(

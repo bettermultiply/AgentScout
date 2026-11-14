@@ -188,6 +188,22 @@ pub(super) fn spawn_delete_worker(worker: Arc<DeleteWorker>) {
 }
 
 impl FilesystemBackend {
+    pub(super) fn retain_retired_root(&self, state: &mut BackendState, root: &Path) -> Result<(), BackendError> {
+        let id = format!("owned-root-{}", short_hash(&root.display().to_string()));
+        let record = SnapshotRecord { snapshot_id: id.clone(), path: root.into(), read_only: true,
+            lower: BTreeMap::new(), refs: BTreeSet::new() };
+        self.persist_snapshot(&record)?;
+        state.snapshots.insert(id, record);
+        Ok(())
+    }
+    pub(super) fn root_referenced(state: &BackendState, root: &Path) -> bool {
+        state.environments.values().any(|env| env.root.starts_with(root) || env.mounts.values().any(|mount|
+            mount.upper.starts_with(root) || mount.work.starts_with(root) ||
+            mount.saved_base.as_ref().is_some_and(|base| base.starts_with(root)) ||
+            mount.lower.iter().any(|layer| layer.starts_with(root)))) ||
+        state.snapshots.values().any(|snapshot| snapshot.path.starts_with(root) ||
+            snapshot.lower.values().flatten().any(|layer| layer.starts_with(root)))
+    }
     /// Rebuild snapshot reference tokens from the current environment graph.
     /// Unreferenced snapshots are removed from memory and scheduled for GC.
     pub(super) fn refresh_references(
@@ -205,8 +221,9 @@ impl FilesystemBackend {
                 tokens.push((base.clone(), format!("env:{}:base", environment.id)));
             }
             for (target, mount) in &environment.mounts {
-                for layer in &mount.lower {
-                    if let Some(id) = path_to_id.get(layer) {
+                for layer in mount.lower.iter().chain(mount.saved_base.iter()) {
+                    for (path, id) in &path_to_id {
+                        if !layer.starts_with(path) { continue; }
                         tokens.push((
                             id.clone(),
                             format!("env:{}:lower:{target}", environment.id),
@@ -219,6 +236,24 @@ impl FilesystemBackend {
                     snapshot.clone(),
                     format!("env:{}:mark:{mark}", environment.id),
                 ));
+            }
+        }
+        // Only snapshots reachable from environments retain their lower chains;
+        // recording all snapshots would let unreachable chains retain each other.
+        let mut pending: Vec<String> = tokens.iter().map(|(id, _)| id.clone()).collect();
+        let mut visited = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id.clone()) { continue; }
+            if let Some(snapshot) = state.snapshots.get(&id) {
+                for layer in snapshot.lower.values().flatten() {
+                    for (path, lower_id) in &path_to_id {
+                        if !layer.starts_with(path) { continue; }
+                        if lower_id != &id {
+                            tokens.push((lower_id.clone(), format!("snapshot:{id}:lower")));
+                            pending.push(lower_id.clone());
+                        }
+                    }
+                }
             }
         }
         for snapshot in state.snapshots.values_mut() {

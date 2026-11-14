@@ -157,6 +157,8 @@ pub(crate) struct SnapshotRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EnvironmentMetadata {
     pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) root: Option<PathBuf>,
     pub(crate) snapshot_id: String,
     pub(crate) parent_snapshot_id: Option<String>,
     pub(crate) base_snapshot_id: Option<String>,
@@ -177,6 +179,7 @@ impl EnvironmentMetadata {
     pub(crate) fn from_environment(environment: &Environment) -> Self {
         Self {
             id: environment.id.clone(),
+            root: Some(environment.root.clone()),
             snapshot_id: environment.snapshot_id.clone(),
             parent_snapshot_id: environment.parent_snapshot_id.clone(),
             base_snapshot_id: environment.base_snapshot_id.clone(),
@@ -190,6 +193,7 @@ impl EnvironmentMetadata {
     }
 
     pub(crate) fn into_environment(self, root: PathBuf) -> Result<Environment, BackendError> {
+        let root = self.root.unwrap_or(root);
         let mut mounts = self.mounts;
         if mounts.is_empty() && !self.lower.is_empty() {
             // Explicit one-way migration from the scope layout.  A workspace

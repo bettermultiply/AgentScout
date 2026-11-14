@@ -272,6 +272,7 @@ export type Request =
   | { action: 'model'; model: string }
   | { action: 'prompt'; prompt: string }
   | { action: 'interrupt' }
+  | { action: 'pause' }
   | { action: 'shutdown' }
 
 export function isChanceEvent(event: ObservationEvent): event is ChanceObservationEvent {

@@ -54,7 +54,11 @@ impl SpeculativeTree {
                 timestamp_ms,
             ),
             AgentMessage::TurnCompleted { branch_id } => {
+                let active = self.branch(&branch_id)?.execution_state.turn_active;
                 self.branch_mut(&branch_id)?.execution_state.turn_active = false;
+                if active && !self.recovering && !self.stopping && self.authority_branch_id.as_deref() == Some(&branch_id) {
+                    self.task_finishing = true;
+                }
                 Ok(vec![])
             }
             AgentMessage::Transcript { branch_id, .. } => {
@@ -459,6 +463,9 @@ impl SpeculativeTree {
         }
         self.change_authority(branch_id)?;
         self.change_status(branch_id, BranchStatus::Promoted, "Agent promotion applied")?;
+        if !self.recovering && !self.branch(branch_id)?.execution_state.turn_active {
+            self.task_finishing = true;
+        }
         if let Some(chance_id) = self.branch(branch_id)?.chance_id.clone()
             && let Some(assumption) = self.own_assumption(self.branch(branch_id)?).cloned()
         {

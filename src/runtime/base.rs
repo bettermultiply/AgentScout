@@ -22,6 +22,7 @@ pub struct BaseRuntime {
     /// occupy this slot; BaseRuntime does not know filesystem types.
     data_plane: Option<Arc<dyn Backend>>,
     pub(super) process: ProcessBackend,
+    session_hosts: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl BaseRuntime {
@@ -31,6 +32,7 @@ impl BaseRuntime {
             inner,
             data_plane: None,
             process: ProcessBackend::new("process", "bwrap"),
+            session_hosts: Default::default(),
         }
     }
 
@@ -56,7 +58,11 @@ impl BaseRuntime {
         if let Some(data_plane) = &self.data_plane {
             merge_launch_fragment(&mut fragment, data_plane.launch_fragment(context, launch)?)?;
         }
-        self.process.launch(context, launch, &fragment)
+        self.process.launch(context, launch, &fragment)?;
+        if launch.env.get("ASCOUT_PI_SESSION_HOST").is_some_and(|value|value=="1") {
+            self.session_hosts.lock().map_err(|_|BackendError::new("Session host table poisoned"))?.insert(context.environment_id.clone());
+        }
+        Ok(())
     }
 
     fn stop_agent_process(&self) -> Result<(), BackendError> {
@@ -109,6 +115,24 @@ impl Drop for BaseRuntime {
 }
 
 impl Backend for BaseRuntime {
+    fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
+        if self.data_plane.is_some()
+            && !self.session_hosts.lock().map_err(|_|BackendError::new("Session host table poisoned"))?.contains(&context.environment_id)
+            && self.process.process_handle(&context.environment_id).is_some()
+            && self.process.is_running(&context.environment_id)?
+        {
+            return Err(BackendError::new(
+                "cannot materialize while Runtime-managed execution is active; task writers have not been confirmed drained",
+            ));
+        }
+        let mut result = self.inner.materialize(context)?;
+        if let Some(data_plane) = &self.data_plane {
+            let publication = data_plane.materialize(context)?;
+            result.confirmation = publication.confirmation;
+            result.conflicts.extend(publication.conflicts);
+        }
+        Ok(result)
+    }
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
         if let Some(data_plane)=&self.data_plane {
             return self.process.with_frozen(||super::recovery::save(path, &[("inner", self.inner.as_ref()), ("data-plane", data_plane.as_ref())], Value::Null));
@@ -139,8 +163,11 @@ impl Backend for BaseRuntime {
         let mut capabilities = self.inner.capabilities();
         if let Some(data_plane) = &self.data_plane {
             let data_plane_capabilities = data_plane.capabilities();
-            capabilities.branch_environment &= data_plane_capabilities.branch_environment;
-            capabilities.shared_environment |= data_plane_capabilities.shared_environment;
+            capabilities.branch_environment = (capabilities.branch_environment || capabilities.shared_environment)
+                && (data_plane_capabilities.branch_environment || data_plane_capabilities.shared_environment);
+            // A composed environment is shareable only when every state domain
+            // can be shared. NLE sharing cannot bypass the FS branch fork.
+            capabilities.shared_environment &= data_plane_capabilities.shared_environment;
             capabilities.filesystem_fast_delete = data_plane_capabilities.filesystem_fast_delete;
             capabilities.filesystem_fork_cost = data_plane_capabilities.filesystem_fork_cost;
             capabilities.filesystem_btrfs_incremental_diff =
@@ -398,10 +425,14 @@ impl Backend for BaseRuntime {
     }
 
     fn terminate_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        let stopped = self
+        // A Pi session host owns the whole tree, not the retired Authority
+        // Branch. Its Branch work is aborted by the Agent protocol; stop the
+        // host only at Runtime shutdown, otherwise promotion kills its winner.
+        let host = self.session_hosts.lock().map_err(|_| BackendError::new("Session host table poisoned"))?.contains(&context.environment_id);
+        let stopped = if host { Ok(()) } else { self
             .process
             .terminate(&context.environment_id)
-            .and_then(|_| self.process.stop(&context.environment_id));
+            .and_then(|_| self.process.stop(&context.environment_id)) };
         let inner = self.inner.terminate_with_context(context);
         let filesystem = self
             .data_plane
@@ -429,7 +460,8 @@ impl Backend for BaseRuntime {
     }
 
     fn cleanup_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        let process = self.process.cleanup(&context.environment_id);
+        let host = self.session_hosts.lock().map_err(|_| BackendError::new("Session host table poisoned"))?.contains(&context.environment_id);
+        let process = if host { Ok(()) } else { self.process.cleanup(&context.environment_id) };
         let inner = self.inner.cleanup_with_context(context);
         let filesystem = self
             .data_plane
@@ -454,12 +486,18 @@ impl Backend for BaseRuntime {
 
     fn state(&self, environment_id: &str) -> Option<EnvironmentState> {
         let inner = self.inner.state(environment_id);
+        if self.data_plane.is_none() {
+            return inner;
+        }
         let filesystem = self
             .data_plane
             .as_ref()
             .and_then(|value| value.state(environment_id));
         match (inner, filesystem) {
             (Some(left), Some(right)) if left == right => Some(left),
+            // Backends may remove cleaned records or retain their terminal
+            // fact. Both representations mean all owned resources are gone.
+            (Some(EnvironmentState::Cleaned), None) | (None, Some(EnvironmentState::Cleaned)) => Some(EnvironmentState::Cleaned),
             (Some(_), Some(_)) => Some(EnvironmentState::PartiallyAvailable),
             (Some(_), None) | (None, Some(_)) => Some(EnvironmentState::PartiallyAvailable),
             (None, None) => None,
@@ -593,4 +631,3 @@ impl Backend for BaseRuntime {
         self.stop_agent_process()
     }
 }
-

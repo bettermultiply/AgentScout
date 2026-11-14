@@ -6,6 +6,40 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
 
+#[test]
+fn retained_snapshot_keeps_transitive_lower_alive() {
+    let root = temp();
+    let backend = new_backend(root.path());
+    backend.establish("root").unwrap();
+    let mut state = backend.lock().unwrap();
+    for (id, lower) in [("older", vec![]), ("newer", vec![root.path().join("older")])] {
+        state.snapshots.insert(id.into(), SnapshotRecord {
+            snapshot_id: id.into(), path: root.path().join(id), read_only: true,
+            lower: BTreeMap::from([("mount".into(), lower)]), refs: BTreeSet::new(),
+        });
+    }
+    state.environments.get_mut("root").unwrap().base_snapshot_id = Some("newer".into());
+    let garbage = backend.refresh_references(&mut state).unwrap();
+    assert!(garbage.is_empty(), "a retained snapshot's lower must remain reachable");
+}
+
+#[test]
+fn owned_saved_base_is_released_only_after_its_last_reference() {
+    let root = temp();
+    let backend = new_backend(root.path());
+    backend.establish("root").unwrap();
+    let owned = root.path().join("retained-parent");
+    fs::create_dir_all(owned.join("base")).unwrap();
+    let mut state = backend.lock().unwrap();
+    backend.retain_retired_root(&mut state, &owned).unwrap();
+    let mount = state.environments.get_mut("root").unwrap().mounts.values_mut().next().unwrap();
+    mount.saved_base = Some(owned.join("base"));
+    assert!(backend.refresh_references(&mut state).unwrap().is_empty());
+    state.environments.get_mut("root").unwrap().mounts.values_mut().next().unwrap().saved_base = None;
+    let garbage = backend.refresh_references(&mut state).unwrap();
+    assert!(garbage.iter().any(|(_, path)| path == &owned));
+}
+
     #[test]
     fn filesystem_operation_replays_same_generation_and_rejects_stale_generation() {
         let root = temp();
@@ -694,9 +728,13 @@ use std::os::unix::fs::FileTypeExt;
         // Exercise create/snapshot/layout without send or a privileged mount.
         // The host cannot select the full btrfs plane without privileged send.
         backend.mechanism = FilesystemMechanism::Btrfs;
-        let targets = backend.overlayable_mounts().into_iter()
-            .filter(|target| !backend.config.state_directory.starts_with(target))
-            .collect::<Vec<_>>();
+        // Exercise the same multi-target layout without reading arbitrary
+        // host mounts (some contain root-only entries). All lower fixtures
+        // belong to this test and remain outside the state directory.
+        let lowers = tempfile::Builder::new().prefix("control-plane-refactor-lowers-")
+            .tempdir_in("/tmp/opencode").unwrap();
+        let targets = vec![lowers.path().join("first"), lowers.path().join("second")];
+        for target in &targets { fs::create_dir(target).unwrap(); }
         assert!(!targets.is_empty(), "test needs a non-overlapping mount");
         *backend.overlay_targets.lock().unwrap() = Some(vec![targets[0].clone()]);
         let result = (|| -> Result<(), BackendError> {

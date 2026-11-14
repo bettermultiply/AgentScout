@@ -30,6 +30,10 @@ Gateway 统一承接 Agent 接入侧、UI 与 Runtime 的通信，负责接入�
 
 ## 2. 工作模型
 
+一个 session 对应一个 AScoutAgent 和一棵 Speculative Tree。task 是 Agent 的一轮工作；Agent 完成本轮工作并开始等待用户输入时，task 完成，多轮 task 在同一控制域中继续。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。Runtime 向控制面报告物化完成或失败，物化失败等同操作失败；控制面必须等物化成功后才能宣告任务成功，物化前提见 [Runtime 设计](design/runtime.md)。
+
+候选被接受并承接后续执行时继续使用候选环境，仍受祖先依赖与效果约束。Agent 常用 Ctrl-C 或退出终止任务，结束候选及相关写入后物化；暂停由 AScout 独立接口提供，保留树、候选和环境等待继续。
+
 ### 2.1 投机执行过程
 
 投机执行的最小条件，是后续工作暂时依赖一个尚未确认的 Proposal，并且之后存在能够验证或接受这个 Proposal 的依据。这个依据可以来自 Authority 提供的真实结果，也可以来自独立 validator 给出的可接受性判断。
@@ -50,7 +54,7 @@ Agent 默认无需感知背后的投机分支，仍可按原方式完成任务�
 
 1. **机会发现**：在 Agent 接入侧识别并规范化 operation 及其 `pending-result boundary`，并把该边界上潜在的投机机会按 Edge 模型描述；此阶段没有 id，机会通过 `admit` 后才成为拥有 id 的 Chance。具体的命令拦截、Hook、CLI、embedded adapter 或进程观察方式属于接入实现，不是投机执行的固定前提。
 2. **待选准入**：由 Policy 判断当前机会是否值得登记并保留；通过后由 AScout 暂存，尚不表示立即启动。
-3. **启动选择**：一个 task / AScoutAgent 绑定的 Policy 在该 task 内所有仍然有效的待选机会之间进行全局权衡，直接选择现在启动哪些；控制面只在固定正确性、Contract 和资源硬约束内落实。
+3. **启动选择**：Policy 在同一 AScoutAgent 内所有仍然有效的待选机会之间进行全局权衡，直接选择现在启动哪些；控制面只在固定正确性、Contract 和资源硬约束内落实。
 4. **预测生成**：产生一个或多个 Proposal，为后续投机工作提供暂时依据。Proposal 可以来自模型、规则、历史轨迹、外部系统或其他来源。
 5. **过程执行**：基于 Proposal 提前执行投机工作。投机工作可以是模型推理、工具调用、命令执行、远程请求或其他计算；Policy 可以在已启动工作之间决定暂停、恢复或抢占。
 6. **验证**：获取用于验证 Proposal 的权威依据，并按 Policy 规定的条件判断 Proposal 是否兼容或达到可接受标准。权威依据可以来自 Authority 提供的真实执行、用户输入、环境反馈或远程服务；Authority 可以为空，此时由独立的 validator 或其他可接受性判断完成验证。
@@ -68,7 +72,7 @@ Edge 是描述投机如何进行的抽象模型，给出这一通用过程的形
 
 九类 Policy Decision 的语义定义在 Edge 模型上，运行时作用于具体的 Chance。Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策，通过对不同 Policy Decision 的组合可以生成不同的执行策略。单个 Chance 上的局部决策、跨 Chance 的全局选择和已启动工作的调整由九类 policy decision 刻画：`admit`、`select`、`rebalance`、`extent`、`predict`、`launch`、`effect`、`match`、`dispose`。对每个 decision 的详细描述见 [Policy Decisions 设计](design/policy-decisions.md)。
 
-组合与嵌套：同一 Chance 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的投机机会（admit 后成为新的 Chance），由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定或发生变化都会使依赖它的后续工作失效；当前阶段不修复或重新对齐这类 Branch。父 Proposal 被确认时，原父 Branch 的执行延续成为权威路径，仍有未决依赖的后代 Branch 保留原有隔离环境和执行进展并重新挂到该权威执行延续之下；后代 Branch 只有在自身依赖清空后才具备提交资格。AScout 以树形、single-winner 和受控信息流约束这些关系；当前 task 内的嵌套 Chance 使用同一个 Policy。Proposal 依赖、确认与否定、Branch 取消、父 Branch salvage 以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
+组合与嵌套：同一 Chance 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的投机机会（admit 后成为新的 Chance），由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定或发生变化都会使依赖它的后续工作失效；当前阶段不修复或重新对齐这类 Branch。父 Proposal 被确认时，原父 Branch 的执行延续成为权威路径，仍有未决依赖的后代 Branch 保留原有隔离环境和执行进展并重新挂到该权威执行延续之下；后代 Branch 只有在自身依赖清空后才具备提交资格。AScout 以树形、single-winner 和受控信息流约束这些关系。Proposal 依赖、确认与否定、Branch 取消、父 Branch salvage 以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
 
 ### 3.2 状态与效果
 

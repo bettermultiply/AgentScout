@@ -141,6 +141,7 @@ pub struct RuntimeCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
+    MaterializeAuthority,
     SaveRuntime { path: std::path::PathBuf },
     LoadRuntime { path: std::path::PathBuf },
     EstablishEnvironment,

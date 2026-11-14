@@ -22,15 +22,19 @@ AScout 不是某个固定算法，也不要求每个动作都建立完整、昂�
 
 记录、保存和恢复属于正常 AScout；模型输出回放是系统外的验证工具，通过正常模型接口及用户输入接口驱动普通运行，不进入运行机制。具体边界见[记录与回放](development/replay.md)。
 
+系统最终必须把 Authority 的结果物化到现实。Agent 完成本轮工作、开始等待用户输入时，task 完成；正常完成须在无存活候选且任务相关写入完成后物化，不为物化暂停执行。Runtime 向控制面报告物化结果；物化失败按操作失败处理，控制面必须等物化成功后才能宣告任务成功。Agent 常用的 Ctrl-C 或退出均终止任务，取消、失败和终止须结束候选并等待相关写入完成后物化。暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，保留树、候选和环境等待继续，暂停不意味着退出程序。目标边界见 [Runtime 设计](design/runtime.md)，物化及终止／暂停入口对齐仍有实现缺口，见[恢复](development/recovery.md)。
+
+文件系统物化按 Authority 增量最终视图直接覆盖受影响路径，保留未涉及路径，不检测或报告物化冲突；禁止复制整个挂载。任务完成须等待物化确认，完成后以新的受管增量基准继续执行。具体写回范围和属性保留要求见[物化提案](fs-backend/materialize-proposal.md)；组合 Runtime、工具接入和存储后端的验收状态见[当前实现](fs-backend/current-state.md)。
+
 ## 2. AScout 的工作模型
 
 Agent 以 action 及其结果报告执行事实，action 不限于工具调用。Agent 与 Branch 的生命周期、Agent 对控制命令的回执、Runtime 的操作与环境事实分别归属各自产生方；控制面据此更新 Tree，不以“发出命令”冒充“已完成”。
 
-投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 待选准入 -> 启动选择 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。AScout 可以暂存已经准入但尚未启动的机会；一个 task / AScoutAgent 绑定的 Policy 在该 task 内全部有效待选机会之间选择现在启动哪些，并可以调整已经运行或暂停的投机工作。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、Promote 或结束。Parent 得到真实结果后立即继续，候选验证可并行进行；合法 Promote 才停止旧 Parent。工具准入与结果兼容性由 Policy 结合实际能力判断，不由固定工具数量或结果类型代替策略决策。
+投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 待选准入 -> 启动选择 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。AScout 可以暂存已经准入但尚未启动的机会；Policy 在同一 AScoutAgent 内全部有效待选机会之间选择现在启动哪些，并可以调整已经运行或暂停的投机工作。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、Promote 或结束。Parent 得到真实结果后立即继续，候选验证可并行进行；合法 Promote 才停止旧 Parent。工具准入与结果兼容性由 Policy 结合实际能力判断，不由固定工具数量或结果类型代替策略决策。
 
 Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Agent 接入侧负责 Agent 内部会话和行为接入，并由与产品无关的通用层和产品专用的 Product Integration 组成——`extent`、`effect` 等本地 Decision 由通用层求值，Product Integration 只把产品执行点接入并执行处置结果，其余依赖全局状态的 Decision 由控制面求值；Runtime 承载动作并提供隔离、资源和效果边界；控制面负责全局编排、校验和裁决。Runtime Adapter 是 Runtime 的接入边界，不是与 Runtime 平级的另一套 Runtime。Speculation Contract 约束 Policy、控制面和 Runtime 之间的可观察语义；Runtime 内部可以组合不同的执行和效果管理能力。
 
-创建 task 时即建立对应的 Speculative Tree。树拥有该 task 的投机控制状态，其方法检查合法转换；Policy 函数计算策略选择。Controller 可以协调多棵树，不保存具体 task 的投机状态。同一 task 由消息和定时器触发顺序处理，耗时操作异步返回；Agent 的普通执行由接入侧负责。
+每个 session 对应一个 AScoutAgent 和一棵 Speculative Tree。树拥有该 session 的投机控制状态，其方法检查合法转换；Policy 函数计算策略选择。Controller 可以协调多棵树，不保存具体 session 的第二份投机状态。同一棵树由消息和定时器触发顺序处理，耗时操作异步返回；Agent 的普通执行由接入侧负责。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。
 
 工作模型的完整权威描述见 [设计模型](design-model.md) §2。
 
@@ -70,25 +74,25 @@ Adapter Registry 属于 Runtime，负责登记、契约与能力声明校验、�
 ### 4.2 核心对象与所有权
 
 ```text
-task
+session
   -> AScoutAgent
       -> Speculative Tree
           -> Branch
-  -> Branch Root
+              -> Branch Root
                   -> Instance
 ```
 
-`task` 是 session 中一次独立的 AScout 管理单元。AScout 为每个 task 建立一个 AScoutAgent 控制域，并在其中维护一棵 Speculative Tree。task 准入时绑定 Policy 及其 task-level 配置，并建立初始 Agent，称为 root Authority Instance。在运行过程中，随着投机执行的不断发生和结束，Authority Instance 不断变化，由此形成树形结构。树中的每个子树都称为 `Branch`。`Branch` 是树中的计算延续，也是投机世界的结构实体；Branch 对应的根节点称为 `Branch Root`。`Branch Root` 具有稳定 identity 并直接拥有该根的 local state；`Instance` 是由 Runtime 承载 Branch Root 执行活动的实际执行单元。逻辑 Branch 可以在没有立即建立独立 Instance 的情况下先存在并推进，直到其状态或效果要求独立 Runtime 环境。
+`task` 是 session 中 Agent 的一轮工作；Agent 完成本轮工作、开始等待用户输入时，task 完成。一个 session 对应一个 AScoutAgent 控制域和一棵 Speculative Tree，多轮 task 在该控制域中继续。建立初始 Agent 时，其执行单元称为 root Authority Instance。在运行过程中，随着投机执行的不断发生和结束，Authority Instance 不断变化，由此形成树形结构。树中的每个子树都称为 `Branch`。`Branch` 是树中的计算延续，也是投机世界的结构实体；Branch 对应的根节点称为 `Branch Root`。`Branch Root` 具有稳定 identity 并直接拥有该根的 local state；`Instance` 是由 Runtime 承载 Branch Root 执行活动的实际执行单元。逻辑 Branch 可以在没有立即建立独立 Instance 的情况下先存在并推进，直到其状态或效果要求独立 Runtime 环境。
 
-对外，为只呈现一个单一 Agent，这个统一视图称为 `AScoutAgent`。端用户通过主对话直接操作当前有效的权威执行主线；另可只读观察候选 Branch 的运行状态与内容；候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份，以了解投机是否真实发生及其处理过程。观察不形成另一条用户对话，不表示候选已被接受，也不改变 Branch 的裁决权限或向其他 Branch 传播候选内容。一个 task 对应一个 AScoutAgent，一个 AScoutAgent 拥有一棵 Speculative Tree；控制面拥有 Tree、Branch 关系、逻辑推进和实际环境对齐状态，已建立 Instance 的实际执行、资源和隔离状态位于 Runtime，控制面只能通过 Adapter 观察所需结果。
+对外，为只呈现一个单一 Agent，这个统一视图称为 `AScoutAgent`。端用户通过主对话直接操作当前有效的权威执行主线；另可只读观察候选 Branch 的运行状态与内容；候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份，以了解投机是否真实发生及其处理过程。观察不形成另一条用户对话，不表示候选已被接受，也不改变 Branch 的裁决权限或向其他 Branch 传播候选内容。一个 session 对应一个 AScoutAgent，一个 AScoutAgent 拥有一棵 Speculative Tree；控制面拥有 Tree、Branch 关系、逻辑推进和实际环境对齐状态，已建立 Instance 的实际执行、资源和隔离状态位于 Runtime，控制面只能通过 Adapter 观察所需结果。
 
 控制面在运行时以三类状态描述一次投机，它们分别回答不同问题：`ChanceStage` 属于 Chance，说明该投机机会从待选到收敛走到哪一步、最终是否被接受；`AuthorityState` 也属于 Chance，说明其权威值是否已请求和到达，与机会的运行并行；`BranchStatus` 属于 Branch，合并生命周期与运行状态，说明承载具体执行的 Branch 当前处于何处。三类状态不能互相替代。
 
-用户端保持稳定的 AScoutAgent 交互入口，不绑定某个后端 Agent session。合法 Promote 改变该视图对应的权威执行及输入输出路由，不要求用户切换对话，也不以候选会话结束为前提；候选保留自己的执行状态和在飞进展，接受与效果约束仍然有效。
+用户端保持稳定的 AScoutAgent 交互入口，不绑定某个后端 Agent session。合法 Promote 改变该视图对应的权威执行及输入输出路由，不要求用户切换对话，也不以候选会话结束为前提；候选保留自己的环境、执行状态和在飞进展承接后续执行，接受与效果约束仍然有效，嵌套接受不能越过祖先约束。
 
 状态交接正确是机制必须保证的条件，不能仅以路由切换或历史整理代替。最终保留单一权威 session，表示经过验证、用真实结果整理后的执行历史；它不再要求准确复原候选当时收到的预测输入。因此，原始运行上下文与从整理后历史恢复的上下文可能不同。历史整理不决定权威，也不直接替换运行中的上下文；具体语义见 [Agent 接入设计](design/agent-integration.md) §3。
 
-主动退出恢复保留整棵有效树、各 Branch 的原运行上下文与环境关联。退出立即请求 Agent 原生中断，等待取消确认和所有 backend 保存成功后发布恢复点并关闭；重启校验关联、配置及资源后等待用户继续。保存的运行源须与后续可写执行独立，继续运行不能改坏既有恢复点；保存失败保留暂停状态，用户可以继续或重试。最终历史不能替代运行恢复状态。首版覆盖成功主动退出，不覆盖崩溃或掉电；实现进度见 [恢复](development/recovery.md)。
+暂停后的保存与恢复保留整棵有效树、各 Branch 的原运行上下文与环境关联；保存成功后才能发布恢复点，恢复校验关联、配置及资源后等待用户继续。保存源与后续可写执行独立，继续运行不能改坏既有恢复点；最终历史不能替代运行恢复状态。文件系统恢复保留受管增量，但普通宿主 bottom lower 使用恢复时内容，不承诺宿主历史版本，也不复制整个挂载；代码、配置和依赖绑定仍需校验。现有保存恢复能力及入口调整缺口见 [恢复](development/recovery.md)。
 
 AScout 管理稳定交互入口、显示区域与自身控制事实；Pi 等 Agent 的消息、思考、工具调用和结果通过公开 SDK 报告给 AScout，再由 AScout 的 UI 排版展示，不嵌入 Agent 产品的终端画面。浏览器 UI 与 TUI 共享事实和操作接口，但彼此不依赖绘制实现。用户可从当前 AScoutAgent 的整棵 Tree 查看 Branch 关系与投机状态，并选择具体 Branch 深入只读观察；选择观察对象不改变权威路径或 Branch 生命周期。
 

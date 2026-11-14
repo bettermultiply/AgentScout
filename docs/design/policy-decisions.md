@@ -257,7 +257,7 @@ dispose(branch, resolution, context) -> DispositionPlan
 select(frontier_view, scheduling_context) -> ordered subset[ChanceId]
 ```
 
-`frontier_view` 是 AScout 当前维护的、同一 task / AScoutAgent 中已经通过 `admit` 且仍然有效的全部待选 Chance 快照，而不是单个机会或固定容量窗口。`scheduling_context` 提供可观察的预算、资源压力、机会等待时间、依赖与成本事实。该 task 绑定的 Policy 直接返回现在希望启动的有序 Chance 子集；可以选择一个、多个或暂时一个都不选。排序公式、best-first、浅层优先、深层优先以及 breadth/depth 分配都属于具体 Policy，不是 AScout 的固定规则。
+`frontier_view` 是 AScout 当前维护的、同一 AScoutAgent 中已经通过 `admit` 且仍然有效的全部待选 Chance 快照，而不是单个机会或固定容量窗口。`scheduling_context` 提供可观察的预算、资源压力、机会等待时间、依赖与成本事实。Policy 直接返回现在希望启动的有序 Chance 子集；可以选择一个、多个或暂时一个都不选。排序公式、best-first、浅层优先、深层优先以及 breadth/depth 分配都属于具体 Policy，不是 AScout 的固定规则。
 
 未被选择的机会继续留在待选集合，之后可以随新的资源和执行事实再次参与选择。AScout 拥有并维护该集合，而 Policy 不拥有可变队列状态。等待期间，如果 pending result 已到达、所属任务结束、祖先依赖被否定或其他必要前提失效，AScout 将机会移出集合；启动前 Speculation Coordinator 还必须复核机会有效性、Contract 与资源硬约束。
 
@@ -272,7 +272,7 @@ rebalance(active_view, paused_view, scheduling_context)
     -> ordered actions[(BranchId, pause | resume | preempt)]
 ```
 
-`rebalance` 面向同一 task / AScoutAgent 中已经运行或暂停的投机 Branch。Policy 可以要求暂时停止某项工作并保留其执行状态（`pause`）、恢复此前暂停的工作（`resume`），或者终止不再值得继续占用资源的工作（`preempt`）。它不接收尚未启动的机会，也不代替 `select`。
+`rebalance` 面向同一 AScoutAgent 中已经运行或暂停的投机 Branch。Policy 可以要求暂时停止某项工作并保留其执行状态（`pause`）、恢复此前暂停的工作（`resume`），或者终止不再值得继续占用资源的工作（`preempt`）。它不接收尚未启动的机会，也不代替 `select`。
 
 `rebalance` 与 `extent` 回答不同问题：`extent` 决定单个投机过程基于自身进展应推进到哪里并等待裁决；`rebalance` 在多个已经启动的工作之间，根据当前资源和相对价值重新分配运行机会。暂停和恢复必须在 Runtime Adapter 声明支持的安全边界上执行。
 
@@ -325,7 +325,7 @@ AssumptionSet(B1) = {(E1, p1)}
 AssumptionSet(B2) = {(E1, p1), (E2, p2)}
 ```
 
-新 Chance 仍按照当前 task 已绑定的同一 Policy 执行既有 decision，并分别使用该 Policy 中对应函数的配置；当前不因嵌套深度切换到另一套 Policy。新 Chance 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Chance 的 `extent` 和 step 计数独立于父 Chance。未来按嵌套深度或其他上下文切换 Policy，属于独立扩展。
+长期设计允许修改 Policy，修改后仍须遵守既有 Decision、Contract 和生命周期约束；该能力不属于当前首版，同一 session 加载的 Policy 固定、不实现修改或切换的范围见 [Policy 开发说明](../development/policy-engine.md)。新 Chance 具有自己的 Proposal、Branch、未决 Proposal 依赖和过程状态；子 Chance 的 `extent` 和 step 计数独立于父 Chance。
 
 每个候选 Branch 携带其路径上的未决 Proposal 引用集合：`AssumptionSet = frozenset[(chance_id, proposal_id)]`
 

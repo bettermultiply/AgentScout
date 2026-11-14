@@ -1,6 +1,7 @@
 use super::*;
 use ascout::control_plane::agent_control::AgentController;
 use ascout::control_plane::coordination::{ControlActions, ControlResult};
+use ascout::control_plane::coordination::{recovery::Recovery, task};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::Ordering;
@@ -21,15 +22,12 @@ struct Task<'a> {
     notice: String,
     started: Instant,
     draining: bool,
-    recovery_path: std::path::PathBuf,
-    saved: bool,
-    suspended: bool,
-    save_requested: bool,
-    loaded: bool,
+    recovery: Recovery,
     pending_model: Option<String>,
     model_changing: bool,
     input_sequence: u64,
     input_error: Option<String>,
+    lifecycle: task::Task,
 }
 
 impl Task<'_> {
@@ -48,48 +46,35 @@ impl Task<'_> {
 
     fn handle(&mut self, event: Event) -> io::Result<Option<ControlActions>> {
         let mut actions = match event {
-            Event::Request(ui::Request::Shutdown) => {
-                if self.tree.recovering && !self.loaded {return Ok(Some(ControlActions::default()));}
-                self.loaded=false;
-                self.saved=false;
-                let directory=self.recovery_path.parent().unwrap().join(format!("recovery-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-                std::fs::create_dir(&directory)?;
-                self.recovery_path=directory.join("agent.json");
-                self.suspended=false;
-                self.save_requested=false;
-                self.tree.recovering = true;
-                self.tree.recovery_paused_at.get_or_insert(now_ms());
+            Event::Request(ui::Request::Pause) => {
                 ControlActions {
-                    commands: vec![AgentCommand::SuspendRecovery {branch_id:self.tree.authority_branch_id.clone().unwrap_or_default()}],
+                    commands: self.recovery.pause(self.tree, now_ms())?,
                     ..Default::default()
                 }
             },
-            Event::Request(ui::Request::Interrupt) => {
+            Event::Request(ui::Request::Shutdown) | Event::Request(ui::Request::Interrupt) => {
+                self.notice = "Task cancellation requested".into();
                 ControlActions {
-                    commands: if self.tree.recovering {vec![]} else {self.tree.interrupt()?},
+                    commands: self.lifecycle.cancel(self.tree, matches!(event, Event::Request(ui::Request::Shutdown)))?,
                     ..Default::default()
                 }
             },
             Event::Request(ui::Request::Model { model }) => {
-                if self.tree.recovering || self.tree.authority_running() || self.tree.pending_work() || self.tree.recovery_pending_commands() || self.model_changing {
+                if self.tree.recovering() || self.tree.authority_running() || self.tree.pending_work() || self.tree.recovery_pending_commands() || self.model_changing {
                     self.notice="Model change failed: wait for an idle authority".into();
                 } else {self.pending_model=Some(model);}
                 ControlActions::default()
             }
             Event::Request(ui::Request::Prompt { prompt }) => {
-                if self.tree.recovering {
-                    if !self.loaded {return Ok(Some(ControlActions::default()));}
-                    if let Some(at)=self.tree.recovery_paused_at.take() {
-                        let elapsed=now_ms().saturating_sub(at);
-                        for branch in self.tree.branches.values_mut() {
-                            for operation in &mut branch.pending_operations {
-                                if let Some(deadline)=&mut operation.deadline_at {*deadline=deadline.saturating_add(elapsed);}
-                            }
-                        }
-                    }
-                    self.tree.recovering=false;
+                if prompt.trim() == "/pause" { return self.handle(Event::Request(ui::Request::Pause)); }
+                if !self.recovery.continue_execution(self.tree, now_ms()) { return Ok(Some(ControlActions::default())); }
+                if self.tree.task_finishing() {
+                    self.lifecycle.retry_materialization();
+                    self.notice = "Finishing previous task; input deferred".into();
+                    self.tree.queue_prompt(prompt);
+                } else {
+                    self.tree.queue_prompt(prompt);
                 }
-                self.tree.queue_prompt(prompt);
                 self.input_sequence += 1;
                 self.input_error = None;
                 self.notice = "Agent running".into();
@@ -97,7 +82,7 @@ impl Task<'_> {
             }
             Event::Completed(id, result) => self.tree.complete_work(id, result)?,
             Event::Timer => {
-                if !self.tree.recovering {self.tree.check_command_deadlines()?;}
+                if !self.tree.recovering() {self.tree.check_command_deadlines()?;}
                 ControlActions::default()
             }
             Event::Agent(message) => {
@@ -112,32 +97,16 @@ impl Task<'_> {
                 };
                 match &message {
                     AgentMessage::TurnFailed {branch_id,reason,..} => {
-                        if self.tree.authority_branch_id.as_ref() == Some(branch_id) {self.input_error=Some(reason.clone());}
+                        if self.tree.authority_branch_id.as_ref() == Some(branch_id) {
+                            self.input_error=Some(reason.clone());
+                             self.lifecycle.fail(self.tree);
+                        }
                         self.notice=format!("Turn failed; session retained: {reason}");
                     }
                     AgentMessage::ModelChanged {model,error,..} => {self.model_changing=false;self.notice=match error {Some(error)=>format!("Model change failed: {error}"),None=>format!("Model changed: {model}")};}
                     _=>{}
                 }
-                if let AgentMessage::RecoverySaved { path, error } = &message {
-                    if path != &self.recovery_path {return Err(io::Error::other("Recovery path mismatch"));}
-                    if let Some(error) = error {
-                        // Pi has already cancelled. Retain the tree frozen
-                        // until another user prompt or save attempt.
-                        self.tree.recovering = true;
-                        self.loaded=true;
-                        self.saved = false;
-                        self.suspended=false;
-                        self.save_requested=false;
-                        self.notice = format!("Save failed; still running: {error}");
-                    } else {self.saved = true;}
-                }
-                if matches!(message,AgentMessage::RecoverySuspended) {self.suspended=true;}
-                if let AgentMessage::RecoveryLoaded {error:Some(error)} = &message {
-                    return Err(io::Error::other(format!("Recovery load failed: {error}")));
-                }
-                if let AgentMessage::RecoveryLoaded {error:None} = &message {
-                    self.loaded=true;
-                }
+                if let Some(notice) = self.recovery.handle(self.tree, &message)? { self.notice = notice; }
                 let commands =
                     if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
                         Vec::new()
@@ -170,16 +139,18 @@ impl Task<'_> {
         if let Some(reason) = self.tree.authority_failure()
             && !self.tree.is_stopping()
         {
-            return Err(io::Error::other(reason.to_string()));
+            self.input_error=Some(reason.to_string());
+            self.lifecycle.fail(self.tree);
         }
-        let progress = if !self.tree.recovering && (self.model_changing || self.pending_model.is_some()) {ControlActions::default()} else {self.tree.progress(self.capabilities)?};
+        let progress = if !self.tree.recovering() && (self.model_changing || self.pending_model.is_some()) {ControlActions::default()} else {self.tree.progress(self.capabilities)?};
         actions.commands.extend(progress.commands);
         actions.operations.extend(progress.operations);
         actions.records.extend(progress.records);
+        actions.commands.extend(self.lifecycle.progress(self.tree)?);
         // Do not change a model beneath in-flight work or a pending Promote.
         // Descendants retain their own model; newly forked sessions inherit
         // the model from their actual parent, never a global replacement.
-        let idle=(!self.tree.recovering||self.loaded)&&!self.model_changing&&self.tree.authority_ready()&&!self.tree.authority_running()&&!self.tree.pending_work()&&!self.tree.recovery_pending_commands();
+        let idle=(!self.tree.recovering()||self.recovery.loaded)&&!self.model_changing&&self.tree.authority_ready()&&!self.tree.authority_running()&&!self.tree.pending_work()&&!self.tree.recovery_pending_commands();
         if idle {
             if let Some(model)=self.pending_model.take() {
                 self.model_changing=true;
@@ -243,15 +214,12 @@ pub fn run(
         notice: "Starting Agent session…".into(),
         started: Instant::now(),
         draining: false,
-        recovery_path: run_dir.join("agent-recovery.json"),
-        saved: false,
-        suspended: false,
-        save_requested: false,
-        loaded: false,
+        recovery: Recovery::new(run_dir),
         pending_model:resume_model,
         model_changing:false,
         input_sequence: 0,
         input_error: None,
+        lifecycle: task::Task::default(),
     };
     let result = thread::scope(|scope| {
         let sender = events.clone();
@@ -268,7 +236,7 @@ pub fn run(
         let result = (|| -> io::Result<()> {
             task.publish()?;
             loop {
-                let event = match if task.tree.recovering {None} else {task.tree.next_deadline()} {
+                let event = match if task.tree.recovering() {None} else {task.tree.next_deadline()} {
                     Some(deadline) => match receiver
                         .recv_timeout(Duration::from_millis(deadline.saturating_sub(now_ms())))
                     {
@@ -285,11 +253,12 @@ pub fn run(
                 let actions = match task.handle(event) {
                     Ok(Some(actions)) => actions,
                     Ok(None) => break,
-                    Err(error) if !task.tree.is_stopping() && !task.tree.recovering => {
+                    Err(error) if !task.tree.is_stopping() && !task.tree.recovering() => {
                         task.publish()?;
+                        task.input_error=Some(error.to_string());
                         failure = Some(error);
                         ControlActions {
-                            commands: task.tree.begin_shutdown()?,
+                            commands: task.lifecycle.fail_and_exit(task.tree)?,
                             ..Default::default()
                         }
                     }
@@ -327,29 +296,30 @@ pub fn run(
                         let _ = sender.send(Event::Completed(id, result));
                     });
                 }
-                if task.tree.recovering && task.suspended && !task.save_requested
-                    && !task.tree.pending_work() && !task.tree.recovery_pending_commands() {
-                    task.save_requested=true;
-                    task.connection.send(AgentCommand::Save {branch_id:task.tree.authority_branch_id.clone().unwrap_or_default(),path:task.recovery_path.clone()})?;
+                if let Some(command) = task.recovery.save_command(task.tree) {
+                    task.connection.send(command)?;
                 }
-                if task.saved && !task.draining && !task.tree.pending_work() {
-                    let save_result=(||->io::Result<()> {
-                        let generation=task.recovery_path.parent().unwrap();
-                        runtime_call(runtime,"authority",Operation::SaveRuntime {path:generation.join("runtime.json")})
-                            .map_err(|error|io::Error::other(error.to_string()))?;
-                        recovery::publish(run_dir,generation,task.tree)?;
-                        Ok(())
-                    })();
-                    if let Err(error)=save_result {
-                        task.notice=format!("Save failed; execution retained: {error}");
-                        task.saved=false;
-                        task.connection.send(AgentCommand::CancelSave {branch_id:task.tree.authority_branch_id.clone().unwrap_or_default()})?;
-                        task.tree.recovering=true;
-                        task.loaded=true;
-                    } else {
-                        task.connection.finish()?;
-                        task.draining=true;
+                if let Some((command, notice)) = task.recovery.publish(task.tree, runtime, run_dir, task.draining) {
+                    task.connection.send(command)?;
+                    task.notice = notice;
+                }
+                let started = task.started;
+                let ledger = &mut task.ledger;
+                let terminating = task.lifecycle.terminating;
+                if let Some((commands, wake, result)) = task.lifecycle.materialize(
+                    task.tree, runtime, capabilities, task.input_error.is_some(), |mut value| {
+                        value["t_ms"] = json!(started.elapsed().as_millis() as u64);
+                        ledger.record(value)
+                    })? {
+                    match result {
+                        Ok(()) => task.notice = if task.input_error.is_some() || terminating {"Task ended"} else {"Task succeeded"}.into(),
+                        Err(error) => {
+                            task.input_error = Some(format!("Materialization failed: {error}"));
+                            task.notice = format!("Materialization failed; retained for retry: {error}");
+                        }
                     }
+                    for command in commands { task.connection.send(command)?; }
+                    if wake { let _ = events.send(Event::Timer); }
                 }
                 loop {
                     let ids = task.tree.evictable_branches();
@@ -361,15 +331,11 @@ pub fn run(
                             .archive_branch(task.tree.take_archivable_branch(&id)?)?;
                     }
                 }
-                if task.tree.is_stopping()
-                    && !task.draining
-                    && !task.tree.cleanup_pending()?
-                    && !task.tree.pending_work()
-                {
+                if !task.draining && task.lifecycle.finish_ready(task.tree)? {
                     task.connection.finish()?;
                     task.draining = true;
                 }
-                if !task.notice.starts_with("Save failed") && !task.notice.starts_with("Turn failed") && !task.notice.starts_with("Model ") {task.notice = if task.tree.is_stopping() {
+                if !task.tree.task_finishing() && !task.tree.recovering() && !task.notice.starts_with("Save failed") && !task.notice.starts_with("Turn failed") && !task.notice.starts_with("Model ") {task.notice = if task.tree.is_stopping() {
                     "Stopping"
                 } else if task.tree.authority_running() {
                     "Agent running"
@@ -389,7 +355,7 @@ pub fn run(
     task.flush_observations()?;
     interface.publish(task.ledger, false, false, "Stopped")?;
     let unarchived: Vec<_> = task.ledger.unarchived().collect();
-    if !unarchived.is_empty() && !task.saved {
+    if !unarchived.is_empty() && !task.recovery.saved {
         return Err(format!(
             "{}; Ledger history incomplete: {}",
             result
@@ -409,41 +375,4 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-/// Operation interpretation stays with control logic, not Gateway transport.
-pub(super) fn runtime_call(
-    runtime: &dyn Runtime,
-    environment: &str,
-    operation: Operation,
-) -> Result<ascout::protocol::contract::OperationResult, Box<dyn std::error::Error>> {
-    let result = runtime.call(environment, operation)?;
-    if result.status != ascout::protocol::contract::ResultStatus::Completed {
-        return Err(format!("Runtime request failed: {:?}", result.reason).into());
-    }
-    Ok(result)
-}
-
-pub(super) fn runtime_cleanup(
-    runtime: &dyn Runtime,
-    capabilities: &RuntimeCapabilities,
-    branch: &str,
-    tree: &mut SpeculativeTree,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if capabilities.shared_environment {
-        return Ok(());
-    }
-    use ascout::control_plane::agent_control::RuntimeExecutionState;
-    tree.record_runtime_state(branch, RuntimeExecutionState::TerminationRequested)?;
-    if let Err(error) = runtime_call(runtime, branch, Operation::TerminateEnvironment) {
-        tree.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
-        return Err(error);
-    }
-    tree.record_runtime_state(branch, RuntimeExecutionState::Terminated)?;
-    if let Err(error) = runtime_call(runtime, branch, Operation::CleanupEnvironment) {
-        tree.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
-        return Err(error);
-    }
-    tree.record_runtime_state(branch, RuntimeExecutionState::Cleaned)?;
-    Ok(())
 }

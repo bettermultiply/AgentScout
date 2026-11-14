@@ -21,25 +21,22 @@ impl FilesystemBackend {
         fs::create_dir(&directory).map_err(error)?;
         let mut environments: Vec<_>=state.environments.values().map(|e|json!({"root":e.root,"metadata":EnvironmentMetadata::from_environment(e)})).collect();
         let snapshots: Vec<_>=state.snapshots.values().map(SnapshotMetadata::from_record).collect();
-        // Host mount points are locations, not immutable content identities. Save
-        // each bottom layer once; existing saved bases are already owned snapshots.
+        // Ordinary host lowers are locations, not immutable recovery content.
+        // Preserve only owned uppers/layers; load resolves these lowers from
+        // their current host mount while validating all managed recovery data.
         let mut bases=BTreeMap::new();
         for saved in &mut environments {
             let mounts=saved["metadata"]["mounts"].as_object_mut().ok_or_else(||BackendError::new("Missing mounts"))?;
             for mount in mounts.values_mut() {
-                let target:PathBuf=serde_json::from_value(mount["target"].clone()).map_err(error)?;
                 let base:Option<PathBuf>=serde_json::from_value(mount["saved_base"].clone()).map_err(error)?;
-                let base=base.unwrap_or(target);
-                if base==Path::new("/") || self.config.state_directory.starts_with(&base) || directory.starts_with(&base) {
-                    return Err(BackendError::new(format!("Cannot independently save filesystem lower {} containing runtime or recovery storage; use isolated_paths outside that storage",base.display())));
+                if let Some(base)=base {
+                    let destination=directory.join("bases").join(short_hash(&base.display().to_string()));
+                    if !bases.contains_key(&base) {
+                        clone_upper(&base,&destination,self.reflink_available)?;
+                        bases.insert(base,destination.clone());
+                    }
+                    mount["saved_base"]=json!(destination);
                 }
-                let destination=directory.join("bases").join(short_hash(&base.display().to_string()));
-                if !bases.contains_key(&base) {
-                    tree_digest(&base)?;
-                    clone_upper(&base,&destination,self.reflink_available)?;
-                    bases.insert(base,destination.clone());
-                }
-                mount["saved_base"]=json!(destination);
             }
         }
         let mut roots=BTreeSet::new();
@@ -127,7 +124,7 @@ impl FilesystemBackend {
             if !env_root.starts_with(&target) {return Err(BackendError::new("Filesystem environment root outside restored state"));}
             let env=metadata.into_environment(env_root)?;
             for mount in env.mounts.values() {
-                if !mount.upper.starts_with(&target) || !mount.work.starts_with(&target) || !mount.upper.is_dir() || mount.saved_base.as_ref().is_none_or(|p|!p.starts_with(&target)||!p.is_dir()) || mount.lower.iter().any(|p|!p.starts_with(&target)||!p.is_dir()) {
+                if !mount.upper.starts_with(&target) || !mount.work.starts_with(&target) || !mount.upper.is_dir() || mount.saved_base.as_ref().is_some_and(|p|!p.starts_with(&target)||!p.is_dir()) || mount.lower.iter().any(|p|!p.starts_with(&target)||!p.is_dir()) {
                     return Err(BackendError::new("Filesystem recovery mount is missing or outside restored state"));
                 }
                 ensure_overlay_work(&mount.upper,&mount.work)?;
@@ -140,6 +137,7 @@ impl FilesystemBackend {
             if snapshots.insert(snapshot.snapshot_id.clone(),snapshot.into_record()).is_some() {return Err(BackendError::new("Duplicate filesystem snapshot"));}
         }
         *self.lock()?=BackendState {environments,snapshots,operations};
+        for environment in self.lock()?.environments.values() {self.persist_tool_plan(environment)?;}
         Ok(())
         })();
         if result.is_err() { let _=remove_path(&self.config.btrfs_path,&target,self.uses_btrfs_storage()); }

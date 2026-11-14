@@ -180,6 +180,11 @@ impl BackendExecution {
 
 /// 机制侧的能力。Adapter 只通过这个接口触及环境。
 pub trait Backend: Send + Sync {
+    /// Called only after task writers and candidate work have drained. Non-FS
+    /// backends already own their authoritative state and need no host copy.
+    fn materialize(&self, _context: &BackendContext) -> Result<FilesystemResult, BackendError> {
+        Ok(FilesystemResult::default())
+    }
     /// 配置中用于 Policy 路由和结果关联的稳定标识。
     fn backend_id(&self) -> &str {
         "backend"

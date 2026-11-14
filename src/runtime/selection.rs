@@ -33,6 +33,7 @@ pub enum BackendOperation {
     FilesystemDiscard,
     Branch,
     Promote,
+    Materialize,
     Suspend,
     Resume,
     Terminate,
@@ -44,6 +45,7 @@ pub enum BackendOperation {
 impl BackendOperation {
     pub fn for_operation(operation: &Operation) -> Self {
         match operation {
+            Operation::MaterializeAuthority => Self::Materialize,
             Operation::SaveRuntime { .. } => Self::SaveRuntime,
             Operation::LoadRuntime { .. } => Self::LoadRuntime,
             Operation::EstablishEnvironment => Self::Establish,

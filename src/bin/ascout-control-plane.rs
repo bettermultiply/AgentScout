@@ -12,8 +12,6 @@ use std::time::{Duration, Instant};
 
 #[path = "ascout-control-plane/execution.rs"]
 mod execution;
-#[path = "ascout-control-plane/recovery.rs"]
-mod recovery;
 #[path = "ascout-control-plane/tui.rs"]
 mod tui;
 #[path = "ascout-control-plane/ui.rs"]
@@ -31,7 +29,7 @@ use ascout::protocol::contract::{AgentLaunch, Operation, RuntimeCapabilities};
 use serde_json::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use execution::{runtime_call, runtime_cleanup};
+use ascout::control_plane::{recovery, coordination::execution::{runtime_call, cleanup}};
 
 static SIGNAL_FD: AtomicI32 = AtomicI32::new(-1);
 
@@ -197,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = take_option(&mut args, "--model")?;
     let thinking = take_option(&mut args, "--thinking")?;
     let web_address = take_option(&mut args, "--web")?;
-    let mut models = take_option(&mut args, "--models")?.map(fs::canonicalize).transpose()?;
+    let models = take_option(&mut args, "--models")?.map(fs::canonicalize).transpose()?;
     let policy_artifact = take_option(&mut args, "--policy-artifact")?.map(std::path::PathBuf::from);
     let runtime_option=take_option(&mut args,"--runtime")?;
     let resume = if let Some(index)=args.iter().position(|value|value=="--resume") {args.remove(index);true} else {false};
@@ -222,36 +220,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Establish task control state before starting its execution infrastructure.
     let recovered=if resume {Some(recovery::load(&run_dir)?)} else {None};
     let recovery_generation=recovered.as_ref().map(|(_,path)|path.clone());
-    // Restore the bound model first; apply an explicit model selection through
-    // the ordinary model-change path only after recovery validation succeeds.
-    let mut startup_model = model.clone();
-    let mut resume_model = None;
-    if let Some(generation) = &recovery_generation {
-        let record: Value = serde_json::from_slice(&fs::read(generation.join("agent.json"))?)?;
-        if let Some(config) = record.get("executionConfig") {
-            startup_model = config.get("modelPattern").and_then(Value::as_str).map(str::to_owned);
-            if model != startup_model { resume_model = model.clone(); }
-        }
-        if let Some(extra) = record.get("additionalModels").filter(|value| !value.is_null()) {
-            if let Some(path) = &models {
-                let supplied: Value = serde_json::from_slice(&fs::read(path)?)?;
-                if &supplied != extra { return Err("Recovery additional model configuration changed".into()); }
-            }
-            let path = run_dir.join("models.json");
-            fs::write(&path, serde_json::to_vec_pretty(extra)?)?;
-            models = Some(path);
-        }
-    } else if let Some(source) = &models {
-        let bytes = fs::read(source)?;
-        let _: Value = serde_json::from_slice(&bytes)?;
-        let path = run_dir.join("models.json");
-        fs::write(&path, bytes)?;
-        models = Some(path);
-    }
-    let mut tree = if let Some((mut tree,_))=recovered {
-        if tree.execution_id != run_dir.display().to_string() {return Err("Recovery task identity mismatch".into());}
-        // No work may run until the adapter confirms all native sources.
-        tree.recovering=true;
+    let (startup_model, resume_model, models) = recovery::models(
+        &run_dir, recovery_generation.as_deref(), model, models)?;
+    let mut tree = if let Some((tree,_))=recovered {
         tree
     } else {
         if run_dir.join("recovery.json").exists() {return Err("Saved execution exists; use --resume".into());}
@@ -266,11 +237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }};
     let policy = if artifact_bytes.is_some() {
         let bytes = artifact_bytes.as_ref().unwrap();
-        if resume && tree.policy_binding.as_ref().and_then(|binding| binding.get("sha256"))
-            != Some(&json!(format!("{:x}", Sha256::digest(bytes))))
-        {
-            return Err("Recovery Policy artifact changed".into());
-        }
+        if resume { recovery::validate_policy_artifact(&tree, bytes)?; }
         let saved = CompiledPolicy::from_bytes(bytes)?;
         if let Some(path) = args.get(2) {
             let supplied = engine.compile(std::path::Path::new(path))?;
@@ -293,10 +260,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| policy.runtime_config_path().map(std::path::PathBuf::from))
         .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
     tree.execution_id = run_dir.display().to_string();
-    if resume && tree.local_policy_digest.as_deref()!=Some(policy.digest()) {return Err("Recovery Policy changed".into());}
-    if resume && tree.runtime_binding.as_ref().and_then(|v|v.get("config_path"))!=Some(&json!(config_path)) {return Err("Recovery Runtime binding changed".into());}
-    let config_digest=recovery::digest(&config_path)?;
-    if resume && tree.runtime_binding.as_ref().and_then(|v|v.get("sha256"))!=Some(&json!(config_digest)) {return Err("Recovery Runtime configuration changed".into());}
+    let config_digest = if resume {
+        recovery::validate_bindings(&tree, policy.digest(), &config_path)?
+    } else { recovery::digest(&config_path)? };
     let artifact_digest = if let Some(bytes) = artifact_bytes {
         format!("{:x}", Sha256::digest(bytes))
     } else {
@@ -310,7 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = run_dir.join("agent.sock");
     let listener = agent::Listener::bind(&socket)?;
     let (mut adapter, session, runtime_capabilities) = start_adapter(&config_path, &run_dir)?;
-    if resume && tree.capability_view.as_ref()!=Some(&serde_json::to_value(&runtime_capabilities)?) {return Err("Recovery Runtime capabilities changed".into());}
+    if resume { recovery::validate_capabilities(&tree, &runtime_capabilities)?; }
     tree.bind_execution(
         policy_binding,
         json!({"config_path": config_path,"sha256":config_digest}),
@@ -351,6 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log: run_dir.join("agent.log"),
         instance_id: Some("agent".into()),
         env: std::collections::BTreeMap::from([
+            ("ASCOUT_PI_SESSION_HOST".into(), "1".into()),
             ("ASCOUT_RUNTIME_TOOLS".into(), runtime_tools),
             ("ASCOUT_PI_ROOT".into(), pi_root.display().to_string()),
             ("ASCOUT_TASK_ID".into(), tree.execution_id.clone()),
@@ -448,76 +415,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         result
     })();
     // 先让 Runtime 停掉环境里的 Agent 进程，再断开 Adapter 让它自行退出。
-    let runtime_result: Result<(), Box<dyn std::error::Error>> = (|| {
-        if tree.recovering {return Ok(());}
-        // Every retained Branch refers to this same shared environment. A
-        // confirmed environment fact therefore applies to all of them, not
-        // only the last Authority. Archived records remain historical facts.
-        let record_shared =
-            |tree: &mut SpeculativeTree, state| -> Result<(), Box<dyn std::error::Error>> {
-                let ids: Vec<_> = tree.branches.keys().cloned().collect();
-                for id in ids {
-                    tree.record_runtime_state(&id, state)?;
-                }
-                Ok(())
-            };
-        if tree.authority_branch_id.is_some() {
-            if runtime_capabilities.shared_environment {
-                record_shared(
-                    &mut tree,
-                    ascout::control_plane::agent_control::RuntimeExecutionState::TerminationRequested,
-                )?;
-                if let Err(error) =
-                    runtime_call(&session, "authority", Operation::TerminateEnvironment)
-                {
-                    record_shared(
-                        &mut tree,
-                        ascout::control_plane::agent_control::RuntimeExecutionState::Failed,
-                    )?;
-                    return Err(error);
-                }
-                record_shared(
-                    &mut tree,
-                    ascout::control_plane::agent_control::RuntimeExecutionState::Terminated,
-                )?;
-                if let Err(error) =
-                    runtime_call(&session, "authority", Operation::CleanupEnvironment)
-                {
-                    record_shared(
-                        &mut tree,
-                        ascout::control_plane::agent_control::RuntimeExecutionState::Failed,
-                    )?;
-                    return Err(error);
-                }
-                record_shared(
-                    &mut tree,
-                    ascout::control_plane::agent_control::RuntimeExecutionState::Cleaned,
-                )?;
-            } else {
-                let ids: Vec<_> = tree
-                    .branches
-                    .values()
-                    .filter(|branch| {
-                        branch.execution_state.runtime
-                            != ascout::control_plane::agent_control::RuntimeExecutionState::Cleaned
-                    })
-                    .map(|branch| branch.branch_id.clone())
-                    .collect();
-                let mut failures = Vec::new();
-                for id in ids {
-                    if let Err(error) =
-                        runtime_cleanup(&session, &runtime_capabilities, &id, &mut tree)
-                    {
-                        failures.push(format!("{id}: {error}"));
-                    }
-                }
-                if !failures.is_empty() {
-                    return Err(failures.join("; ").into());
-                }
-            }
-        }
-        Ok(())
-    })();
+    let runtime_result = cleanup(&session, &runtime_capabilities, &mut tree);
     let observation_result = (|| -> io::Result<()> {
         let mut failure = None;
         for content in tree.drain_observations() {

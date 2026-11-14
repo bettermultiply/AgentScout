@@ -83,6 +83,14 @@ impl Shared {
         let state = self.runtime.state(environment_id);
         let context = operation_context(environment_id, request);
         match &request.operation {
+            Operation::MaterializeAuthority => match self.runtime.materialize(&context) {
+                Ok(filesystem) => {
+                    let mut result = self.success(request, state, can_accept(state));
+                    result.filesystem = Some(filesystem);
+                    result
+                }
+                Err(error) => self.backend_error(request, environment_id, error),
+            },
             Operation::SaveRuntime { path } | Operation::LoadRuntime { path } => {
                 let result = if matches!(request.operation, Operation::SaveRuntime { .. }) {
                     // Even a failed save must not fall through to destructive EOF cleanup.

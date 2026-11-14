@@ -320,6 +320,17 @@ fn normalize_outputs(
 }
 
 impl Backend for CompositeRuntime {
+    fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
+        let mut result = FilesystemResult::default();
+        for connection in &self.connections {
+            if connection.backend.state(&context.environment_id).is_some() {
+                let publication = connection.backend.materialize(context)?;
+                result.confirmation.published |= publication.confirmation.published;
+                result.conflicts.extend(publication.conflicts);
+            }
+        }
+        Ok(result)
+    }
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
         if self.connections.len()==1 { return self.connections[0].backend.save_runtime(path); }
         let backends: Vec<_> = self.connections.iter().map(|c|(c.id.as_str(),c.backend.as_ref())).collect();
