@@ -1,6 +1,6 @@
-import { actionStatusLabel, type BranchState } from '../fold'
-import { formatCost, formatDuration, formatSignedDuration, formatSignedMoney, formatTokens, shortId } from '../format'
-import type { ModelUsageEvent, ObservationAmount } from '../types'
+import { actionStatusLabel } from '../fold'
+import { formatCost, formatDuration, formatTokens, shortId } from '../format'
+import type { ModelUsageEvent } from '../types'
 import { toolName, type CallGroup } from './calls'
 
 export interface CallDetail {
@@ -39,21 +39,4 @@ export function callDetailLines(group: CallGroup): CallDetail[] {
           + `${event.cost === null ? '费用未上报' : formatCost(event.cost)} · `
           + actionText(event.action_id),
       })
-}
-
-function amountSummary(amount: ObservationAmount, format: (value: number) => string): string {
-  const parts: string[] = []
-  if (amount.measured !== null) parts.push(`实测 ${format(amount.measured)}`)
-  if (amount.estimated !== null) parts.push(`估计 ${format(amount.estimated)}`)
-  return parts.length ? parts.join(' · ') : '暂无数据'
-}
-
-export function settlementLines(branch: BranchState): string[] {
-  const settlement = branch.settlements.at(-1)
-  if (!settlement) return []
-  return [
-    `结算：${settlement.hit ? '命中' : '未命中'}`,
-    `时间：${amountSummary(settlement.time_ms, formatSignedDuration)}`,
-    `金额：${amountSummary(settlement.money, value => formatSignedMoney(value, settlement.currency ?? '未上报'))}`,
-  ]
 }

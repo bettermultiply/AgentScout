@@ -389,12 +389,6 @@ export function isActiveCandidate(branch: BranchState): boolean {
   return branch.role === 'candidate' && !isTerminalStatus(branch.status)
 }
 
-export function speculationReason(kind: ActionKind | null): SpeculationReason {
-  if (kind === 'tool_execution') return 'tool'
-  if (kind === 'model_inference') return 'model'
-  return 'other'
-}
-
 export function latestModel(branch: BranchState): string | null {
   return branch.modelUsages.at(-1)?.model ?? null
 }

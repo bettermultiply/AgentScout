@@ -72,10 +72,6 @@ pub(crate) struct Environment {
     /// Authoritative per-mount overlay units, keyed by normalized absolute
     /// mount point.
     pub(crate) mounts: BTreeMap<String, MountUnit>,
-    /// Legacy metadata from the scope-based layout.  Migrated into `mounts`
-    /// while loading; never used by new data plane operations.
-    #[allow(dead_code)]
-    pub(crate) lower: BTreeMap<String, Vec<PathBuf>>,
     /// Mark identifier to immutable snapshot identifier.
     pub(crate) marks: BTreeMap<String, String>,
     /// Absolute host workspace path observed at Agent launch.
@@ -239,7 +235,6 @@ impl EnvironmentMetadata {
             base_snapshot_id: self.base_snapshot_id,
             scopes: self.scopes,
             mounts,
-            lower: self.lower,
             marks: self.marks,
             workspace_root: self.workspace_root,
         })

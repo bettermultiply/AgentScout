@@ -28,7 +28,6 @@ import { connectionSide, connectSides, type ConnectionSides } from '../geometry/
 export const NODE_HALF_WIDTH = DEFAULT_TUNING.nodeOrigin
 export const NODE_WIDTH = NODE_HALF_WIDTH * 2
 export const HEAD_CENTER_Y = 0
-export const PATH_SAMPLE_GAP = 4
 
 export interface BranchSection {
   id: string

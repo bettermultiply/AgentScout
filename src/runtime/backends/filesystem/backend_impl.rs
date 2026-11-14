@@ -157,7 +157,6 @@ impl Backend for FilesystemBackend {
             base_snapshot_id: None,
             scopes,
             mounts,
-            lower: BTreeMap::new(),
             marks: BTreeMap::new(),
             workspace_root: None,
         };

@@ -279,7 +279,6 @@ impl FilesystemBackend {
             base_snapshot_id: Some(Self::base_snapshot_id_for_child(child)),
             scopes: scopes.to_vec(),
             mounts: child_mounts,
-            lower: BTreeMap::new(),
             marks: BTreeMap::new(),
             workspace_root: parent_environment.workspace_root.clone(),
         };

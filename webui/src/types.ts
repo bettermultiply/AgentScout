@@ -274,10 +274,6 @@ export type Request =
   | { action: 'interrupt' }
   | { action: 'shutdown' }
 
-export function hasBranchId(event: ObservationEvent): event is BranchObservationEvent {
-  return 'branch_id' in event
-}
-
 export function isChanceEvent(event: ObservationEvent): event is ChanceObservationEvent {
   return (
     event.event === 'chance_created' ||

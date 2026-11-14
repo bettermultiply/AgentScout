@@ -26,7 +26,6 @@ export interface DetailAnchor {
 
 interface AppStore {
   state: RunState
-  eventCount: number
   connection: ConnectionState
   error: string | null
   selectedTaskId: string | null
@@ -49,21 +48,9 @@ interface AppStore {
   dismissError: () => void
 }
 
-// Kept outside the store so long event histories do not require a new array on
-// every append. `replayState` is the pure entry point for a future replay UI.
-let eventLog: ObservationEvent[] = []
 let source: EventSource | null = null
 let generation = 0
 let started = false
-
-export function getEventLog(): readonly ObservationEvent[] {
-  return eventLog
-}
-
-/** Replay helper: the state after events 1..sequence. */
-export function replayState(sequence: number): RunState {
-  return foldEvents(eventLog, sequence)
-}
 
 function readPanelOpen(): boolean {
   try {
@@ -136,8 +123,7 @@ export const useAppStore = create<AppStore>((set, get) => {
   }
 
   function loadStateEventSet(events: ObservationEvent[]): void {
-    eventLog = events.slice()
-    const state = foldEvents(eventLog)
+    const state = foldEvents(events)
     const selectedTaskId = pickTask(state, get().selectedTaskId)
     const task = selectedTaskId ? state.tasks[selectedTaskId] : null
     const explicit = get().selectedAuthorityBranchId
@@ -145,7 +131,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       explicit && task?.branches[explicit] ? explicit : null
     set({
       state,
-      eventCount: eventLog.length,
       selectedTaskId,
       selectedAuthorityBranchId,
     })
@@ -153,7 +138,6 @@ export const useAppStore = create<AppStore>((set, get) => {
 
   return {
     state: emptyRunState(),
-    eventCount: 0,
     connection: 'idle',
     error: null,
     selectedTaskId: null,
@@ -194,7 +178,6 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     ingestEvent(event) {
-      eventLog.push(event)
       const state = applyEvent(get().state, event)
       const selectedTaskId = pickTask(state, get().selectedTaskId)
       const task = selectedTaskId ? state.tasks[selectedTaskId] : null
@@ -218,7 +201,6 @@ export const useAppStore = create<AppStore>((set, get) => {
 
       set({
         state,
-        eventCount: eventLog.length,
         selectedTaskId,
         selectedAuthorityBranchId,
         conversationVersions,
