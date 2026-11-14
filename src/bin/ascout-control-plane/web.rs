@@ -96,6 +96,9 @@ fn serve(
             let body = serde_json::to_vec(&reader.state_event_set())?;
             reply(stream, "200 OK", "application/json", &body)
         }
+        ["GET", "/api/input-status", _] => {
+            reply(stream, "200 OK", "application/json", &serde_json::to_vec(&interface.input_status())?)
+        }
         ["GET", path, _] if path.starts_with("/api/observation/events") => {
             let (path, query) = path.split_once('?').unwrap_or((path, ""));
             if path != "/api/observation/events" {

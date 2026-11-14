@@ -633,8 +633,6 @@ pub enum AgentCommand {
 pub enum AgentMessage {
     TurnFailed { branch_id: String, reason: String },
     ModelChanged { branch_id: String, model: String, error: Option<String> },
-    ReplayInputs { inputs: Vec<String> },
-    ReplayStatus { total: usize, consumed: usize, remaining: usize, failure: Option<String> },
     RecoverySuspended,
     RecoverySaved { path: PathBuf, error: Option<String> },
     RecoveryLoaded { error: Option<String> },

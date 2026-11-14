@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+/** Read native session/events without writing to the source. */
 import fs from "node:fs";
 import path from "node:path";
 import { requestKey, replyParts, sessionContext } from "./normalize.mjs";
@@ -76,16 +76,17 @@ for (const [branch, c] of candidates) {
   if (start < 0 || results.length !== calls.length || operations.size !== calls.length || results.some(e => e.message.role !== "toolResult") || calls.some(c => !operations.has(c.id))) throw Error(`Ambiguous Promote source batch for ${branch}`);
   moved.parentId = tail;
 }
-const out = []; let skippedAborted = 0, skippedError = 0;
+const out = []; let aborted = 0, skippedError = 0;
 for (const line of entries) {
   const m = line.type === "message" ? line.message : null;
   if (m?.role !== "assistant") continue;
-  if (m.stopReason === "aborted") { skippedAborted++; continue; }
-  if (m.stopReason === "error" || m.errorMessage != null) { skippedError++; continue; }
+   const cancelled = m.stopReason === "aborted";
+   if (!cancelled && (m.stopReason === "error" || m.errorMessage != null)) { skippedError++; continue; }
   const branch = owner.get(line.id);
   if (!branch) throw Error(`Missing transcript branch for assistant ${line.id}`);
   const context = sessionContext(chain(byId.get(line.id).parentId));
-   out.push({ key: requestKey(context), reply: replyParts(m), branch_id: branch, session_entry_id: line.id });
+   if (cancelled) aborted++;
+   out.push({ key: requestKey(context), ...(cancelled ? {stopReason:"aborted"} : {reply:replyParts(m)}), branch_id: branch, session_entry_id: line.id });
 }
 const inputs=[],consumed=new Set();
 for(const event of events) {
@@ -97,5 +98,5 @@ for(const event of events) {
   if(typeof content!=='string'&&(!Array.isArray(content)||content.some(p=>p.type!=='text')))throw Error(`User input ${entry.id} requires unsupported non-text input`);
   inputs.push({id:entry.id,prompt:typeof content==='string'?content:content.map(p=>p.text).join('\n')});
 }
-return {recording:out,inputs,skippedAborted,skippedError};
+return {recording:out,inputs,aborted,skippedError};
 }

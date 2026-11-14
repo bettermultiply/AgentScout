@@ -20,6 +20,8 @@ AScout 不是某个固定算法，也不要求每个动作都建立完整、昂�
 
 当前发布路线聚焦 coding Agent：v1.0.0 交付开发者可以实际接入、编写策略并验证收益的通用底座；CUA 等更广泛 Agent 可作为 v2 方向。阶段目标见 [版本规划](development/roadmap.md)。
 
+记录、保存和恢复属于正常 AScout；模型输出回放是系统外的验证工具，通过正常模型接口及用户输入接口驱动普通运行，不进入运行机制。具体边界见[记录与回放](development/replay.md)。
+
 ## 2. AScout 的工作模型
 
 Agent 以 action 及其结果报告执行事实，action 不限于工具调用。Agent 与 Branch 的生命周期、Agent 对控制命令的回执、Runtime 的操作与环境事实分别归属各自产生方；控制面据此更新 Tree，不以“发出命令”冒充“已完成”。

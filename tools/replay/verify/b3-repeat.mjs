@@ -64,7 +64,7 @@ try {
     fs.copyFileSync(`${sourceRoot}/decisions.py`,`${dir}/decisions.py`);
     fs.writeFileSync(runtime,JSON.stringify({...JSON.parse(fs.readFileSync(`${sourceRoot}/runtime.json`)),control_socket:`${dir}/nle.sock`}));
     fs.writeFileSync(policy,fs.readFileSync(policy,"utf8").replace(/runtime: .*/,`runtime: ${runtime}`));
-    server=spawn(process.execPath,["tools/replay/serve.mjs",recording,"0"],{cwd:project,env:{...process.env,REPLAY_REPORT:`${dir}/report.json`,REPLAY_REQUEST_LOG:`${dir}/requests.jsonl`},stdio:["ignore","pipe","pipe"]}); children.push(server); const modelPort=await ready(server);
+    server=spawn(process.execPath,["tools/replay/serve.mjs",source,"0"],{cwd:project,env:{...process.env,REPLAY_REPORT:`${dir}/report.json`,REPLAY_REQUEST_LOG:`${dir}/requests.jsonl`},stdio:["ignore","pipe","pipe"]}); children.push(server); const modelPort=await ready(server);
     const piDir=`${dir}/pi`; fs.mkdirSync(piDir); fs.writeFileSync(`${piDir}/models.json`,JSON.stringify({providers:{replay:{baseUrl:`http://127.0.0.1:${modelPort}/v1`,api:"openai-completions",apiKey:"dummy",models:[{id:"fixture",reasoning:false,input:["text"],contextWindow:8192,maxTokens:256}]}}}));
     const controlPort=19090+i, bin="target/debug/ascout-control-plane";
     const control=spawn(bin,[dir,process.env.PI_ROOT||"/home/betmul/BETMUL/AgentScout-suit/pi",policy,"--web",`127.0.0.1:${controlPort}`,"--model","replay/fixture","--thinking","low"],{cwd:project,env:{...process.env,ASCOUT_RUNTIME_CONFIG:runtime,PI_CODING_AGENT_DIR:piDir},stdio:["ignore","ignore","pipe"]}); children.push(control); let controlErr=""; control.stderr.on("data",b=>{controlErr+=b;fs.appendFileSync(`${dir}/control.stderr.log`,b);});

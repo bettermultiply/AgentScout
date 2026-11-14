@@ -12,7 +12,7 @@ import { SessionTree } from './session-tree.ts';
 import { Notifications } from './notification.ts';
 import {save as saveRecovery,load as loadRecovery} from './recovery.ts';
 import {recoveryBinding,snapshotResources} from './recovery-binding.ts';
-import { createReplay } from '../replay/index.mjs';
+import { readFileSync } from 'node:fs';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
@@ -21,7 +21,6 @@ const { createAgentSession, SessionManager, ModelRuntime, resolveCliModel } = re
 const sessionFile = process.env.ASCOUT_SESSION_FILE;
 if (!sessionFile) throw Error('ASCOUT_SESSION_FILE is required');
 let tree = new SessionTree(SessionManager.open(sessionFile));
-const replay=process.env.ASCOUT_REPLAY?createReplay(process.env.ASCOUT_REPLAY):null;
 const { Type } = require('typebox');
 const args = process.argv.slice(2);
 const socketPath = args.shift();
@@ -29,44 +28,32 @@ const agentId = args.shift() ?? 'agent';
 const taskId = process.env.ASCOUT_TASK_ID ?? '';
 let nextAction = 1;
 if (!socketPath) throw Error('usage: main.ts <socket> <agent> [--model provider/model] [--thinking level]');
-let modelPattern, thinkingLevel = 'low';
+let modelPattern, modelsPath, additionalModels, thinkingLevel = 'low';
 while (args.length) {
     const flag = args.shift(), value = args.shift();
     if (!value) throw Error(`${flag} requires a value`);
     if (flag === '--model') modelPattern = value;
+    else if (flag === '--models') modelsPath = value;
     else if (flag === '--thinking') thinkingLevel = value;
     else throw Error(`Unknown argument ${flag}`);
 }
 if (!['off','minimal','low','medium','high','xhigh'].includes(thinkingLevel)) throw Error('Invalid thinking level');
 let modelRuntime, model;
-if(replay)modelPattern='replay/recorded';
-if (modelPattern) {
+if (modelPattern || modelsPath) {
     modelRuntime = await ModelRuntime.create();
-    if(replay) {
-        const { AssistantMessageEventStream }=require(resolve(root,'packages/ai/src/utils/event-stream.ts'));
-        modelRuntime.registerProvider('replay',{
-            api:'ascout-replay',apiKey:'local',baseUrl:'http://127.0.0.1',
-            models:[{id:'recorded',name:'Recorded replies',reasoning:false,input:['text'],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:1000000,maxTokens:100000}],
-            streamSimple:(model,context)=>{
-                const stream=new AssistantMessageEventStream();
-                queueMicrotask(()=>{
-                    const usage={input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}};
-                    const message={role:'assistant',api:model.api,provider:model.provider,model:model.id,usage,timestamp:Date.now(),content:[],stopReason:'stop'};
-                    try {
-                        message.content=replay.next(context.messages);
-                        message.stopReason=message.content.some(p=>p.type==='toolCall')?'toolUse':'stop';
-                        stream.push({type:'start',partial:message});
-                        stream.push({type:'done',reason:message.stopReason,message});
-                    }catch(error){message.stopReason='error';message.errorMessage=String(error.message);stream.push({type:'error',reason:'error',error:message});}
-                    stream.end();
-                });
-                return stream;
-            },
-        });
+    if (modelsPath) {
+        const extra = JSON.parse(readFileSync(modelsPath, 'utf8'));
+        additionalModels = extra;
+        for (const [id, config] of Object.entries(extra.providers ?? {})) {
+            if (modelRuntime.getProvider(id)) throw Error(`Additional provider already exists: ${id}`);
+            modelRuntime.registerProvider(id, config);
+        }
     }
+    if (modelPattern) {
     const resolved = resolveCliModel({ cliModel:modelPattern, cliThinking:thinkingLevel, modelRuntime });
     if (resolved.error || !resolved.model) throw Error(resolved.error ?? 'Unknown model');
     model = resolved.model;
+    }
 }
 tree.initialize(model,thinkingLevel);
 const sessions = new Map(), checkpoints = new Map(), results = new Map(), waiters = new Map(), resultWaiters = new Map();
@@ -326,7 +313,6 @@ async function run(session,branch,operation) {
     finally { syncTranscript(branch);await finishActions(branch,saving||cancelled.has(branch)||aborting.has(branch)?'cancelled':'failed'); }
     const last=[...session.messages].reverse().find(m=>m.role==='assistant');
     if(last?.stopReason==='error'&&!saving)await report({message:branch===authority?'turn_failed':'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
-    if(replay)await report({message:'replay_status',...replay.status()});
     await report({message:'turn_completed',branch_id:branch});
     if(branch===authority)tree.settle();
 }
@@ -389,6 +375,7 @@ async function handle(command) {
                     resourceBinding:await recoveryBinding(root,snapshot.sources.map(source=>source.header.cwd)),
                     snapshotResources:snapshotResources(snapshot.sources),
                     executionConfig:{model:model??null,modelPattern:modelPattern??null,thinkingLevel,runtimeTools},
+                    additionalModels:additionalModels??null,
                     access:access.snapshot(),generations:[...generations],results:[...results],
                     cancelled:[...cancelled],reportedEntries:[...reportedEntries],commands:commandRecords,
                     suspendedHooks:[...suspendedHooks],candidateSetups:[...candidateSetups],
@@ -410,7 +397,9 @@ async function handle(command) {
                 if(record.resourceBinding&&JSON.stringify(record.resourceBinding)!==JSON.stringify(await recoveryBinding(root,record.tree.sources.map(source=>source.header.cwd))))throw Error('Recovery Pi code, extension or configuration resources changed');
                 snapshotResources(record.tree.sources,record.snapshotResources);
                 const executionConfig={model:model??null,modelPattern:modelPattern??null,thinkingLevel,runtimeTools};
-                if(record.executionConfig&&JSON.stringify(record.executionConfig)!==JSON.stringify(executionConfig))throw Error('Recovery model, thinking level or tool configuration changed');
+                const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
+                if(record.additionalModels&&JSON.stringify(canonical(record.additionalModels))!==JSON.stringify(canonical(additionalModels)))throw Error('Recovery additional model configuration changed');
+                if(record.executionConfig&&JSON.stringify(canonical(record.executionConfig))!==JSON.stringify(canonical(executionConfig)))throw Error('Recovery model, thinking level or tool configuration changed');
                 if(record.authority!==record.tree.authority)throw Error('Recovery authority identity mismatch');
                 const sources=new Map(record.tree.sources.map(source=>[source.file,source]));
                 for(const [id,checkpoint] of record.checkpoints){
@@ -628,7 +617,6 @@ function startSetup(command){
 }
 await report({message:'agent_connected',agent_id:agentId,capabilities});
 await report({message:'agent_ready',agent_id:agentId});
-if(replay)await report({message:'replay_inputs',inputs:replay.inputs.map(input=>input.prompt)});
 let buffer=Buffer.alloc(0);const tasks=new Set();
 let commandQueue: Promise<unknown>=Promise.resolve();
 try{

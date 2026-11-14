@@ -31,16 +31,16 @@ cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi --web 127.0.0.
 
 浏览器 UI 只绑定 loopback；打开控制面输出的地址即可。左侧是权威窗口对话，右侧是可隐藏的投机面板（投机树与分支详情）；候选内容始终只读。TUI 与浏览器 UI 不共享绘制代码，只通过控制面提供的 AScoutRunView 和操作请求接口工作。界面的开发代理、构建与嵌入方式见 [控制面 WebUI](docs/development/web-ui.md)。
 
-指定已有 run 可用 `--replay <source-run>` 从其原生 `session.jsonl`、`events.jsonl` 内存提供模型回复，仍以正常方式执行 Runtime 与 Policy：
+外部回放工具从已有 run 的原生 `session.jsonl`、`events.jsonl` 在内存提供模型回复，并启动普通 AScout 执行 Runtime 与 Policy：
 
 ```sh
 mkdir /tmp/opencode/replay-run
-cargo run --bin ascout-control-plane -- /tmp/opencode/replay-run ../pi \
-  --replay /path/to/source-run --runtime /path/to/runtime.json \
+node tools/replay/run.mjs /path/to/source-run /tmp/opencode/replay-run ../pi \
+  --runtime /path/to/runtime.json \
   --web 127.0.0.1:8080
 ```
 
-源 `policy.json` 优先；缺失时显式传入原 Policy YAML。Runtime/初始环境不猜测，必要时用 `--runtime` 提供。源目录只读；正常新 run 照常记录 session/events，不产生额外回放缓存。自动输入结束或缺键后系统仍可用，用户可在 WebUI 切换到 `provider/model` 并继续。详见[回放工具](tools/replay/README.md)及[开发边界](docs/development/replay.md)。
+源 `policy.json` 优先；缺失时在 Pi 路径后显式传入原 Policy YAML。用 `--runtime` 明确提供新运行环境。源目录只读；普通 AScout 负责新 run 的记录和恢复。工具终端输入 `pause` 暂停自动输入后，可在 WebUI 手动输入或切换模型；`resume` 继续，`status` 查看消费情况，`quit` 协调正常保存退出。完成或缺键仅停止自动输入，保留系统。详见[回放工具](tools/replay/README.md)及[开发边界](docs/development/replay.md)。
 
 第一个参数是本次运行目录，第二个参数是 Pi 源码路径。运行目录、Agent 日志和事件记录都由调用方持有。Runtime Adapter 在环境内启动 Agent 接入进程，控制面只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。Ctrl-C 请求中断，Ctrl-D 退出，TUI 中 ↑/↓ 滚动。运行目录及 `agent.log` 保留用于检查。
 

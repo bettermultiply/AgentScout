@@ -10,28 +10,39 @@
 
 导出与伪造端点放在 [`tools/replay/`](../../tools/replay/README.md)，使用 Node 26，只读取已有 run 内 `events.jsonl` 和 `session.jsonl`。记录是系统原生能力，测试套件不执行录制：B3、repeat、deep 均须提供已有 run，先导出再执行一次、五次或三次回放；低层 B1／B1-PI 保留手构造原生数据验证，B1-PI 也可接收已有样例目录。
 
-### 通用入口（2026-11-13）
+### 通用入口（2026-11-14）
 
 ```sh
 mkdir /tmp/opencode/replay-run
-target/debug/ascout-control-plane /tmp/opencode/replay-run ../pi \
-  --replay /path/to/source-run --runtime /path/to/runtime.json \
-  --web 127.0.0.1:8080
+node tools/replay/run.mjs /path/to/source-run /tmp/opencode/replay-run ../pi \
+  --runtime /path/to/runtime.json --web 127.0.0.1:8080
 ```
 
-源 run 的 `policy.json` 优先；不存在时必须显式提供第三个位置参数 `original-policy.yaml`，不得回退默认策略。若两者都提供，核对编译 digest。Runtime 选择沿用正常系统：`--runtime`、`ASCOUT_RUNTIME_CONFIG`、Policy 的原 runtime 引用；缺失直接报错。配置须使用新 control_socket，不得位于源目录。新 run 不得位于源目录内。Runtime 的其他可写路径和初始环境由调用方明确提供，系统不会猜测测试目录上一级布局或拿退出快照当初始状态。
+源 run 的 `policy.json` 优先，经正常 `--policy-artifact` 加载；不存在时必须在 Pi 路径后显式提供 `original-policy.yaml`，不得回退默认策略。若两者都提供，核对编译 digest。外部工具要求显式 `--runtime`；配置须使用新 control_socket，不得位于源目录。新 run 不得位于源目录内。Runtime 的其他可写路径和初始环境由调用方明确提供，工具不会猜测目录布局或拿退出快照当初始状态。
 
-`agent-access/replay/` 是运行侧与导出工具共同使用的无依赖模块，运行侧不导入 tools 测试代码。每次启动读取当前原生 session/events，恢复候选实际模型上下文，在进程内注册本地 `replay/recorded` provider。原生记录不增加回放匹配键。按 events 文件顺序、原生 ID 去重，仅将已消费 `message.role=user` 的纯文本输入送入当前权威；通知不作为用户输入。不重现输入被接收的墙钟时刻、Interrupt 或未消费队列；每轮等待权威空闲且控制工作/命令收齐再送下一条。
+`tools/replay/recording.mjs` 每次启动读取原生 session/events，在内存恢复候选请求上下文。外部本地 HTTP 服务以 OpenAI SSE 返回记录回复，通过通用 `--models` 追加模型配置；普通 Pi 模型、认证和扩展仍可用，重复 provider 拒绝覆盖。运行侧不导入测试工具。按 events 文件顺序、原生 ID 去重，仅将已消费 `message.role=user` 的纯文本输入经 `POST /api/request` 送入当前权威；通知不作为用户输入。不重现墙钟时刻、Interrupt 或未消费队列。
 
-自动输入完成或任意匹配缺失/耗尽时保留系统，不退回真实模型；错误与消费数量可从 events、API notice 检查。用户手动输入或请求模型切换会停止剩余自动输入。浏览器权威窗口可输入 `provider/model` 切换，API 为 `POST /api/request` 的 `{"action":"model","model":"provider/model"}`；须等权威空闲，不能在 Promote/Runtime 工作/恢复中改模型。解析或认证失败只报告错误，保留原模型和会话；候选保留自己的模型，新候选继承实际 parent。真实模型仅由用户主动选择，认证仍使用正常 Pi 配置。
+HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已处理输入序号 `sequence`、`ready` 和当前权威输入失败原因 `error`。外部工具等待序号推进及 `ready=true` 后才提交下一输入；可输入要求权威轮次结束、无排队输入或待确认 Promote、不在恢复／关闭／模型切换中，不要求所有候选结束。此接口是当前状态，序号不跨重启保留，不是每条输入的持久回执。
+
+工具终端 `pause` 暂停后续自动输入，当前轮次继续；`resume` 恢复，`status` 查看消费及错误，`quit` 请求正常保存退出。用户手动输入或切换模型前先暂停工具，工具不检测人工操作。自动输入完成静默停输入；缺键、耗尽或请求失败报告具体原因停输入，不退回真实模型，两者均保留 AScout 及服务管理。任一方主动退出时另一方退出，复用正常 Shutdown/save。浏览器模型 API 为 `POST /api/request` 的 `{"action":"model","model":"provider/model"}`；须等权威空闲，不能在 Promote/Runtime 工作/恢复中改模型。解析或认证失败保留原模型和会话；候选保留自己的模型，新候选继承实际 parent。
 
 普通模型请求失败以 turn_failed 报告并结束本轮，权威会话保留；候选执行失败和 Runtime/协议故障仍走原 Branch 生命周期，不扩大为任意故障恢复。主动退出与 `--resume` 保持正常持久路径。当前回放模型本身未持久化队列：退出后若要接着交互，使用普通 `--resume --model provider/model`，不承诺恢复自动回放进度。
 
-**本轮实测**：手造原生多用户输入→真实 bash→工具结果续跑，3/3 回复；结束与缺键两种情况均保持 WebUI/API，未知模型切换失败后仍能切到本地 HTTP 伪模型并继续；正常新 run 保存、原 Policy artifact 优先、普通重启恢复后继续输入通过。源 session/events 的 SHA-256 与 mtime 未变，无额外 recording 缓存。命令 `node /tmp/opencode/check-general-replay.mjs`，最终复跑资料 `/tmp/opencode/general-replay-keCEWl/result.json`。NLE 通用入口单层 4/4、四层 13/13 回复、1/4 Chance 与 1/4 Promote，零剩余/失败，最终复跑资料 `/tmp/opencode/general-nle-AyrZyk/report.json`；首次使用全局 Pi 扩展时上下文改变导致缺键，独立空 `PI_CODING_AGENT_DIR` 后通过；扩展环境也必须与源一致。
+**本轮实测**：`node /tmp/opencode/check-external-replay.mjs`，产物 `/tmp/opencode/external-replay-LUunGA`。已有手造原生记录经外部工具→普通 AScout→真实 bash→工具结果续跑，两条历史输入顺序完成；启动暂停期间零轮次、恢复后正常完成；完成和缺键均保持系统；保留的普通 Pi 本地模型可切换继续；AScout API shutdown 和工具 quit 双向退出都正常保存 recovery.json；源记录 SHA-256 不变且没有 recording 缓存。全部模型请求为本地伪模型。扩展环境仍须与源一致，未持久化的上下文改写可能造成缺键。
 
-相关检查：Rust library 148/148、Pi 接入/历史/通知/恢复 25/25、主动恢复 4/4、native/B1/B1-PI 通过；前端构建通过（保留 >500KB bundle 警告）。未调用真实模型。完整 Runtime 留档、初始环境自动重建、非文本输入、长历史同键碰撞和取消时序仍不保证。
+本轮相关检查：Rust library 148/148、native/B1/B1-PI 通过。完整 Runtime 留档、初始环境自动重建、非文本输入、长历史同键碰撞和取消时序仍不保证；没有确定性调度。普通保存和 resume 仍归 AScout；自动回放进度不持久化。
 
 ## 记录来源
+
+### 取消请求与响应延迟修复（2026-11-14）
+
+原生明确 aborted 的 assistant 按源 session 顺序保留为取消项，与成功项共同组成同键队列。匹配取消项后等待 AScout 自行取消 HTTP 请求，不产生回答；默认 30 秒未取消以 HTTP 504 `replay_cancel_timeout` 明确失败并停止自动输入。真正缺键／耗尽仍为 HTTP 400，其他 error 不视为取消。成功项每次请求在响应输出前等待一次 500ms；客户端取消会清理等待定时器和响应监听，不再写连接。
+
+`cancellation.test.mjs` 的四项取消／延迟回归修前全部失败，修后通过；端到端又发现跨 HTTP chunk 的 UTF-8 字符被 Buffer 字符串拼接损坏，新增真实分块请求回归先得到 400，改用 `req.setEncoding("utf8")` 后通过。归一化及上下文重建规则保持原有行为。取消比较、同键顺序、缺失／耗尽断言均保留。
+
+独立真实 NLE 验证 `/tmp/opencode/run1-cancel-STTMVB`：源 `/tmp/opencode/run-1` 的两条输入 `cd8248f0`、`fdbd1515` 顺序完成，`finished=true`、`sequence=2`、`error=null`；40 requests/hits/consumed，23 成功、17 客户端取消，misses/exhausted/unconsumed/pending/cancel_timeouts 均为 0。原首错 `bc8aef78…` 正常命中；中途新增缺键 `813e77c9…` 的 UTF-8 根因也已消除。使用原 `nle-runtime.json` 的初始配置，仅更换 control_socket；保留正常 Pi 环境，模型服务均为本地录制回复。源 session/events/policy SHA-256 前后一致。`result.json`、`report.json`、`requests.jsonl`、原生 run 和日志保留证据，`cleanup.json` 确认退出码 0 和正常 recovery 保存。原 8180 实例未操作。
+
+此次证明该源两输入完成与请求消费正确，不宣称任意源的取消时序或同键碰撞均确定。验证中间产物 `/tmp/opencode/run1-cancel-dxvq5D`、`/tmp/opencode/run1-cancel-CF1SI7` 保留 UTF-8 修复前的失败。B1、B1-PI、native 和 8 项 Node 回归通过；没有付费模型调用。
 
 `events.jsonl` 的 transcript 事实保存 Branch id、`session_entry_id` 与 role；正文从 run 内 `session.jsonl`（权威 session 文件）读取。其余 Policy、操作、状态和清理事实仍由 Ledger 保存。必须先写文件、后写引用；允许文件存在未引用记录，不承诺两边原子提交或从 Ledger 恢复完整 Tree。
 
@@ -45,7 +56,7 @@ target/debug/ascout-control-plane /tmp/opencode/replay-run ../pi \
 
 整理后恢复上下文可能不同于原始运行上下文；compaction/custom 必须保存，但引用、摘要、在飞推理与 rollback 外部资源关联仍有未决实现差距，详见 [接入实现](agent-access.md) §4。是否追加真实结果通知由 Policy 决定，默认完全不追加，不是空消息。
 
-**模型回放边界**：正常运行仅生成原生 session/events，不为回放计算或持久化匹配键，不依赖 `tools/replay`；键仅在回放内存或显式导出产物中生成。导出按 events 文件序建立 transcript 原生 ID 的 Branch 归属，以 candidate_created 的 parent/chance 和 chance_created 的 operation_id 核对候选注入批次；由原生 toolCall ID 验证整批（包括并行 sibling），applied Promote 后将第一后续记录的父边仅在内存中接回预测批次尾部。嵌套候选按创建顺序还原。无正文相似度、命名解析或时间近似匹配，源文件不变。
+**模型回放边界**：正常运行仅生成原生 session/events，不为回放计算或持久化匹配键；键仅在 `tools/replay/` 内存或显式导出产物中生成。导出按 events 文件序建立 transcript 原生 ID 的 Branch 归属，以 candidate_created 的 parent/chance 和 chance_created 的 operation_id 核对候选注入批次；由原生 toolCall ID 验证整批（包括并行 sibling），applied Promote 后将第一后续记录的父边仅在内存中接回预测批次尾部。嵌套候选按创建顺序还原。无正文相似度、命名解析或时间近似匹配，源文件不变。
 
 第一后续记录可以是 custom、compaction、context_edit 或 custom_message，不限 assistant。通知以 details.command_id 关联 applied Promote。还原后按最新 compaction 的保留区间、context_edit replacement、branch_summary/custom_message 构造当前 Pi 模型上下文；失败 assistant 排除，当前待决调用的较早同 toolCallId 结果被后续结果替换。缺原生引用、注入批次不全、未知消息角色或无法唯一确定重挂边时明确失败，不加旧格式回退。未持久化的扩展改写及任意 provider 转换不在保证内。
 
@@ -204,7 +215,11 @@ Candidate 不取得 NLE 快照、不 fork 进程、不重放动作。Runtime 声
 
 ## Pi 端点核实
 
-`main.ts:27-41` 只接收 `--model` 与 `--thinking`，通过 `ModelRuntime.create()` 和 `resolveCliModel` 解析；没有自有 baseUrl CLI 参数。Pi `core/model-runtime.ts:218-223` 默认从 getAgentDir()/models.json 读取；`packages/coding-agent/src/config.ts:604-610,630-636` 默认变量为 `PI_CODING_AGENT_DIR`（APP_NAME 改名会改变变量前缀）。指定独立 agent 目录即可隔离真实凭据，不需要改 Pi。精确使用 `--model replay/fixture`，不要使用可能模糊匹配的短名称；resolver:450-505 使用全模型列表、解析 provider/model。baseUrl 与 key 写 models.json，不依赖未核实的 URL 环境变量。
+追加 provider 配置由普通 AScout 复制为 run 的 `models.json`，并将配置内容保存到 Agent recovery 记录；恢复从已校验的记录重建，不能依赖外部工具的临时路径。恢复时显式提供不同的 `--models` 内容会被拒绝。`--resume --model provider/model` 先按保存的模型完成原有恢复校验，再在空闲权威上走普通模型切换；thinking、工具、Pi 配置与扩展绑定仍校验，回放队列不保存。
+
+2026-11-14 恢复补验：修复前 `/tmp/opencode/resume-replay-Jp4eQ9/resume.log` 实际报 `Recovery model, thinking level or tool configuration changed`。修复后 `/tmp/opencode/resume-replay-Dy8cjl` 完成外部工具 quit 保存退出→普通 `--resume --model local/fake`→recovery_loaded 无错误→model_changed→新输入 turn_completed→正常退出。脚本 `/tmp/opencode/resume-replay-check.mjs`，全部为本地伪模型。`/tmp/opencode/check-replay-stop.mjs` 在第三条历史输入仍待提交时制造第二轮缺键，等待 1.2 秒后输入序号仍为 2；证据 `/tmp/opencode/external-replay-759N0k`，退出后按运行路径及回放脚本检查进程无匹配。后续并行工作移除了旧 Policy YAML，扩大复跑因此受夹具路径缺失阻塞；不将该复跑报告为通过。
+
+Pi `ModelRuntime` 支持通用追加 provider；外部工具以临时独立 models 文件提供本地端点，不改写用户的 models/auth 文件。普通启动的 `main.ts` 仍接受 `--model`、`--models` 与 `--thinking`；重名 provider 报错而不覆盖。手动切换继续使用普通 `provider/model`。
 
 最小配置（端口替换为本地端点；apiKey 是 dummy，不是真实凭据）：
 

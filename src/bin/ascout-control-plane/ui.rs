@@ -144,6 +144,7 @@ pub enum Request {
 
 #[derive(Clone)]
 pub struct Interface {
+    input_status: Arc<Mutex<Value>>,
     task_id: String,
     conversations: Arc<Mutex<BTreeMap<String, Conversation>>>,
     /// 每个工具 action 的开始时刻与工具名；工具名来自同一 action 的
@@ -160,6 +161,7 @@ impl Interface {
         requests: impl Fn(Request) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
         Self {
+            input_status: Arc::new(Mutex::new(serde_json::json!({"sequence":0,"ready":false,"error":null}))),
             task_id,
             conversations: Default::default(),
             action_starts: Default::default(),
@@ -186,6 +188,12 @@ impl Interface {
             return Err("Control plane disconnected".into());
         }
         (self.requests)(request)
+    }
+    pub fn input_status(&self) -> Value {
+        self.input_status.lock().unwrap().clone()
+    }
+    pub fn publish_input_status(&self, sequence: u64, ready: bool, error: &Option<String>) {
+        *self.input_status.lock().unwrap() = serde_json::json!({"sequence":sequence,"ready":ready,"error":error});
     }
     pub fn publish(
         &self,
