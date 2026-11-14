@@ -836,3 +836,19 @@ e89533d 保存／恢复逻辑曾为每次新世界增加独立随机 lgen 种子
 # 2026-11-14：回放取消项修复
 
 废弃将明确 aborted assistant 从回放队列过滤的做法：该做法使源实际存在、被 AScout 取消的请求变成缺键。取消项现在按源顺序保留，命中后等待客户端取消，超时明确失败；成功输出统一等待一次 500ms。其他 error 不扩展为取消。验证中同时修正 HTTP Buffer 分块导致的 UTF-8 损坏，未改变匹配材料或放宽缺键断言。实施与证据见 `docs/development/replay.md`。
+
+## 2026-11-14：Gateway 审查收尾
+
+用户批准精简 Gateway：废弃 HTTP 经 Presentation.request／Interface.request 再转发请求的路径，HTTP 与 TUI 直接共享 main 装配的 Gateway Connection；Presentation 只提供展示查询，Interface 不再保存请求字段。保留连接断开拒绝、HTTP 状态码及通信协议。Runtime 废弃无外部消费者的 send_with_context／call_with_context，统一由 send 构造既有请求上下文；保留 send、call_with_id、wait_event 测试用途及 30 秒等待，wait_result 不再二次克隆。Runtime trait、Agent 写侧半关闭与停止接收的分离保持。
+
+废弃 `control_plane::session` 的兼容 re-export：本仓 `Cargo.toml` 为 `publish = false`，仓库及相邻源码引用核查仅发现 `tests/firecracker_e2e.rs` 尚在使用旧路径，未发现外部兼容承诺。迁移该调用至 `gateway::runtime`，移除冗余模块，不保留 stub。通信协议及 Runtime 会话实现不变。
+
+完整 Gateway 审查同时覆盖更早中断任务；`gateway-20261114-before` 已含部分迁移，不能作为完整重构前基线。B3 首错经绕过 Gateway 的真实 Pi／本地 HTTP 探针定位为 replay 已提交校验器拒绝 assistant 的 `content:null`，不在本任务扩张修改 replay、Policy 或 NLE。证据与验收限制见 `gateway.md`。
+
+# 2026-11-14：Gateway 三侧通信与 Registry 归属
+
+用户确认：名称采用 Gateway，统一 Agent 接入侧、UI 与 Runtime 三侧的通信接入、消息分发和送达；管理连接／会话、握手与断线，进行入口格式、身份、上下文和权限检查，转交请求／事实／回执，交付命令／已编译本地 Decision／结果／事件。消息对投机执行的变化由相应控制逻辑决定，Gateway 不拥有 Tree、Policy 或投机编排。实际启动由 Runtime 负责；transport、UI 部署和启动协调归属仍未决。
+
+Registry 已属于 Runtime，保留登记、契约兼容性、能力声明校验、主动验证和独立证据职责；Adapter 不得自填验证状态或以自测结果代替证明。控制面使用带验证状态的能力视图匹配 Policy、协调生命周期。现有 Agent、UI、Runtime 三条通信入口尚未统一实现，缺口归 reference-workload.md。
+
+废弃正式名称 Agent Control Gateway／ACGateway、将 Registry 列为控制面组件以及 Gateway 实际启动 Agent 的表述；此前“Gateway 是否覆盖 UI／Runtime 未定”仅为历史。本轮只同步文档，不修改代码、不提交、不运行模型或代码测试。

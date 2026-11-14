@@ -4,6 +4,7 @@ use super::{
     view,
 };
 use ascout::control_plane::agent_control::BranchRole;
+use ascout::control_plane::gateway::ui::Connection;
 use ascout::control_plane::ledger::LedgerReader;
 use std::io::{self, Read, Write};
 use std::sync::mpsc;
@@ -21,7 +22,7 @@ impl Drop for Terminal {
     }
 }
 
-pub fn start(interface: Interface, reader: LedgerReader) -> io::Result<JoinHandle<()>> {
+pub fn start(interface: Interface, connection: Connection, reader: LedgerReader) -> io::Result<JoinHandle<()>> {
     let mut original = std::mem::MaybeUninit::uninit();
     if unsafe { libc::tcgetattr(0, original.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
@@ -38,14 +39,14 @@ pub fn start(interface: Interface, reader: LedgerReader) -> io::Result<JoinHandl
     io::stdout().flush()?;
     Ok(std::thread::spawn(move || {
         let _terminal = Terminal(original);
-        if let Err(error) = run(&interface, &reader) {
+        if let Err(error) = run(&interface, &connection, &reader) {
             eprintln!("TUI: {error}");
-            let _ = interface.request(Request::Shutdown);
+            let _ = connection.request(Request::Shutdown);
         }
     }))
 }
 
-fn run(interface: &Interface, reader: &LedgerReader) -> io::Result<()> {
+fn run(interface: &Interface, connection: &Connection, reader: &LedgerReader) -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for byte in io::stdin().lock().bytes() {
@@ -149,11 +150,11 @@ fn run(interface: &Interface, reader: &LedgerReader) -> io::Result<()> {
                 }
                 match byte {
                     4 => {
-                        let _ = interface.request(Request::Shutdown);
+                        let _ = connection.request(Request::Shutdown);
                     }
                     3 => {
                         input.clear();
-                        let _ = interface.request(Request::Interrupt);
+                        let _ = connection.request(Request::Interrupt);
                     }
                     27 => {
                         if observing || events {
@@ -200,7 +201,7 @@ fn run(interface: &Interface, reader: &LedgerReader) -> io::Result<()> {
                                 Err(error) => hint = error,
                             }
                         } else if !events && !line.is_empty() {
-                            let _ = interface.request(Request::Prompt { prompt: line });
+                            let _ = connection.request(Request::Prompt { prompt: line });
                         }
                     }
                     byte if byte >= 32 => input.push(byte),
@@ -208,7 +209,7 @@ fn run(interface: &Interface, reader: &LedgerReader) -> io::Result<()> {
                 }
             }
             Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = interface.request(Request::Shutdown);
+                let _ = connection.request(Request::Shutdown);
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => escape.clear(),

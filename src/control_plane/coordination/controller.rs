@@ -7,7 +7,7 @@ impl AgentController {
         &self,
         tree: &SpeculativeTree,
         policy: &CompiledPolicy,
-        runtime: &ControlSession,
+        runtime: &dyn Runtime,
         capabilities: &RuntimeCapabilities,
         work: &ControlOperation,
     ) -> Result<ControlResult, String> {

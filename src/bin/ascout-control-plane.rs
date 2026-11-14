@@ -3,7 +3,6 @@
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -21,20 +20,18 @@ mod tui;
 mod ui;
 #[path = "ascout-control-plane/view.rs"]
 mod view;
-#[path = "ascout-control-plane/web.rs"]
-mod web;
 
 use ascout::control_plane::agent_control::{
-    AgentCommand, AgentMessage, AgentWireMessage, SpeculativeTree,
+    AgentCommand, AgentMessage, SpeculativeTree,
 };
 use ascout::control_plane::ledger::Ledger;
 use ascout::control_plane::policy::{CompiledPolicy, Decision, PolicyEngine};
-use ascout::control_plane::session::{ControlServer, ControlSession};
+use ascout::control_plane::gateway::{agent, runtime::{ControlServer, ControlSession, Runtime}};
 use ascout::protocol::contract::{AgentLaunch, Operation, RuntimeCapabilities};
-use ascout::protocol::transport;
 use serde_json::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use execution::{runtime_call, runtime_cleanup};
 
 static SIGNAL_FD: AtomicI32 = AtomicI32::new(-1);
 
@@ -106,35 +103,6 @@ fn resolve_agent_entry() -> Result<std::path::PathBuf, Box<dyn std::error::Error
     Ok(path)
 }
 
-fn validate_agent_capabilities(
-    capabilities: &ascout::control_plane::agent_control::AdapterCapabilities,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let required = [
-        (
-            capabilities.pre_execution_interception,
-            "preExecutionInterception",
-        ),
-        (
-            capabilities.local_decision_evaluation,
-            "localDecisionEvaluation",
-        ),
-        (
-            capabilities.checkpoint_continuation,
-            "checkpointContinuation",
-        ),
-        (
-            capabilities.independent_candidate_session,
-            "independentCandidateSession",
-        ),
-        (capabilities.cancel_completion, "cancelCompletion"),
-        (capabilities.tool_result_injection, "toolResultInjection"),
-    ];
-    if let Some((false, name)) = required.into_iter().find(|(supported, _)| !supported) {
-        return Err(format!("Agent Adapter lacks required capability {name}").into());
-    }
-    Ok(())
-}
-
 /// 启动 Runtime Adapter 并完成握手。控制面只持有连接和进程句柄，
 /// 不保存任何环境状态。
 fn start_adapter(
@@ -198,56 +166,17 @@ fn start_adapter(
             Err(error) => return Err(error.into()),
         }
     };
-    let hello = session
-        .wait_for_hello(Duration::from_secs(10))
-        .ok_or("Runtime Adapter handshake timed out")?;
+    let hello = match session.wait_for_hello(Duration::from_secs(10)) {
+        Some(hello) => hello,
+        None => {
+            // Failed admission must not leave the process started by assembly behind.
+            let _ = session.shutdown();
+            let _ = adapter.kill();
+            let _ = adapter.wait();
+            return Err("Runtime Adapter handshake timed out".into());
+        }
+    };
     Ok((adapter, session, hello.capabilities))
-}
-
-fn runtime_environment<'a>(capabilities: &RuntimeCapabilities, branch: &'a str) -> &'a str {
-    if capabilities.shared_environment {
-        "authority"
-    } else {
-        branch
-    }
-}
-
-fn runtime_cleanup(
-    session: &ControlSession,
-    capabilities: &RuntimeCapabilities,
-    branch: &str,
-    tree: &mut SpeculativeTree,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if capabilities.shared_environment {
-        return Ok(());
-    }
-    let environment = runtime_environment(capabilities, branch);
-    use ascout::control_plane::agent_control::RuntimeExecutionState;
-    tree.record_runtime_state(branch, RuntimeExecutionState::TerminationRequested)?;
-    if let Err(error) = runtime_call(session, environment, Operation::TerminateEnvironment) {
-        tree.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
-        return Err(error);
-    }
-    tree.record_runtime_state(branch, RuntimeExecutionState::Terminated)?;
-    if let Err(error) = runtime_call(session, environment, Operation::CleanupEnvironment) {
-        tree.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
-        return Err(error);
-    }
-    tree.record_runtime_state(branch, RuntimeExecutionState::Cleaned)?;
-    Ok(())
-}
-
-/// 按 Branch 名字向 Runtime 发一次操作；Runtime 自己负责把它对应到环境。
-fn runtime_call(
-    session: &ControlSession,
-    branch: &str,
-    operation: Operation,
-) -> Result<ascout::protocol::contract::OperationResult, Box<dyn std::error::Error>> {
-    let result = session.call(branch, operation)?;
-    if result.status != ascout::protocol::contract::ResultStatus::Completed {
-        return Err(format!("Runtime request failed: {:?}", result.reason).into());
-    }
-    Ok(result)
 }
 
 fn take_option(args: &mut Vec<String>, name: &str) -> Result<Option<String>, String> {
@@ -379,9 +308,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let policy_binding = json!({"source": policy.source(), "artifact": "policy.json", "sha256": artifact_digest});
     if !resume && policy_artifact.is_some() {policy.save(&artifact_path)?;}
     let socket = run_dir.join("agent.sock");
-    let _ = fs::remove_file(&socket);
-    let listener = UnixListener::bind(&socket)?;
-    listener.set_nonblocking(true)?;
+    let listener = agent::Listener::bind(&socket)?;
     let (mut adapter, session, runtime_capabilities) = start_adapter(&config_path, &run_dir)?;
     if resume && tree.capability_view.as_ref()!=Some(&serde_json::to_value(&runtime_capabilities)?) {return Err("Recovery Runtime capabilities changed".into());}
     tree.bind_execution(
@@ -442,8 +369,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "task_id": tree.execution_id,
         "session_file": session_file,
     }))?;
-    let interface =
-        ui::Interface::new(tree.execution_id.clone(), ledger.reader(), move |request| {
+    let interface = ui::Interface::new(tree.execution_id.clone(), ledger.reader());
+    let ui_connection =
+        ascout::control_plane::gateway::ui::Connection::new(ledger.reader(), move |request| {
             requests
                 .send(execution::Event::Request(request))
                 .map_err(|_| "Control plane disconnected".into())
@@ -460,35 +388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 agent: Some(agent_launch),
             },
         )?;
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err(format!(
-                            "Agent connection timed out; see {}/agent.log",
-                            run_dir.display()
-                        )
-                        .into());
-                    }
-                    thread::sleep(Duration::from_millis(30));
-                }
-                Err(error) => return Err(error.into()),
-            }
-        };
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        match transport::read_message(&mut stream)? {
-            Some(AgentWireMessage::Message(AgentMessage::AgentConnected {
-                agent_id,
-                capabilities,
-            })) if agent_id == "agent" => {
-                validate_agent_capabilities(&capabilities)?;
-            }
-            _ => return Err("Agent handshake failed".into()),
-        }
-        stream.set_read_timeout(None)?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let mut connection = listener.accept("agent", Duration::from_secs(30))?;
         let command = if resume {AgentCommand::Load {branch_id:tree.authority_branch_id.clone().ok_or("Recovery authority missing")?,path:recovery_generation.as_ref().unwrap().join("agent.json")}} else {tree.create_authority("authority", "")?};
         tree.record_runtime_state(
             "authority",
@@ -503,15 +403,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ))
             })
             .collect::<Result<serde_json::Map<_, _>, Box<dyn std::error::Error>>>()?;
-        send(
-            &mut stream,
+        connection.send(
             AgentCommand::LocalPolicy {
                 branch_id: "authority".into(),
                 policy_digest: policy.digest().into(),
                 decisions: serde_json::Value::Object(decisions),
             },
         )?;
-        send(&mut stream, command)?;
+        connection.send(command)?;
         let mut observation_error = None;
         for content in tree.drain_observations() {
             if let Err(error) = ledger.append_observation(&tree.execution_id, content) {
@@ -523,13 +422,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         interface.publish(&mut ledger, false, false, "Starting Agent session…")?;
         tui_thread = if let Some(address) = &web_address {
-            web::start(address, interface.clone(), ledger.reader())?;
+            ascout::control_plane::gateway::ui::start(address, interface.clone(), ui_connection.clone(), ledger.reader(),
+                ascout::control_plane::gateway::ui::Assets {
+                    index_html: include_bytes!("../../webui/dist/index.html"),
+                    app_js: include_bytes!("../../webui/dist/assets/app.js"),
+                    app_css: include_bytes!("../../webui/dist/assets/app.css"),
+                    favicon_svg: include_bytes!("../../webui/dist/favicon.svg"),
+                })?;
             None
         } else {
-            Some(tui::start(interface.clone(), ledger.reader())?)
+            Some(tui::start(interface.clone(), ui_connection.clone(), ledger.reader())?)
         };
         let result = execution::run(
-            &mut stream,
+            &mut connection,
             &mut tree,
             &policy,
             &session,
@@ -672,8 +577,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Err(errors.join("; ").into())
     }
-}
-
-fn send(stream: &mut UnixStream, command: AgentCommand) -> io::Result<()> {
-    transport::write_message(stream, &AgentWireMessage::Command(command))
 }

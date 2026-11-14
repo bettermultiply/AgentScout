@@ -2,7 +2,7 @@
 
 pub mod agent_control;
 pub mod coordination;
+pub mod gateway;
 pub mod ledger;
 pub mod observation;
 pub mod policy;
-pub mod session;

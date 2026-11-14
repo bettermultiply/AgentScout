@@ -22,7 +22,9 @@ Runtime（动作承载、状态和效果边界）
 
 **Mechanism：把抽象落实为执行。** Mechanism 不是额外的一侧，而是横跨 Agent 接入侧、控制面与 Runtime 的实现责任：Agent 接入侧通过 Interposer 拦截命令与推理调用等环节，控制面组织执行、验证与调度，Runtime 承载动作并落实环境、资源和效果边界。它不一定只是组合 Runtime 原语；拦截、编排、校验、调度和实际边界执行都是 Mechanism 的一部分。Runtime 无法提供所需能力时，Mechanism 必须拒绝或明确降级，不让策略悄悄跑偏。
 
-**Runtime：动作的受约束承载系统。** Runtime 承载 Agent 的一步动作，使其能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 可以组合进程、容器、虚拟机、Overlay 和效果协调等能力；这些是可插拔的能力，不是 Runtime 的固定形态。Runtime Adapter 是 Runtime 与控制面之间的接入边界。Agent Session 的内部复制、共享、恢复和继续运行由 Agent 接入侧负责，Runtime 只承载其所需的执行状态和外部效果边界。
+**Runtime：动作的受约束承载系统。** Runtime 承载 Agent 的一步动作，使其能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 可以组合进程、容器、虚拟机、Overlay 和效果协调等能力；这些是可插拔的能力，不是 Runtime 的固定形态。Runtime Adapter 是 Runtime 与控制面之间的接入边界；Registry 属于 Runtime，负责能力声明校验、主动验证和独立证据，控制面使用其能力事实匹配 Policy。Agent Session 的内部复制、共享、恢复和继续运行由 Agent 接入侧负责，Runtime 承载其所需的执行状态和外部效果边界。
+
+Gateway 统一承接 Agent 接入侧、UI 与 Runtime 的通信，负责接入、消息分发和送达；消息对投机执行的变化由相应控制逻辑决定。它不拥有 Tree、Policy 或投机编排，通信统一也不改变 Runtime Adapter 的契约或 Registry 的证明职责。
 
 **Speculation Contract：策略、控制面与 Runtime 的语义对齐约束。** Contract 约束 Policy 的表达以及 Runtime 通过 Adapter 呈现的可观察行为：Policy 如何表达与校验决策取值、Runtime 需要声明并兑现哪些基本运行语义。控制面与 Runtime 共同落实这份约束（Mechanism）：控制面编排受管操作，Runtime 实际承载动作并返回结果和事件。Contract 不直接规定 Runtime 内部实现。
 

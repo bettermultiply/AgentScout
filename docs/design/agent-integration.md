@@ -36,9 +36,9 @@ Product Integration 负责完整持久化运行分支的 session 记录，并在
 
 ### 2.2 ASC-Proxy
 
-ASC-Proxy 是 Agent 接入侧与控制面之间的受管通信代理。它可以由控制面随 Agent 一起启动的进程内组件、本地 IPC 客户端、网络客户端或独立进程实现，不要求用户手工启动或直接管理。它与控制面建立通信会话，并在会话建立过程中确认通信双方的身份；在后续通信中，它通过通信凭证证明消息来自对应的 Agent 接入侧，避免信息伪造。
+ASC-Proxy 是 Agent 接入侧与控制面之间的受管通信代理。它可以由进程内组件、本地 IPC 客户端、网络客户端或独立进程实现，不要求用户手工启动或直接管理；进程的实际启动由 Runtime 负责。它经 Gateway 与控制面建立通信会话，并在会话建立过程中确认通信双方的身份；在后续通信中，它通过通信凭证证明消息来自对应的 Agent 接入侧，避免信息伪造。
 
-通信会话建立后，Agent 接入侧通过 ASC-Proxy 向控制面提交 Agent 执行事实、控制请求、本地 Decision 结果和 outcome；控制面通过同一会话向 Agent 接入侧返回命令、结果和事件。ASC-Proxy 负责消息的发送、接收和传递，不参与 Agent 步骤的执行、Decision 的判断或 Branch 生命周期的处理。正式用户流程中，控制面负责启动和回收该 Agent 及其接入会话，用户不直接管理 ASC-Proxy。
+通信会话建立后，Agent 接入侧通过 ASC-Proxy 向控制面提交 Agent 执行事实、控制请求、本地 Decision 结果和 outcome；控制面通过同一会话向 Agent 接入侧返回命令、结果和事件。ASC-Proxy 负责消息的发送、接收和传递，不参与 Agent 步骤的执行、Decision 的判断或 Branch 生命周期的处理。Runtime 负责实际启动、监视和回收 Agent 进程，Gateway 管理通信连接，用户不直接管理 ASC-Proxy。
 
 ### 2.3 Interposer
 
@@ -98,13 +98,13 @@ compaction 摘要保留原文，即使包含预测，也不阻止汇总或满足
 
 Agent 接入侧可以在执行环境中按需要建立其本地承载，并由 ASC-Proxy 与控制面建立会话。环境内的每个 Agent 在启动时通过 Product Integration 接入 Agent 接入侧，并持有独立的 Agent 执行上下文。多个 Agent 及其 Branch 可以暂时共享同一个执行环境和接入侧承载；当某个 Branch 需要独立的 Branch-local 状态时，控制面通过 Runtime 接入边界请求相应的承载能力，并使该 Branch 的执行活动进入满足要求的环境。具体承载方式由实现决定，但必须保持各 Agent 和 Branch 上下文的独立性。状态可以复制、共享、写时复制、重建或恢复，优先采用满足要求的低成本方式。Agent Session 的内部管理、复制、共享、恢复和继续运行由 Agent 接入侧负责；Runtime 负责提供其所需的动作承载和环境约束。
 
-目标协议中，Task 绑定 Policy 并建立受管上下文时，控制面从 Policy Engine 查询已经编译的本地 Decision，并经 Agent Control Gateway 交付给对应的 Agent 接入侧。Pi 接入侧不重新编译或修改 Policy，而是执行下发 artifact 中带有既有 runner、配置和依赖的脚本；工具 Hook 的本地 `admit` 结果决定是否提交 `speculative_admission_request`。普通工具事实不因控制面只处理准入而停止，Runtime 工具仍沿原有结果等待路径继续。需要全局事实或生命周期裁决时仍提交控制面。
+目标协议中，Task 绑定 Policy 并建立受管上下文时，控制面从 Policy Engine 查询已经编译的本地 Decision，并经 Gateway 交付给对应的 Agent 接入侧。Pi 接入侧不重新编译或修改 Policy，而是执行下发 artifact 中带有既有 runner、配置和依赖的脚本；工具 Hook 的本地 `admit` 结果决定是否提交 `speculative_admission_request`。普通工具事实不因控制面只处理准入而停止，Runtime 工具仍沿原有结果等待路径继续。需要全局事实或生命周期裁决时仍提交控制面。
 
 ## 相关文档
 
 - [AScout 架构](../architecture.md)：调用路径与责任边界
 - [Branch 语义设计](branch-semantics.md)：Agent-facing operation 所受的 lifecycle 约束
-- [控制面设计](control-plane.md)：Agent Control Gateway 后的控制路径
+- [控制面设计](control-plane.md)：Gateway 后的控制路径
 - [Agent 接入状态](../usage/agent-guide.md)：当前实现与可用性
 ## 5. 主动退出与恢复
 

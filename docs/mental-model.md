@@ -51,17 +51,21 @@ AScout 用三个支撑模型承接不同投机执行策略在预测、验证、�
 AScout 按以下责任边界组织，控制请求向下流动，结果与事件向上返回：
 
 ```text
-Agent 接入侧 -> 控制面 -> Runtime
+Agent 接入侧 <-> Gateway <-> 控制逻辑
+UI         <-> Gateway
+Runtime    <-> Gateway（经 Runtime Adapter 契约）
 ```
 
-这里的调用路径展示逻辑责任，不等同于进程或 crate。Runtime 是 AScout 支持的完整执行与效果承载系统；Runtime Adapter 只是它与控制面之间的接入边界。各侧责任见 [架构](architecture.md)。
+这里的调用路径展示逻辑责任，不等同于进程或 crate。Gateway 负责通信如何接入、消息交给谁以及如何送达；它不拥有 Tree、Policy 或投机编排。Agent 接入侧、UI 和 Runtime 通过统一 Gateway 通信边界接入，但三侧的消息处理责任仍由各自控制逻辑决定。Runtime 是 AScout 支持的完整执行与效果承载系统；Runtime Adapter 只是它与控制面之间的接入边界。各侧责任见 [架构](architecture.md)。
 
 Runtime 通过接入边界接收控制请求，结果和事件沿相反方向返回：
 
 ```text
-Policy Action -> 控制面编排 -> Runtime Adapter 接入 -> Runtime 执行
-  -> typed result/event -> 控制面更新控制状态
+Policy Action -> 控制面编排 -> Gateway 送达 -> Runtime Adapter 接入 -> Runtime 执行
+  -> typed result/event -> Gateway 送达 -> 控制面更新控制状态
 ```
+
+Adapter Registry 属于 Runtime，负责登记、契约与能力声明校验、主动验证及独立验证证据，向控制面提供带验证状态的能力事实；控制面据此匹配 Policy 并作出投机裁决。Registry 的归属不允许 Adapter 自行证明其声明成立。Agent 与接入进程的实际启动、监视和回收由 Runtime 负责。
 
 ### 4.2 核心对象与所有权
 

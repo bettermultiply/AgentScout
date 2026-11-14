@@ -34,10 +34,10 @@
 - **AScoutAgent**：一个 task 对外呈现的单一 Agent 视图，也是该 task 在控制面中的控制域；主对话操作当前有效的权威执行主线，另可只读观察该 Tree 的 Branch 状态与候选内容；候选内容与主对话分开，并随 Branch 的角色与状态显示其投机身份，不改变主对话路由或生命周期权限。（`../mental-model.md` §4.2；`agent-integration.md` §3）
 - **`/ascout`**：AScout TUI 内打开当前 AScoutAgent 整棵 Speculative Tree 的只读观察操作，可从 Branch 关系与投机状态选择具体 Branch 深入查看；选择仅改变观察对象，不切换主对话、不向候选发送对话，也不接受或丢弃 Branch。它不是 Agent 产品自身的命令，不查询其他 Tree。（用户确认：2026-10-25；`../../Discussion.md`；`../development/decisions.md`）
 - **Agent 接入侧**：负责 Agent 执行实体、Session、执行活动、Branch context、operation 归属、Interposer、ASC-Proxy 和 Product Integration 等接入职责；其中 Interposer 统一承担 Agent 拦截与 operation integration。（`../architecture.md` §1；`agent-integration.md`）
-- **控制面**：负责 AScoutAgent、Speculative Tree 控制状态、Policy、请求校验、操作编排和 Runtime event 解释；包含 Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator 与 Ledger。效果协调属于 Runtime 的整体责任。（`../architecture.md` §1；`control-plane.md`）
+- **控制面**：负责 AScoutAgent、Speculative Tree 控制状态、Policy、请求校验、操作编排和 Runtime event 解释；包含 Gateway、Policy Engine、Speculation Coordinator 与 Ledger。Gateway 统一承接 Agent 接入侧、UI 与 Runtime 的通信，Registry 属于 Runtime。效果协调属于 Runtime 的整体责任。（`../architecture.md` §1；`control-plane.md`）
 
 - **Runtime Adapter**：Runtime 与控制面之间的接入边界；按控制面的接入约定声明并呈现能力、operation result 与 event，并负责能力映射、transport 和事件规范化。（`../architecture.md` §1；`../development/runtime-adapter.md`）
-- **Adapter Registry**：控制面内 Runtime Adapter 的固定接入入口；负责登记、契约兼容性检查、能力声明校验和接入时基本语义测试，并发布已校验的能力信息；不拥有 Runtime 或 Speculative Tree 的执行状态。（`control-plane.md` §2.3；`runtime-adapter-contract.md`）
+- **Adapter Registry**（Registry）：Runtime 内负责 Adapter 登记、契约兼容性检查、能力声明校验、主动验证及独立验证证据的组件，发布带验证状态的能力信息；不拥有 Speculative Tree 或 Runtime 的执行状态，Adapter 不得自行填写验证状态或验证证据。（`runtime.md`；`runtime-adapter-contract.md`）
 - **Runtime**：AScout 支持的完整执行与效果承载系统；承载 Agent 一步动作，提供环境、资源、状态派生、隔离和外部效果边界。其内部架构不由 AScout 预先固定，具体能力可以通过进程、Overlay、容器或虚拟机组合。（`../architecture.md` §1；`runtime.md`）
 
 ## 实体
@@ -93,7 +93,7 @@
 - **Ledger**：异步旁路记录控制面运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），唯一保存观察事件日志并提供状态事件集及按序号补发的只读接口，用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期，不要求据观察日志恢复整棵树。（`control-plane.md` §2.6；`speculation-contract.md` §3）
 - **ASC-Proxy**：Agent 接入侧与控制面之间的受管通信代理，负责会话、身份确认以及 request、fact、result 和 event 的双向传递；不拥有全局控制状态。（`agent-integration.md` §2.2）
 - **Interposer**：Agent 接入侧统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 求值和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）
-- **Agent Control Gateway**：控制面面向 Agent 接入侧的受管通信边界；管理 Task 启动、Agent 接入侧会话、已编译的本地 Decision、本地 Decision 结果、decision log 与受管控制请求的双向传递。Runtime 创建 Branch 执行环境后，它在该环境内创建并启动 Agent 接入侧；除通信会话所需的暂时状态外，不持有控制面或 Runtime 的权威状态。（`control-plane.md` §2.1）
+- **Gateway**：控制面面向 Agent 接入侧、UI 与 Runtime 的统一受管通信边界；负责连接／会话管理、入口格式／身份／上下文／权限检查、消息转交和交付。不拥有 Tree、Policy 或投机编排；消息对投机执行的变化由相应控制逻辑决定。（`control-plane.md` §2.1）
 
 ## 状态与生命周期
 

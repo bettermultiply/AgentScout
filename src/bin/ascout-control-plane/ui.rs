@@ -4,7 +4,8 @@ use ascout::control_plane::agent_control::{
 };
 use ascout::control_plane::ledger::{Ledger, LedgerReader};
 use ascout::control_plane::observation::{ObservationContent, StateEventSet};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+pub use ascout::control_plane::gateway::ui::Request;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io;
@@ -133,15 +134,6 @@ pub fn run_view(set: StateEventSet) -> AScoutRunView {
     view
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Request {
-    Model { model: String },
-    Prompt { prompt: String },
-    Interrupt,
-    Shutdown,
-}
-
 #[derive(Clone)]
 pub struct Interface {
     input_status: Arc<Mutex<Value>>,
@@ -151,14 +143,12 @@ pub struct Interface {
     /// `ActionStarted.name`，没有 ActionStarted 时两者都不存在。
     action_starts: Arc<Mutex<BTreeMap<(String, String), (u64, String)>>>,
     reader: LedgerReader,
-    requests: Arc<dyn Fn(Request) -> Result<(), String> + Send + Sync>,
 }
 
 impl Interface {
     pub fn new(
         task_id: String,
         reader: LedgerReader,
-        requests: impl Fn(Request) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
         Self {
             input_status: Arc::new(Mutex::new(serde_json::json!({"sequence":0,"ready":false,"error":null}))),
@@ -166,7 +156,6 @@ impl Interface {
             conversations: Default::default(),
             action_starts: Default::default(),
             reader,
-            requests: Arc::new(requests),
         }
     }
     pub fn conversation(&self, branch: &str) -> Option<Conversation> {
@@ -182,12 +171,6 @@ impl Interface {
         conversation.role = branch.role;
         conversation.status = branch.status;
         Some(conversation)
-    }
-    pub fn request(&self, request: Request) -> Result<(), String> {
-        if !self.reader.connected() {
-            return Err("Control plane disconnected".into());
-        }
-        (self.requests)(request)
     }
     pub fn input_status(&self) -> Value {
         self.input_status.lock().unwrap().clone()
@@ -355,4 +338,15 @@ impl Interface {
         }
         Ok(())
     }
+}
+
+impl ascout::control_plane::gateway::ui::Presentation for Interface {
+    fn input_status(&self) -> Value {
+        self.input_status()
+    }
+
+    fn conversation(&self, branch: &str) -> Option<Value> {
+        self.conversation(branch).map(|value| serde_json::to_value(value).unwrap())
+    }
+
 }

@@ -1,18 +1,17 @@
-//! Loopback-only browser transport. Observation reads go directly to Ledger.
-use super::ui::{Interface, Request};
-use ascout::control_plane::ledger::LedgerReader;
+//! Loopback-only HTTP/SSE ingress and delivery. Ledger remains the fact owner.
+use super::{Assets, Connection, Presentation, Request};
+use crate::control_plane::ledger::LedgerReader;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
-// Generate webui/dist with `npm run build` in webui before `cargo build`.
-// These build artifacts are embedded here but are not committed to the repository.
-const INDEX_HTML: &[u8] = include_bytes!("../../../webui/dist/index.html");
-const APP_JS: &[u8] = include_bytes!("../../../webui/dist/assets/app.js");
-const APP_CSS: &[u8] = include_bytes!("../../../webui/dist/assets/app.css");
-const FAVICON_SVG: &[u8] = include_bytes!("../../../webui/dist/favicon.svg");
-
-pub fn start(address: &str, interface: Interface, reader: LedgerReader) -> io::Result<()> {
+pub fn start<P: Presentation + Clone + 'static>(
+    address: &str,
+    interface: P,
+    connection: Connection,
+    reader: LedgerReader,
+    assets: Assets,
+) -> io::Result<()> {
     let address: std::net::SocketAddr = address
         .parse()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -31,21 +30,24 @@ pub fn start(address: &str, interface: Interface, reader: LedgerReader) -> io::R
                 break;
             };
             let interface = interface.clone();
+            let connection = connection.clone();
             let reader = reader.clone();
             let host = address.to_string();
             std::thread::spawn(move || {
-                let _ = serve(&mut stream, &interface, &reader, &host);
+                let _ = serve(&mut stream, &interface, &connection, &reader, &host, assets);
             });
         }
     });
     Ok(())
 }
 
-fn serve(
+fn serve<P: Presentation>(
     stream: &mut TcpStream,
-    interface: &Interface,
+    interface: &P,
+    connection: &Connection,
     reader: &LedgerReader,
     host: &str,
+    assets: Assets,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -82,23 +84,32 @@ fn serve(
         return reply(stream, "403 Forbidden", "text/plain", b"Invalid host");
     }
     match fields.as_slice() {
-        ["GET", "/", _] | ["GET", "/index.html", _] | ["GET", "/map", _] => {
-            reply(stream, "200 OK", "text/html; charset=utf-8", INDEX_HTML)
-        }
-        ["GET", "/assets/app.js", _] => {
-            reply(stream, "200 OK", "text/javascript; charset=utf-8", APP_JS)
-        }
+        ["GET", "/", _] | ["GET", "/index.html", _] | ["GET", "/map", _] => reply(
+            stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            assets.index_html,
+        ),
+        ["GET", "/assets/app.js", _] => reply(
+            stream,
+            "200 OK",
+            "text/javascript; charset=utf-8",
+            assets.app_js,
+        ),
         ["GET", "/assets/app.css", _] => {
-            reply(stream, "200 OK", "text/css; charset=utf-8", APP_CSS)
+            reply(stream, "200 OK", "text/css; charset=utf-8", assets.app_css)
         }
-        ["GET", "/favicon.svg", _] => reply(stream, "200 OK", "image/svg+xml", FAVICON_SVG),
+        ["GET", "/favicon.svg", _] => reply(stream, "200 OK", "image/svg+xml", assets.favicon_svg),
         ["GET", "/api/observation/state-event-set", _] => {
             let body = serde_json::to_vec(&reader.state_event_set())?;
             reply(stream, "200 OK", "application/json", &body)
         }
-        ["GET", "/api/input-status", _] => {
-            reply(stream, "200 OK", "application/json", &serde_json::to_vec(&interface.input_status())?)
-        }
+        ["GET", "/api/input-status", _] => reply(
+            stream,
+            "200 OK",
+            "application/json",
+            &serde_json::to_vec(&interface.input_status())?,
+        ),
         ["GET", path, _] if path.starts_with("/api/observation/events") => {
             let (path, query) = path.split_once('?').unwrap_or((path, ""));
             if path != "/api/observation/events" {
@@ -207,7 +218,7 @@ fn serve(
                 Ok(Request::Prompt { ref prompt }) if prompt.trim().is_empty() => {
                     reply(stream, "400 Bad Request", "text/plain", b"Prompt is empty")
                 }
-                Ok(request) => match interface.request(request) {
+                Ok(request) => match connection.request(request) {
                     Ok(()) => reply(
                         stream,
                         "202 Accepted",

@@ -250,15 +250,15 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 ## D-038：ASC-Proxy 作为 Agent-facing context boundary
 
-**选择**：CLI/library 不直接向 Agent Control Gateway 发送请求，而是先调用当前 Agent 接入侧提供的 ASC-Proxy。ASC-Proxy 通过自身绑定的 AScoutAgent/Branch context 隐藏当前身份，并将 resolved typed request 转交给 Agent Control Gateway。
+**选择**：CLI/library 不直接向 Gateway 发送请求，而是先调用当前 Agent 接入侧提供的 ASC-Proxy。ASC-Proxy 通过自身绑定的 AScoutAgent/Branch context 隐藏当前身份，并将 resolved typed request 转交给 Gateway。
 
-**Agent Control Gateway 边界**：Agent Control Gateway 不从 caller context 重新解析 AScoutAgent、Branch 或 capability，也不直接接触 Runtime。它接收 ASC-Proxy 已解析的请求并交给控制面中的相应组件；控制面拥有 AScoutAgent/Branch metadata，并负责后续 lifecycle orchestration 与 Runtime 交互。Runtime 创建 Branch 执行环境后，Agent Control Gateway 在该环境内创建并启动 Agent 接入侧，形成完整的 Branch Root 执行承载。
+**Gateway 边界**：Gateway 对 ASC-Proxy 已解析的 AScoutAgent、Branch 和 capability 做入口检查，不替代 ASC-Proxy 解析本地 caller context。它统一承接 Agent 接入侧、UI 与 Runtime 的通信，负责接入、消息分发与送达；消息对投机执行的变化由相应控制逻辑决定。控制面拥有 AScoutAgent/Branch metadata，并负责 lifecycle orchestration；Runtime 负责实际启动 Agent 接入侧。
 
 **运输约束**：ASC-Proxy 的具体 transport 不属于 AScout 语义。它可以由进程内组件、本地 IPC 客户端、网络客户端或独立进程实现；wire format、端口数值和 client/server 部署细节属于实现决策，不能改变 Agent-facing operation semantics。
 
 **范围**：当前 AScoutAgent 只表示控制面 Speculative Tree metadata；Runtime connection 与受管启动 handshake 留待后续议题。
 
-**原因**：把上下文隐藏和本地调用入口收敛到 ASC-Proxy，可以让 CLI/library 使用稳定的无身份请求，同时保持 Agent Control Gateway 的统一通信边界，并将控制面与 Runtime 的状态责任分开。
+**原因**：把上下文隐藏和本地调用入口收敛到 ASC-Proxy，可以让 CLI/library 使用稳定的无身份请求，同时保持 Gateway 的统一通信边界，并将控制面与 Runtime 的状态责任分开。
 
 ## D-039：接入侧、控制面与 Runtime
 
@@ -266,7 +266,7 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **Agent 接入侧**：包含 Agent/product，以及 Interposer、ASC-Proxy 和 Product Integration 等接入职责。它绑定或承载调用上下文，管理 Session、执行实体和本地操作归属；Agent 或 resolver 仍可在授权范围内作 lifecycle 决定。该侧不拥有 AScout 全局控制状态，也不绕过 Runtime 的环境和效果边界。
 
-**控制面**：包含 Agent Control Gateway、Policy Engine、Speculation Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、Policy、请求校验、操作编排和 Runtime event 解释。效果处理由 Runtime 内部的 Effect Coordinator 等机制落实，控制面保存全局裁决和对齐所需的事实。
+**控制面**：包含 Gateway、Policy Engine、Speculation Coordinator 与 Ledger，拥有 AScoutAgent、Speculative Tree 控制状态、Policy、请求校验、操作编排和 Runtime event 解释。Gateway 统一承接 Agent 接入侧、UI 与 Runtime 的通信，Registry 属于 Runtime。效果处理由 Runtime 内部的 Effect Coordinator 等机制落实，控制面保存全局裁决和对齐所需的事实。
 
 **Runtime Adapter**：位于控制面与 Runtime 之间，是 Runtime 的接入边界。它按稳定、typed、可版本化的 operation/event 契约呈现能力、结果和事件；具体映射、原语和 transport 由实现决定。它不向控制面呈现第二份长期权威状态，也不能改变 Runtime 的语义。
 

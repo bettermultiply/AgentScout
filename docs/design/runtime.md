@@ -4,7 +4,13 @@
 
 Runtime 是 AScout 用来承载 Agent 一步动作的受约束执行系统。一步动作可以是一次模型推理或一次工具调用。它不是替 Agent 决定如何推理，也不只是把命令运行起来，而是提供动作正常、正确运行所需的条件，并把动作对真实世界或 Authority 的影响限制在允许范围内。投机动作通常不应直接影响真实世界；具体允许哪些影响，必须遵守任务要求和既定的效果约束。
 
-Runtime 面向一般投机执行，不专门为 NLE 或某个 Agent 产品设计，也不等同于虚拟机。AScout 自身支持一套 Runtime；Runtime Adapter、Effect Coordinator、环境、进程与资源管理都属于这个整体中的接入或实现职责，而不是几套平级系统。适配外部执行机制是为了便于接入，不意味着 AScout 只有适配器而没有自己的 Runtime。
+Runtime 面向一般投机执行，不专门为 NLE 或某个 Agent 产品设计，也不等同于虚拟机。AScout 自身支持一套 Runtime；Runtime Adapter、Adapter Registry、Effect Coordinator、环境、进程与资源管理都属于这个整体中的接入或实现职责，而不是几套平级系统。适配外部执行机制是为了便于接入，不意味着 AScout 只有适配器而没有自己的 Runtime。Runtime 经 Gateway 与控制面通信，语义边界仍由 Runtime Adapter 契约规定；实际启动、监视和回收 Agent 与接入进程由 Runtime 负责。
+
+## Adapter Registry
+
+Adapter Registry（简称 Registry）属于 Runtime，负责 Adapter 登记、契约兼容性和能力声明校验，维护接入状态、契约版本、声明快照与验证结果。它自主建立验证环境、执行验证场景并观察结果，生成可复核的验证状态与独立证据；Adapter 提供接入信息，不得自行填写验证状态、验证证据，或以自测结果代替 Registry 验证。接入验证为主要证明手段，运行期验证用于发现遗漏与偏差。
+
+Registry 向控制面提供带验证状态的能力视图，Policy Engine 据此检查 Policy 要求；Registry 不拥有 Tree、Branch 生命周期或 Runtime 执行状态，也不编排投机活动。能力降级、未验证范围与验证失败的处理遵守 [Runtime Adapter 契约](runtime-adapter-contract.md)，不因 Registry 属于 Runtime 而放宽证明要求。
 
 ## 状态与接入侧
 

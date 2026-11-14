@@ -84,7 +84,7 @@ Tree 的 insert_branch、change_status、change_authority、record_runtime_state
 
 Ledger 复用 events.jsonl：观察事件记录为 {message: "observation", observation: 公共事件}，与 record 的原始事实和 archive_branch 的归档记录区分。采用同一文件便于一并检查控制事实和观察事实，保留 record / archive_branch 的职责；不逐次保存完整树，不承诺完整 Tree 崩溃恢复。Promote 与消息引用可以提供有限消息定位依据，但恢复工具尚未实现。append_observation 在追加时分配连续序号；文件写入失败仍保留内存事件并返回错误，报告历史不完整，不承诺部分文件写入回滚。
 
-Ledger::reader 返回只读 LedgerReader；Ledger 和句柄均提供 state_event_set、events_after。web.rs / tui.rs 直接接收该句柄，不经 Interface 转交事件。内存有序历史用不可变 Arc 链保存，读取只在短锁内复制末端句柄和序号，遍历、复制和折叠均在锁外；追加不等待完整历史读取。events_after 在同一个序号锁和 Condvar 上检查并等待新事件，追加和断开事件唤醒所有等待连接。销毁历史采用迭代释放，避免长链递归释放栈溢出。
+Ledger::reader 返回只读 LedgerReader；Ledger 和句柄均提供 state_event_set、events_after。Gateway HTTP 与 TUI 直接接收该句柄，不经 Interface 转交事件。内存有序历史用不可变 Arc 链保存，读取只在短锁内复制末端句柄和序号，遍历、复制和折叠均在锁外；追加不等待完整历史读取。events_after 在同一个序号锁和 Condvar 上检查并等待新事件，追加和断开事件唤醒所有等待连接。销毁历史采用迭代释放，避免长链递归释放栈溢出。
 
 日志包含完整运行前缀，不截断；状态事件集和 TUI 按事件折叠，尚未优化长运行的折叠与内存成本，也未实现折叠后的缓存状态。序号范围是单次控制面进程运行，重启后需重新取得状态事件集，不支持跨重启续传。归档不删除观察历史或权威 session 文件中的消息旁支。
 

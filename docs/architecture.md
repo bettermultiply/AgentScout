@@ -18,9 +18,9 @@ AScout 的完整调用路径涉及 Agent 接入侧、控制面和 Runtime。控�
 
 Agent 接入侧围绕一组 Agent 进程及其执行活动提供本地管理。Branch 为执行活动提供逻辑归属，Agent 接入侧为每个 Branch 承载独立的本地管理上下文；控制面通过接入侧获取 Agent 行为事实、发出控制命令，并协调 Branch 与 Instance 的全局状态。多个 Branch 可以在共享执行环境和接入侧承载中共存，Branch 建立独立环境后，其管理上下文随执行活动进入相应环境。
 
-控制面负责维护投机执行过程当中 Agent 的控制状态，特别是由多次投机执行组合嵌套形成的拓扑结构。同时还负责执行过程中的决策和检查，Policy 和 Adapter 都以可插拔的形式与该结构连接。这也意味着控制面还负责根据 Adapter 接入契约校验其是否符合 AScout 所要求的基本语义，并解析回传事件；加载与校验 Policy，并检查 Adapter 所声明和呈现的后端能力是否满足 Policy 需求。逻辑 Branch 可以先进入控制面视图，独立 Runtime 环境按需建立，不要求每次投机执行都立即 fork。
+控制面负责维护投机执行过程当中 Agent 的控制状态，特别是由多次投机执行组合嵌套形成的拓扑结构。同时还负责执行过程中的决策和检查，Policy 和 Adapter 都以可插拔的形式与该结构连接。Runtime 内的 Adapter Registry 负责登记、契约兼容性与能力声明校验、主动验证及独立验证证据；控制面使用其能力视图加载与校验 Policy，并解析回传事件、检查请求和实际结果是否符合控制语义。逻辑 Branch 可以先进入控制面视图，独立 Runtime 环境按需建立，不要求每次投机执行都立即 fork。
 
-控制面定义自己接受的稳定 operation/event 边界和接入条件。Runtime Adapter 依据该边界，把 Runtime 的能力映射成控制面可以使用的能力，并规范化结果与事件。Runtime 内部可以组合 Overlay、进程、容器、Firecracker、效果协调等能力；AScout 不规定这些内部模块如何组织或选择 transport，但要求接入边界如实呈现能力和限制。
+控制面定义自己接受的稳定 operation/event 边界和接入条件。Gateway 负责 Agent 接入侧、UI、控制面与 Runtime 之间的通信接入、消息分发和送达；对应侧的控制逻辑决定消息如何影响自身状态。Runtime Adapter 依据控制面边界，把 Runtime 的能力映射成控制面可以使用的能力，并规范化结果与事件。Runtime 内部可以组合 Overlay、进程、容器、Firecracker、效果协调等能力；AScout 不规定这些内部模块如何组织或选择 transport，但要求接入边界如实呈现能力和限制。
 
 Runtime 承载 Agent 的一步动作，使动作能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 负责动作所需的环境、状态派生、隔离、资源、进程和效果边界；这些能力可以按任务需要共享、复制、写时复制、重建或恢复。Agent Session 的内部管理由 Agent 接入侧负责。Agent-facing integration 组件可以部署在 Runtime 提供的环境内，其运行生命周期随该环境管理。
 
@@ -59,8 +59,8 @@ sequenceDiagram
 | 侧面 | 组件 | 状态 |
 |---|---|---|
 | Agent 接入侧 | Interposer（拦截与操作集成）、ASC-Proxy（受管控制通信）、Product Integration（产品接入） | 当前 Agent 与 Branch 的本地执行上下文 |
-| 控制面 | Agent Control Gateway、Adapter Registry、Policy Engine、Speculation Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、Adapter 接入状态 |
-| Runtime | 包含 Runtime Adapter 接入边界及所需的执行、状态派生、进程、资源、隔离和效果管理能力 | 管理实际承载和效果状态；不决定 Speculative Tree 的全局裁决，不呈现第二份 Tree 权威状态 |
+| 控制面 | Gateway、Policy Engine、Speculation Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、请求校验与投机编排；Gateway 只持有通信所需状态 |
+| Runtime | 包含 Runtime Adapter 接入边界及所需的执行、状态派生、进程、资源、隔离和效果管理能力；Registry 属于 Runtime | 管理实际承载、能力声明校验与效果状态；不决定 Speculative Tree 的全局裁决，不呈现第二份 Tree 权威状态 |
 
 特别的，ASC-Proxy、Interposer 等 Agent 接入侧组件可以运行在 Agent 执行实体当前使用的执行环境内；该环境可以是多个逻辑 Branch 暂时共享的执行环境，也可以是 Runtime 为某个 Branch 建立的独立环境。
 

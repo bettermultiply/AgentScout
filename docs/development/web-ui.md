@@ -8,7 +8,7 @@
 
 - React 19 + TypeScript，React Flow 绘制投机树，Zustand 保存观察状态。
 - Vite 构建；源码位于仓库根目录 `webui/`。前端构建需要 Node 22.12 或更新的版本（当前验证使用 Node 26）。
-- 构建产物位于 `webui/dist/`，不提交到仓库，由 `src/bin/ascout-control-plane/web.rs` 用 `include_bytes!` 嵌入 Rust 二进制。`cargo build` 不会自动启动前端工具链，必须先手动构建前端。
+- 构建产物位于 `webui/dist/`，不提交到仓库，由 `src/bin/ascout-control-plane.rs` 用 `include_bytes!` 嵌入 Rust 二进制，交给 Gateway HTTP 入口提供。`cargo build` 不会自动启动前端工具链，必须先手动构建前端。
 - `webui/dist/index.html`、`webui/dist/assets/app.js`、`webui/dist/assets/app.css` 与 `webui/dist/favicon.svg` 是嵌入入口；控制面按固定路径提供它们。
 
 ### 生产构建

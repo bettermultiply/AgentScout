@@ -1,12 +1,12 @@
 # Runtime Adapter 契约设计
 
-本文定义 Runtime 与 AScout 控制面之间的正式接入契约。Runtime Adapter 是这条接入边界的实现，负责呈现 Runtime 的环境语义、操作身份与顺序、能力声明、Registry 校验以及环境操作的结果和事件。本文不把 Adapter 视作独立于 Runtime 的另一套运行系统。
+本文定义 Runtime 与 AScout 控制面之间的正式接入契约。Runtime Adapter 是这条接入边界的实现，负责呈现 Runtime 的环境语义、操作身份与顺序、能力声明、Registry 校验结果以及环境操作的结果和事件。Adapter Registry 属于 Runtime，独立承担本契约规定的校验和验证证据生成；Adapter 不自行证明其声明成立。本文不把 Adapter 视作独立于 Runtime 的另一套运行系统。
 
 ## 1. 契约边界
 
 Runtime 的操作开始、操作结果和环境状态变化是 Runtime 自身的事实，按 request/environment identity 关联；资源、剩余资源与后续清理要求随结果报告。接收请求不等于开始，开始不等于完成，控制面等待超时也不等于 Runtime 已取消。Agent action 结果或 Agent Adapter 命令回执不能代替这些事实，Runtime 结果同样不能代替 Agent session 已释放或 Tree 已完成权威切换。
 
-Runtime Adapter 连接控制面与 Runtime。控制面通过 Adapter 发出环境操作，Adapter 将其映射到 Runtime，并把结果和事件规范化返回。契约的核心是 Runtime 提供的承载能力：环境建立、环境内操作、静止、恢复、终止和清理，以及这些操作对不同环境内容形成的隔离和效果保证；环境派生是可选能力，不是所有任务或 Runtime 的前提。
+Runtime Adapter 连接控制面与 Runtime。控制面经 Gateway 按 Adapter 契约发出环境操作，Adapter 将其映射到 Runtime，并把结果和事件规范化返回；Gateway 负责通信接入、消息分发和送达，不代替 Adapter 的语义映射或 Registry 的验证。契约的核心是 Runtime 提供的承载能力：环境建立、环境内操作、静止、恢复、终止和清理，以及这些操作对不同环境内容形成的隔离和效果保证；环境派生是可选能力，不是所有任务或 Runtime 的前提。
 
 Adapter 可以使用 Runtime 原生隔离、权限控制、代理、拦截或拒绝来兑现声明。Registry 检查的是 Adapter 在边界上呈现的最终环境保证，不检查某一种内部实现。
 
@@ -267,12 +267,13 @@ Registry 将最终 `CapabilityView` 提供给 Policy Engine。Policy Engine 依�
 
 Adapter 配置在运行期不允许变化。若 Registry 或运行期证据发现当前 Runtime 行为与 Adapter 声明不符，不能继续沿用旧能力视图。
 
-控制面将 Adapter 降级到已经验证且仍然成立的范围，并让全部任务使用这个降级后的能力范围。依赖失效能力的投机活动停止并清理；不依赖失效能力的活动可以继续。Policy Engine 和后续新任务只能使用降级后的能力视图。
+Registry 将能力视图降级到已经验证且仍然成立的范围，控制面让全部任务使用这个降级后的能力范围。控制面协调停止并清理依赖失效能力的投机活动；不依赖失效能力的活动可以继续。Policy Engine 和后续新任务只能使用降级后的能力视图。
 
 重新验证通过后，Adapter 才能恢复使用新的能力范围。重新验证不会自动恢复已经停止的投机活动，也不会把历史运行期偏差当作已不存在。
 
 ## 相关文档
 
 - [Speculation Contract](speculation-contract.md)：Policy 与 Adapter 之间的总体语义关系
-- [控制面设计](control-plane.md)：Adapter Registry 与控制面其他组件的协作
+- [Runtime 设计](runtime.md#adapter-registry)：Adapter Registry 的归属与责任
+- [控制面设计](control-plane.md)：控制面如何使用 Registry 的能力事实
 - [Runtime Adapter 接入指南](../development/runtime-adapter.md)：Adapter 作者的实现与接入方法

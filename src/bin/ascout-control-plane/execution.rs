@@ -2,10 +2,11 @@ use super::*;
 use ascout::control_plane::agent_control::AgentController;
 use ascout::control_plane::coordination::{ControlActions, ControlResult};
 use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::Ordering;
 
 pub enum Event {
-    Agent(io::Result<Option<AgentWireMessage>>),
+    Agent(io::Result<Option<AgentMessage>>),
     Request(ui::Request),
     Completed(u64, Result<ControlResult, String>),
     Timer,
@@ -13,7 +14,7 @@ pub enum Event {
 
 struct Task<'a> {
     tree: &'a mut SpeculativeTree,
-    stream: &'a mut UnixStream,
+    connection: &'a mut agent::Connection,
     interface: &'a ui::Interface,
     capabilities: &'a RuntimeCapabilities,
     ledger: &'a mut Ledger,
@@ -108,9 +109,6 @@ impl Task<'_> {
                             "Agent disconnected; cleanup is not confirmed",
                         ))
                     };
-                };
-                let AgentWireMessage::Message(message) = message else {
-                    return Err(io::Error::other("Agent sent a control-plane command"));
                 };
                 match &message {
                     AgentMessage::TurnFailed {branch_id,reason,..} => {
@@ -218,10 +216,10 @@ impl Task<'_> {
 }
 
 pub fn run(
-    stream: &mut UnixStream,
+    connection: &mut agent::Connection,
     tree: &mut SpeculativeTree,
     policy: &CompiledPolicy,
-    runtime: &ControlSession,
+    runtime: &dyn Runtime,
     capabilities: &RuntimeCapabilities,
     interface: &ui::Interface,
     ledger: &mut Ledger,
@@ -230,15 +228,15 @@ pub fn run(
     resume_model: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (events, receiver) = channel;
-    let mut reader = stream.try_clone()?;
-    let close_reader = stream.try_clone()?;
+    let sender = events.clone();
+    connection.receive(move |message| sender.send(Event::Agent(message)).is_ok())?;
     let (mut signal_reader, mut signal_writer) = UnixStream::pair()?;
     signal_writer.set_nonblocking(true)?;
     use std::os::fd::AsRawFd;
     SIGNAL_FD.store(signal_writer.as_raw_fd(), Ordering::Relaxed);
     let mut task = Task {
         tree,
-        stream,
+        connection,
         interface,
         capabilities,
         ledger,
@@ -256,16 +254,6 @@ pub fn run(
         input_error: None,
     };
     let result = thread::scope(|scope| {
-        let sender = events.clone();
-        scope.spawn(move || {
-            loop {
-                let message = transport::read_message(&mut reader);
-                let done = !matches!(message, Ok(Some(_)));
-                if sender.send(Event::Agent(message)).is_err() || done {
-                    break;
-                }
-            }
-        });
         let sender = events.clone();
         scope.spawn(move || {
             let mut byte = [0];
@@ -317,7 +305,7 @@ pub fn run(
                 }
                 task.publish()?;
                 for command in actions.commands {
-                    send(task.stream, command)?;
+                    task.connection.send(command)?;
                 }
                 for record in actions.records {
                     task.record(record)?;
@@ -342,7 +330,7 @@ pub fn run(
                 if task.tree.recovering && task.suspended && !task.save_requested
                     && !task.tree.pending_work() && !task.tree.recovery_pending_commands() {
                     task.save_requested=true;
-                    send(task.stream,AgentCommand::Save {branch_id:task.tree.authority_branch_id.clone().unwrap_or_default(),path:task.recovery_path.clone()})?;
+                    task.connection.send(AgentCommand::Save {branch_id:task.tree.authority_branch_id.clone().unwrap_or_default(),path:task.recovery_path.clone()})?;
                 }
                 if task.saved && !task.draining && !task.tree.pending_work() {
                     let save_result=(||->io::Result<()> {
@@ -355,11 +343,11 @@ pub fn run(
                     if let Err(error)=save_result {
                         task.notice=format!("Save failed; execution retained: {error}");
                         task.saved=false;
-                        send(task.stream,AgentCommand::CancelSave {branch_id:task.tree.authority_branch_id.clone().unwrap_or_default()})?;
+                        task.connection.send(AgentCommand::CancelSave {branch_id:task.tree.authority_branch_id.clone().unwrap_or_default()})?;
                         task.tree.recovering=true;
                         task.loaded=true;
                     } else {
-                        task.stream.shutdown(std::net::Shutdown::Write)?;
+                        task.connection.finish()?;
                         task.draining=true;
                     }
                 }
@@ -378,7 +366,7 @@ pub fn run(
                     && !task.tree.cleanup_pending()?
                     && !task.tree.pending_work()
                 {
-                    task.stream.shutdown(std::net::Shutdown::Write)?;
+                    task.connection.finish()?;
                     task.draining = true;
                 }
                 if !task.notice.starts_with("Save failed") && !task.notice.starts_with("Turn failed") && !task.notice.starts_with("Model ") {task.notice = if task.tree.is_stopping() {
@@ -395,7 +383,7 @@ pub fn run(
         })();
         SIGNAL_FD.store(-1, Ordering::Relaxed);
         let _ = signal_writer.write(&[0]);
-        let _ = close_reader.shutdown(std::net::Shutdown::Read);
+        task.connection.stop_receiving();
         result
     });
     task.flush_observations()?;
@@ -421,4 +409,41 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Operation interpretation stays with control logic, not Gateway transport.
+pub(super) fn runtime_call(
+    runtime: &dyn Runtime,
+    environment: &str,
+    operation: Operation,
+) -> Result<ascout::protocol::contract::OperationResult, Box<dyn std::error::Error>> {
+    let result = runtime.call(environment, operation)?;
+    if result.status != ascout::protocol::contract::ResultStatus::Completed {
+        return Err(format!("Runtime request failed: {:?}", result.reason).into());
+    }
+    Ok(result)
+}
+
+pub(super) fn runtime_cleanup(
+    runtime: &dyn Runtime,
+    capabilities: &RuntimeCapabilities,
+    branch: &str,
+    tree: &mut SpeculativeTree,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if capabilities.shared_environment {
+        return Ok(());
+    }
+    use ascout::control_plane::agent_control::RuntimeExecutionState;
+    tree.record_runtime_state(branch, RuntimeExecutionState::TerminationRequested)?;
+    if let Err(error) = runtime_call(runtime, branch, Operation::TerminateEnvironment) {
+        tree.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
+        return Err(error);
+    }
+    tree.record_runtime_state(branch, RuntimeExecutionState::Terminated)?;
+    if let Err(error) = runtime_call(runtime, branch, Operation::CleanupEnvironment) {
+        tree.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
+        return Err(error);
+    }
+    tree.record_runtime_state(branch, RuntimeExecutionState::Cleaned)?;
+    Ok(())
 }

@@ -19,7 +19,7 @@ use crate::control_plane::agent_control::{
     RuntimeExecutionState, SpeculativeTree,
 };
 use crate::protocol::contract::{Operation, RuntimeCapabilities};
-use crate::control_plane::session::ControlSession;
+use crate::control_plane::gateway::runtime::Runtime;
 use crate::control_plane::policy::{CompiledPolicy, Decision, PolicyEngine};
 
 /// 一个 Chance 的等待点：权威 Branch 在哪个 operation 上等待哪个工具结果。

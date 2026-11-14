@@ -395,7 +395,7 @@ ASCOUT_RUNTIME_CONFIG=nle-runtime.json \
 
 `src/bin/ascout-control-plane/execution.rs` 接收 Agent 消息、UI 请求、操作返回及到期检查，同一 task 顺序处理。运行期间不再每 100 毫秒轮询；等待使用树给出的最近期限，期限到达才触发检查。Policy 与 Runtime 操作在工作线程完成，不阻塞控制事件处理。读取树的副本仅用于一次异步求值，不成为另一份可变控制状态。取消、结束或状态变化后，返回结果重新检查有效性；仍有环境操作在进行的 Branch 不得提前归档或清理。
 
-Gateway 是否覆盖 UI 与 Runtime 尚未确定；当前保留各自的通信边界，UI 通过请求回调投递事件。
+Gateway 的 Agent socket、UI HTTP/SSE 和 Runtime ControlSession 通信代码已统一归入 `src/control_plane/gateway/`。协调逻辑依赖类型化 Runtime 操作／结果接口，UI 绘制与对话折叠、Ledger 保存、Tree 转换仍在原责任处；详情、验证及剩余缺口见 [Gateway 实现核查](gateway.md)。本轮保持既有传输和进程部署，不决定未来 transport、UI 部署方式或启动协调归属；Gateway 不承担 Tree、Policy 或投机编排。
 
 验证结果和支持边界见本轮验收记录；脚本 Agent／Runtime 替身验证控制路径，不代表真实模型或 NLE 的端到端效果。完整 Policy 调度、嵌套与 Registry 能力验证仍属既有后续范围。
 

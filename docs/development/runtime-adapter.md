@@ -1,6 +1,6 @@
 # Runtime Adapter 接入指南
 
-本文面向 Runtime 接入实现作者，说明如何准备能力声明、实现环境操作、参加 Registry 验证、完成注册并处理运行期偏差。Runtime Adapter 是 Runtime 与控制面之间的接入边界；正式语义和接入条件见 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)。
+本文面向 Runtime 接入实现作者，说明如何准备能力声明、实现环境操作、参加 Registry 验证、完成注册并处理运行期偏差。Runtime Adapter 与 Registry 都属于 Runtime：前者呈现接入契约，后者独立校验能力并生成验证证据。正式语义和接入条件见 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)。Agent socket、UI HTTP/SSE 与 Runtime ControlSession 已归入 `src/control_plane/gateway/`；现有通信检查不等于通用认证授权或 Registry 验证已经完成。实现与验证边界见 [Gateway 实现核查](gateway.md)。
 
 ## 1. 接入边界
 
@@ -116,7 +116,7 @@ Adapter 配置注册后不得在运行期变化。若发现 Runtime 实际行为
 
 ## 5. 运行期偏差
 
-运行期验证是接入验证的兜底，不是替代。发现声明与实际行为不符时，控制面会把 Adapter 降级到仍然成立的能力范围；全部任务使用降级后的范围，依赖失效能力的投机活动停止并清理，不依赖的活动可以继续。重新验证通过后才能恢复新的能力范围。
+运行期验证是接入验证的兜底，不是替代。发现声明与实际行为不符时，Registry 将能力视图降级到仍然经过验证的范围；控制面让全部任务使用降级后的范围，协调停止并清理依赖失效能力的投机活动，不依赖的活动可以继续。重新验证通过后才能恢复新的能力范围。
 
 ## 6. 实现方向与当前代码
 
@@ -145,6 +145,7 @@ Adapter 配置注册后不得在运行期变化。若发现 Runtime 实际行为
 ## 相关文档
 
 - [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)：正式接入契约
-- [控制面设计](../design/control-plane.md)：Adapter Registry 与控制面协作
+- [Runtime 设计](../design/runtime.md#adapter-registry)：Registry 的职责与独立验证边界
+- [控制面设计](../design/control-plane.md)：控制面使用 Registry 的能力事实
 - [Agent 接入侧设计](../design/agent-integration.md)：环境内 Agent 接入侧的责任
 - [效果管理设计](../design/effect-management.md)：Runtime 的环境与效果处理责任

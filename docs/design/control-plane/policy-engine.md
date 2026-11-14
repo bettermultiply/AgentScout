@@ -76,14 +76,14 @@ Policy Engine 返回的只是本次 Policy Decision，不是已经完成的状�
 
 ## 4. 跨侧运行与组件边界
 
-Policy Engine 编译全部 Decision。控制面需要作出决定时，直接调用 Policy Engine；Agent 接入侧需要作出决定时，控制面查询对应的编译结果并经 Agent Control Gateway 交付，接入侧按相同语义求值。接入侧不能自行加载、编译或修改 Policy。
+Policy Engine 编译全部 Decision。控制面需要作出决定时，直接调用 Policy Engine；Agent 接入侧需要作出决定时，控制面查询对应的编译结果并经 Gateway 交付，接入侧按相同语义求值。接入侧不能自行加载、编译或修改 Policy。
 
 各组件围绕这两项职责与 Policy Engine 协作：
 
 - **Speculation Coordinator** 为相关 Decision 提供输入，并落实本次 Policy Decision。
-- **Adapter Registry** 提供 Runtime Adapter 的能力信息和验证状态，作为 Policy 编译时的约束依据。
+- **Adapter Registry** 属于 Runtime，提供 Runtime Adapter 的能力信息和验证状态，作为 Policy 编译时的约束依据。
 - **Effect Coordinator** 提供 `effect` Decision 所需的事实，并落实其返回的效果处理选择。
-- **Agent Control Gateway** 交付编译结果、端侧 Decision 结果和执行记录；Policy Engine 不拥有通信会话或传输状态。
+- **Gateway** 交付编译结果、端侧 Decision 结果和执行记录；Policy Engine 不拥有通信会话或传输状态。
 - **Agent 接入侧** 对控制面交付的 Decision 以相同语义求值，并返回结果和执行记录。
 
 ## 相关文档

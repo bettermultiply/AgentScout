@@ -1,7 +1,5 @@
-//! 控制面侧的最小实现：接入会话（Registry 的位置）和请求客户端。
-//!
-//! 首版只有会话、登记和请求收发；能力声明、验证和目录留到后面的里程碑。
-//! 发操作、收结果和事件由控制面的协调侧使用，不属于 Registry 的职责。
+//! Gateway 的 Runtime 接入：握手、请求关联、结果及事件送达。
+//! 不拥有 Runtime 状态或 Registry 的能力验证责任。
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -23,6 +21,28 @@ use crate::protocol::transport;
 const RESULT_WINDOW: usize = 256;
 /// 未消费事件的有界窗口；事件是通知而不是历史记录。
 const EVENT_WINDOW: usize = 4096;
+
+/// Typed Runtime operation delivery used by coordination, independent of transport.
+pub trait Runtime: Sync {
+    fn call(&self, environment_id: &str, operation: Operation) -> io::Result<OperationResult>;
+    fn drain_events(&self) -> Vec<Event>;
+}
+
+impl Runtime for ControlSession {
+    fn call(&self, environment_id: &str, operation: Operation) -> io::Result<OperationResult> {
+        ControlSession::call(self, environment_id, operation)
+    }
+
+    fn drain_events(&self) -> Vec<Event> {
+        ControlSession::drain_events(self)
+    }
+}
+
+impl Drop for ControlSession {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
 
 #[derive(Default)]
 struct ResultStore {
@@ -59,10 +79,7 @@ impl ControlServer {
                 if !metadata.file_type().is_socket() {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
-                        format!(
-                            "refusing to remove non-socket path {}",
-                            path.display()
-                        ),
+                        format!("refusing to remove non-socket path {}", path.display()),
                     ));
                 }
                 std::fs::remove_file(path)?;
@@ -130,9 +147,7 @@ impl ControlSession {
                 let message = match transport::read_message::<_, AdapterMessage>(&mut reader) {
                     Ok(message) => message,
                     Err(error) => {
-                        eprintln!(
-                            "control plane: failed to read Adapter message: {error}"
-                        );
+                        eprintln!("control plane: failed to read Adapter message: {error}");
                         break;
                     }
                 };
@@ -200,32 +215,13 @@ impl ControlSession {
         environment_id: &str,
         operation: Operation,
     ) -> io::Result<()> {
-        self.send_with_context(
-            request_id,
-            environment_id,
-            None,
-            Some(environment_id),
-            operation,
-        )
-    }
-
-    /// 发送带有任务和逻辑 Branch 上下文的请求。旧调用方继续使用
-    /// [`send`]，因此不会改变既有控制协议的最小用法。
-    pub fn send_with_context(
-        &self,
-        request_id: &str,
-        environment_id: &str,
-        task_id: Option<&str>,
-        branch_id: Option<&str>,
-        operation: Operation,
-    ) -> io::Result<()> {
         let message = ControlMessage::Request(OperationRequest {
             request_id: request_id.to_string(),
             generation: 0,
             environment_id: environment_id.to_string(),
             operation,
-            task_id: task_id.map(str::to_string),
-            branch_id: branch_id.map(str::to_string),
+            task_id: None,
+            branch_id: Some(environment_id.to_string()),
         });
         let mut writer = self.writer.lock().unwrap();
         transport::write_message(&mut *writer, &message)
@@ -238,24 +234,7 @@ impl ControlSession {
         environment_id: &str,
         operation: Operation,
     ) -> io::Result<OperationResult> {
-        self.call_with_context(
-            request_id,
-            environment_id,
-            None,
-            Some(environment_id),
-            operation,
-        )
-    }
-
-    pub fn call_with_context(
-        &self,
-        request_id: &str,
-        environment_id: &str,
-        task_id: Option<&str>,
-        branch_id: Option<&str>,
-        operation: Operation,
-    ) -> io::Result<OperationResult> {
-        self.send_with_context(request_id, environment_id, task_id, branch_id, operation)?;
+        self.send(request_id, environment_id, operation)?;
         self.wait_result(request_id, Duration::from_secs(30))
             .ok_or_else(|| {
                 io::Error::new(
@@ -276,7 +255,7 @@ impl ControlSession {
         let mut results = self.results.0.lock().unwrap();
         loop {
             if let Some(result) = results.get(request_id) {
-                return Some(result.clone());
+                return Some(result);
             }
             let now = Instant::now();
             if now >= deadline {
@@ -377,11 +356,8 @@ mod tests {
         let (session, mut client) = session_pair();
         for index in 0..(RESULT_WINDOW + 8) {
             let request_id = format!("request-{index}");
-            transport::write_message(
-                &mut client,
-                &AdapterMessage::Result(result(&request_id)),
-            )
-            .unwrap();
+            transport::write_message(&mut client, &AdapterMessage::Result(result(&request_id)))
+                .unwrap();
         }
         let last = format!("request-{}", RESULT_WINDOW + 7);
         assert!(session.wait_result(&last, Duration::from_secs(5)).is_some());
@@ -409,10 +385,7 @@ mod tests {
         for _ in 0..500 {
             let ready = {
                 let events = session.events.0.lock().unwrap();
-                events
-                    .back()
-                    .and_then(|event| event.request_id.as_deref())
-                    == Some(last.as_str())
+                events.back().and_then(|event| event.request_id.as_deref()) == Some(last.as_str())
             };
             if ready {
                 break;

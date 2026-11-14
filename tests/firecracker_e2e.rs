@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ascout::protocol::contract::{
     EnvironmentState, EventPayload, Operation, OperationResult, PROTOCOL_VERSION, ResultStatus,
 };
-use ascout::control_plane::session::{ControlServer, ControlSession};
+use ascout::control_plane::gateway::runtime::{ControlServer, ControlSession};
 use serde_json::{Value, json};
 
 static FIRECRACKER_TEST: Mutex<()> = Mutex::new(());

@@ -13,7 +13,7 @@ AScout 当前有一个可构建、可运行的原型：Rust 控制面持有 Tree
 
 ## 计划中的 Agent Surface
 
-Routine Agent-facing control 计划通过当前执行环境中的 ASC-Proxy 进入 Agent Control Gateway。ASC-Proxy 隐藏当前 Agent 执行上下文；其具体 transport 和部署形式未定。计划覆盖以下操作：
+Routine Agent-facing control 计划通过当前执行环境中的 ASC-Proxy 进入 Gateway。现有 Agent socket、UI HTTP/SSE 与 Runtime ControlSession 通信代码已归入 Gateway；这不代表下列计划接口或通用身份／权限检查已完成。ASC-Proxy 隐藏当前 Agent 执行上下文；其具体 transport 和部署形式未定。计划覆盖以下操作：
 
 - 查询当前 Branch context；
 - 查询 direct children；
@@ -25,7 +25,7 @@ Outcome 由 Interposer 自动发布，不作为独立 Agent command。Resolver d
 
 ## 计划中的 Launch 与 Integration
 
-当前支持具备足够拦截点或 Hook 的特定 Agent product。产品相关的内部执行结构、拦截点和 Hook 归 Agent 接入侧；routine control 计划先进入 ASC-Proxy，再由 Agent Control Gateway 转交控制面。当前不承诺完全无修改且无需了解产品内部实现的通用接入。控制面通过 Runtime Adapter 的 typed contract 接入；原型已实现基础连接与 handshake，Adapter discovery、Registry 验证和稳定对外接口仍未定义。
+当前支持具备足够拦截点或 Hook 的特定 Agent product。产品相关的内部执行结构、拦截点和 Hook 归 Agent 接入侧；routine control 计划先进入 ASC-Proxy，再由 Gateway 转交控制面。当前不承诺完全无修改且无需了解产品内部实现的通用接入。控制面通过 Runtime Adapter 的 typed contract 接入；原型已实现基础连接与 handshake，Adapter discovery、Registry 验证和稳定对外接口仍未完整实现；Registry 的目标职责与独立验证要求见 [Runtime 设计](../design/runtime.md)及其契约。
 
 launcher、CLI、library、Command + Skill 和 embedded Agent adapter 暂不属于当前范围，后续根据具体产品的可观察和可控制能力单独评估。
 

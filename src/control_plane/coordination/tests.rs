@@ -5,7 +5,7 @@ use super::*;
     
     use crate::control_plane::agent_control::{BranchRole, CommandOperation, CommandStatus};
     use crate::control_plane::policy::CompiledPolicy;
-    use crate::control_plane::session::ControlServer;
+    use crate::control_plane::gateway::runtime::ControlServer;
     use crate::protocol::contract::{
         AdapterMessage, ControlMessage, EnvironmentState, OperationResult, ResultStatus,
         RuntimeCapabilities,
