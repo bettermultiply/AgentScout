@@ -4,3 +4,4 @@
 /docs/survey/[0-9]*.pdf
 /docs/survey/[0-9]*.txt
 /Discussion.md
+__pycache__/
