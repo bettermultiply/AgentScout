@@ -12,7 +12,15 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 ### 运行 AScout TUI 或浏览器 UI
 
-目标系统入口是控制面：用户请求进入控制面，控制面启动对应的 Agent 及接入组件。当前原型使用 Pi 作为首个接入实现；Pi 接入只运行 AgentSession、收集 Agent 行为事实和执行控制命令，不是用户入口。
+目标系统通过 Gateway 统一接入 Agent、UI 与 Runtime 的通信，将请求交给相应控制逻辑；实际启动 Agent 及接入进程由 Runtime 负责。三侧通信入口的源码职责已归入 Gateway，传输方式、UI 部署与启动协调仍未定，见 [Gateway 实现核查](docs/development/gateway.md)。当前原型使用 Pi 作为首个接入实现；Pi 接入只运行 AgentSession、收集 Agent 行为事实和执行控制命令，不是用户入口。
+
+先在仓库根目录构建（需要 Make、Rust 与 Node 22.12 或更新版本）：
+
+```sh
+make
+```
+
+`make` 先准备前端依赖并构建 WebUI，再执行 `cargo build`，`make -j` 同样保证此顺序；任一步失败即停止。前端产物在本地生成并嵌入 Rust 二进制，不入库，具体规则见 [控制面 WebUI](docs/development/web-ui.md#生产构建)。
 
 从真实终端启动（运行目录由调用方创建）：
 
@@ -29,7 +37,7 @@ ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
 cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi --web 127.0.0.1:8080
 ```
 
-浏览器 UI 只绑定 loopback；打开控制面输出的地址即可。左侧是权威窗口对话，右侧是可隐藏的投机面板（投机树与分支详情）；候选内容始终只读。TUI 与浏览器 UI 不共享绘制代码，只通过控制面提供的 AScoutRunView 和操作请求接口工作。界面的开发代理、构建与嵌入方式见 [控制面 WebUI](docs/development/web-ui.md)。
+浏览器 UI 只绑定 loopback；用本机浏览器打开本机控制面输出的地址即可。左侧是权威窗口对话，右侧是可隐藏的投机面板（投机树与分支详情）；候选内容始终只读。TUI 与浏览器 UI 不共享绘制代码，只通过控制面提供的 AScoutRunView 和操作请求接口工作。界面的开发代理、构建与嵌入方式见 [控制面 WebUI](docs/development/web-ui.md)。
 
 外部回放工具从已有 run 的原生 `session.jsonl`、`events.jsonl` 在内存提供模型回复，并启动普通 AScout 执行 Runtime 与 Policy：
 
@@ -48,7 +56,7 @@ node tools/replay/run.ts /path/to/source-run /tmp/opencode/replay-run ../pi \
 
 ```sh
 ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
-cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi assets/policy/pi-tool.yaml
+cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi assets/policy/pi-tool/policy.yaml
 ```
 
 该示例 Policy 从 `example`、`true`、`false` 中无固定种子地抽取两个不同预测。具体随机场景、脚本模型接口及启动方式见 [验证 Workload](docs/development/reference-workload.md)。`/ascout` 查看预测、实际结果、处置和清理，`/events` 查看原始事件；运行目录的 `events.jsonl` 保留原始事实。已有脚本模型接口加真实 Pi/bash 的验证，不冒充真实大模型验证，不宣称预测质量或加速收益。
@@ -57,11 +65,11 @@ Runtime Adapter 可以在握手中声明环境工具及其参数结构。控制�
 
 Parent 收到真实结果立即继续，验证并行进行；仅 Promote 时停止旧 Parent。已接入同一等待点的两个 Candidate，至多一个胜出，其余被取消。工具等待点逐项交给 Policy；并行消息续跑需补齐其他工具的真实结果，不重跑这些工具。接入目前支持字符串和布尔预测，复杂结果类型、非标准上下文、嵌套、完整效果隔离、Runtime Registry 与能力验证、多行编辑及确认式退出清理仍未完成。详见 [当前实现与验证边界](docs/development/reference-workload.md)。
 
-Policy YAML 编译与受限 Python 求值已可独立运行：
+Policy YAML 编译与受限 Python 求值已可独立运行。本地策略按 `assets/policy/<策略目录>/` 独立保存声明和算法，目前均不随 Git 交付；以下命令及相关测试需要先准备这些本地文件，布局见 [Policy Engine 原型](docs/development/policy-engine.md)。默认 `policy/policy.yaml` 禁用候选：
 
 ```sh
-cargo run --example policy -- compile assets/policy/policy.yaml /tmp/opencode/policy.json
-cargo run --example policy -- evaluate /tmp/opencode/policy.json extent assets/policy/extent-input.json
+cargo run --example policy -- compile assets/policy/policy/policy.yaml /tmp/opencode/policy.json
+printf '%s\n' '{"process_state":{"steps_completed":5,"hook_count":5,"phase":"reasoning"}}' | cargo run --example policy -- evaluate /tmp/opencode/policy.json extent -
 ```
 
 需要 Linux、Python 3、bubblewrap 和 libseccomp。当前接口、支持范围及未完成能力见 [Policy Engine 原型](docs/development/policy-engine.md)；这条路径不等同于完整 Branch 生命周期接入。
@@ -80,12 +88,9 @@ cargo run --example policy -- evaluate /tmp/opencode/policy.json extent assets/p
 ```sh
 node tools/replay/verify/b1.ts          # 约 1 秒：导出、规范化、顺序消费和缺失/耗尽报告
 node tools/replay/verify/b1-pi.ts       # 约 3 秒：通过现有 Pi provider 验证并行调用与续跑
-node tools/replay/verify/b3.ts EXISTING_B3_RUN # 已有原生记录导出后一次真实 NLE 回放
-node tools/replay/verify/b3-repeat.ts EXISTING_B3_RUN # 同一导出、五个全新 run 严格回放
-DEEP_ROUNDS=4 node tools/replay/verify/b3-deep.ts EXISTING_DEEP_RUN # 已有四层记录、三次严格回放
 ```
 
-B1 验证记录键规范化及端点的顺序消费；B1-PI 还验证 Pi 对两个并行工具调用的解析和后续请求；B3 验证真实 NLE action、每个 Chance 的双 Candidate、单一 Promote、applied Discard、权威 session 父链和回放报告。重复与深度脚本额外报告每轮结构、真实 NLE 观察、请求命中/缺失/耗尽和清理结果；这些是正确性证据，不是性能收益证据。B3 首次运行包含一次 `cargo build`，仅构建 debug 目标。
+B1 验证记录键规范化及端点的顺序消费；B1-PI 还验证 Pi 对两个并行工具调用的解析和后续请求。套件从已有运行提供响应，机制正确性仍需单独验证；候选数量、嵌套与活跃祖先丢弃、跨组件取消／超时仍有端到端覆盖缺口，见[回放开发说明](docs/development/replay.md)。回放不证明性能收益。
 
 文档以心智模型为唯一根文档，再延伸到各语义权威与实现细节（详见 [文档导航](docs/index.md)）。
 

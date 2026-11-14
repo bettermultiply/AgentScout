@@ -187,7 +187,7 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 
 **涉及算法**：DynBranch 最直接；Memory 的跨 task 经验与它有关，但不是同一种状态。
 
-`branch-semantics.md` §1 将 identity、handle、capability 和 resolution 限定在一棵 Tree 内；`policy-decisions.md` §2.8–2.9 的调度也限定同一 task。这适合拥有独立执行世界的 Branch，但不能直接承载 DynBranch 已确认结果在后续请求中的消费。现有 Outcome 复用方向和 Ledger 记录尚未规定跨 task 的访问授权、寿命与失效；将整棵 Branch 跨 task 挂接不属于现有语义。
+`branch-semantics.md` §1 将 identity、handle、capability 和 resolution 限定在一棵 Tree 内；`policy-decisions.md` §2.8–2.9 的调度范围为同一 AScoutAgent。一个 session 内多轮 task 共用树，但这本身不证明 DynBranch 已确认结果在后续请求中的消费已实现。现有 Outcome 复用方向和 Ledger 记录尚未规定跨 task 的结果访问授权、寿命与失效；相关能力仍需核查。
 
 **建议，尚未批准**：保留 Tree 和 Branch 的 task 所有权。跨 task 复用若纳入范围，应仅通过明确受控的结果移交／保存，而不是共享活的 Branch、Agent context 或未清空假设的数据。至少核对完整输入、模型与执行版本、状态读依赖、新鲜度、访问权限、保留期限、取消与资源归属；TTL 和参数相等不足以代替这些条件。也可明确将跨 task 缓存交给外部服务，AScout 只校验当前消费的依据与保证，不必自行实现缓存平台。
 
@@ -213,7 +213,7 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 | Speculative Actions | API 结果预测、多候选、call specifier 匹配、连续嵌套、失败剪枝 | 缓存 future 的消费与主执行保留需统一 Reuse／accept 映射（§8.9 第 1 项）；不能只把参数相等当作所有状态下结果相等 |
 | PASTE | 模式生成具体调用，参数绑定完成后再形成不可变 Proposal；只读／dry-run 纪律、选择与抢占 | 提前工具结果／在飞调用复用同 §8.9 第 1 项；未绑定 preparation hint 不能直接冒充可执行 Proposal；co-scheduler 与部署级调度不完整覆盖 |
 | SPAgent Verified | 推理期间预测动作、精确匹配后复用工具结果 | Reuse 入口已有，需统一 accept 映射（§8.9 第 1 项）；推理引擎两级调度不在范围内 |
-| SPAgent Aggressive | `launch=false`，依据明确接受规则跳过部分主推理，按弱 Fidelity 运行 | 不能将置信度阈值当作已证明等价；策略切换仍须由一套 task Policy 显式表达 |
+| SPAgent Aggressive | `launch=false`，依据明确接受规则跳过部分主推理，按弱 Fidelity 运行 | 不能将置信度阈值当作已证明等价；长期允许修改 Policy，当前首版同一 session 的 Policy 固定，后续修改规则见 [Policy 开发说明](policy-engine.md) |
 | Cost-Aware Speculative Execution | `admit/select/rebalance`、资源计量、`effect`、`match`、失败重执行足以承载局部成本决策 | 任意 DAG 的 fan-in/shared work 不是当前 Tree 自动保证；若拆成结构化 Proposal 仍须提供联合依赖和中间状态。概率更新反馈、跨任务容量与机会成本未闭合；不以论文公式改写机制 |
 | Speculative Interaction Agents | 未来用户输入／工具结果预测、持续事件、级联取消、写前缓冲 | 仅权威主线对用户输出；新输入使前提改变时现模型保守剪枝。不能声称覆盖论文的全部交互与重对齐行为 |
 | Speculative Tool Calls | client-side 提前调用、精确参数匹配、结果复用的局部流程 | 同 §8.9 第 1 项；engine-side KV 拼接、resident sequence 与提议中的 provider endpoint 明确不在现有范围内 |
@@ -327,7 +327,7 @@ W&D、AsyncFC、Execution Edits 和 Tracking State Footprints 仍按 survey 作�
 | 3 | AOSpec 的动作加执行前环境版本；DynBranch 的读集合新鲜度；TomasuLLM 的实际读依赖 | Runtime Adapter 只声明隔离属性，不提供状态版本、读集合或新鲜度；D-031 只有 command reuse 的 workspace revision，不是通用状态版本 | 能力契约缺口 | 把状态版本和读集合做成可选能力；Policy 需要时由 Contract 校验，后端没有就拒绝或明确降级；`match` 的 evidence 携带这些事实及其来源 | 改 Runtime Adapter Contract、Capability View 和 `match` 输入；Branch 语义不变。实现需要后端配合，不能只靠控制面推断 |
 | 4 | LEAP 一次验证 `k+1` 个上下文；SpecAgent 返回 `(j, reason, replacement)`；SMC 一次接受宏 | `MatchResult` 是开放的，但没有规定一次批量结果如何拆成每条 Edge 的确认／拒绝，也没有规定验证证据自身携带哪些未决 Proposal 依赖 | 规则缺口，不是结构不支持 | **方向：不新增批量原语**：`match`／`dispose` 保持逐 Edge，由 Policy 在一次审核后把结果分发；机制按前缀顺序逐条确认／拒绝，再采用对应状态。需补修正动作入口和证据依赖；确有必要时再给 evidence 增加结构化前缀字段 | 主要改 `policy-decisions.md` §2.6／§4.2 的说明；可能扩展 `MatchResult`／validator 契约。不改树，不新增 Decision |
 | 5 | SpecAgent／LEAP 的 weak–strong；Skim 的快路径执行器 | `predict` 可以用小模型，但候选 Branch 的执行配置没有声明位置；文档没有说明候选能否使用不同的模型、prompt、工具集或执行器 | 能力契约缺口 | 在 candidate／Instance 上声明执行配置，由 Contract 和 Fidelity 校验；`predict` 仍只负责生成 Proposal | 改 Agent 接入侧、Contract、Instance metadata 和 Fidelity 校验；Edge／Branch／九类 Decision 不变 |
-| 6 | DynBranch 跨 task 缓存已确认结果 | Branch identity、handle、capability 和 resolution 都限定在一棵 Tree／一个 task 内；Outcome 可以受控保存，但没有跨 task 的授权、寿命和失效规则 | 范围边界，可外部实现 | 不把活 Branch、Agent context 或未清空假设挂到另一个 task；用外部结果缓存或明确的受控移交，AScout 只校验消费时的依据 | 不改模型；若要在 AScout 内置，才需要新的结果存储、授权和寿命契约 |
+| 6 | DynBranch 跨 task 缓存已确认结果 | Branch identity、handle、capability 和 resolution 限定在一棵 Tree 内，同 session 的多轮 task 共用树；Outcome 跨 task 消费的授权、寿命和失效规则仍待核查 | 结果复用契约缺口 | 核查后续 task 消费已确认结果的依据、授权与有效性，不以共用树代替结果复用保证 | 若要在 AScout 内置，仍需明确结果存储、授权和寿命契约 |
 | 7 | Cost-aware／B-PASTE 的 DAG fan-in、共享子图 | 当前是树；多个消费者共享同一份中间结果需要重复计算，或需要另一套执行模型 | 范围边界 | 明确不覆盖，或以后单独扩展 DAG；不能把 beam 子图共享说成已有能力 | 不改模型；扩 DAG 会改变树、single-winner 和依赖语义，是另一套执行模型 |
 | 8 | ISP 的候选预览、Speculative Interaction Agents 的持续交互；SPORK D3／KV；TomasuLLM 的完全乱序提交 | 当前只向用户呈现权威主线；engine plane 已由 D-013 排除；乱序提交／rebase 超出 Branch replacement 的明确语义 | 范围边界 | 分别保持不覆盖，或用更保守的串行屏障退化；需要时单独设计 | 不改现有模型；不能因论文依赖这些能力就默认扩大 AScout |
 

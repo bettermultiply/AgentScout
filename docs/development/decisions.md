@@ -17,6 +17,37 @@ Authority 环境不结束整棵树共用的 Pi 宿主；Runtime shutdown 统一�
 物化先持久登记旧 root，再切换新计划；切换完成后的回收失败只记录延后清理，不把
 已成功发布变成失败重试。进展与验证边界见 current-state 和 recovery 文档。
 
+## 2026-11-14：本机使用与统一构建入口
+
+用户确定当前在本机运行控制面、用本机浏览器访问，批准根目录 Makefile 作为统一构建入口。默认 `make` 依次准备前端依赖、`npm run build`、`cargo build`；依赖关系保证 `make -j` 也先前端后 Rust，失败即停止。依赖安装按 `node_modules` 内安装时间戳缺失或 package 文件更新触发，每次重新构建前端，不承诺前端增量。产物仍本地生成、嵌入 Rust 且不入库，Gateway 部署与启动协调继续未决。
+
+废弃“是否自动准备前端仍未定”及必须手工分步构建的当前使用要求；不采用 `build.rs` 或额外脚本。直接 `cargo build` 的行为不变，完整构建入口与验证见 [WebUI](web-ui.md#生产构建)。
+
+## 2026-11-14：树几何持续更新与复用目标
+
+用户确认：树隐藏或进入 Branch 详情后仍继续更新几何，可见性不是暂停计算的条件；无关对话或纯展示变化不触发几何重算，未变化几何复用，返回树直接使用最新有效结果。缓存有界，及时释放不再需要的结果；不改变既有绘制语义。
+
+当前实现已把观察状态与几何缓存分离，只保留当前 task 每枝最新结果并独立复用中心线采样；事件级增量仍不等于几何增量，单枝追加的采样前缀、逐叶茎连接及局部宽度轮廓复用尚未实现。缓存大小随当前树规模增长，不是固定字节上限；长运行性能收益尚未验证。具体复用粒度与已知限制见 [WebUI](web-ui.md#性能目标与实现差距2026-11-14)，剩余验证留在根 Discussion。
+
+## 2026-11-14：恢复源侧投机起点与父枝验证截止
+
+此前 2026-11-13 因分叉衔接回归撤回了 Chance 准入源时间、`ProposalValidated`、验证 work id 到 Accepted 的关联和父枝验证点截止。本轮重新实现这组目标：`chance_created` 携带接入侧 `admit` 后的 `speculation_started_at_ms`，无候选 Chance 也保留；控制面在 `match` 返回后、`dispose` 前测量 `validated_at_ms`，公共 `proposal_validated` 绑定 Chance、Proposal 与本次验证 id；只有 Agent 确认 Promote 后应用的那次验证 id 进入 Accepted。由此 Chance 定位改用源侧准入时间，父枝在子枝接受后按该验证时间截取原时间映射，终点显示短横线；缺少或不匹配时明确报错，不回退记录时刻、Promote 时刻或旧结果。
+
+本轮只同步目标、代码与观察字段说明；真实模型、浏览器画面及全部极端参数尚未验收。协议字段见[观察](observation.md)，几何规则见 [WebUI](web-ui.md#源侧起点与父枝截止2026-11-14) 与[参数](tree-parameters.md)。
+
+## 2026-11-14：移除 B3 固定场景脚本（废弃记录）
+
+用户明确批准删除 `tools/replay/verify/b3.ts`、`b3-deep.ts`、`b3-repeat.ts` 及确认独占的资源，不扩大为整个 verify 清理，不新建替代验收框架。三个入口分别固定一次、三次深度、五次重复执行，后两种由 repeat 实现；固定 prompt、双候选、层数 1/3/4/10、父目录 `b3-policy.yaml`／`decisions.py`／`runtime.json` 和端口布局一并退出当前入口。仓库内未发现额外独占资源；策略夹具 `verify/b3-policy.yaml` 已在更早任务删除。当时因 `export-content.test.ts` 仍消费 `export-content.ts`，在该次 B3 删除范围内暂时保留通用每键队列比较与回归；后续测试清理确认该测试是唯一调用者，二者仅比较手造数据，不检验真实导出。现按用户已授权的测试清理成对删除这两个文件，无替代测试，也不改变产品功能。B1/native、其余回归、通用 replay 与 assistant null 支持保留。外部实验配置、原始录制和用户数据不删除。移除脚本不表示任何整链验收通过，也不取消通用机制验证缺口。
+
+以下为从当前文档迁入的历史事实，保留各轮先后与失败限定，不作为当前命令或待修脚本任务：
+
+- 2026-11-13 Pi session 审查的当时 B3 首跑／回放各 1 Chance、2 Candidate、1 Promote、2 Discard，4/4 命中，权威 role/text 与 NLE 相同；产物 `/tmp/ascout-replay/b3/acceptance.json`，日志 `/tmp/opencode/pi-review-b3.log`。此前两次分别因过宽宿主进程断言、旧预测 `moved` 正文断言失败；修正后才通过。清理仅覆盖本次子进程和端口。
+- 原生导出阶段单层真实工具回放 3 hit／1 miss、四层也缺键失败；日志 `/tmp/opencode/native-b3.log`、`/tmp/opencode/native-deep4.log`。当时四层导出 13 项、十层 31 项；三层为 10 项，不能混写为四层 10 项。深度样例后续 Chance 都在祖先 Promote 后产生，未覆盖活跃祖先 Discard 后的嵌套失效。
+- NLE 独立 lgen 初始化修复后，单层／四层各三次独立尝试分别 4／13 hits/consumed、零缺失／耗尽／未消费，但旧日期 before 消息及四层旧权威预测历史仍导致严格失败；一次深度入口的内部三轮未完成，三次独立调用不能称作三轮通过。证据 `/tmp/opencode/{nle-fixed-b3.log,nle-fixed-b3-three.log,nle-b3-final-3.log,nle-fixed-deep4.log,nle-deep4-final-2.log,nle-deep4-final-3.log}`。不兼容旧日期／旧历史，不改源或弱化匹配。
+- 随后的当前语义基线为 `/tmp/opencode/ascout-replay-b3-repeat-{bIAF7f,K0uZLH}/run-1`，只读复制到 `/tmp/opencode/current-replay-inputs-0k1c9rtd/{single,deep4}/source`；`provenance.json` 记来源与 SHA-256，`policy-fix.json` 记父目录 single 策略顺序修复，source 不变。Policy 身份交换与跨键数组比较问题分别复现后修复，小回归保留。初错 `/tmp/opencode/current-single-5.log` 及 `ascout-replay-b3-repeat-9WDxkS`；当时 `node tools/replay/verify/b3-repeat.ts …/single/source` 五轮、`DEEP_ROUNDS=4 node tools/replay/verify/b3-deep.ts …/deep4/source` 三轮严格通过，每轮分别 4／13 hits/consumed、零缺失／耗尽／未消费，结构、权威正文、NLE 和每键回复队列一致，清理通过。产物 `/tmp/opencode/ascout-replay-b3-repeat-{tsCtg4,OhpcwY}`，日志 `/tmp/opencode/{current-single-5-final.log,current-deep4-3-final.log}`。这些是当时短轨迹结果，不覆盖长轨迹、自然重复键、取消调度或活跃祖先丢弃。
+- 2026-11-14 Gateway 检查最初并行受固定 19091 端口冲突干扰，`gateway-replay-single.log`／`gateway-replay-deep.log` 不作为有效整链结论。串行 `/tmp/opencode/gateway-replay-{single,deep}-serial.log` 对应 `ascout-replay-b3-repeat-{AEVXM8,a4jA1u}`：单层 Promote=0、四层止于首层，report 各 1 hit/consumed，剩余 3／18，cleanup 通过。独立六请求 Pi 捕获定位为 replay 在匹配前拒绝合法 assistant `content:null`，不是 NLE 缺键；原探针和 Gateway 通信证据保留于当前开发文档，后续 null 修复不追认本轮通过。
+- null 修复后串行单层／四层产物 `/tmp/opencode/ascout-replay-b3-repeat-{1rQJm5,j5MZJ6}`，日志 `/tmp/opencode/replay-null-fix/{b3-single,b3-deep4}.log`：分别 1／4 Chance、2／8 Proposal/Candidate、1／4 Promote、2／8 applied Discard、1／4 NLE action；4／13 requests/hits/consumed、3／9 cancelled，misses/exhausted/pending/cancel_timeouts=0。单层 unconsumed=0，四层剩余 6 个源 aborted 项未请求（源 13 成功＋6 aborted 共 19 项）。两组均在 repeat 第 97 行完整 audit 因最终权威正文为空失败，源正文分别为 `scripted complete`／`deep complete after 4 rounds`。旧脚本第 94 行以 Discard 达目标结束，第 96 行立即 shutdown，赢家保存 aborted／Request aborted／空 content；最后 Discard→取消分别为 1237→1257ms、3219→3242ms，而回复输出等待 500ms。证据支持结束过早取消回答，consumed 不代表交付。未到重导出或第 101 行固定 `depth*3+1=13` 计数断言，四层首轮失败后两轮未跑；不将未触发的计数问题称作本次失败原因。两组 cleanup clean=true、直接子进程退出 0、相关后代／端口无残留，源 bundle 55 个普通文件 SHA-256 不变；快照和独立 diff 在 `/tmp/opencode/replay-null-fix/`。结束条件和固定计数随脚本退出，不再作为待修入口；最终交付、取消时序及剩余项解释仍为通用验证要求。
+
 ## 2026-11-14：首版固定 Policy 与权限位物化范围
 
 用户确定：“我们先按 Policy 不能修改来实现。我觉得保持一致就好了吧，就修改权限位吧”。首版同一 session 加载的 Policy 固定，多轮 task 使用同一份 Policy，不实现修改或切换；端侧求值、异步求值及保存／恢复保持一致。长期允许修改 Policy 的目标保留，切换时机和活动 Chance 的旧／新 Policy 适用规则留待后续支持时确定，不再列为首版待定或阻塞项。
@@ -24,6 +55,22 @@ Authority 环境不结束整棵树共用的 Pi 宿主；Runtime shutdown 统一�
 文件属性变更的首版物化范围仅为权限位；其他属性不新增修改支持，其扩展范围不阻塞首版。此决定不授权破坏原文件未改属性或链接结构，也未批准上一轮助手提出的 ACL、UID 等具体处理建议；不能将这些建议作为用户决定或实现方案。物化仍未实现，权限位及保留要求均需后续落实、验证；能力不足须明确报告，不能静默丢失或重置未改属性。
 
 本次范围收敛取代下文将 Policy 切换规则及文件属性支持范围整体列为当前未决问题的表述；不把首版固定 Policy 升格为长期禁止修改。session 一棵树、task 多轮、独立 `/pause`、候选环境承接及已有保存恢复能力均保留。本轮仅同步文档，不编码、不测试、不提交，保留并行工作。
+
+## 2026-11-14：Gateway 审查收尾
+
+用户批准精简 Gateway：废弃 HTTP 经 Presentation.request／Interface.request 再转发请求的路径，HTTP 与 TUI 直接共享 main 装配的 Gateway Connection；Presentation 只提供展示查询，Interface 不再保存请求字段。保留连接断开拒绝、HTTP 状态码及通信协议。Runtime 废弃无外部消费者的 send_with_context／call_with_context，统一由 send 构造既有请求上下文；保留 send、call_with_id、wait_event 测试用途及 30 秒等待，wait_result 不再二次克隆。Runtime trait、Agent 写侧半关闭与停止接收的分离保持。
+
+废弃 `control_plane::session` 的兼容 re-export：本仓 `Cargo.toml` 为 `publish = false`，仓库及相邻源码引用核查仅发现 `tests/firecracker_e2e.rs` 尚在使用旧路径，未发现外部兼容承诺。迁移该调用至 `gateway::runtime`，移除冗余模块，不保留 stub。通信协议及 Runtime 会话实现不变。
+
+完整 Gateway 审查同时覆盖更早中断任务；`gateway-20261114-before` 已含部分迁移，不能作为完整重构前基线。B3 首错经绕过 Gateway 的真实 Pi／本地 HTTP 探针定位为 replay 已提交校验器拒绝 assistant 的 `content:null`，不在本任务扩张修改 replay、Policy 或 NLE。证据与验收限制见 `gateway.md`。
+
+## 2026-11-14：回放工具迁移 TypeScript
+
+用户批准 `tools/replay` 核心与 verify 脚本整体迁移 TypeScript，Node 26 直接运行、局部 ESM package 与独立 strict 类型检查，不引入运行时库、构建发布或 binary。废弃该目录原 `.mjs` 入口，正式文档和跨仓 import 同步使用 `.ts`，不保留兼容 stub。保留已使用 CLI/export/serve 文件模式、报告选项、`messageBody`、成功与取消项、原生父链及同键顺序。
+
+审查确认自动输入只消费字符串正文，去掉返回输入项中无人读取的 `id` 及仅包装正文的对象，源 ID 去重仍在读取阶段保留；导出项 `branch_id`、`session_entry_id` 有验收和溯源消费者，保留。上轮删除未使用 `verify/b3-policy.yaml` 和报告覆盖源修复继续有效；B3 仍读取外部已有实验的策略文件。验证结果与限制记在 `replay.md`。
+
+收尾仅将 `run.ts` 的读取校验 input-status、提交 prompt、推进自动输入拆成内部函数，不以减少行数为目标；保留 await 后暂停检查、序号等待、失败／完成状态与超时行为，不扩展类型、统计或父链重构。
 
 ## 2026-11-14：候选环境承接与任务终止／暂停
 
@@ -43,13 +90,15 @@ Agent 常用的 Ctrl-C 或退出均终止任务，结束候选并等待相关写
 
 Policy 切换时机、活动 Chance 使用旧／新 Policy、同 session 各 task 是否绑定不可变 Policy，以及暂停任务与现有主动退出恢复的映射均未决定。此次仅同步文档，未修改代码、运行测试或提交；实现路径仍需核查对齐，详见 [参考负载](reference-workload.md)、[Policy 原型](policy-engine.md) 和 [物化提案](../fs-backend/materialize-proposal.md)。
 
-## 2026-11-14：回放工具迁移 TypeScript
+## 2026-11-14：调参只用本地存储恢复
 
-用户批准 `tools/replay` 核心与 verify 脚本整体迁移 TypeScript，Node 26 直接运行、局部 ESM package 与独立 strict 类型检查，不引入运行时库、构建发布或 binary。废弃该目录原 `.mjs` 入口，正式文档和跨仓 import 同步使用 `.ts`，不保留兼容 stub。保留已使用 CLI/export/serve 文件模式、报告选项、`messageBody`、成功与取消项、原生父链及同键顺序。
+用户确认叶茎及参数保持现状；停止将树形参数写入 URL 或从 URL 恢复的方案。调参只通过当前浏览器 localStorage 保存和恢复，移除复制调参链接按钮；`?tune` 面板开关保留。页面对历史已知调参键作一次性清理，包含已移除的七个固定绘制字段，同时保留其它查询参数及 hash。废弃此前 URL 优先于本地存储、每次调整写回地址栏、复制链接复现形态的方案；原大采样回归记录中的 URL 恢复验证只属于当时实现，不构成现行规则。叶茎绘制与参数默认值不变。
 
-审查确认自动输入只消费字符串正文，去掉返回输入项中无人读取的 `id` 及仅包装正文的对象，源 ID 去重仍在读取阶段保留；导出项 `branch_id`、`session_entry_id` 有验收和溯源消费者，保留。上轮删除未使用 `verify/b3-policy.yaml` 和报告覆盖源修复继续有效；B3 仍读取外部已有实验的策略文件。验证结果与限制记在 `replay.md`。
+## 2026-11-14：Policy 按独立目录组织，当前策略不入库
 
-收尾仅将 `run.ts` 的读取校验 input-status、提交 prompt、推进自动输入拆成内部函数，不以减少行数为目标；保留 await 后暂停检查、序号等待、失败／完成状态与超时行为，不扩展类型、统计或父链重构。
+用户批准每份策略独立拥有声明与算法：`assets/policy/policy/`、`assets/policy/nle/`、`assets/policy/pi-tool/` 各含 `policy.yaml` 与 `decisions.py`，`extent-input.json` 归默认 `policy/`。沿用原声明 stem，目录可容纳示例及未来正式内置策略；当前三份均不成熟，暂不 Git 跟踪。单文件算法仅为简单组织方式，不限制 Engine 的多文件、包和相对导入。
+
+废弃平铺的 `assets/policy/policy.yaml`、`assets/policy/nle.yaml`、`assets/policy/pi-tool.yaml`、`assets/policy/decisions.py` 与 `assets/policy/extent-input.json` 路径；取消原已跟踪 `decisions.py`、`pi-tool.yaml` 的索引条目，内容拆分／迁至本地策略目录，配置逐字保留。CLI、测试及文档使用新路径，克隆后需另行准备这些被忽略的本地文件。默认禁用选择和原有不完整预测／验证配置保持；Runtime 引用仍按启动 cwd 解析。实现与限制见 [Policy 实现](policy-engine.md)。
 
 ## 2026-11-13：前端构建产物不入库
 
@@ -913,23 +962,13 @@ e89533d 保存／恢复逻辑曾为每次新世界增加独立随机 lgen 种子
 # 2026-11-14：回放取消项修复
 
 废弃将明确 aborted assistant 从回放队列过滤的做法：该做法使源实际存在、被 AScout 取消的请求变成缺键。取消项现在按源顺序保留，命中后等待客户端取消，超时明确失败；成功输出统一等待一次 500ms。其他 error 不扩展为取消。验证中同时修正 HTTP Buffer 分块导致的 UTF-8 损坏，未改变匹配材料或放宽缺键断言。实施与证据见 `docs/development/replay.md`。
-
-## 2026-11-14：Gateway 审查收尾
-
-用户批准精简 Gateway：废弃 HTTP 经 Presentation.request／Interface.request 再转发请求的路径，HTTP 与 TUI 直接共享 main 装配的 Gateway Connection；Presentation 只提供展示查询，Interface 不再保存请求字段。保留连接断开拒绝、HTTP 状态码及通信协议。Runtime 废弃无外部消费者的 send_with_context／call_with_context，统一由 send 构造既有请求上下文；保留 send、call_with_id、wait_event 测试用途及 30 秒等待，wait_result 不再二次克隆。Runtime trait、Agent 写侧半关闭与停止接收的分离保持。
-
-废弃 `control_plane::session` 的兼容 re-export：本仓 `Cargo.toml` 为 `publish = false`，仓库及相邻源码引用核查仅发现 `tests/firecracker_e2e.rs` 尚在使用旧路径，未发现外部兼容承诺。迁移该调用至 `gateway::runtime`，移除冗余模块，不保留 stub。通信协议及 Runtime 会话实现不变。
-
-完整 Gateway 审查同时覆盖更早中断任务；`gateway-20261114-before` 已含部分迁移，不能作为完整重构前基线。B3 首错经绕过 Gateway 的真实 Pi／本地 HTTP 探针定位为 replay 已提交校验器拒绝 assistant 的 `content:null`，不在本任务扩张修改 replay、Policy 或 NLE。证据与验收限制见 `gateway.md`。
-
 # 2026-11-14：Gateway 三侧通信与 Registry 归属
 
 用户确认：名称采用 Gateway，统一 Agent 接入侧、UI 与 Runtime 三侧的通信接入、消息分发和送达；管理连接／会话、握手与断线，进行入口格式、身份、上下文和权限检查，转交请求／事实／回执，交付命令／已编译本地 Decision／结果／事件。消息对投机执行的变化由相应控制逻辑决定，Gateway 不拥有 Tree、Policy 或投机编排。实际启动由 Runtime 负责；transport、UI 部署和启动协调归属仍未决。
 
-Registry 已属于 Runtime，保留登记、契约兼容性、能力声明校验、主动验证和独立证据职责；Adapter 不得自填验证状态或以自测结果代替证明。控制面使用带验证状态的能力视图匹配 Policy、协调生命周期。现有 Agent、UI、Runtime 三条通信入口尚未统一实现，缺口归 reference-workload.md。
+Registry 已属于 Runtime，保留登记、契约兼容性、能力声明校验、主动验证和独立证据职责；Adapter 不得自填验证状态或以自测结果代替证明。控制面使用带验证状态的能力视图匹配 Policy、协调生命周期。当时 Agent、UI、Runtime 三条通信入口尚未统一实现；同日审查收尾已将三侧入口归入 `src/control_plane/gateway/`，见上文“Gateway 审查收尾”。
 
 废弃正式名称 Agent Control Gateway／ACGateway、将 Registry 列为控制面组件以及 Gateway 实际启动 Agent 的表述；此前“Gateway 是否覆盖 UI／Runtime 未定”仅为历史。本轮只同步文档，不修改代码、不提交、不运行模型或代码测试。
-
 # 2026-11-14：取消物化冲突检测与全量基准副本
 
 用户确认“直接写入”：废弃物化阶段宿主/共同祖先比较、冲突检测与报告及其全量
