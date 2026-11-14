@@ -291,21 +291,6 @@ struct ProcessInfo {
 }
 
 #[test]
-fn adapter_connects_and_establishes_a_real_microvm() {
-    let _serial = serial_test();
-    let harness = AdapterHarness::start("connect-establish");
-
-    let result = harness
-        .session
-        .call("environment-1", Operation::EstablishEnvironment)
-        .unwrap();
-    assert_completed_in_state(&result, EnvironmentState::Available);
-    harness.firecracker_process("environment-1");
-
-    harness.terminate_and_cleanup("environment-1");
-}
-
-#[test]
 fn real_microvm_completes_the_full_lifecycle_over_vsock() {
     let _serial = serial_test();
     let harness = AdapterHarness::start("lifecycle");
@@ -318,6 +303,8 @@ fn real_microvm_completes_the_full_lifecycle_over_vsock() {
             .unwrap(),
         EnvironmentState::Available,
     );
+    // Retain the establish smoke check before exercising guest operations.
+    harness.firecracker_process(environment);
     assert_command(
         &harness.session,
         environment,

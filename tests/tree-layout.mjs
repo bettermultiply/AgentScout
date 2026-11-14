@@ -7,11 +7,25 @@ import { createServer } from '../webui/node_modules/vite/dist/node/index.js'
 // Use the existing Vite TypeScript loader and Node test runner, without a new framework.
 const server = await createServer({ root: new URL('../webui', import.meta.url).pathname, server: { middlewareMode: true }, appType: 'custom' })
 const { foldEvents } = await server.ssrLoadModule('/src/fold.ts')
-const { layoutTree, DEFAULT_TUNING, tuningFromSearch } = await server.ssrLoadModule('/src/tree/index.ts')
+const { layoutTree, DEFAULT_TUNING, normalizeTuning } = await server.ssrLoadModule('/src/tree/index.ts')
 const { buildTree } = await server.ssrLoadModule('/src/components/treeGraph.ts')
 const { startLead } = await server.ssrLoadModule('/src/tree/startLead.ts')
 const { sampleGeometry } = await server.ssrLoadModule('/src/tree/geometry.ts')
+const { placeStems } = await server.ssrLoadModule('/src/tree/stemPlacement.ts')
 test.after(() => server.close())
+
+const stem = { id: 's', distance: 20, range: 10, preferred: 1, base: 20, angles: [10, 20, 30] }
+const place = (s = stem, n = []) => placeStems([s], n).get(s.id)
+test('no neighbors retains preferred side and nearest base', () => assert.deepEqual(place(), { side: 1, tilt: 20 }))
+test('same psi child switches side', () => assert.deepEqual(place(stem, [{distance:20,side:1,angleDeg:70}]), {side:-1,tilt:20}))
+test('two sides choose greatest minimum clearance', () => assert.deepEqual(place(stem, [{distance:20,side:1,angleDeg:70},{distance:20,side:-1,angleDeg:50}]), {side:-1,tilt:10}))
+test('fixed mode changes side but not angle', () => assert.deepEqual(place({...stem,angles:[20]},[{distance:20,side:1,angleDeg:70}]),{side:-1,tilt:20}))
+test('neighbors beyond S are ignored', () => assert.deepEqual(place(stem,[{distance:31,side:1,angleDeg:70}]),{side:1,tilt:20}))
+test('placement is deterministic and sorts by distance', () => {
+ const a={...stem,id:'a',distance:0}, b={...stem,id:'b',distance:5}
+ assert.deepEqual(placeStems([b,a],[]),placeStems([a,b],[]))
+ assert.deepEqual(placeStems([b,a],[]),placeStems([b,a],[]))
+})
 
 test('startLead uses initialAngle for a zero first segment without mutation', () => {
   const points = [{ x: 2, y: 3 }, { x: 2, y: 3 }], widths = [10, 4]
@@ -45,7 +59,7 @@ function taskWithCalls() {
 
 for (const [name, tuning] of [
   ['default', DEFAULT_TUNING],
-  ['large legal sampled outline', tuningFromSearch('?k=300&tau=500&sampleGap=4')],
+  ['large legal sampled outline', normalizeTuning({ segmentK: 300, segmentTauMs: 500, sampleGap: 4 })],
 ]) {
   test(`layout preserves every call and sample: ${name}`, () => {
     const task = taskWithCalls()
