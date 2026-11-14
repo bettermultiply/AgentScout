@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
-import {exportContent} from "./export-content.mjs";
+import {exportContent} from "./export-content.ts";
 
-const record = (key, text) => ({key, branch_id: "candidate", reply: [{type: "text", text}]});
+const record = (key: string, text: string) => ({key, branch_id: "candidate", reply: [{type: "text" as const, text}]});
 test("independent completion order does not change replay queues", () => {
   const a = record("a", "first"), b = record("b", "other"), a2 = record("a", "second");
   assert.deepEqual(exportContent([a, b, a2]), exportContent([b, a, a2]));

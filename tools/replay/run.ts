@@ -5,13 +5,17 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
-import { loadRecording } from './recording.mjs';
-import { createReplayServer } from './serve.mjs';
+import { loadRecording } from './recording.ts';
+import { createReplayServer } from './serve.ts';
+import type { ChildProcess } from 'node:child_process';
+import type { Interface } from 'node:readline';
+import type { AddressInfo } from 'node:net';
+import { isObject } from './types.ts';
 
 const [sourceArg, runArg, piRoot, ...options] = process.argv.slice(2);
-if (!piRoot) throw Error('usage: node tools/replay/run.mjs SOURCE_RUN NEW_RUN PI_ROOT POLICY --runtime CONFIG [--web 127.0.0.1:8080]');
+if (!piRoot) throw Error('usage: node tools/replay/run.ts SOURCE_RUN NEW_RUN PI_ROOT POLICY --runtime CONFIG [--web 127.0.0.1:8080]');
 const source = fs.realpathSync(sourceArg), run = fs.realpathSync(runArg);
-const insideSource = file => file === source || file.startsWith(source + path.sep);
+const insideSource = (file: string) => file === source || file.startsWith(source + path.sep);
 if (insideSource(run)) throw Error('New run must be outside the read-only source');
 if (options.some(x => ['--model','--models','--resume'].includes(x))) throw Error('Replay selects its local model and requires a new run');
 if (options.includes('--policy-artifact')) throw Error('Replay uses the source Policy artifact');
@@ -19,34 +23,58 @@ if (fs.existsSync(path.join(source,'policy.json'))) options.push('--policy-artif
 else if (!options[0] || options[0].startsWith('--')) throw Error('Source Policy artifact missing; supply the original Policy YAML explicitly');
 const runtimeIndex = options.indexOf('--runtime');
 if (runtimeIndex < 0 || !options[runtimeIndex + 1]) throw Error('Supply --runtime explicitly for the new environment');
-const runtime = JSON.parse(fs.readFileSync(options[runtimeIndex + 1], 'utf8'));
-if (!runtime.control_socket) throw Error('Runtime requires control_socket');
+const runtime: unknown = JSON.parse(fs.readFileSync(options[runtimeIndex + 1], 'utf8'));
+if (!isObject(runtime) || typeof runtime.control_socket !== 'string' || !runtime.control_socket) throw Error('Runtime requires control_socket');
 if (insideSource(path.join(fs.realpathSync(path.dirname(runtime.control_socket)), path.basename(runtime.control_socket)))) throw Error('Runtime socket must be outside the read-only source');
 const { recording, inputs } = loadRecording(source);
 if (!inputs.length) throw Error('No consumed native text user inputs');
-let paused = false, failure = null, finished = false, closing = false, child, childExited = false;
-let nextInput = 0, waitingSequence = null;
-function fail(reason) {
+let paused = false, failure: string | null = null, finished = false, closing = false, child: ChildProcess | undefined, childExited = false;
+let nextInput = 0, waitingSequence: number | null = null;
+function fail(reason: string) {
   if (!failure) console.error(`Replay stopped automatic input: ${reason}`);
   failure ??= reason;
 }
 const { server, report } = createReplayServer(recording, { onFailure: fail, reportPath: process.env.REPLAY_REPORT, requestLog: process.env.REPLAY_REQUEST_LOG });
-await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
 const temporary = fs.mkdtempSync('/tmp/opencode/ascout-models-');
 const models = path.join(temporary, 'models.json');
 fs.writeFileSync(models, JSON.stringify({providers:{'ascout-replay-local':{
-  api:'openai-completions', apiKey:'local', baseUrl:`http://127.0.0.1:${server.address().port}/v1`,
+  api:'openai-completions', apiKey:'local', baseUrl:`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
   models:[{id:'recorded',name:'Recorded replies',reasoning:false,input:['text'],contextWindow:1000000,maxTokens:100000}],
 }}}));
-let webIndex = options.indexOf('--web');
-if (webIndex < 0) { options.push('--web','127.0.0.1:0'); webIndex = options.length - 2; }
-let endpoint;
-let resolveEndpoint;
-const endpointReady = new Promise(resolve => { resolveEndpoint = resolve; });
+if (!options.includes('--web')) options.push('--web','127.0.0.1:0');
+let endpoint = '';
+const { promise: endpointReady, resolve: resolveEndpoint } = Promise.withResolvers<void>();
 const binary = process.env.ASCOUT_BIN || path.resolve('target/debug/ascout-control-plane');
-async function request(body) {
+async function request(body: { action: string; prompt: string }) {
   const response = await fetch(`${endpoint}/api/request`, {method:'POST', headers:{origin:endpoint,'content-type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(5000)});
   if (!response.ok) throw Error(`AScout request ${response.status}: ${await response.text()}`);
+}
+async function readInputStatus() {
+  const response = await fetch(`${endpoint}/api/input-status`, {signal:AbortSignal.timeout(5000)});
+  if (!response.ok) throw Error(`Input status HTTP ${response.status}`);
+  const status: unknown = await response.json();
+  if (!isObject(status) || typeof status.sequence !== 'number' || typeof status.ready !== 'boolean' ||
+      (status.error != null && typeof status.error !== 'string')) throw Error('Invalid AScout input status');
+  return { sequence: status.sequence, ready: status.ready, error: status.error };
+}
+async function submitPrompt(sequence: number) {
+  // No await between pause check and submitting the next request.
+  waitingSequence=sequence;
+  await request({action:'prompt',prompt:inputs[nextInput]});
+  nextInput++;
+}
+async function advanceAutomaticInput() {
+  const status = await readInputStatus();
+  if (paused || closing || failure) return true;
+  if (typeof status.error === 'string' && status.error) fail(status.error);
+  else if (waitingSequence !== null) {
+    if (status.sequence > waitingSequence && status.ready) waitingSequence=null;
+  } else if (status.ready) {
+    if (nextInput === inputs.length) finished=true;
+    else await submitPrompt(status.sequence);
+  }
+  return false;
 }
 async function shutdown() {
   if (closing) return;
@@ -56,7 +84,7 @@ async function shutdown() {
     child.kill('SIGTERM');
   } else cleanup();
 }
-let lines;
+let lines: Interface | undefined;
 function cleanup() {
   closing = true;
   lines?.close();
@@ -69,7 +97,7 @@ child = spawn(binary, [run,piRoot,...options,'--models',models,'--model','ascout
 child.on('error', error => { fail(`AScout launch: ${error.message}`); childExited = true; resolveEndpoint(); cleanup(); process.exitCode=1; });
 child.on('exit', (code, signal) => { childExited=true; resolveEndpoint(); cleanup(); if(code || signal) {console.error(`AScout exited: ${code ?? signal}`);process.exitCode=1;} });
 let stderr = '';
-child.stderr.on('data', chunk => {
+child.stderr!.on('data', chunk => {
   process.stderr.write(chunk);
   stderr += chunk;
   const match = stderr.match(/AScout browser UI: (http:\/\/[^\s]+)/);
@@ -91,23 +119,8 @@ await endpointReady;
 while (!closing && !childExited) {
   try {
     if (!paused && !failure && !finished) {
-      const response = await fetch(`${endpoint}/api/input-status`, {signal:AbortSignal.timeout(5000)});
-      if (!response.ok) throw Error(`Input status HTTP ${response.status}`);
-      const status = await response.json();
-      if (paused || closing || failure) continue;
-      if (status.error) fail(status.error);
-      else if (waitingSequence !== null) {
-        if (status.sequence > waitingSequence && status.ready) waitingSequence=null;
-      } else if (status.ready) {
-        if (nextInput === inputs.length) finished=true;
-        else {
-          // No await between pause check and submitting the next request.
-          waitingSequence=status.sequence;
-          await request({action:'prompt',prompt:inputs[nextInput].prompt});
-          nextInput++;
-        }
-      }
+      if (await advanceAutomaticInput()) continue;
     }
-  } catch (error) { if (!closing) fail(error.message); }
+  } catch (error) { if (!closing) fail(error instanceof Error ? error.message : String(error)); }
   await delay(100);
 }

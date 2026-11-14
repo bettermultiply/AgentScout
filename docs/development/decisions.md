@@ -1,5 +1,13 @@
 # 开发决策
 
+## 2026-11-14：回放工具迁移 TypeScript
+
+用户批准 `tools/replay` 核心与 verify 脚本整体迁移 TypeScript，Node 26 直接运行、局部 ESM package 与独立 strict 类型检查，不引入运行时库、构建发布或 binary。废弃该目录原 `.mjs` 入口，正式文档和跨仓 import 同步使用 `.ts`，不保留兼容 stub。保留已使用 CLI/export/serve 文件模式、报告选项、`messageBody`、成功与取消项、原生父链及同键顺序。
+
+审查确认自动输入只消费字符串正文，去掉返回输入项中无人读取的 `id` 及仅包装正文的对象，源 ID 去重仍在读取阶段保留；导出项 `branch_id`、`session_entry_id` 有验收和溯源消费者，保留。上轮删除未使用 `verify/b3-policy.yaml` 和报告覆盖源修复继续有效；B3 仍读取外部已有实验的策略文件。验证结果与限制记在 `replay.md`。
+
+收尾仅将 `run.ts` 的读取校验 input-status、提交 prompt、推进自动输入拆成内部函数，不以减少行数为目标；保留 await 后暂停检查、序号等待、失败／完成状态与超时行为，不扩展类型、统计或父链重构。
+
 ## 2026-11-13：前端构建产物不入库
 
 废弃“构建产物提交到 `webui/dist`、`cargo build` 不依赖 Node”的交付方式：用户决定不提交构建产物，改为在本地生成后嵌入 Rust 二进制；代价是首次克隆及前端源码变化后必须先安装前端依赖并构建，再运行 `cargo build`，缺少嵌入文件会编译失败。当前不实施自动前端构建。

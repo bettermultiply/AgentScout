@@ -11,7 +11,7 @@
 | 23 | `src/control_plane/agent_control/mod.rs` 保存 generation、execution_position、chance_id、assumption_set、pending_operations、execution_state；Chance 保存 authority_outcome 与 authority_evidence。 | 后续需审查能力、约束与 Runtime 对齐信息是否满足目标契约。 |
 | 28 | `src/control_plane/coordination/actions.rs` 按 epoch 调度 Rebalance，处理 pause／resume／preempt；`agent-access/core/index.ts` 实现 hold。 | 不能笼统说 rebalance 未实现；效果复用与保留等扩展需分别检查。 |
 | 29 | `webui/src/components/ChatPane.tsx` 已有多行 textarea；`MessageView.tsx` 展示文字、思考、工具调用和结果。 | 尚无 Markdown 渲染，图片等仍以未展示内容呈现。 |
-| 33 | `src/control_plane/agent_control/tests/nested.rs` 覆盖活跃祖先假设阻止提交和祖先丢弃失效；`tools/replay/verify/b3-deep.mjs` 支持 3／4／10 轮。 | 单元回归不等于端到端祖先丢弃回放；本轮未运行深度脚本。 |
+| 33 | `src/control_plane/agent_control/tests/nested.rs` 覆盖活跃祖先假设阻止提交和祖先丢弃失效；`tools/replay/verify/b3-deep.ts` 支持 3／4／10 轮。 | 单元回归不等于端到端祖先丢弃回放；本轮未运行深度脚本。 |
 | 36 | `src/runtime/process/` 有进程身份、冻结、终止与清理，控制面已有 generation。 | 完整资源租约、跨重启恢复及执行延续方式仍不能据此认定完成。 |
 
 仍确认存在的具体缺口：公共 ChanceCreated 事件没有源侧投机开始时间，尽管内部 ChanceRecord 已保存该时间；公共 Proposal 真实验证时刻仍缺；session 保存主要随 message_end，compaction 覆盖不足；NLE 配置仍只有单个 seed；历史恢复、物化及通用事件级回放界面不能认定已完成。树形几何和 NLE 地图已有实现，完整交付与统计验收仍是单独事项。

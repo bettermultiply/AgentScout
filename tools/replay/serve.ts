@@ -1,23 +1,34 @@
 #!/usr/bin/env node
 import http from "node:http";
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { loadRecording } from "./recording.mjs";
-import { requestKey } from "./normalize.mjs";
+import { loadRecording } from "./recording.ts";
+import { requestKey } from "./normalize.ts";
+import type { RecordingItem } from './types.ts';
+import { isObject, isMessage, parseRecording } from './types.ts';
+import type { AddressInfo } from 'node:net';
 
-export function createReplayServer(recording, { reportPath, requestLog, onFailure = () => {}, cancelTimeoutMs = 30000 } = {}) {
+export interface ReplayOptions {
+  reportPath?: string;
+  requestLog?: string;
+  onFailure?: (message: string) => void;
+  cancelTimeoutMs?: number;
+}
+
+export function createReplayServer(recording: RecordingItem[], { reportPath, requestLog, onFailure = () => {}, cancelTimeoutMs = 30000 }: ReplayOptions = {}) {
 if (!Number.isFinite(cancelTimeoutMs) || cancelTimeoutMs <= 0) throw Error("cancelTimeoutMs must be positive and finite");
-const used = new Array(recording.length).fill(false); const counts = new Map();
+const used: boolean[] = new Array(recording.length).fill(false); const counts = new Map<string, number>();
 let hits = 0, misses = 0, exhausted = 0, pending = 0, cancelled = 0, cancelTimeouts = 0;
 function report() {
-  const missing = {};
+   const missing: Record<string, number> = {};
   for (const [key, n] of counts) if (!recording.some(r => r.key === key)) missing[key] = n;
   for (const [key, n] of counts) {
     const available = recording.filter(r => r.key === key).length;
     if (available > 0 && n > available) missing[key] = n - available;
   }
-  const unconsumed = {};
+   const unconsumed: Record<string, number> = {};
   recording.forEach((r, i) => {
     if (!used[i]) unconsumed[r.key] = (unconsumed[r.key] || 0) + 1;
   });
@@ -29,7 +40,9 @@ const server = http.createServer((req, res) => {
   if (req.method !== "POST" || !req.url?.endsWith("/chat/completions")) { res.writeHead(404); return res.end(); }
   req.setEncoding("utf8");
   let body = ""; req.on("data", c => body += c); req.on("end", () => {
-    let json; try { json = JSON.parse(body); } catch { return fail(res, "invalid JSON"); }
+    let json: unknown;
+    try { json = JSON.parse(body); } catch { return fail(res, "invalid JSON"); }
+    if (!isObject(json) || !Array.isArray(json.messages) || !json.messages.every(isMessage)) return fail(res, 'messages must be an array of messages');
     const key = requestKey(json.messages);
     if (requestLog) fs.appendFileSync(requestLog, JSON.stringify({key,messages:json.messages}) + "\n");
     const index = recording.findIndex((r, i) => r.key === key && !used[i]);
@@ -42,7 +55,7 @@ const server = http.createServer((req, res) => {
     hits++;
     used[index] = true; const item = recording[index], reply = item.reply || [];
     pending++;
-    let timer, settled = false;
+     let timer: NodeJS.Timeout | undefined, settled = false;
     const settle = () => {
       if (settled) return false;
       settled = true; clearTimeout(timer); pending--;
@@ -73,20 +86,26 @@ const server = http.createServer((req, res) => {
     }, item.stopReason === "aborted" ? cancelTimeoutMs : 500);
   });
 });
-function fail(res, message, status = 400, type = "replay_miss") { onFailure(message); if (res.destroyed) return; res.writeHead(status, {"content-type":"application/json"}); res.end(JSON.stringify({error:{type,message}})); }
+function fail(res: http.ServerResponse, message: string, status = 400, type = "replay_miss") { onFailure(message); if (res.destroyed) return; res.writeHead(status, {"content-type":"application/json"}); res.end(JSON.stringify({error:{type,message}})); }
 return { server, report };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const source = process.argv[2];
-  if (!source) throw Error("usage: node tools/replay/serve.mjs SOURCE_RUN_OR_RECORDING [port]");
-  const native = fs.statSync(source).isDirectory();
-  const recording = native ? loadRecording(source).recording : JSON.parse(fs.readFileSync(source, "utf8"));
+  if (!source) throw Error("usage: node tools/replay/serve.ts SOURCE_RUN_OR_RECORDING [port]");
+  const sourceStat = fs.statSync(source);
+  const native = sourceStat.isDirectory();
+  const reportPath = process.env.REPLAY_REPORT || (native ? undefined : path.basename(source) === "recording.json" ? path.join(path.dirname(source), "report.json") : `${source}.report.json`);
+  if (!native && reportPath && fs.existsSync(reportPath)) {
+    const reportStat = fs.statSync(reportPath);
+    if (reportStat.dev === sourceStat.dev && reportStat.ino === sourceStat.ino) throw Error("Replay report must not overwrite the recording source");
+  }
+  const recording = native ? loadRecording(source).recording : parseRecording(JSON.parse(fs.readFileSync(source, "utf8")));
   const {server, report} = createReplayServer(recording, {
-    reportPath: process.env.REPLAY_REPORT || (native ? undefined : source.replace(/recording\.json$/, "report.json")),
+    reportPath,
     requestLog: process.env.REPLAY_REQUEST_LOG,
   });
   process.on("exit", report);
   for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => { report(); server.close(); server.closeAllConnections(); });
-  server.listen(Number(process.argv[3] || process.env.PORT || 0), "127.0.0.1", () => console.log(`replay endpoint http://127.0.0.1:${server.address().port}/v1`));
+  server.listen(Number(process.argv[3] || process.env.PORT || 0), "127.0.0.1", () => console.log(`replay endpoint http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`));
 }

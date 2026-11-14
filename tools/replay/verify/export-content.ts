@@ -1,6 +1,7 @@
 // Different keys are independent queues; retain every item and same-key order.
-export function exportContent(records) {
-  const queues = new Map();
+import type { RecordingItem } from '../types.ts';
+export function exportContent(records: RecordingItem[]) {
+  const queues = new Map<string, Omit<RecordingItem, 'key' | 'session_entry_id'>[]>();
   for (const {key, branch_id, reply, stopReason} of records) {
     const queue = queues.get(key) ?? [];
     queue.push({branch_id, reply, ...(stopReason ? {stopReason} : {})});

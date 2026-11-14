@@ -3,31 +3,35 @@ import { test } from 'node:test';
 import http from 'node:http';
 import fs from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { loadRecording } from '../recording.mjs';
-import { createReplayServer } from '../serve.mjs';
-import { requestKey } from '../normalize.mjs';
+import { loadRecording } from '../recording.ts';
+import { createReplayServer } from '../serve.ts';
+import { requestKey } from '../normalize.ts';
+import type { RecordingItem } from '../types.ts';
+import type { ReplayOptions } from '../serve.ts';
+import type { TestContext } from 'node:test';
+import type { AddressInfo } from 'node:net';
 
 const messages = [{role:'user',content:'start'}], key = requestKey(messages);
-const success = {key,reply:[{type:'text',text:'done'}]};
-const aborted = {key,stopReason:'aborted'};
-async function start(t, recording, options = {}) {
-  const failures = [];
+const success: RecordingItem = {key,reply:[{type:'text',text:'done'}]};
+const aborted: RecordingItem = {key,stopReason:'aborted'};
+async function start(t: TestContext, recording: RecordingItem[], options: ReplayOptions = {}) {
+  const failures: string[] = [];
   const replay = createReplayServer(recording,{...options,onFailure:message=>failures.push(message)});
-  await new Promise(resolve=>replay.server.listen(0,'127.0.0.1',resolve));
+  await new Promise<void>(resolve=>replay.server.listen(0,'127.0.0.1',resolve));
   t.after(async()=>{replay.server.closeAllConnections(); await new Promise(resolve=>replay.server.close(resolve));});
   function request(input = messages) {
     let answered = false;
-    const req = http.request({host:'127.0.0.1',port:replay.server.address().port,path:'/v1/chat/completions',method:'POST',agent:false});
-    const result = new Promise(resolve=>{
+    const req = http.request({host:'127.0.0.1',port:(replay.server.address() as AddressInfo).port,path:'/v1/chat/completions',method:'POST',agent:false});
+    const result = new Promise<{status?: number; body: string; error?: Error}>(resolve=>{
       req.on('response',res=>{answered=true;let body='';res.on('data',c=>body+=c);res.on('end',()=>resolve({status:res.statusCode,body}));});
-      req.on('error',error=>resolve({error}));
+      req.on('error',error=>resolve({error, body: ''}));
     });
     req.end(JSON.stringify({messages:input}));
     return {req,result,get answered(){return answered;}};
   }
   return {...replay,failures,request};
 }
-async function until(check) {
+async function until(check: () => boolean) {
   for(let i=0;i<100;i++){if(check())return;await delay(10);}
   assert.ok(check(),'condition did not settle');
 }
@@ -36,7 +40,7 @@ test('UTF-8 request characters split across HTTP chunks retain their exact key',
   const input=[{role:'user',content:'公开 observation（chars）'}];
   const r=await start(t,[{...success,key:requestKey(input)}]);
   const bytes=Buffer.from(JSON.stringify({messages:input})), split=bytes.indexOf(Buffer.from('（'))+1;
-  const req=http.request({host:'127.0.0.1',port:r.server.address().port,path:'/v1/chat/completions',method:'POST',agent:false});
+  const req=http.request({host:'127.0.0.1',port:(r.server.address() as AddressInfo).port,path:'/v1/chat/completions',method:'POST',agent:false});
   const result=new Promise((resolve,reject)=>{req.on('error',reject);req.on('response',res=>{res.resume();res.on('end',()=>resolve(res.statusCode));});});
   req.write(bytes.subarray(0,split));await delay(30);req.end(bytes.subarray(split));
   assert.equal(await result,200);
@@ -48,7 +52,7 @@ test('native aborted entries retain source order and context; errors are not can
   t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const entries=[{type:'message',id:'u',parentId:null,message:messages[0]},
     ...['stop','aborted','stop','error'].map((stopReason,i)=>({type:'message',id:`a${i}`,parentId:'u',message:{role:'assistant',stopReason,content:[{type:'text',text:'done'}],...(stopReason==='aborted'?{errorMessage:'aborted'}:{})}}))];
-  fs.writeFileSync(`${root}/session.jsonl`,entries.map(JSON.stringify).join('\n'));
+  fs.writeFileSync(`${root}/session.jsonl`,entries.map(e => JSON.stringify(e)).join('\n'));
   fs.writeFileSync(`${root}/events.jsonl`,entries.map(e=>JSON.stringify({message:'transcript',session_entry_id:e.id,branch_id:'root'})).join('\n'));
   const loaded=loadRecording(root);
   assert.deepEqual(loaded.recording.map(r=>r.session_entry_id),['a0','a1','a2']);

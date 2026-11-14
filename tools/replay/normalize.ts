@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /** Dependency-free request normalization for external replay tools. */
 import crypto from "node:crypto";
+import type { ContentPart, Entry, Message, ReplyPart } from './types.ts';
 
-export function textOfContent(content) {
+function textOfContent(content: Message['content']) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   const text = content.filter((b) => b && b.type === "text").map((b) => b.text ?? "").join("\n");
@@ -11,36 +12,36 @@ export function textOfContent(content) {
   return "(no tool output)";
 }
 
-export function stable(value) {
+function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
-  if (value && typeof value === "object") return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${stable(value[k])}`).join(",")}}`;
-  return JSON.stringify(value);
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${stable((value as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(value) ?? 'undefined';
 }
 
-function argsOf(call) {
+function argsOf(call: ContentPart) {
   const a = call?.function?.arguments ?? call?.arguments ?? {};
   if (typeof a !== "string") return a || {};
   try { return JSON.parse(a); } catch { return a; }
 }
-function callsOf(message) {
+function callsOf(message: Message) {
   if (Array.isArray(message?.tool_calls)) return message.tool_calls;
-  return (message?.content ?? []).filter?.(p => p?.type === "toolCall") || [];
+  return Array.isArray(message?.content) ? message.content.filter(p => p.type === 'toolCall') : [];
 }
 
 /** Matches the final context Pi sends to openai-completions. */
-export function requestKey(messages) {
+export function requestKey(messages: Message[]) {
   const ms = (Array.isArray(messages) ? messages : []).map(m => m?.role === "custom" ? {...m, role:"user"} : m);
   let ai = -1;
   for (let i = ms.length - 1; i >= 0; i--) if (ms[i]?.role === "assistant") { ai = i; break; }
   const tail = ai >= 0 ? ms.slice(ai + 1) : [];
   const tools = tail.filter(m => m?.role === "tool" || m?.role === "toolResult");
-  let material;
+  let material: unknown;
   if (tools.length) {
     const prior = ai >= 0 ? callsOf(ms[ai]) : [];
     const byId = new Map(prior.map(c => [c.id ?? c.toolCallId, c]));
     material = tools.map(t => {
       const id = t.tool_call_id ?? t.toolCallId;
-      const call = byId.get(id) || {};
+      const call = byId.get(id) || {type: 'toolCall'};
       return { name: call.function?.name ?? call.name ?? t.toolName ?? "", arguments: argsOf(call), result: textOfContent(t.content) };
     });
   } else {
@@ -54,8 +55,8 @@ export function requestKey(messages) {
   return crypto.createHash("sha256").update(stable(material)).digest("hex");
 }
 
-export function replyParts(message) {
-  const parts = [
+export function replyParts(message: Message): ReplyPart[] {
+  const parts: ContentPart[] = [
     ...(Array.isArray(message?.content) ? message.content : (typeof message?.content === "string" ? [{type:"text", text:message.content}] : [])),
     ...(message?.tool_calls ?? []).map(c => ({type:"toolCall", id:c.id, name:c.function?.name, arguments:argsOf(c)})),
   ];
@@ -63,13 +64,13 @@ export function replyParts(message) {
 }
 
 /** Read a current native Pi message entry, never custom state data. */
-export function messageBody(entry) {
-  if (entry.type === "custom_message") return { role: "custom", customType: entry.customType, content: entry.content ?? [], display: entry.display, details: entry.details, timestamp: Date.parse(entry.timestamp) };
+export function messageBody(entry: Entry) {
+  if (entry.type === "custom_message") return { role: "custom", customType: entry.customType, content: entry.content ?? [], display: entry.display, details: entry.details, timestamp: Date.parse(entry.timestamp ?? '') };
   return entry.type === "message" ? entry.message : {};
 }
 
 /** Current Pi buildSessionProjection + convertToLlm semantics on one native path. */
-export function sessionContext(path) {
+export function sessionContext(path: Entry[]) {
   const compaction = path.findLastIndex(e => e.type === "compaction");
   let selected = path;
   if (compaction >= 0) {
@@ -78,19 +79,22 @@ export function sessionContext(path) {
     selected = [c, ...(kept >= 0 ? path.slice(kept, compaction).filter(e => e.message?.role !== "system") : []), ...path.slice(compaction + 1)];
   }
   const edits = new Map(selected.filter(e => e.type === "context_edit").map(e => [e.targetId, e]));
-  const messages = [];
+  const messages: Message[] = [];
   for (const [i, e] of selected.entries()) {
     const edit = edits.get(e.id);
     if (edit?.replacement === null) continue;
-    let projected = [];
-    if (e.type === "message") projected = [e.message];
+    let projected: Message[] = [];
+    if (e.type === "message") {
+      if (!e.message) throw Error(`Missing message ${e.id}`);
+      projected = [e.message];
+    }
     if (e.type === "custom_message") projected = [{ role: "user", content: e.content ?? [] }];
     if (e.type === "branch_summary" && e.summary) projected = [{ role: "user", content: `The following is a summary of a branch that this conversation came back from:\n\n<summary>\n${e.summary}</summary>` }];
     if (e.type === "compaction" && i === 0) projected = [...(e.systemMessage ? [e.systemMessage] : []), { role: "user", content: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${e.summary}\n</summary>` }];
     for (let m of projected) {
-      if (!["system", "user", "assistant", "toolResult"].includes(m.role)) throw Error(`Unsupported persisted message role ${m.role}`);
-      if (edit && ["message", "custom_message"].includes(e.type) && ["user", "assistant", "toolResult", "custom"].includes(m.role)) m = { ...m, content: edit.replacement.content };
-      if (m.role === "assistant" && ["aborted", "error"].includes(m.stopReason)) continue;
+      if (!m.role || !["system", "user", "assistant", "toolResult"].includes(m.role)) throw Error(`Unsupported persisted message role ${m.role}`);
+      if (edit?.replacement && ["message", "custom_message"].includes(e.type) && ["user", "assistant", "toolResult"].includes(m.role)) m = { ...m, content: edit.replacement.content };
+      if (m.role === "assistant" && ["aborted", "error"].includes(m.stopReason ?? '')) continue;
       if (m.role === "toolResult") {
         const previous = messages.findLastIndex(x => x.role === "toolResult" && x.toolCallId === m.toolCallId);
         const assistant = messages.findLastIndex(x => x.role === "assistant");

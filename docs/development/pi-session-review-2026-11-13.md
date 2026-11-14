@@ -20,8 +20,8 @@ Pi `SessionManager.createBranchedSession()` 修改 receiver，仅保留选定父
 2. `node --test tests/pi-access.mjs tests/pi-session-history.mjs tests/pi-history-regressions.mjs tests/pi-standalone-continuation.mjs`：14 项。覆盖完成、工具等待、候选闸门、准入等待和 EOF 退出；await 后追加的 shutdown custom 记录必须仍在最终文件。SDK double 测试与真实 Pi 测试分别标识，不能混称全部为真实 SDK。
 3. 独立真实 Pi：`tests/pi-standalone-continuation.mjs` 从停止汇总的最终文件创建新的真实 `AgentSession`，本地伪模型接收真实结果上下文，用 Pi 内建 `write` 写入 `answer.txt`，再完成原任务。实际断言文件内容、工具成功、两次模型请求、最终落盘回答；另验证真实扩展异步 shutdown append。证明范围是同一目录的文件任务，不是 NLE 外部运行进程的独立迁移。
 4. 已安装 `pi-code-rollback`：临时 Git 仓库生成快照，汇总、重开、启动 GC 后，通过扩展 `restoreSnapshot` 实际恢复修改的 `task.txt` 为 baseline，并删除快照后新增的 `new.txt`。保留 targetId、repoRoot、ref、tree 与 Git 对象断言。没有对用户仓库恢复；没有验证跨仓库 object/ref 迁移或完整交互式 `/restore` 导航。
-5. `node tools/replay/verify/b1-pi.mjs`：真实 Pi 解析两个并行调用、结果续跑、HTTP 请求键和计数通过；产物 `/tmp/opencode/ascout-replay-b1-pi-1jV4iH`。
-6. `node tools/replay/verify/b3.mjs`：真实控制面、Pi SDK、本地伪模型和真实 NLE；首跑与回放各 1 Chance、2 候选、1 Promote、2 Discard，4 次模型请求，完整权威 role/text 与 NLE 观测相同。回放 4/4 命中，缺失／耗尽／改键均 HTTP 400，两次控制面退出 0。产物 `/tmp/ascout-replay/b3/acceptance.json`，日志 `/tmp/opencode/pi-review-b3.log`。清理仅断言本脚本启动的子进程和占用端口，不干扰另一轮用户任务；不能推广为宿主全部进程已退出。
+5. `node tools/replay/verify/b1-pi.ts`：真实 Pi 解析两个并行调用、结果续跑、HTTP 请求键和计数通过；产物 `/tmp/opencode/ascout-replay-b1-pi-1jV4iH`。
+6. `node tools/replay/verify/b3.ts`：真实控制面、Pi SDK、本地伪模型和真实 NLE；首跑与回放各 1 Chance、2 候选、1 Promote、2 Discard，4 次模型请求，完整权威 role/text 与 NLE 观测相同。回放 4/4 命中，缺失／耗尽／改键均 HTTP 400，两次控制面退出 0。产物 `/tmp/ascout-replay/b3/acceptance.json`，日志 `/tmp/opencode/pi-review-b3.log`。清理仅断言本脚本启动的子进程和占用端口，不干扰另一轮用户任务；不能推广为宿主全部进程已退出。
 
 B3 旧断言要求预测值 `moved`，已按设计改为真实 NLE observation。前两次运行分别因过宽宿主进程断言和这个旧历史断言失败，修正后重跑通过。开发事实应保留失败原因，不能把前两次称作通过。
 

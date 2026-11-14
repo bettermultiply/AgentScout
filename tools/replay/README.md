@@ -1,17 +1,27 @@
 # 模型输出记录与回放工具
 
+运行使用 Node 26 直接执行 TypeScript，局部 `package.json` 明确采用 ESM，无构建步骤或运行时依赖。独立严格类型检查包含核心与全部验收脚本：
+
+```sh
+npm install --prefix tools/replay
+npm run check --prefix tools/replay
+npm test --prefix tools/replay
+```
+
+仅开发检查需要 TypeScript 和 Node 类型包；版本与仓库已有 WebUI 开发依赖一致，可复用已安装的依赖。运行回放本身不需要安装它们。
+
 记录是系统原生能力。通用运行入口从指定已有 run 直接读取 `session.jsonl`、`events.jsonl` 并在内存准备回复；正常新 run 仍按通常方式保存自己的原生记录。不会额外生成 recording 缓存。
 
 ```sh
-node tools/replay/export.mjs RUN_DIR OUTPUT/recording.json
-node tools/replay/serve.mjs OUTPUT/recording.json 18080
+node tools/replay/export.ts RUN_DIR OUTPUT/recording.json
+node tools/replay/serve.ts OUTPUT/recording.json 18080
 ```
 
 通用交互回放由外部工具启动普通 AScout，不需要先导出：
 
 ```sh
 mkdir /tmp/opencode/replay-run
-node tools/replay/run.mjs /path/to/source-run /tmp/opencode/replay-run ../pi \
+node tools/replay/run.ts /path/to/source-run /tmp/opencode/replay-run ../pi \
   --runtime /path/to/runtime.json --web 127.0.0.1:8080
 ```
 
@@ -27,22 +37,25 @@ AScout 保存追加 provider 配置内容，普通恢复不依赖工具临时目
 
 上下文按原生父链投影：保留最新 compaction 摘要及其保留区间，应用 context_edit，转换 custom_message 和 branch_summary；不把 authority custom 状态当模型消息。失败 assistant 不进入请求；恢复后的同一待决工具结果保留最后一条。外部扩展未持久化的上下文改写不能从这些文件恢复。
 
-`normalize.mjs` 供导出与 HTTP 端共同使用。键取最近 assistant 之后的工具结果，其工具名、参数（JSON 对象按键排序）、Pi 文本结果组成材料；若同时存在后续 user/custom 内容也纳入。没有工具结果时取最后 user 文本。材料用 SHA-256，原生 ID、时间、Branch 名不进入键。同键按导出项顺序消费；不能据此证明完整历史相同。
+`normalize.ts` 供导出与 HTTP 端共同使用。键取最近 assistant 之后的工具结果，其工具名、参数（JSON 对象按键排序）、Pi 文本结果组成材料；若同时存在后续 user/custom 内容也纳入。没有工具结果时取最后 user 文本。材料用 SHA-256，原生 ID、时间、Branch 名不进入键。同键按导出项顺序消费；不能据此证明完整历史相同。
 
-端点只接受 `POST /v1/chat/completions`，成功项在输出任何响应前等待一次 500ms，再以 SSE 返回全部内容。取消期间清理定时器，停止写入连接。缺键或耗尽返回 HTTP 400，不回退真实模型。独立 `serve.mjs` 可直接接收源 run，也可供低层检查接收显式导出文件；原生 run 模式默认不写报告，显式 `REPLAY_REPORT` 可指定验收报告，`REPLAY_REQUEST_LOG` 可记录请求；通用入口也支持这两个选项。`missing_keys` 统计缺键／耗尽，`unconsumed_keys` 统计剩余项。端口可省略，自动选择并打印 URL。Pi 配置见 `models.json`，dummy key 仅用于本地服务。
+端点只接受 `POST /v1/chat/completions`，成功项在输出任何响应前等待一次 500ms，再以 SSE 返回全部内容。取消期间清理定时器，停止写入连接。缺键或耗尽返回 HTTP 400，不回退真实模型。独立 `serve.ts` 可直接接收源 run，也可供低层检查接收显式导出文件；原生 run 模式默认不写报告，显式 `REPLAY_REPORT` 可指定验收报告，`REPLAY_REQUEST_LOG` 可记录请求；通用入口也支持这两个选项。`missing_keys` 统计缺键／耗尽，`unconsumed_keys` 统计剩余项。端口可省略，自动选择并打印 URL。Pi 配置见 `models.json`，dummy key 仅用于本地服务。
+
+独立 `serve.ts` 的文件输入保持只读：文件名恰为 `recording.json` 时默认报告为同目录 `report.json`；其他文件名在完整路径后追加 `.report.json`，例如 `capture.json.report.json`、`report.json.report.json`。显式 `REPLAY_REPORT` 或默认报告若指向源文件本身（包括符号链接、硬链接），启动时拒绝。
 
 导出项按 session 文件序保存成功和明确 `stopReason=aborted` 的 assistant；成功 reply 保留 text/toolCall 和原 toolCall ID，取消项只保留取消状态及匹配信息。其他 error 或带 errorMessage 的失败项跳过，stderr 分别报告数量。成功与取消项均要求 transcript 原生引用，同键按源顺序消费。取消项命中后不返回回答，等待 AScout 取消 HTTP 请求；30 秒仍未取消则返回 HTTP 504 `replay_cancel_timeout` 并通知自动输入失败。`createReplayServer` 的 `cancelTimeoutMs` 可供验证调整有界超时。报告的 `pending`、`cancelled`、`cancel_timeouts` 分别表示等待、客户端取消、取消超时数量；`hits` 和 `consumed` 包括取消项。
 
 ## 验收
 
 ```sh
-node tools/replay/verify/b1.mjs
-node tools/replay/verify/native.mjs
-node --test tools/replay/verify/cancellation.test.mjs
-node tools/replay/verify/b1-pi.mjs EXISTING_B1_PI_RUN
-node tools/replay/verify/b3.mjs EXISTING_B3_RUN
-node tools/replay/verify/b3-repeat.mjs EXISTING_B3_RUN
-DEEP_ROUNDS=4 node tools/replay/verify/b3-deep.mjs EXISTING_DEEP_RUN
+node tools/replay/verify/b1.ts
+node tools/replay/verify/native.ts
+node --test tools/replay/verify/cancellation.test.ts
+node --test tools/replay/verify/report-path.test.ts
+node tools/replay/verify/b1-pi.ts EXISTING_B1_PI_RUN
+node tools/replay/verify/b3.ts EXISTING_B3_RUN
+node tools/replay/verify/b3-repeat.ts EXISTING_B3_RUN
+DEEP_ROUNDS=4 node tools/replay/verify/b3-deep.ts EXISTING_DEEP_RUN
 ```
 
 B1 保留手构造低层规范化、顺序消费、缺失/耗尽和报告检查。B1-PI 支持从已有 B1-PI run 开始，省略参数则使用手构造原生记录，验证真实 Pi provider 对并行工具调用及后续回放请求的解析。所有路径均不调用真实模型。

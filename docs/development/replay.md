@@ -1,5 +1,21 @@
 # 模型输出记录与回放
 
+## 2026-11-14：TypeScript 迁移与维护性检查
+
+`tools/replay` 核心与全部 verify 入口现由 Node 26 直接执行 `.ts`；局部 ESM package、`strict` / `noEmit` / `erasableSyntaxOnly` 检查独立于 WebUI，无运行时库及构建步骤。开发依赖版本沿用仓库已有 TypeScript 5.9 和 Node 26 类型；本机检查复用已安装包。命令见 [工具说明](../../tools/replay/README.md)。
+
+删除了 `loadRecording().inputs` 内无人消费的 `id` 字段和仅包装正文的对象，现在直接返回正文字符串；原生 ID 仍用于读取阶段去重。导出 `branch_id` 被 B1／B1-PI／内容比较消费，`session_entry_id` 被源序回归消费，均保留；`messageBody` 由跨仓 Pi notification 回归使用，保留。去掉 requestKey 回归中的无效恒等 map，改为 `structuredClone`；JSON map 使用单参数调用，Promise 初始化直接使用 Node 的 `withResolvers`。B1 使用独立临时目录与自动分配端口，避免共享固定目录与端口。既有取消、UTF-8、报告路径保护及上轮删除闲置策略夹具均保留。
+
+验证：`npm run check --prefix tools/replay` 通过；现有 Node 回归 14/14，加 `tests/pi-notification.mjs` 共 15/15；B1、native、B1-PI 通过。native 产物 `/tmp/opencode/replay-native-KpiYwi`；B1-PI 产物 `/tmp/opencode/ascout-replay-b1-pi-pFLH3Q`，两请求命中、并行调用及后续请求解析、报告计数、四子进程退出和两个动态端口关闭均通过。
+
+`/tmp/opencode/replay-ts-run1.mjs` 在 `/tmp/opencode/replay-ts-run1-ruRFrZ` 对已有 `/tmp/opencode/run-1` 跑两个全新环境：每轮 40 hits/consumed、23 成功、17 客户端取消、2 输入完成，misses/exhausted/pending/unconsumed/cancel_timeouts 均 0；启动 pause 零输入、resume 后完成，完成后保持交互。一轮工具 quit、另一轮 AScout API shutdown，双方退出 0 且 recovery 文件存在；源 session/events/policy 哈希未变，运行目录相关子进程无残留。只使用本地录制输出，未接触用户 8180 服务或调用真实模型。
+
+此验收不扩大既有保证：任意源的工具环境重建、扩展未持久化改写、非文本输入、同键碰撞与取消调度仍受原限制。B3/repeat/deep 全部迁移并纳入类型检查，本轮未重新执行其旧 NLE 整链场景；此前失败证据继续保留，不能以 run-1 两轮替代全部 B3 验收。普通模型／恢复仍使用原系统实现，本轮没有修改对应控制面或 Pi 行为。
+
+收尾增加 Runtime 配置及 input-status 响应结构检查、B1 动态端口后，再跑严格类型检查、B1 和 run-1 两轮均通过；最终端到端证据为 `/tmp/opencode/replay-ts-run1-REI1bp`。正式引用跨本仓与 `../pi` 搜索无旧 replay 入口；工具源码无 `any`、`@ts-ignore` 或 `@ts-nocheck`；`git diff --check` 通过。
+
+最终将 `run.ts` 的读取校验状态、提交 prompt、推进自动输入分为内部函数，保留 await 后的暂停／关闭／失败检查及跳过本轮延迟的行为；`waitingSequence` 仍在请求发出前设置，仅在请求成功后递增输入下标，等待序号推进与 ready 后才解除等待。重新运行 `npm run check --prefix tools/replay`、`npm test --prefix tools/replay`（14/14）和 `git diff --check` 通过；本次拆分未新增测试或重新执行真实环境端到端验证，未调用真实模型。
+
 本文从[控制面观察接口](observation.md)展开，说明系统外的正确性验证工具，不改变控制面主线。
 
 ## 目标与边界
@@ -14,13 +30,13 @@
 
 ```sh
 mkdir /tmp/opencode/replay-run
-node tools/replay/run.mjs /path/to/source-run /tmp/opencode/replay-run ../pi \
+node tools/replay/run.ts /path/to/source-run /tmp/opencode/replay-run ../pi \
   --runtime /path/to/runtime.json --web 127.0.0.1:8080
 ```
 
 源 run 的 `policy.json` 优先，经正常 `--policy-artifact` 加载；不存在时必须在 Pi 路径后显式提供 `original-policy.yaml`，不得回退默认策略。若两者都提供，核对编译 digest。外部工具要求显式 `--runtime`；配置须使用新 control_socket，不得位于源目录。新 run 不得位于源目录内。Runtime 的其他可写路径和初始环境由调用方明确提供，工具不会猜测目录布局或拿退出快照当初始状态。
 
-`tools/replay/recording.mjs` 每次启动读取原生 session/events，在内存恢复候选请求上下文。外部本地 HTTP 服务以 OpenAI SSE 返回记录回复，通过通用 `--models` 追加模型配置；普通 Pi 模型、认证和扩展仍可用，重复 provider 拒绝覆盖。运行侧不导入测试工具。按 events 文件顺序、原生 ID 去重，仅将已消费 `message.role=user` 的纯文本输入经 `POST /api/request` 送入当前权威；通知不作为用户输入。不重现墙钟时刻、Interrupt 或未消费队列。
+`tools/replay/recording.ts` 每次启动读取原生 session/events，在内存恢复候选请求上下文。外部本地 HTTP 服务以 OpenAI SSE 返回记录回复，通过通用 `--models` 追加模型配置；普通 Pi 模型、认证和扩展仍可用，重复 provider 拒绝覆盖。运行侧不导入测试工具。按 events 文件顺序、原生 ID 去重，仅将已消费 `message.role=user` 的纯文本输入经 `POST /api/request` 送入当前权威；通知不作为用户输入。不重现墙钟时刻、Interrupt 或未消费队列。
 
 HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已处理输入序号 `sequence`、`ready` 和当前权威输入失败原因 `error`。外部工具等待序号推进及 `ready=true` 后才提交下一输入；可输入要求权威轮次结束、无排队输入或待确认 Promote、不在恢复／关闭／模型切换中，不要求所有候选结束。此接口是当前状态，序号不跨重启保留，不是每条输入的持久回执。
 
@@ -34,11 +50,15 @@ HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已�
 
 ## 记录来源
 
+### 独立服务报告路径修复（2026-11-14）
+
+`report-path.test.ts` 使用临时手造录制文件，修复前六项中五项稳定复现源文件被报告覆盖（`capture.json`、`report.json`、显式同源路径及其符号链接／硬链接），`recording.json` 原调用通过。默认规则现为：`recording.json` 写同目录 `report.json`，其他文件名追加 `.report.json`；显式或默认报告与源文件为同一文件时启动拒绝。原生 run 默认仍不写报告。修后六项全部通过，连同已有取消／内容比较回归共 14/14 通过，B1、native 也通过，全部使用手造记录和本地服务。规则及命令见 [工具说明](../../tools/replay/README.md)。
+
 ### 取消请求与响应延迟修复（2026-11-14）
 
 原生明确 aborted 的 assistant 按源 session 顺序保留为取消项，与成功项共同组成同键队列。匹配取消项后等待 AScout 自行取消 HTTP 请求，不产生回答；默认 30 秒未取消以 HTTP 504 `replay_cancel_timeout` 明确失败并停止自动输入。真正缺键／耗尽仍为 HTTP 400，其他 error 不视为取消。成功项每次请求在响应输出前等待一次 500ms；客户端取消会清理等待定时器和响应监听，不再写连接。
 
-`cancellation.test.mjs` 的四项取消／延迟回归修前全部失败，修后通过；端到端又发现跨 HTTP chunk 的 UTF-8 字符被 Buffer 字符串拼接损坏，新增真实分块请求回归先得到 400，改用 `req.setEncoding("utf8")` 后通过。归一化及上下文重建规则保持原有行为。取消比较、同键顺序、缺失／耗尽断言均保留。
+`cancellation.test.ts` 的四项取消／延迟回归修前全部失败，修后通过；端到端又发现跨 HTTP chunk 的 UTF-8 字符被 Buffer 字符串拼接损坏，新增真实分块请求回归先得到 400，改用 `req.setEncoding("utf8")` 后通过。归一化及上下文重建规则保持原有行为。取消比较、同键顺序、缺失／耗尽断言均保留。
 
 独立真实 NLE 验证 `/tmp/opencode/run1-cancel-STTMVB`：源 `/tmp/opencode/run-1` 的两条输入 `cd8248f0`、`fdbd1515` 顺序完成，`finished=true`、`sequence=2`、`error=null`；40 requests/hits/consumed，23 成功、17 客户端取消，misses/exhausted/unconsumed/pending/cancel_timeouts 均为 0。原首错 `bc8aef78…` 正常命中；中途新增缺键 `813e77c9…` 的 UTF-8 根因也已消除。使用原 `nle-runtime.json` 的初始配置，仅更换 control_socket；保留正常 Pi 环境，模型服务均为本地录制回复。源 session/events/policy SHA-256 前后一致。`result.json`、`report.json`、`requests.jsonl`、原生 run 和日志保留证据，`cleanup.json` 确认退出码 0 和正常 recovery 保存。原 8180 实例未操作。
 
@@ -60,7 +80,7 @@ HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已�
 
 第一后续记录可以是 custom、compaction、context_edit 或 custom_message，不限 assistant。通知以 details.command_id 关联 applied Promote。还原后按最新 compaction 的保留区间、context_edit replacement、branch_summary/custom_message 构造当前 Pi 模型上下文；失败 assistant 排除，当前待决调用的较早同 toolCallId 结果被后续结果替换。缺原生引用、注入批次不全、未知消息角色或无法唯一确定重挂边时明确失败，不加旧格式回退。未持久化的扩展改写及任意 provider 转换不在保证内。
 
-本轮验证：B1 与 B1-PI 通过，后者从已有 `/tmp/opencode/ascout-replay-b1-pi-hyZBIv` 开始导出、经真实 Pi stream 消费两个输出，hits/consumed=2、misses/exhausted/unconsumed=0；`native.mjs` 覆盖自定义首后续、反序并行完成、嵌套、compaction/edit/notification、时钟重置、源文件不变与歧义报错。已有 `/tmp/opencode/recovery-active-BITw2r` 并行恢复样例导出成功，candidate-2 的 4b5fdb14 上下文使用预测批次 02901c7e → 204d72b4；四层 `/tmp/ascout-replay/b3-deep-4/deep-recording` 导出 13 项，十层记录导出 31 项。B3 真实工具回放尝试 3 hit／1 miss，四层也因缺键失败，不能宣称严格整链通过。B3 新运行 NLE 初始地图／位置与源记录不同，严格保留 400 及所有结构、正文、观测和消费断言；不重新录制或弱化匹配。日志 `/tmp/opencode/native-b3.log`、`/tmp/opencode/native-deep4.log`。所有模型请求仅到 loopback。
+本轮验证：B1 与 B1-PI 通过，后者从已有 `/tmp/opencode/ascout-replay-b1-pi-hyZBIv` 开始导出、经真实 Pi stream 消费两个输出，hits/consumed=2、misses/exhausted/unconsumed=0；`native.ts` 覆盖自定义首后续、反序并行完成、嵌套、compaction/edit/notification、时钟重置、源文件不变与歧义报错。已有 `/tmp/opencode/recovery-active-BITw2r` 并行恢复样例导出成功，candidate-2 的 4b5fdb14 上下文使用预测批次 02901c7e → 204d72b4；四层 `/tmp/ascout-replay/b3-deep-4/deep-recording` 导出 13 项，十层记录导出 31 项。B3 真实工具回放尝试 3 hit／1 miss，四层也因缺键失败，不能宣称严格整链通过。B3 新运行 NLE 初始地图／位置与源记录不同，严格保留 400 及所有结构、正文、观测和消费断言；不重新录制或弱化匹配。日志 `/tmp/opencode/native-b3.log`、`/tmp/opencode/native-deep4.log`。所有模型请求仅到 loopback。
 
 失败 Branch 对有效执行、成功产物和副作用的影响须等效于没有创建过，但审计记录必须存在；旁支不得重新执行或对权威生效。
 
@@ -82,7 +102,7 @@ HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已�
 
 ### 深度回放结构（2026-11-12）
 
-`b3-deep.mjs` 从 `chance_created` observation 的 `parent_branch_id` 与
+`b3-deep.ts` 从 `chance_created` observation 的 `parent_branch_id` 与
 `parent_chance_id` 识别嵌套 Chance，而不是从 `candidate_created` 推断。N=3 的结构为：
 `chance-1` 的 parent 为 `authority`，`chance-2` 的 parent 为 `candidate-2/chance-1`，
 `chance-3` 的 parent 为 `candidate-4/chance-2`；N=4 再增加
@@ -126,7 +146,7 @@ Python 和仓库 bridge；套件只替换 control_socket。实际路径为 NleBa
 misses/exhausted/unconsumed 均 0，结构与动作结果恢复，但全部严格验收仍失败。
 四层另有权威历史差异：源文件链中是预测 `moved`，当前整理后的链中是真实工具结果；
 这符合当前已确认语义，不通过改回运行语义或弱化 audit 绕过。脚本遇到首个严格差异即
-退出，所以一次 `b3-deep.mjs` 的三轮内部循环未完成；三次独立调用不等于三轮验收通过。
+退出，所以一次 `b3-deep.ts` 的三轮内部循环未完成；三次独立调用不等于三轮验收通过。
 这些旧基线的严格比较仍失败；不兼容旧日期或旧权威历史语义。当前语义的重复验收另用下述已存在原生 run，不把新结果冒充旧基线通过。
 
 原始证据：`/tmp/opencode/nle-initialization-before.log`、`nle-initialization-after.log`、
@@ -152,21 +172,21 @@ misses/exhausted/unconsumed 均 0，结构与动作结果恢复，但全部严�
   `policy-fix.json` 保存前后哈希，source 不变。四层原配置已使用 candidates[:count]，未改。
 - 并行不同键的完成顺序可以交换；验收脚本原来比较导出整个数组，错误地要求跨键总顺序相同。
   现在严格比较键集合及每个键的完整 branch/reply 队列，保留同键顺序、数量、分支和全部回复断言；
-  不改导出器或端点顺序。`export-content.test.mjs` 先失败后通过，含同键反序／增删／正文变化拒绝。
+  不改导出器或端点顺序。`export-content.test.ts` 先失败后通过，含同键反序／增删／正文变化拒绝。
   初次失败证据为 `/tmp/opencode/current-single-5.log`（OTCm8H）和修正比较后
   `/tmp/opencode/ascout-replay-b3-repeat-9WDxkS`（Policy 身份交换，4/4 命中）。
 
 精确验收命令（仓库根目录）：
 
 ```sh
-node tools/replay/verify/b3-repeat.mjs /tmp/opencode/current-replay-inputs-0k1c9rtd/single/source
-DEEP_ROUNDS=4 node tools/replay/verify/b3-deep.mjs /tmp/opencode/current-replay-inputs-0k1c9rtd/deep4/source
-node --test tools/replay/verify/export-content.test.mjs
+node tools/replay/verify/b3-repeat.ts /tmp/opencode/current-replay-inputs-0k1c9rtd/single/source
+DEEP_ROUNDS=4 node tools/replay/verify/b3-deep.ts /tmp/opencode/current-replay-inputs-0k1c9rtd/deep4/source
+node --test tools/replay/verify/export-content.test.ts
 python3 tests/policy-proposal-order.py
 /home/betmul/BETMUL/AgentScout-suit/nle-313/bin/python tests/nle-initialization.py
 /home/betmul/BETMUL/AgentScout-suit/nle-313/bin/python /tmp/opencode/current-disp-probe.py
-node tools/replay/verify/native.mjs
-node tools/replay/verify/b1.mjs
+node tools/replay/verify/native.ts
+node tools/replay/verify/b1.ts
 ```
 
 单层 5/5 完整通过，每轮 Chance=1、Proposal/Candidate=2、Promote=1、applied Discard=2、

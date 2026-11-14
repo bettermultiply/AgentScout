@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": { "check": "tsc --noEmit", "test": "node --test verify/*.test.ts" },
+  "devDependencies": { "@types/node": "^26.6.6", "typescript": "^5.9.3" }
+}
