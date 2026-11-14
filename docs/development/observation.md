@@ -6,17 +6,18 @@
 
 仅绑定 loopback，继续校验 Host。所有观察接口只读；`POST /api/request` 的 Prompt、Interrupt、Shutdown 以及同源 JSON 校验保持原样。
 
-- `GET /api/observation/state-event-set`：`{sequence, chances, events}`。events 是从第 1 号到 sequence 的完整有序公共事件读取，称为状态事件集；`chances` 是由这些事件折叠出的 Chance 当前视图（id、父 Branch/父 Chance、operation、tool、stage、authority_state、proposal_ids、branch_ids），客户端可据此直接显示机会状态。客户端自行折叠 events 得到展示状态，不包含对话正文。
+- `GET /api/observation/state-event-set`：`{sequence, chances, events}`。events 是从第 1 号到 sequence 的完整有序公共事件读取，称为状态事件集；`chances` 是由这些事件折叠出的 Chance 当前视图（id、父 Branch/父 Chance、operation、tool、stage、authority_state、源侧投机起点、已接受验证的 id、proposal_ids、branch_ids），客户端可据此直接显示机会状态。客户端自行折叠 events 得到展示状态，不包含对话正文。
 - `GET /api/observation/events?after=N`：SSE，只补发 `sequence > N` 的事件，再持续等待新事件；`id` 与事件 sequence 相同，`data` 是事件 JSON。自动重连的 `Last-Event-ID` 优先于初始 after 参数。缺省从 0 开始；非法序号返回 400，超前序号返回 409，需重新取得状态事件集。15 秒空闲发送注释心跳。每个连接独立线程，不占住其他请求。
 - `GET /api/branches/{branch_id}/conversation`：Branch id 按 URL segment 编码；未知 Branch 返回 404。响应 `{inherited, messages, streaming, role, status}`；`role` 与 `status` 是该 Branch 当前的 Branch 角色和生命周期状态，前端据此显示候选的投机身份，不再依赖单独的标志字段。已归档 Branch 的历史仍可读取。
 
-公共事件为 `{sequence, timestamp_ms, task_id, event, ...内容}`。timestamp_ms 是控制面记录事实的 Unix 毫秒时刻，不冒充源侧实际发生时间；所有事件（包括 `branch_created`）都遵循这一含义。枚举值使用现有代码的 snake_case 序列化。`branch_created`、`model_usage` 与 `tool_finished` 中的源侧时间字段是接入侧测量值，与事件公共 timestamp_ms 含义不同。
+公共事件为 `{sequence, timestamp_ms, task_id, event, ...内容}`。timestamp_ms 是控制面记录事实的 Unix 毫秒时刻，不冒充源侧实际发生时间；所有事件（包括 `branch_created`）都遵循这一含义。枚举值使用现有代码的 snake_case 序列化。`branch_created`、`chance_created`、`proposal_validated`、`model_usage` 与 `tool_finished` 中的单独时间字段分别来自事实产生侧，与事件公共 timestamp_ms 含义不同。
 
 事件名与内容：
 
 - `branch_created`：branch_id、parent_branch_id、role、chance_id、speculation_kind、speculation_started_at_ms。chance_id 是这个 Branch 所属 Chance；初始权威 Branch 为 null。speculation_started_at_ms 只对由准入请求创建的投机候选填写，值为对应准入请求的接入侧时间戳，表示投机起点；其他 Branch 为 null。
-- `chance_created`：chance_id、parent_branch_id、parent_chance_id、operation_id、tool_name、stage、authority_state。`admit` 通过时产生，此时 stage 为 `pending`、authority_state 为 `not_requested`。
-- `chance_stage_changed`：chance_id、stage、reason。stage 取 `pending`、`running`、`resolving`、`{"accepted": proposal_id}` 或 `{"discarded": reason}`；reason 为描述性文字。
+- `chance_created`：chance_id、parent_branch_id、parent_chance_id、operation_id、tool_name、stage、authority_state、speculation_started_at_ms。`admit` 通过时产生，此时 stage 为 `pending`、authority_state 为 `not_requested`；源时间来自接入侧准入请求，即使 Chance 没有候选也保留。它不是 `select` 选中或候选实际启动的时刻，无法取得时为 null。
+- `chance_stage_changed`：chance_id、stage、reason、validation_id。stage 取 `pending`、`running`、`resolving`、`{"accepted": proposal_id}` 或 `{"discarded": reason}`；reason 为描述性文字。只有对应 Promote 已由 Agent 确认的 Accepted 携带所依据的 validation_id，其他情况为 null。
+- `proposal_validated`：chance_id、proposal_id、validation_id、validated_at_ms。控制面在 `match` 求值返回后、`dispose` 求值前读取 Unix 毫秒墙钟，之后通过异步结果传递并发布；validation_id 是本次验证工作的 id。重复验证各自拥有 id，Accepted 只引用实际用于该次 Promote 的一次；缺少系统时间时为 null。公共事件的 timestamp_ms 仍是 Ledger 记录时刻；验证失败或没有成功完成处置求值时不冒充一次可供接受的验证。
 - `authority_state_changed`：chance_id、state。state 取 `not_requested`、`fetching`、`arrived`、`unavailable`。
 - `proposal_added`：chance_id、proposal_id、payload。每次 `predict` 生成一个 Proposal 时发布。
 - `authority_changed`：branch_id、previous_authority。

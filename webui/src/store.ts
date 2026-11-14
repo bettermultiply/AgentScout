@@ -3,6 +3,9 @@ import { eventStreamUrl, fetchStateEventSet } from './api'
 import { applyEvent, emptyRunState, foldEvents } from './fold'
 import type { RunState } from './fold'
 import type { ObservationEvent } from './types'
+import { buildTree, type TreeGraph } from './components/treeGraph'
+import { cachedLayoutTree, clearCachedTreeLayout } from './tree/geometry'
+import { DEFAULT_TUNING, normalizeTuning, type TreeTuning } from './tree/tuning'
 
 export type ConnectionState =
   | 'idle'
@@ -25,6 +28,9 @@ export interface DetailAnchor {
 }
 
 interface AppStore {
+  treeGraph: TreeGraph
+  treeTuning: TreeTuning
+  setTreeTuning: (tuning: TreeTuning) => void
   state: RunState
   connection: ConnectionState
   error: string | null
@@ -77,6 +83,11 @@ function pickTask(state: RunState, current: string | null): string | null {
 }
 
 export const useAppStore = create<AppStore>((set, get) => {
+  function graphFor(state: RunState, taskId: string | null, tuning = get().treeTuning) {
+    const task = taskId ? state.tasks[taskId] ?? null : null
+    if (!task) clearCachedTreeLayout()
+    return buildTree(task, tuning, cachedLayoutTree)
+  }
   function openSource(after: number, currentGeneration: number): void {
     closeSource()
     const stream = new EventSource(eventStreamUrl(after))
@@ -133,10 +144,21 @@ export const useAppStore = create<AppStore>((set, get) => {
       state,
       selectedTaskId,
       selectedAuthorityBranchId,
+      treeGraph: graphFor(state, selectedTaskId),
     })
   }
 
   return {
+    treeGraph: { nodes: [], latestNodeId: null, error: null },
+    treeTuning: (() => {
+      try {
+        const stored = window.localStorage.getItem('ascout-tree-tuning')
+        return stored ? normalizeTuning(JSON.parse(stored)) : DEFAULT_TUNING
+      } catch { return DEFAULT_TUNING }
+    })(),
+    setTreeTuning(tuning) {
+      set({ treeTuning: tuning, treeGraph: graphFor(get().state, get().selectedTaskId, tuning) })
+    },
     state: emptyRunState(),
     connection: 'idle',
     error: null,
@@ -158,6 +180,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       started = false
       generation += 1
       closeSource()
+      clearCachedTreeLayout()
+      set({ treeGraph: { nodes: [], latestNodeId: null, error: null } })
       set({ connection: 'idle' })
     },
 
@@ -204,11 +228,12 @@ export const useAppStore = create<AppStore>((set, get) => {
         selectedTaskId,
         selectedAuthorityBranchId,
         conversationVersions,
+        treeGraph: graphFor(state, selectedTaskId),
       })
     },
 
     selectTask(taskId) {
-      set({ selectedTaskId: taskId, selectedAuthorityBranchId: null })
+      set({ selectedTaskId: taskId, selectedAuthorityBranchId: null, treeGraph: graphFor(get().state, taskId) })
     },
 
     selectAuthorityWindow(branchId) {

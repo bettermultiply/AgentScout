@@ -1,4 +1,10 @@
 // All shape controls, including fixed/range modes, live in this file.
+export const FIXED_GEOMETRY = Object.freeze({
+  nodeOrigin: 64,
+  petioleWidth: 1.4, leafStrokeWidth: 1, veinWidth: 1,
+  leafOpacity: 1, veinStart: .1, veinEnd: .85,
+})
+
 const EXTRA_DEFAULTS = {
   stemTauMs: 1000, leafTauMs: 1000, leafReferenceMs: 12000,
   leafWidthRatio: .45, leafWidthRandom: 0, leafWidthMin: .3, leafWidthMax: .6,
@@ -7,9 +13,8 @@ const EXTRA_DEFAULTS = {
   childAngleMin: 30, childAngleMax: 90,
   leafStart: .45, leafSpread: 35, leafSideProbability: .7,
   budLength: 30, budWidth: 4.5, modelTipRadius: 1.5, chanceRadiusRatio: .05,
-  nodeOrigin: 64, sampleGap: 4, stemOppositeBias: .5,
-  petioleLength: 6, petioleWidth: 1.4, leafStrokeWidth: 1, veinWidth: 1,
-  leafOpacity: 1, veinStart: .1, veinEnd: .85, stemWidthRatio: .9,
+  sampleGap: 4, stemOppositeBias: .5,
+  petioleLength: 6, stemWidthRatio: .9,
   stemControlX: .5, stemControlY: .1, stemTipY: .14,
   connectionParentRatio: .15, connectionRootRatio: .15,
   startLeadRatio: .5,
@@ -45,13 +50,9 @@ export const EXTRA_FIELDS: TuneField[] = [
   field('budLength', '空枝芽长度', 0, 200, 1, '树枝'), field('budWidth', '空枝芽宽度', 0, 100, .5, '树枝'),
   field('modelTipRadius', '模型端点半径', 0, 30, .1, '叶茎'),
   field('chanceRadiusRatio', 'Chance 半径 / 子枝根宽', 0, 2, .05, '树枝'),
-  field('nodeOrigin', '节点局部原点 X（仅坐标参考）', 1, 500, 1, '整体'),
   field('sampleGap', '树枝曲线采样步长', 1, 30, 1, '树枝'),
   field('stemOppositeBias', '叶茎反向生长偏好', 0, .5, .05, '叶茎'),
-  field('petioleLength', '叶柄长度', 0, 50, .5, '叶片'), field('petioleWidth', '叶柄线宽', 0, 12, .1, '叶片'),
-  field('leafStrokeWidth', '叶片描边宽度', 0, 12, .1, '叶片'), field('veinWidth', '叶脉线宽', 0, 12, .1, '叶片'),
-  field('leafOpacity', '叶片透明度', 0, 1, .05, '叶片'),
-  field('veinStart', '叶脉起点比例', 0, 1, .01, '叶片'), field('veinEnd', '叶脉终点比例', 0, 1, .01, '叶片'),
+  field('petioleLength', '叶柄长度', 0, 50, .5, '叶片'),
   field('stemWidthRatio', '叶茎宽度比例 / 本处枝宽', 0, 1, .05, '叶茎'),
   field('stemControlX', '叶茎控制点横向比例', 0, 1, .05, '叶茎'),
   field('stemControlY', '叶茎控制点上翘比例', 0, 1, .01, '叶茎'),
@@ -140,23 +141,6 @@ export const TUNING_RANGES = Object.fromEntries(TUNE_FIELDS.map(f =>
   [f.key, [f.min * (f.scale ?? 1), f.max * (f.scale ?? 1)]],
 )) as Record<keyof TreeTuning, TuningRange>
 
-const TUNING_KEYS: Record<keyof TreeTuning, string> = {
-  ...Object.fromEntries(EXTRA_FIELDS.map(f => [f.key, f.key])) as Record<keyof ExtraTuning, string>,
-  startLeadRatio: 'lead',
-  segmentK: 'k',
-  segmentTauMs: 'tau',
-  turnStepDeg: 'turn',
-  recenterRange: 'recenter',
-  maxLeanDeg: 'lean',
-  rootWidth: 'rootw',
-  widthExponent: 'wexp',
-  minTrunkWidth: 'wmin',
-  stemK: 'stem',
-  leafMin: 'lmin',
-  leafMax: 'lmax',
-  stemWidth: 'swidth',
-}
-
 export function normalizeTuning(input: unknown): TreeTuning {
   const out = { ...DEFAULT_TUNING }
   const source = input !== null && typeof input === 'object' ? input as Record<string, unknown> : {}
@@ -171,28 +155,19 @@ export function normalizeTuning(input: unknown): TreeTuning {
   return out
 }
 
-export function hasTuningParams(search: string): boolean {
-  const params = new URLSearchParams(search)
-  return Object.values(TUNING_KEYS).some((key) => params.has(key))
-}
-
-export function tuningFromSearch(search: string): TreeTuning {
-  const params = new URLSearchParams(search)
-  const partial: Partial<TreeTuning> = {}
-  for (const key of Object.keys(TUNING_KEYS) as Array<keyof TreeTuning>) {
-    const raw = params.get(TUNING_KEYS[key])
-    if (raw !== null) {
-      const value = Number(raw)
-      if (Number.isFinite(value)) partial[key] = value
-    }
+/** One-way cleanup of previously supported URL parameters; never reads values. */
+export function removeTuningParams(params: URLSearchParams): boolean {
+  const keys = [
+    'k', 'tau', 'turn', 'recenter', 'lean', 'rootw', 'wexp', 'wmin',
+    'stem', 'lmin', 'lmax', 'swidth', 'lead',
+    ...EXTRA_FIELDS.filter(field => field.key !== 'startLeadRatio').map(field => field.key),
+    ...Object.keys(FIXED_GEOMETRY),
+  ]
+  let changed = false
+  for (const key of keys) {
+    if (!params.has(key)) continue
+    params.delete(key)
+    changed = true
   }
-  return normalizeTuning(partial)
-}
-
-export function tuningToSearch(tuning: TreeTuning, base = ''): string {
-  const params = new URLSearchParams(base)
-  for (const key of Object.keys(TUNING_KEYS) as Array<keyof TreeTuning>) {
-    params.set(TUNING_KEYS[key], String(tuning[key]))
-  }
-  return params.toString()
+  return changed
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
@@ -16,6 +16,7 @@ import { buildTree, type TreeGraph } from './treeGraph'
 import { useTreeTuning } from '../useTreeTuning'
 import { BranchNode } from './BranchNode'
 import { TreeTuningPanel } from './TreeTuningPanel'
+import { useAppStore } from '../store'
 
 const nodeTypes: NodeTypes = { branch: BranchNode }
 
@@ -102,7 +103,9 @@ function TreeCanvas({ graph, tuning, onTuning }: { graph: TreeGraph; tuning: Tre
 
 export function SpeculationTree({ task }: { task: TaskState | null }) {
   const [tuning, setTuning] = useTreeTuning()
-  const graph = useMemo(() => buildTree(task, tuning), [task, tuning])
+  const storedGraph = useAppStore(store => store.treeGraph)
+  const selectedTask = useAppStore(store => store.selectedTaskId ? store.state.tasks[store.selectedTaskId] : null)
+  const graph = task === selectedTask ? storedGraph : buildTree(task, tuning)
 
   if (graph.error) {
     return (

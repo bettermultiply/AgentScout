@@ -92,6 +92,7 @@ export interface ChanceCreatedEvent extends EventBase {
   tool_name: string
   stage: ChanceStage
   authority_state: AuthorityState
+  speculation_started_at_ms: number | null
 }
 
 export interface ChanceStageChangedEvent extends EventBase {
@@ -99,6 +100,15 @@ export interface ChanceStageChangedEvent extends EventBase {
   chance_id: string
   stage: ChanceStage
   reason: string | null
+  validation_id: number | null
+}
+
+export interface ProposalValidatedEvent extends EventBase {
+  event: 'proposal_validated'
+  chance_id: string
+  proposal_id: string
+  validation_id: number
+  validated_at_ms: number | null
 }
 
 export interface AuthorityStateChangedEvent extends EventBase {
@@ -226,6 +236,7 @@ export type ChanceObservationEvent =
   | ChanceStageChangedEvent
   | AuthorityStateChangedEvent
   | ProposalAddedEvent
+  | ProposalValidatedEvent
 
 export type ObservationEvent =
   | BranchObservationEvent
@@ -240,6 +251,8 @@ export interface ObservedChance {
   tool_name: string
   stage: ChanceStage
   authority_state: AuthorityState
+  speculation_started_at_ms: number | null
+  validation_id: number | null
   proposal_ids: string[]
   branch_ids: string[]
 }
@@ -280,6 +293,7 @@ export function isChanceEvent(event: ObservationEvent): event is ChanceObservati
     event.event === 'chance_created' ||
     event.event === 'chance_stage_changed' ||
     event.event === 'authority_state_changed' ||
-    event.event === 'proposal_added'
+    event.event === 'proposal_added' ||
+    event.event === 'proposal_validated'
   )
 }

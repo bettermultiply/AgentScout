@@ -302,6 +302,9 @@ pub struct ChanceRecord {
     /// 产生这次投机的准入请求时刻。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speculation_started_at_ms: Option<u64>,
+    /// 验证通过并用于当前 Promote 尝试的工作 id。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) validation_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speculation_kind: Option<ActionKind>,
     /// 最近一次 `launch` 求值时的 Tree 版本；版本不变就不重复求值。

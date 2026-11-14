@@ -4,6 +4,8 @@ import { type Node, type NodeProps } from '@xyflow/react'
 import { type BranchState, type ChanceState, statusLabel } from '../fold'
 import {
   HEAD_CENTER_Y,
+  NODE_HALF_WIDTH,
+  FIXED_GEOMETRY,
   branchTone,
   callDetailLines,
   type BranchGeometry,
@@ -29,10 +31,12 @@ export interface BranchData extends Record<string, unknown> {
 export type BranchFlowNode = Node<BranchData, 'branch'>
 
 function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
-  const { branch, geometry:g, tuning, isAuthorityPath, isCurrentAuthority, childForks } = data
-  const NODE_HALF_WIDTH = tuning.nodeOrigin
+  const { branch, geometry:g, isAuthorityPath, isCurrentAuthority, childForks } = data
   const openBranch = useAppStore(store=>store.openBranch)
   const [hover,setHover] = useState<{x:number;y:number;group:CallGroup|null;chance:ChanceState|null}|null>(null)
+  // Hover identity survives fresh observation payloads; its facts must not.
+  const hoverGroup = hover?.group ? g.calls.find(call => call.id === hover.group?.id) ?? null : null
+  const hoverChance = hover?.chance ? childForks.find(f => f.chance?.chanceId === hover.chance?.chanceId)?.chance ?? null : null
   // All ink is in one tree coordinate system; zoom scales dots and leaves too.
   const tone=branchTone(branch, isAuthorityPath, isCurrentAuthority)
   const aborted=tone==='aborted'
@@ -84,7 +88,7 @@ function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
                       onClick={e=>{e.stopPropagation();open(tool)}}
                       onKeyDown={e=>{if(e.key==='Enter'){e.stopPropagation();open(tool)}}}>
                       <path className="tree-leaf-petiole" style={{strokeWidth:leaf.petiole.stroke}} d={leaf.petiole.d} />
-                      <ellipse className="tree-leaf-visual" style={{strokeWidth:leaf.stroke,opacity:tuning.leafOpacity}} data-length={leaf.size} data-width={leaf.width}
+                      <ellipse className="tree-leaf-visual" style={{strokeWidth:leaf.stroke,opacity:FIXED_GEOMETRY.leafOpacity}} data-length={leaf.size} data-width={leaf.width}
                         cx={leaf.ellipse.cx} cy={leaf.ellipse.cy} rx={leaf.ellipse.rx} ry={leaf.ellipse.ry} />
                       <path className="tree-leaf-vein" style={{strokeWidth:leaf.vein.stroke}} d={leaf.vein.d} />
                     </g>
@@ -92,6 +96,10 @@ function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
             </g>
           </g>
         })}
+        {g.validationEnd ? <line className="tree-validation-end" x1={g.validationEnd.x1} y1={g.validationEnd.y1} x2={g.validationEnd.x2} y2={g.validationEnd.y2}
+          stroke="#c48116" strokeWidth={2} style={{pointerEvents:'stroke'}}>
+          <title>父枝止于此；Proposal 验证完成于 {new Date(g.validationEnd.validatedAtMs).toLocaleString()}</title>
+        </line> : null}
         {root?<path className="tree-head-hit" d={`M ${NODE_HALF_WIDTH} ${HEAD_CENTER_Y} v ${12}`} strokeWidth={g.trunkWidths[0]} onMouseEnter={e=>show(e,null)} onClick={()=>open()} />:null}
       </g>
       {/* A Chance is an observed opportunity, not ink of the Branch it sits on,
@@ -100,7 +108,7 @@ function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
         {childForks.map(f=><circle key={f.chance?.chanceId} className="tree-chance" data-parent-branch={branch.branchId} data-chance-id={f.chance?.chanceId} data-branch-id={f.branchId} data-factual-y={f.y} cx={f.x} cy={f.y} r={f.radius} onMouseEnter={e=>show(e,null,f.chance)} onMouseLeave={()=>setHover(null)} onClick={()=>f.branchId!==branch.branchId&&openBranch(f.branchId)}><title>Chance {f.chance?.chanceId}</title></circle>)}
       </g>
     </svg>
-    {hover?createPortal(<div className="node-tooltip node-tooltip-float tooltip-below" style={{left:Math.min(hover.x,window.innerWidth-350),top:hover.y+10}} role="tooltip"><span>{branch.branchId} · {statusLabel(branch.status)}</span>{hover.chance?<span>Chance {hover.chance.chanceId} · {hover.chance.toolName??'未上报'}</span>:null}{hover.group?callDetailLines(hover.group).map(c=><span key={c.sequence}>#{c.sequence} {c.text}</span>):<span>{branch.modelUsages.length+branch.tools.length} 次调用</span>}</div>,document.body):null}
+    {hover?createPortal(<div className="node-tooltip node-tooltip-float tooltip-below" style={{left:Math.min(hover.x,window.innerWidth-350),top:hover.y+10}} role="tooltip"><span>{branch.branchId} · {statusLabel(branch.status)}</span>{hoverChance?<span>Chance {hoverChance.chanceId} · {hoverChance.toolName??'未上报'}</span>:null}{hoverGroup?callDetailLines(hoverGroup).map(c=><span key={c.sequence}>#{c.sequence} {c.text}</span>):<span>{branch.modelUsages.length+branch.tools.length} 次调用</span>}</div>,document.body):null}
     </div>
 }
 export const BranchNode=memo(BranchNodeView)

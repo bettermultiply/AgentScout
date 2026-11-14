@@ -113,7 +113,7 @@ impl SpeculativeTree {
                 self.complete_invoke(tool, result, &mut actions)?;
             }
             ControlOperation::Validate(candidate) => {
-                self.complete_validate(candidate, result, &mut actions)?;
+                self.complete_validate(id, candidate, result, &mut actions)?;
             }
             ControlOperation::Promote(candidate, record) => {
                 self.complete_promote(candidate, record, result, &mut actions)?;
@@ -390,6 +390,7 @@ impl SpeculativeTree {
 
     fn complete_validate(
         &mut self,
+        validation_id: u64,
         candidate: String,
         result: Result<ControlResult, String>,
         actions: &mut ControlActions,
@@ -397,18 +398,25 @@ impl SpeculativeTree {
         if self.stopping || !self.candidate_due(&candidate) {
             return Ok(());
         }
-        let (compatible, verdict, notification, error) = match result {
-            Ok(ControlResult::Disposition(compatible, verdict, notification)) => {
-                (compatible, verdict, notification, None)
+        let (compatible, verdict, notification, validated_at_ms, error) = match result {
+            Ok(ControlResult::Disposition(compatible, verdict, notification, validated_at_ms)) => {
+                (compatible, verdict, notification, validated_at_ms, None)
             }
-            Err(error) => (false, "error".into(), None, Some(error)),
+            Err(error) => (false, "error".into(), None, None, Some(error)),
             _ => unreachable!(),
         };
         let proposal = self
             .branch_proposal(&candidate)
-            .ok_or_else(|| io::Error::other("candidate Proposal is missing"))?;
+            .ok_or_else(|| io::Error::other("candidate Proposal is missing"))?
+            .clone();
+        let chance_id = self.branch(&candidate)?.chance_id.clone()
+            .ok_or_else(|| io::Error::other("candidate Chance is missing"))?;
+        if error.is_none() {
+            self.record_validation(&chance_id, &proposal.proposal_id, validation_id, validated_at_ms);
+        }
         let record = json!({"branch_id":candidate, "hypothesis":proposal.payload, "verdict":verdict, "policy_error":error});
         if self.can_promote(&candidate, compatible) {
+            self.chance_mut(&chance_id)?.validation_id = Some(validation_id);
             self.record_runtime_state(&candidate, RuntimeExecutionState::PromotionRequested)?;
             self.change_status(
                 &candidate,

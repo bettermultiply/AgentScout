@@ -38,11 +38,22 @@ pub enum ObservationContent {
         tool_name: String,
         stage: ChanceStage,
         authority_state: AuthorityState,
+        /// 接入侧准入请求时刻，可早于 select 和候选启动。
+        speculation_started_at_ms: Option<u64>,
     },
     ChanceStageChanged {
         chance_id: String,
         stage: ChanceStage,
         reason: Option<String>,
+        /// Accepted 所依据的验证工作；其他状态或未知时为 null。
+        validation_id: Option<u64>,
+    },
+    /// 在 Policy Match 实际完成时测量，而不是事件追加或 Promote 时刻。
+    ProposalValidated {
+        chance_id: String,
+        proposal_id: String,
+        validation_id: u64,
+        validated_at_ms: Option<u64>,
     },
     AuthorityStateChanged {
         chance_id: String,
@@ -154,6 +165,8 @@ pub struct ObservedChance {
     pub tool_name: String,
     pub stage: ChanceStage,
     pub authority_state: AuthorityState,
+    pub speculation_started_at_ms: Option<u64>,
+    pub validation_id: Option<u64>,
     pub proposal_ids: Vec<String>,
     pub branch_ids: Vec<String>,
 }
@@ -178,6 +191,7 @@ impl StateEventSet {
                     tool_name,
                     stage,
                     authority_state,
+                    speculation_started_at_ms,
                 } => chances.push(ObservedChance {
                     chance_id: chance_id.clone(),
                     parent_branch_id: parent_branch_id.clone(),
@@ -186,14 +200,17 @@ impl StateEventSet {
                     tool_name: tool_name.clone(),
                     stage: stage.clone(),
                     authority_state: *authority_state,
+                    speculation_started_at_ms: *speculation_started_at_ms,
+                    validation_id: None,
                     proposal_ids: Vec::new(),
                     branch_ids: Vec::new(),
                 }),
                 ObservationContent::ChanceStageChanged {
-                    chance_id, stage, ..
+                    chance_id, stage, validation_id, ..
                 } => {
                     if let Some(chance) = chances.iter_mut().find(|c| &c.chance_id == chance_id) {
                         chance.stage = stage.clone();
+                        chance.validation_id = *validation_id;
                     }
                 }
                 ObservationContent::AuthorityStateChanged { chance_id, state } => {

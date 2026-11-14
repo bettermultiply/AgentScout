@@ -4,10 +4,12 @@ import { SpeculationPanel } from './components/SpeculationPanel'
 import { useAppStore } from './store'
 import { NleMapPage } from './nleMap'
 import { usePanelResize } from './usePanelResize'
+import { useTreeTuning } from './useTreeTuning'
 
 export function App() {
   if (window.location.pathname === '/map') return <NleMapPage />
   const panelOpen = useAppStore((store) => store.panelOpen)
+  useTreeTuning()
   const start = useAppStore((store) => store.start)
   const stop = useAppStore((store) => store.stop)
   const setPanelOpen = useAppStore((store) => store.setPanelOpen)

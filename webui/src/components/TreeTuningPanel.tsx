@@ -4,19 +4,11 @@ import { DEFAULT_TUNING, TUNE_FIELDS, normalizeTuning, type TreeTuning } from '.
 
 /** Temporary drawing-parameter panel; not part of the product surface. */
 export function TreeTuningPanel({ tuning, onChange, onClose }: { tuning: TreeTuning; onChange: (next: TreeTuning) => void; onClose: () => void }) {
-  const [copied, setCopied] = useState(false)
   const [width, setWidth] = useState(360)
 
   const update = (key: keyof TreeTuning, value: number, scale = 1) =>
     onChange(normalizeTuning({ ...tuning, [key]: value * scale }))
   const groups = [...new Set(TUNE_FIELDS.map(field => field.group))]
-
-  const copy = () => {
-    void navigator.clipboard?.writeText(window.location.href).then(() => {
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1200)
-    })
-  }
 
   return (
     <div id="tree-tuning-panel" className="tree-tune-panel" style={{width, maxWidth:'calc(100% - 24px)'}} role="dialog" aria-label="临时调参">
@@ -29,7 +21,6 @@ export function TreeTuningPanel({ tuning, onChange, onClose }: { tuning: TreeTun
         <strong>临时调参</strong>
         <div>
           <button type="button" onClick={() => onChange(DEFAULT_TUNING)}>重置</button>
-          <button type="button" onClick={copy}>{copied ? '已复制' : '复制链接'}</button>
           <button type="button" aria-label="收起调参面板" onClick={onClose}>收起</button>
         </div>
       </header>
@@ -66,7 +57,7 @@ export function TreeTuningPanel({ tuning, onChange, onClose }: { tuning: TreeTun
         </label>
         ))}
       </fieldset>)}
-      <p className="tree-tune-note">参数实时写入地址栏，刷新或复制链接都会保留。</p>
+      <p className="tree-tune-note">参数自动保存在当前浏览器本地，刷新或再次打开时恢复。</p>
     </div>
   )
 }

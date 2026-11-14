@@ -9,12 +9,12 @@ export interface TreeGraph {
 }
 
 /** Turn the folded task state into React Flow nodes. */
-export function buildTree(task: TaskState | null, tuning: TreeTuning): TreeGraph {
+export function buildTree(task: TaskState | null, tuning: TreeTuning, layout = layoutTree): TreeGraph {
   if (!task) return { nodes: [], latestNodeId: null, error: null }
   const path = authorityPath(task)
   let geometry: ReturnType<typeof layoutTree>
   try {
-    geometry = layoutTree(task, tuning)
+    geometry = layout(task, tuning)
   } catch (error) {
     return {
       nodes: [],

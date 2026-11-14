@@ -1,6 +1,6 @@
 import type { BranchState, TaskState } from '../fold'
 import { groupBranchCalls, pairCalls, requiredStart, type CallGroup, type CallUnit } from './calls'
-import { DEFAULT_TUNING, childAngleOf, ranged, type TreeTuning } from './tuning'
+import { DEFAULT_TUNING, FIXED_GEOMETRY, childAngleOf, ranged, type TreeTuning } from './tuning'
 import { chooseForkSide } from './forkSide'
 import { makeWidthAt } from './widthProfile'
 import { startLead } from './startLead'
@@ -25,7 +25,7 @@ import { connectionSide, connectSides, type ConnectionSides } from '../geometry/
  * Width is a function of the calls that still happen at or below a point
  * (including descendant Branches), scaled by the configured root width.
  */
-export const NODE_HALF_WIDTH = DEFAULT_TUNING.nodeOrigin
+export const NODE_HALF_WIDTH = FIXED_GEOMETRY.nodeOrigin
 export const NODE_WIDTH = NODE_HALF_WIDTH * 2
 export const HEAD_CENTER_Y = 0
 
@@ -95,6 +95,7 @@ export interface BranchGeometry {
   connection?: PathGeometry & { rootWidth: number }
   bud: { transform: string; angle: number; base: Point; tip: Point; ellipse: EllipseGeometry }
   chanceCircles: Array<{ chanceId: string; branchId: string; x: number; y: number; radius: number }>
+  validationEnd: { x1: number; y1: number; x2: number; y2: number; validatedAtMs: number } | null
 }
 
 /** Stem length in tree units: one model call, no pixel compensation. */
@@ -222,10 +223,10 @@ function stemGeometry(p: BranchSection, t: TreeTuning, tiltDeg: number, anchor: 
     const size = leafLength(tool.durationMs, t)
     const width = size * ranged(t, 'leafWidth', tool.id)
     const line = (a: number, b: number, stroke: number): PathGeometry => ({ d: `M ${a} 0 L ${b} 0`, points: [{ x: a, y: 0 }, { x: b, y: 0 }], stroke })
-    return { tool, at, angle: leafAngle, transform: transform(at, leafAngle), size, width, stroke: t.leafStrokeWidth,
+    return { tool, at, angle: leafAngle, transform: transform(at, leafAngle), size, width, stroke: FIXED_GEOMETRY.leafStrokeWidth,
       ellipse: { cx: t.petioleLength + size / 2, cy: 0, rx: size / 2, ry: width / 2 },
-      petiole: line(0, t.petioleLength, t.petioleWidth),
-      vein: line(t.petioleLength + size * t.veinStart, t.petioleLength + size * t.veinEnd, t.veinWidth) }
+      petiole: line(0, t.petioleLength, FIXED_GEOMETRY.petioleWidth),
+      vein: line(t.petioleLength + size * FIXED_GEOMETRY.veinStart, t.petioleLength + size * FIXED_GEOMETRY.veinEnd, FIXED_GEOMETRY.veinWidth) }
   })
   return { anchor, angle, transform: transform(anchor, angle), length, tip, tipRadius: t.modelTipRadius, leaves,
     width: Math.min(t.stemWidth, t.stemWidthRatio * p.width),
@@ -247,49 +248,179 @@ function contentOf(branch: BranchState, units: CallUnit[], distanceOfCall: Map<s
   })
 }
 
+interface LayoutEntry {
+  key: string
+  globalKey: string
+  raw: BranchGeometry
+  final: BranchGeometry
+  boundary: ConnectionSides
+  input: { root: Point; initialAngle: number; startWidth: number; attach?: { center: Point; distance: number; width: number; side: -1 | 1; heading: number } }
+  revision: number
+  walkKey: string
+  walk: { points: Point[]; distances: number[]; callDistances: number[] }
+}
+
+// JSON normally aliases NaN/Infinity to null, which is unsafe for invalidation.
+const inputKey = (value: unknown) => JSON.stringify(value, (_key, item: unknown) =>
+  typeof item === 'number' && !Number.isFinite(item) ? String(item) : item)
+
+/** One latest entry per current Branch, never an archive of input revisions. */
+export function createTreeLayoutCache() {
+  let entries = new Map<string, LayoutEntry>()
+  let taskId: string | null = null
+  const stats = { computedBranches: 0, computedWalks: 0, layouts: 0, entries: 0 }
+  return {
+    stats,
+    clear() { entries.clear(); taskId = null; stats.entries = 0 },
+    layout(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING) {
+      if (taskId !== task.taskId) entries.clear()
+      taskId = task.taskId
+      const next = new Map<string, LayoutEntry>()
+      try {
+        const result = computeLayout(task, tuning, entries, next, stats)
+        entries = next
+        stats.entries = entries.size
+        return result
+      } catch (error) {
+        entries.clear()
+        stats.entries = 0
+        throw error
+      }
+    },
+  }
+}
+
+const activeTreeLayouts = createTreeLayoutCache()
+export function cachedLayoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING) {
+  return activeTreeLayouts.layout(task, tuning)
+}
+export function clearCachedTreeLayout() { activeTreeLayouts.clear() }
+export function treeLayoutStats() { return { ...activeTreeLayouts.stats } }
+
+/** Refresh call facts without copying sampled paths or retaining old event payloads. */
+function withCalls(g: BranchGeometry, calls: CallGroup[]): BranchGeometry {
+  const byId = new Map(calls.map(call => [call.id, call]))
+  return { ...g, calls, sections: g.sections.map(section => ({ ...section,
+    twig: byId.get(section.twig.id)!, leaves: section.leaves.map(call => byId.get(call.id)!),
+    shape: section.shape ? { ...section.shape, leaves: section.shape.leaves.map(leaf => ({ ...leaf, tool: byId.get(leaf.tool.id)! })) } : undefined,
+  })) }
+}
+
 export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING): Map<string, BranchGeometry> {
-  const NODE_HALF_WIDTH = tuning.nodeOrigin
-  const NODE_WIDTH = NODE_HALF_WIDTH * 2
+  return computeLayout(task, tuning)
+}
+
+function computeLayout(task: TaskState, tuning: TreeTuning,
+  previous = new Map<string, LayoutEntry>(), next = new Map<string, LayoutEntry>(),
+  stats?: { computedBranches: number; computedWalks: number; layouts: number }): Map<string, BranchGeometry> {
   const result = new Map<string, BranchGeometry>()
   // Final visible sides and their source positions, scoped to this layout.
   const boundaries = new WeakMap<BranchGeometry, ConnectionSides>()
   const branches = task.branchOrder.map(id => task.branches[id]).filter(Boolean)
   const children = (id: string) => branches.filter(b => b.parentBranchId === id)
-  const count = (b: BranchState): number =>
-    groupBranchCalls(b).length + children(b.branchId).reduce((sum, child) => sum + count(child), 0)
+  const cutoff = (branch: BranchState): number | null => {
+    const accepted = Object.values(task.chances).filter(c => c.parentBranchId === branch.branchId && typeof c.stage === 'object' && 'accepted' in c.stage)
+    if (accepted.length > 1) throw new Error(`Branch ${branch.branchId} 有多个已接受的 Chance，无法确定截止点`)
+    if (!accepted.length) return null
+    const chance = accepted[0]
+    const proposal = (chance.stage as { accepted: string }).accepted
+    const validation = chance.validationId === null ? undefined : chance.validations[chance.validationId]
+    if (!validation || validation.proposalId !== proposal || validation.validatedAtMs === null || !Number.isFinite(validation.validatedAtMs)) {
+      throw new Error(`Chance ${chance.chanceId} 缺少已接受 Proposal 的验证时间，无法确定父枝截止点`)
+    }
+    return validation.validatedAtMs
+  }
+  const cutoffs = new Map(branches.map(branch => [branch.branchId, cutoff(branch)]))
+  const visibleCalls = (branch: BranchState): CallGroup[] => {
+    const end = cutoffs.get(branch.branchId) ?? null
+    return groupBranchCalls(branch).filter(call => end === null || requiredStart(call, `Branch ${branch.branchId} 的调用`) <= end)
+  }
+  const counts = new Map<string, number>()
+  const count = (b: BranchState): number => {
+    if (!counts.has(b.branchId)) counts.set(b.branchId, visibleCalls(b).length + children(b.branchId).reduce((sum, child) => sum + count(child), 0))
+    return counts.get(b.branchId)!
+  }
+  const hits = new Map<string, LayoutEntry>()
+  let computed = false
+  const tuningKey = inputKey(tuning)
+  // Attachment direction, root widths and Chance lookup can change even on
+  // another branch. Conservatively invalidate the tree's structural changes.
+  const structureKey = JSON.stringify([branches.map(b => [b.branchId, b.parentBranchId, b.chanceId]),
+    Object.values(task.chances).map(c => [c.chanceId, c.parentBranchId])])
+  const workloadKey = JSON.stringify(branches.map(b => [b.branchId, count(b)]))
+  const globalKey = JSON.stringify([structureKey, workloadKey])
+  let revision = 0
+  for (const entry of previous.values()) revision = Math.max(revision, entry.revision)
 
   const place = (branch: BranchState, root: Point, initialAngle: number, startWidth: number,
     attach?: { parent: BranchGeometry; center: Point; distance: number; width: number; side: -1 | 1; heading: number },
     ): void => {
-    const calls = [...groupBranchCalls(branch)].sort(
+    const allCalls = [...groupBranchCalls(branch)].sort(
       (a, b) => (a.startMs ?? 0) - (b.startMs ?? 0) || a.firstSequence - b.firstSequence,
     )
-    const starts = calls.map(call => requiredStart(call, `Branch ${branch.branchId} 的调用`))
+    const starts = allCalls.map(call => requiredStart(call, `Branch ${branch.branchId} 的调用`))
+    const end = cutoffs.get(branch.branchId) ?? null
+    const calls = end === null ? allCalls : allCalls.filter(call => call.startMs! <= end)
     const units = pairCalls(calls)
     const kids = children(branch.branchId)
     const chances = Object.values(task.chances).filter(chance => chance.parentBranchId === branch.branchId)
+    // Every value read by geometry, including full descendant workload and the
+    // parent's final visible boundary. No assumption that growth affects a tail.
+    const key = inputKey([tuningKey, root, initialAngle, startWidth,
+      branch.parentBranchId, branch.chanceId, end,
+      allCalls.map(c => [c.id, c.kind, c.firstSequence, c.startMs, c.durationMs, c.events[0]?.finished_at_ms]),
+      kids.map(child => [child.branchId, child.chanceId, count(child),
+        groupBranchCalls(child).map(c => [c.firstSequence, c.startMs]),
+        cutoffs.get(child.branchId),
+        Object.values(task.chances).filter(c => c.parentBranchId === child.branchId).map(c => [c.chanceId, c.speculationStartedAtMs])]),
+      chances.map(c => [c.chanceId, c.speculationStartedAtMs]),
+      attach ? [next.get(attach.parent.branchId)?.revision, attach.center, attach.distance, attach.width, attach.side, attach.heading] : null])
+    const cached = previous.get(branch.branchId)
+    if (cached?.key === key && cached.globalKey === globalKey) {
+      const geometry = withCalls(cached.raw, calls)
+      geometry.forkPoints = new Map(cached.raw.forkPoints)
+      result.set(branch.branchId, geometry)
+      boundaries.set(geometry, cached.boundary)
+      hits.set(branch.branchId, cached)
+      next.set(branch.branchId, { ...cached, raw: geometry })
+      // Descendants still inspect their own inputs; an unchanged parent does
+      // not imply unchanged model durations or payloads on a child.
+      for (const child of kids) {
+        const old = previous.get(child.branchId)
+        if (!old) throw new Error('缺少子枝布局缓存')
+        const input = old.input
+        place(child, input.root, input.initialAngle, input.startWidth,
+          input.attach ? { ...input.attach, parent: geometry } : undefined)
+      }
+      return
+    }
+    if (stats) stats.computedBranches++
+    computed = true
 
     // One step per call interval. Each step has its own log length and turns
     // relative to the previous one; nothing outside the calls splits a step.
-    const points: Point[] = [{ x: NODE_HALF_WIDTH, y: 0 }]
-    const pointDistances: number[] = [0]
-    const callDistances: number[] = [0]
-    const callPointIndices: number[] = [0]
+    const walkKey = inputKey([initialAngle, tuning.segmentK, tuning.segmentTauMs,
+      tuning.recenterRange, tuning.turnStepDeg, tuning.maxLeanDeg, tuning.sampleGap,
+      allCalls.map(c => [c.firstSequence, c.startMs])])
+    const walk = cached?.walkKey === walkKey ? cached.walk : null
+    const walkPoints: Point[] = walk?.points ?? [{ x: NODE_HALF_WIDTH, y: 0 }]
+    const walkDistances: number[] = walk?.distances ?? [0]
+    const callDistances: number[] = walk?.callDistances ?? [0]
+    if (!walk && stats) stats.computedWalks++
     let heading = initialAngle
     let x = NODE_HALF_WIDTH
     let y = 0
-    for (let i = 1; i < calls.length; i++) {
+    for (let i = 1; !walk && i < allCalls.length; i++) {
       const length = segmentLength(starts[i] - starts[i - 1], tuning)
       if (length === 0) {
         callDistances.push(callDistances[i - 1])
-        callPointIndices.push(points.length - 1)
         continue
       }
       const aim = (x - NODE_HALF_WIDTH) + tuning.recenterRange * Math.sin(heading)
       const pRight = Math.max(0, Math.min(1, .5 - aim / (2 * tuning.recenterRange)))
       const turn = tuning.turnStepDeg * Math.PI / 180
       const lean = tuning.maxLeanDeg * Math.PI / 180
-      const next = Math.max(-lean, Math.min(lean, heading + (hash(`${branch.branchId}/turn/${calls[i].firstSequence}`) < pRight ? turn : -turn)))
+      const next = Math.max(-lean, Math.min(lean, heading + (hash(`${branch.branchId}/turn/${allCalls[i].firstSequence}`) < pRight ? turn : -turn)))
       const steps = Math.max(1, Math.ceil(length / tuning.sampleGap))
       for (let step = 1; step <= steps; step++) {
         const t = step / steps
@@ -297,12 +428,34 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
         const h = heading + (next - heading) * eased
         x += Math.sin(h) * length / steps
         y += Math.cos(h) * length / steps
-        points.push({ x, y })
-        pointDistances.push(callDistances[i - 1] + length * t)
+        walkPoints.push({ x, y })
+        walkDistances.push(callDistances[i - 1] + length * t)
       }
       heading = next
       callDistances.push(callDistances[i - 1] + length)
-      callPointIndices.push(points.length - 1)
+    }
+    const fullLength = callDistances[callDistances.length - 1]
+    const fullDistanceAtTime = (time: number): number => {
+      if (!starts.length || time <= starts[0]) return 0
+      if (time >= starts[starts.length - 1]) return fullLength
+      let index = 1
+      while (index < starts.length && starts[index] < time) index++
+      const span = starts[index] - starts[index - 1]
+      return callDistances[index - 1] + (callDistances[index] - callDistances[index - 1]) * (span > 0 ? (time - starts[index - 1]) / span : 0)
+    }
+    const totalLength = end === null ? fullLength : fullDistanceAtTime(end)
+    let points = walkPoints, pointDistances = walkDistances
+    if (end !== null && totalLength < fullLength) {
+      let index = 1
+      while (index < walkDistances.length && walkDistances[index] < totalLength) index++
+      points = walkPoints.slice(0, index)
+      pointDistances = walkDistances.slice(0, index)
+      if (totalLength > 0 && index < walkDistances.length) {
+        const t = (totalLength - walkDistances[index - 1]) / (walkDistances[index] - walkDistances[index - 1])
+        points.push({ x: walkPoints[index - 1].x + (walkPoints[index].x - walkPoints[index - 1].x) * t,
+          y: walkPoints[index - 1].y + (walkPoints[index].y - walkPoints[index - 1].y) * t })
+        pointDistances.push(totalLength)
+      }
     }
     // Build the local growth path before choosing its parent-side anchor.
     // Placement must use the direction actually drawn, not the requested angle.
@@ -320,24 +473,17 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       attach.parent.forkPoints.set(branch.branchId, fork)
       root = { x: attach.parent.x + attach.center.x, y: attach.parent.y + attach.center.y }
     }
-    const totalLength = callDistances[callDistances.length - 1]
-    const distanceOfCall = new Map(calls.map((call, index) => [call.id, callDistances[index]]))
+    const distanceOfCall = new Map(allCalls.map((call, index) => [call.id, callDistances[index]]))
 
-    // Chances sit between calls by time; they do not split a step.
+    // Chances and completion points share the original time mapping, capped by
+    // the accepted Proposal's validation point when there is one.
     const chancePositions = new Map<string, number>()
-    const distanceAtTime = (time: number): number => {
-      if (!starts.length || time <= starts[0]) return 0
-      if (time >= starts[starts.length - 1]) return totalLength
-      let index = 1
-      while (index < starts.length && starts[index] < time) index++
-      const span = starts[index] - starts[index - 1]
-      return callDistances[index - 1] + (callDistances[index] - callDistances[index - 1]) * (span > 0 ? (time - starts[index - 1]) / span : 0)
-    }
+    const distanceAtTime = (time: number): number => Math.min(totalLength, fullDistanceAtTime(time))
     for (const chance of chances) {
-      if (chance.createdTimestampMs === null || !Number.isFinite(chance.createdTimestampMs)) {
-        throw new Error(`Chance ${chance.chanceId} 缺少创建时间，无法确定它在枝上的位置`)
+      if (chance.speculationStartedAtMs === null || !Number.isFinite(chance.speculationStartedAtMs)) {
+        throw new Error(`Chance ${chance.chanceId} 缺少投机起点时间，无法确定它在枝上的位置`)
       }
-      chancePositions.set(chance.chanceId, distanceAtTime(chance.createdTimestampMs))
+      chancePositions.set(chance.chanceId, distanceAtTime(chance.speculationStartedAtMs))
     }
 
     const at = (distance: number): Point => {
@@ -433,6 +579,11 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
         ellipse: { cx: tuning.budLength / 2, cy: 0, rx: tuning.budLength / 2, ry: tuning.budWidth / 2 },
       },
       chanceCircles: [],
+      validationEnd: end === null ? null : (() => {
+        const point = at(totalLength), h = headingAt(totalLength), half = widthAt(totalLength) / 2
+        return { x1: point.x - Math.cos(h) * half, y1: point.y + Math.sin(h) * half,
+          x2: point.x + Math.cos(h) * half, y2: point.y - Math.sin(h) * half, validatedAtMs: end }
+      })(),
     }
     sections.forEach(section => {
       const placement = placements.get(section.id)!
@@ -488,6 +639,10 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       const cap = rotate(tip, shape.angle, shape.anchor)
       shape.cap = { cx: cap.x, cy: cap.y, r: shape.width / 2 }
     }
+    next.set(branch.branchId, { key, globalKey, raw: geometry, final: geometry, boundary,
+      revision: ++revision,
+      walkKey, walk: { points: walkPoints, distances: walkDistances, callDistances },
+      input: { root, initialAngle, startWidth, attach: attach ? { center: attach.center, distance: attach.distance, width: attach.width, side: attach.side, heading: attach.heading } : undefined } })
 
     for (const { child, distance, side, angle } of childPlacements) {
       const point = at(distance)
@@ -510,6 +665,15 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
   // hull; rotations cannot exceed the control hull's largest radius. Include
   // wide leaves, petioles, all strokes, buds and Chance circles, not just tips.
   for (const geometry of result.values()) {
+    const hit = hits.get(geometry.branchId)
+    if (hit) {
+      const final = withCalls(hit.final, geometry.calls)
+      result.set(geometry.branchId, final)
+      next.get(geometry.branchId)!.final = final
+      continue
+    }
+    // Keep the unshifted coordinates for child attachment on the next update.
+    next.get(geometry.branchId)!.raw = { ...geometry, chanceCircles: [] }
     // Sample counts can exceed the engine's function-argument limit even for
     // legal tuning values. Accumulate bounds without spreading point arrays.
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
@@ -537,6 +701,10 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
         for (const path of [leaf.petiole, leaf.vein]) path.points.forEach(point => add(leafPoint(point), path.stroke / 2))
       }
     }
+    if (geometry.validationEnd) {
+      add({ x: geometry.validationEnd.x1, y: geometry.validationEnd.y1 }, 1)
+      add({ x: geometry.validationEnd.x2, y: geometry.validationEnd.y2 }, 1)
+    }
     for (const [chanceId, distance] of geometry.chancePositions) {
       const child = branches.find(b => b.chanceId === chanceId)
       const sample = sampleGeometry(geometry, distance)
@@ -553,6 +721,6 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
     geometry.width = Math.max(1, maxX - minX)
     geometry.height = Math.max(1, maxY - minY)
   }
-
+  if (computed && stats) stats.layouts++
   return result
 }

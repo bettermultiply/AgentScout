@@ -108,7 +108,7 @@ fn nested_chance_waits_on_a_live_candidate_and_is_invalidated_with_it() {
     let actions = tree
         .complete_work(
             validate,
-            Ok(ControlResult::Disposition(true, "compatible".into(), None)),
+            Ok(ControlResult::Disposition(true, "compatible".into(), None, Some(123))),
         )
         .unwrap();
     assert!(

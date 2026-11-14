@@ -78,8 +78,8 @@ impl AgentController {
                         .cloned()
                         .unwrap_or(Value::Null),
                 )
-                .map(|(compatible, verdict, notification)| {
-                    ControlResult::Disposition(compatible, verdict, notification)
+                .map(|(compatible, verdict, notification, validated_at_ms)| {
+                    ControlResult::Disposition(compatible, verdict, notification, validated_at_ms)
                 })
                 .map_err(|error| error.to_string())
             }
@@ -298,7 +298,7 @@ impl AgentController {
         operation_id: &str,
         evidence: &Value,
         outcome: &Value,
-    ) -> Result<(bool, String, Option<String>), Box<dyn std::error::Error>> {
+    ) -> Result<(bool, String, Option<String>, Option<u64>), Box<dyn std::error::Error>> {
         let engine = PolicyEngine::default();
         let result = engine.evaluate(
             policy,
@@ -308,6 +308,12 @@ impl AgentController {
                 "match_context": {"operation_id": operation_id}
             }),
         )?;
+        // Match is the validation operation; Dispose and Promote may take
+        // arbitrarily longer. Capture here before either is invoked.
+        let validated_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok());
         let verdict = result["verdict"].as_str().unwrap_or("error").to_string();
         let compatible = verdict == "compatible";
         let disposition = engine.evaluate(
@@ -331,6 +337,6 @@ impl AgentController {
         let promote = disposition["actions"]
             .as_array()
             .is_some_and(|actions| actions.iter().any(|action| action["intent"] == "Promote"));
-        Ok((compatible && promote, verdict, notification))
+        Ok((compatible && promote, verdict, notification, validated_at_ms))
     }
 }

@@ -1,42 +1,32 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
+import { useAppStore } from './store'
 import {
-  DEFAULT_TUNING,
-  hasTuningParams,
-  normalizeTuning,
-  tuningFromSearch,
-  tuningToSearch,
+  removeTuningParams,
   type TreeTuning,
 } from './tree'
 
 const STORAGE_KEY = 'ascout-tree-tuning'
 
-function initiallyTuned(): TreeTuning {
-  if (hasTuningParams(window.location.search)) return tuningFromSearch(window.location.search)
-  try {
-    const stored = window.localStorage.getItem(STORAGE_KEY)
-    if (stored) return normalizeTuning(JSON.parse(stored) as Partial<TreeTuning>)
-  } catch {
-    // A corrupt stored value falls back to the defaults.
-  }
-  return DEFAULT_TUNING
-}
-
 /**
- * Drawing parameters for the tree. URL values win over the last stored values,
- * so a copied link reproduces a shape even in another browser.
+ * Drawing parameters for the tree are restored from this browser's local storage.
  */
 export function useTreeTuning(): [TreeTuning, (next: TreeTuning) => void] {
-  const [tuning, setTuning] = useState<TreeTuning>(initiallyTuned)
+  const tuning = useAppStore(store => store.treeTuning)
+  const setTuning = useAppStore(store => store.setTreeTuning)
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (removeTuningParams(url.searchParams)) {
+      window.history.replaceState(window.history.state, '', url)
+    }
+  }, [])
 
   useEffect(() => {
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tuning))
     } catch {
-      // Storage may be unavailable; the URL still carries the values.
+      // Storage may be unavailable.
     }
-    const url = new URL(window.location.href)
-    url.search = tuningToSearch(tuning, url.search)
-    window.history.replaceState(null, '', url)
   }, [tuning])
 
   return [tuning, setTuning]

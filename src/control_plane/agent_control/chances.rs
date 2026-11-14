@@ -58,6 +58,7 @@ impl SpeculativeTree {
                 authority_outcome: None,
                 authority_evidence: None,
                 speculation_started_at_ms,
+                validation_id: None,
                 speculation_kind,
                 launch_epoch: None,
             },
@@ -72,6 +73,7 @@ impl SpeculativeTree {
                 tool_name: tool_name.to_string(),
                 stage: ChanceStage::Pending,
                 authority_state: AuthorityState::NotRequested,
+                speculation_started_at_ms,
             });
         Ok(chance_id)
     }
@@ -87,12 +89,18 @@ impl SpeculativeTree {
             return Ok(());
         }
         chance.stage = stage.clone();
+        let validation_id = if matches!(stage, ChanceStage::Accepted(_)) {
+            chance.validation_id
+        } else {
+            None
+        };
         self.epoch += 1;
         self.pending_observations
             .push(ObservationContent::ChanceStageChanged {
                 chance_id: chance_id.into(),
                 stage,
                 reason: Some(reason.into()),
+                validation_id,
             });
         Ok(())
     }
@@ -237,6 +245,22 @@ impl SpeculativeTree {
             self.settle_discarded_chance(&chance_id, DiscardedReason::Failed, text)?;
         }
         Ok(())
+    }
+
+    /// 将实际 Match 的时刻和本次工作关联；只有后续 Applied 才接受 Proposal。
+    pub(crate) fn record_validation(
+        &mut self,
+        chance_id: &str,
+        proposal_id: &str,
+        validation_id: u64,
+        validated_at_ms: Option<u64>,
+    ) {
+        self.pending_observations.push(ObservationContent::ProposalValidated {
+            chance_id: chance_id.into(),
+            proposal_id: proposal_id.into(),
+            validation_id,
+            validated_at_ms,
+        });
     }
 
     /// 权威值和验证依据属于 Chance。

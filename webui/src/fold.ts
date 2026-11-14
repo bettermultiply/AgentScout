@@ -46,6 +46,9 @@ export interface ChanceState {
   lastEventSequence: number
   createdSequence: number | null
   createdTimestampMs: number | null
+  speculationStartedAtMs: number | null
+  validationId: number | null
+  validations: Record<number, { proposalId: string; validatedAtMs: number | null }>
 }
 
 export interface BranchState {
@@ -161,6 +164,9 @@ function newChance(chanceId: string, sequence: number): ChanceState {
     lastEventSequence: sequence,
     createdSequence: null,
     createdTimestampMs: null,
+    speculationStartedAtMs: null,
+    validationId: null,
+    validations: {},
   }
 }
 
@@ -235,9 +241,16 @@ export function applyEvent(state: RunState, event: ObservationEvent): RunState {
         chance.authorityState = event.authority_state
         chance.createdSequence = event.sequence
         chance.createdTimestampMs = event.timestamp_ms
+        chance.speculationStartedAtMs = event.speculation_started_at_ms ?? null
         break
       case 'chance_stage_changed':
         chance.stage = event.stage
+        chance.validationId = event.validation_id ?? null
+        break
+      case 'proposal_validated':
+        chance.validations = { ...chance.validations, [event.validation_id]: {
+          proposalId: event.proposal_id, validatedAtMs: event.validated_at_ms ?? null,
+        } }
         break
       case 'authority_state_changed':
         chance.authorityState = event.state
