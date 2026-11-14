@@ -17,7 +17,7 @@ WebUI 的 `/map` 是独立于 AScout 对话和投机树的 NLE 地图浏览入�
 
 控制面现在发布 `nle_map_action` 只读事件。它只在 Runtime 返回包含合法公开 `chars` / `blstats` 的 NLE evidence 时产生；页面会显示“真实 Runtime 公开观测”。如果运行没有动作事件，页面显示演示 fallback，而不会声称真实接通。NLE 特有的地图解释仍留在 WebUI，控制面只转发已经公开的观测事实，不计算坐标、不暴露隐藏地图。
 
-坐标适配依据是仓库现有桥接和示例 Policy：`examples/nle-runtime-bridge.py` 原样保留 `chars` 行，`assets/policy/decisions.py` 把 `chars[ty][tx]` 与 `(dx, dy)` 配合使用，并明确 north 为 `dy=-1`、south 为 `dy=+1`。因此页面把屏幕行增加解释为世界 Y 增加（向南），把屏幕上方显示为北；`blstats[0]`、`blstats[1]` 被当作公开玩家绝对坐标。该适配只基于当前公开接口约定，不读取 NLE 隐藏状态。
+坐标适配依据是仓库现有桥接和本地 NLE Policy：`examples/nle-runtime-bridge.py` 原样保留 `chars` 行，`assets/policy/nle/decisions.py` 把 `chars[ty][tx]` 与 `(dx, dy)` 配合使用，并明确 north 为 `dy=-1`、south 为 `dy=+1`。因此页面把屏幕行增加解释为世界 Y 增加（向南），把屏幕上方显示为北；`blstats[0]`、`blstats[1]` 被当作公开玩家绝对坐标。该适配只基于当前公开接口约定，不读取 NLE 隐藏状态。
 
 ## 运行
 

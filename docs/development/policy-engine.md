@@ -38,9 +38,9 @@ use ascout::control_plane::policy::{Decision, PolicyEngine};
 use serde_json::json;
 
 let engine = PolicyEngine::default();
-let policy = engine.compile(Path::new("assets/policy/policy.yaml"))?;
+let policy = engine.compile(Path::new("assets/policy/policy/policy.yaml"))?;
 let result = engine.evaluate(&policy, Decision::Extent, &json!({
-    "process_state": {"steps_completed": 5, "phase": "reasoning"}
+    "process_state": {"steps_completed": 5, "hook_count": 5, "phase": "reasoning"}
 }))?;
 assert_eq!(result, "stop");
 # Ok::<(), std::io::Error>(())
@@ -49,8 +49,8 @@ assert_eq!(result, "stop");
 可运行示例（输出目录请自行选择）：
 
 ```sh
-cargo run --example policy -- compile assets/policy/policy.yaml /tmp/opencode/policy.json
-cargo run --example policy -- evaluate /tmp/opencode/policy.json extent assets/policy/extent-input.json
+cargo run --example policy -- compile assets/policy/policy/policy.yaml /tmp/opencode/policy.json
+printf '%s\n' '{"process_state":{"steps_completed":5,"hook_count":5,"phase":"reasoning"}}' | cargo run --example policy -- evaluate /tmp/opencode/policy.json extent -
 ```
 
 `evaluate` 的输入文件参数可以写成 `-`，此时从标准输入读取一份不超过 1 MiB 的 JSON；供 Pi 等接入进程直接传递本次 Decision 数据，不必先落临时文件。
@@ -59,7 +59,17 @@ cargo run --example policy -- evaluate /tmp/opencode/policy.json extent assets/p
 
 ## 2. 首版 YAML 与调用约定
 
-完整示例见 `assets/policy/policy.yaml` 和 `assets/policy/decisions.py`。顶层必需字段是 `version: 1`、`language: python`、`files`、`fidelity: Best-effort`、`decisions`。可选顶层字段 `runtime` 指定该 Policy 使用的 Runtime 配置路径，路径按控制面当前工作目录解析；控制面优先使用 `ASCOUT_RUNTIME_CONFIG` 覆盖。示例默认 `select` 的 `max_edges: 0`，即不选择任何待选 Chance，保持普通执行；改成 `1` 后可允许一个候选进入投机路径。
+本地默认策略见 `assets/policy/policy/policy.yaml` 和 `assets/policy/policy/decisions.py`。顶层必需字段是 `version: 1`、`language: python`、`files`、`fidelity: Best-effort`、`decisions`。可选顶层字段 `runtime` 指定该 Policy 使用的 Runtime 配置路径，路径按控制面当前工作目录解析；控制面优先使用 `ASCOUT_RUNTIME_CONFIG` 覆盖。默认 `select` 的 `max_chances: 0` 不选择任何待选 Chance，保持普通执行。
+
+### 本地策略目录（2026-11-14）
+
+一份策略一个独立目录：`assets/policy/policy/`、`assets/policy/nle/`、`assets/policy/pi-tool/` 各自包含声明 `policy.yaml` 和算法 `decisions.py`。目录组织同时适用于示例和未来正式内置策略，当前三份策略均不成熟，整个 `assets/policy/` 暂不纳入 Git，克隆仓库后需另行准备本地文件，依赖它们的示例及现有测试也需要这些文件。
+
+单个 `decisions.py` 是当前简单策略的组织方式，不限制 Engine 的多文件声明、包与相对导入能力。NLE 的观测预测与验证、Pi 工具示例的准入和抽样分别位于自己的算法文件；默认策略保留配置驱动的抽样分支及不选择 Chance 的行为。YAML 的声明文件仍相对 YAML 目录读取，Runtime 引用仍相对启动 cwd 解析。
+
+现有默认声明的 `predict` 缺少算法要求的 `enum_values`，`match` 缺少 `value_type`；直接调用相应非空结果路径会报错，不能仅把 `max_chances` 改成正数就认为投机配置完整。默认输入样例也尚缺 `extent` 声明要求的 `hook_count`。本次仅整理目录与分离算法，保留声明内容和这些既有限制。
+
+本轮验证：三份声明逐字迁移、三份策略均经真实 Engine 编译，NLE／Pi Runtime 路径仍绑定启动 cwd；301 组手构造输入比较拆分前后适用分支的输出及异常一致。现有候选顺序测试 1/1、Policy 集成测试 1/1、控制面测试 26/26、恢复测试 5/5 通过，`cargo check --all-targets` 与 `cargo build --bins --example policy` 通过。恢复测试显式组合抽样预测与 NLE verifier，使用本地伪模型，无真实模型请求；测试与示例依赖本地未跟踪策略，不构成干净克隆后的自包含交付。
 
 每个函数绑定使用 `file`、`function`，可选 `policy_config` 和 `inputs`：
 

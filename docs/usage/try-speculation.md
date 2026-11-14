@@ -21,7 +21,7 @@ mkdir -p /tmp/ascout-demo
 ./target/debug/ascout-control-plane \
   /tmp/ascout-demo \
   ../pi \
-  assets/policy/nle.yaml \
+  assets/policy/nle/policy.yaml \
   --model deepseek/deepseek-flash \
   --thinking low
 ```

@@ -9,7 +9,7 @@ use serde_json::json;
 fn policy_compilation_uses_supported_bubblewrap_pipe_setup() {
     let engine = PolicyEngine::default();
     let policy = engine
-        .compile(Path::new("assets/policy/policy.yaml"))
+        .compile(Path::new("assets/policy/policy/policy.yaml"))
         .unwrap();
     assert_eq!(
         engine

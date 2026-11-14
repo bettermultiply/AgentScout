@@ -248,7 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         saved
     } else {
         let path = args.get(2).map(String::as_str).or_else(|| {
-            if resume { None } else { Some("assets/policy/policy.yaml") }
+            if resume { None } else { Some("assets/policy/policy/policy.yaml") }
         }).ok_or("Saved Policy artifact missing; supply policy.yaml explicitly")?;
         engine.compile(std::path::Path::new(path))?
     };

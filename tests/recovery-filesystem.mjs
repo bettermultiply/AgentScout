@@ -26,7 +26,7 @@ test('filesystem main entry restores managed upper with current host lower and r
  })});await new Promise(r=>fake.listen(0,'127.0.0.1',r));
  const port=await new Promise(r=>{const s=http.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p))})});
  fs.writeFileSync(root+'/pi/models.json',JSON.stringify({providers:{recovery:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
- fs.copyFileSync(project+'/assets/policy/policy.yaml',root+'/policy/policy.yaml');fs.copyFileSync(project+'/assets/policy/decisions.py',root+'/policy/decisions.py');
+ fs.copyFileSync(project+'/assets/policy/policy/policy.yaml',root+'/policy/policy.yaml');fs.copyFileSync(project+'/assets/policy/policy/decisions.py',root+'/policy/decisions.py');
  fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_socket:root+'/runtime.sock',adapter_instance:'fs',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,filesystem:{state_directory:root+'/fs-state',isolated_paths:[root+'/workspace'],passthrough_rw:[root]}}));
  const config=JSON.parse(fs.readFileSync(root+'/runtime.json'));
  config.backends=[{id:'first',type:'nle',config:{...config}},{id:'second',type:'nle',config:{...config,seed:8}}];
