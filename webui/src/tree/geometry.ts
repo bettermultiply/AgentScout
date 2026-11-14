@@ -7,7 +7,6 @@ import { startLead } from './startLead'
 import { placeStems } from './stemPlacement'
 import { ordinaryOutline } from './ordinaryOutline'
 import { ellipseSides, sectionSides, outlineCurves, type ClosedPath, type Cubic } from '../geometry/curves'
-import type { Join } from '../geometry/smoothConnection'
 import { connectionSide, connectSides, type ConnectionSides } from '../geometry/connection'
 
 /**
@@ -65,7 +64,6 @@ interface StemGeometry {
   width: number
   outline?: PathGeometry
   cap?: { cx: number; cy: number; r: number }
-  connection?: { path: ClosedPath; joins: [Join, Join] }
   anchor: Point
   angle: number
   transform: string
@@ -95,7 +93,7 @@ export interface BranchGeometry {
   pathDistances: number[]
   trunkWidths: number[]
   trunk: PathGeometry
-  connection?: PathGeometry & { rootWidth: number; path: ClosedPath; joins?: [Join, Join] }
+  connection?: PathGeometry & { rootWidth: number }
   bud: { transform: string; angle: number; base: Point; tip: Point; ellipse: EllipseGeometry }
   chanceCircles: Array<{ chanceId: string; branchId: string; x: number; y: number; radius: number }>
 }
@@ -262,7 +260,7 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
     groupBranchCalls(b).length + children(b.branchId).reduce((sum, child) => sum + count(child), 0)
 
   const place = (branch: BranchState, root: Point, initialAngle: number, startWidth: number,
-    attach?: { parent: BranchGeometry; fork: Point; center: Point; distance: number; width: number; side: -1 | 1; heading: number },
+    attach?: { parent: BranchGeometry; center: Point; distance: number; width: number; side: -1 | 1; heading: number },
     ): void => {
     const calls = [...groupBranchCalls(branch)].sort(
       (a, b) => (a.startMs ?? 0) - (b.startMs ?? 0) || a.firstSequence - b.firstSequence,
@@ -322,7 +320,6 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       }
       attach.parent.forkPoints.set(branch.branchId, fork)
       root = { x: attach.parent.x + attach.center.x, y: attach.parent.y + attach.center.y }
-      attach = { ...attach, fork, side }
     }
     const totalLength = callDistances[callDistances.length - 1]
     const distanceOfCall = new Map(calls.map((call, index) => [call.id, callDistances[index]]))
@@ -463,14 +460,13 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
       const { parent, center } = attach
       const convert = (p: Point): Point => ({ x: p.x - center.x + NODE_HALF_WIDTH, y: p.y - center.y })
       const W = geometry.trunkWidths[0]
-      let outline: ClosedPath | undefined, joins: [Join, Join] | undefined
-      {
-        const r = connectSides({ parent: boundaries.get(parent)!, child: boundary,
-          position: attach.distance, anchor: center, convert,
-          parentDistance: tuning.connectionParentRatio * W, childDistance: tuning.connectionRootRatio * W })
-        if (r) { outline = r.outline; joins = r.joins; boundary = r.sides }
+      const connected = connectSides({ parent: boundaries.get(parent)!, child: boundary,
+        position: attach.distance, anchor: center, convert,
+        parentDistance: tuning.connectionParentRatio * W, childDistance: tuning.connectionRootRatio * W })
+      if (connected) {
+        geometry.connection = { ...connectionPath(connected.outline), rootWidth: W }
+        boundary = connected.sides
       }
-      if (outline) geometry.connection = { ...connectionPath(outline), path: outline, rootWidth: W, joins }
     }
 
     // The branch outline is final here; hidden ordinary root sides are gone.
@@ -490,7 +486,6 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
         child: [connectionSide(sides[0]), connectionSide(sides[1])],
         parentDistance: tuning.connectionParentRatio * shape.width, childDistance: tuning.connectionRootRatio * shape.width })
       shape.outline = connectionPath(connected?.outline ?? ordinaryOutline(sides))
-      if (connected) shape.connection = { path: connected.outline, joins: connected.joins }
       const cap = rotate(tip, shape.angle, shape.anchor)
       shape.cap = { cx: cap.x, cy: cap.y, r: shape.width / 2 }
     }
@@ -504,7 +499,7 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
         tuning.widthExponent,
       )
       place(child, { x: geometry.x + point.x, y: geometry.y + point.y }, angle, childWidth,
-        { parent: geometry, fork: point, center: point, distance, width, side, heading: localHeading })
+        { parent: geometry, center: point, distance, width, side, heading: localHeading })
     }
   }
 
@@ -531,7 +526,6 @@ export function layoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_TUNING)
     if (geometry.connection) geometry.connection.points.forEach(point => add(point, 0))
     else if (geometry.calls.length) geometry.trunk.points.forEach(point => add(point, geometry.trunk.stroke / 2))
     else ellipsePoints(geometry.bud.ellipse).forEach(point => add(rotate(point, geometry.bud.angle, geometry.bud.base), 0))
-    geometry.connection?.points.forEach(point => add(point, 0))
     for (const section of geometry.sections) {
       const shape = section.shape!
       const stemPoint = (point: Point) => rotate(point, shape.angle, shape.anchor)

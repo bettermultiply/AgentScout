@@ -1,5 +1,4 @@
 import { splitCubic, type Cubic, type ClosedPath, type Point, type PathSegment } from './curves'
-import type { Join } from './smoothConnection'
 
 // Coordinates follow the source centre line, not integrated boundary arc length.
 // A replaced root interval maps to its new cubic; hidden ordinary edges are absent.
@@ -38,7 +37,7 @@ function at(side: ConnectionSide, position: number) {
 export function connectSides(input: {
   parent: ConnectionSides; position: number; anchor: Point; child: ConnectionSides;
   parentDistance: number; childDistance: number; convert?: (p: Point) => Point;
-}): { outline: ClosedPath; joins: [Join, Join]; sides: ConnectionSides } | null {
+}): { outline: ClosedPath; sides: ConnectionSides } | null {
   const { parent, child, position, anchor, parentDistance, childDistance } = input
   if (child.some(s => !s.curves.length) || parent.some(s => !s.curves.length)) return null
   const root = { x: (child[0].curves[0].start.x + child[1].curves[0].start.x) / 2,
@@ -70,17 +69,13 @@ export function connectSides(input: {
       c2: along(C, end.tangent, -cHandle), end: C }
     const curves = [fillet, end.tail, ...side.curves.slice(end.index + 1)]
     const positions = [side.positions[0], end.value, ...side.positions.slice(end.index + 1)]
-    // Legacy field names retained for consumers; coordinates are now mapped
-    // positions and exit is the selected parent boundary, not an intersection.
-    const join: Join = { exit: convert(center.point), exitArc: 0, parentArc: position,
-      parentPoint: Q, childPoint: C, parentDistance: Math.abs(p.value - position), childDistance: end.value - side.positions[0] }
-    return { side: { curves, positions }, join }
+    return { curves, positions }
   })
   const [a, b] = ends
-  return { sides: [a.side, b.side], joins: [a.join, b.join], outline: {
-    start: a.side.curves[0].start,
-    segments: [...a.side.curves.map(segment), { kind: 'line', end: b.side.curves.at(-1)!.end },
-      ...[...b.side.curves].reverse().map(c => segment(reverse(c))),
-      { kind: 'line', end: root }, { kind: 'line', end: a.side.curves[0].start }],
+  return { sides: [a, b], outline: {
+    start: a.curves[0].start,
+    segments: [...a.curves.map(segment), { kind: 'line', end: b.curves.at(-1)!.end },
+      ...[...b.curves].reverse().map(c => segment(reverse(c))),
+      { kind: 'line', end: root }, { kind: 'line', end: a.curves[0].start }],
   } }
 }

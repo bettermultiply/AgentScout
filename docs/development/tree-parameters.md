@@ -62,11 +62,11 @@ K ln(1+d/τ)=ln((1+d/τ)^K) 的等式成立，但不能消去两个自由参数�
 
 共享几何的无模型抽样验证材料为 `/tmp/opencode/system-tree-run/quality.cjs` 与 `panel-shared.cjs`，覆盖边界、DOM 属性、局部原点、面板收起展开、数值输入与存储。这些材料不代表当前默认参数的完整视觉验收，也未穷举全部参数组合。
 
-工作区树形改造基于尚未提交的 `tree/`、`treeGraph.ts`、调用配对和混合 UI／观察类型改动，`dist` 也包含当前其他源改动。本轮不通过整体暂存把这些既有修改和无关 NLE／回放工作混入提交；留待主 Agent 审查与拆分。
+用户已检查并接受当前画面；七案例清理前后完整绘图和位置数据逐值一致，证据见[根部连接状态](tree-connection-repair.md)。视觉接受与这些抽样验证均不代表穷举极端参数。
 
 ## 固定分叉平滑连接（2026-11-13）
 
-保留 React Flow + SVG。`webui/src/geometry/connection.ts` 按父边界位置映射直接生成两侧三次连接；`tree/geometry.ts` 保留最终可见侧边及其映射，绘制和 bounds 消费同一闭合序列。当前是待用户视觉验收原型；公式、退化、兼容字段含义与限制见 [根部连接状态](tree-connection-repair.md)。
+保留 React Flow + SVG。`webui/src/geometry/connection.ts` 按父边界位置映射直接生成两侧三次连接；`tree/geometry.ts` 保留最终可见侧边及其映射，绘制和 bounds 消费同一闭合序列。公式、退化与限制见 [根部连接状态](tree-connection-repair.md)。
 
 ## 第四阶段 B：根枝起点提前量（2026-11-13）
 
