@@ -8,7 +8,6 @@ use crate::protocol::contract::*;
 use crate::runtime::backend::*;
 use serde_json::Value;
 
-
 fn operation_context(environment_id: &str, request: &OperationRequest) -> BackendContext {
     BackendContext {
         operation_id: request.request_id.clone(),
@@ -94,34 +93,93 @@ impl Shared {
             Operation::SaveRuntime { path } | Operation::LoadRuntime { path } => {
                 let result = if matches!(request.operation, Operation::SaveRuntime { .. }) {
                     // Even a failed save must not fall through to destructive EOF cleanup.
-                    self.preserving.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.preserving
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     self.runtime.save_runtime(path)
                 } else {
-                    self.preserving.store(true, std::sync::atomic::Ordering::SeqCst);
-                    let result=self.runtime.load_runtime(path);
-                    if result.is_err() {let _=self.runtime.shutdown();}
+                    self.preserving
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    let result = self.runtime.load_runtime(path);
+                    if result.is_err() {
+                        let _ = self.runtime.shutdown();
+                    }
                     result
                 };
                 match result {
-                    Ok(()) => make_result(request, ResultStatus::Completed, self.runtime.state(environment_id), false),
+                    Ok(()) => make_result(
+                        request,
+                        ResultStatus::Completed,
+                        self.runtime.state(environment_id),
+                        false,
+                    ),
                     Err(error) => self.reasoned_failure(request, state, &error.to_string()),
                 }
             }
-            Operation::EstablishEnvironment => self.execute_establish(environment_id, request, state, &context),
-            Operation::OperateEnvironment { command, agent } => self.execute_operate(environment_id, request, state, &context, command, agent.as_ref(), cancel),
-            Operation::BranchEnvironment { child_environment_id } => self.execute_branch(environment_id, request, state, &context, child_environment_id),
-            Operation::PromoteEnvironment => self.execute_promote(environment_id, request, state, &context),
-            Operation::SuspendEnvironment => self.execute_suspend(environment_id, request, state, &context),
-            Operation::ResumeEnvironment => self.execute_resume(environment_id, request, state, &context),
-            Operation::TerminateEnvironment => self.execute_terminate(environment_id, request, state, &context),
-            Operation::CleanupEnvironment => self.execute_cleanup(environment_id, request, state, &context),
-            Operation::ToolContext { tool_name } => self.execute_tool_context(environment_id, request, state, &context, tool_name, cancel),
-            Operation::InvokeTool { tool_name, arguments } => self.execute_invoke_tool(environment_id, request, state, &context, tool_name, arguments, cancel),
+            Operation::EstablishEnvironment => {
+                self.execute_establish(environment_id, request, state, &context)
+            }
+            Operation::OperateEnvironment { command, agent } => self.execute_operate(
+                environment_id,
+                request,
+                state,
+                &context,
+                command,
+                agent.as_ref(),
+                cancel,
+            ),
+            Operation::BranchEnvironment {
+                child_environment_id,
+                agent,
+            } => self.execute_branch(
+                environment_id,
+                request,
+                state,
+                &context,
+                child_environment_id,
+                agent.as_ref(),
+            ),
+            Operation::PromoteEnvironment => {
+                self.execute_promote(environment_id, request, state, &context)
+            }
+            Operation::SuspendEnvironment => {
+                self.execute_suspend(environment_id, request, state, &context)
+            }
+            Operation::ResumeEnvironment => {
+                self.execute_resume(environment_id, request, state, &context)
+            }
+            Operation::TerminateEnvironment => {
+                self.execute_terminate(environment_id, request, state, &context)
+            }
+            Operation::CleanupEnvironment => {
+                self.execute_cleanup(environment_id, request, state, &context)
+            }
+            Operation::ToolContext { tool_name } => self.execute_tool_context(
+                environment_id,
+                request,
+                state,
+                &context,
+                tool_name,
+                cancel,
+            ),
+            Operation::InvokeTool {
+                tool_name,
+                arguments,
+            } => self.execute_invoke_tool(
+                environment_id,
+                request,
+                state,
+                &context,
+                tool_name,
+                arguments,
+                cancel,
+            ),
             Operation::FilesystemFork { .. }
             | Operation::FilesystemMark { .. }
             | Operation::FilesystemDiff { .. }
             | Operation::FilesystemAccept { .. }
-            | Operation::FilesystemDiscard { .. } => self.execute_filesystem(environment_id, request, state, &context, cancel),
+            | Operation::FilesystemDiscard { .. } => {
+                self.execute_filesystem(environment_id, request, state, &context, cancel)
+            }
         }
     }
 
@@ -189,11 +247,9 @@ impl Shared {
                     let actual = self.runtime.state(environment_id);
                     self.success(request, actual, can_accept(actual))
                 }
-                Err(error) => self.reasoned_failure(
-                    request,
-                    state,
-                    format!("agent launch failed: {error}"),
-                ),
+                Err(error) => {
+                    self.reasoned_failure(request, state, format!("agent launch failed: {error}"))
+                }
             };
         }
         match self.runtime.operate_with_context(context, command, cancel) {
@@ -209,15 +265,12 @@ impl Shared {
         state: Option<EnvironmentState>,
         context: &BackendContext,
         child_environment_id: &str,
+        agent: Option<&AgentLaunch>,
     ) -> OperationResult {
         match state {
             Some(EnvironmentState::Available | EnvironmentState::Suspended) => {}
             Some(other) => {
-                return self.not_applicable(
-                    request,
-                    Some(other),
-                    "environment cannot be branched",
-                );
+                return self.not_applicable(request, Some(other), "environment cannot be branched");
             }
             None => return self.unknown_environment(request),
         }
@@ -240,6 +293,18 @@ impl Shared {
             child_environment_id,
         ) {
             Ok(()) => {
+                if let Some(agent) = agent {
+                    if let Err(error) = self.runtime.launch_agent(
+                        &BackendContext {
+                            environment_id: child_environment_id.to_string(),
+                            parent_environment_id: Some(environment_id.to_string()),
+                            ..context.clone()
+                        },
+                        agent,
+                    ) {
+                        return self.backend_error(request, child_environment_id, error);
+                    }
+                }
                 let actual = self.runtime.state(environment_id);
                 let mut result = self.success(request, actual, can_accept(actual));
                 result.resources = vec![ResourceNote {
@@ -425,7 +490,8 @@ impl Shared {
             .filesystem_operation(context, &request.operation, cancel)
         {
             Ok(filesystem) => {
-                let Some(reason) = filesystem_failure_reason(&request.operation, &filesystem) else {
+                let Some(reason) = filesystem_failure_reason(&request.operation, &filesystem)
+                else {
                     let mut result = self.success(request, state, can_accept(state));
                     result.filesystem = Some(filesystem);
                     return result;
@@ -578,5 +644,4 @@ impl Shared {
         result.backend_states = self.runtime.backend_states(&request.environment_id);
         result
     }
-
 }

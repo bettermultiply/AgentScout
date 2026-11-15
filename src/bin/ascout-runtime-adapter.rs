@@ -48,13 +48,60 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|v| v.as_str())
             .ok_or("filesystem missing state_directory")?;
         let mut filesystem_config = FilesystemConfig::new(state);
-        if let Some(paths)=config.get("passthrough_rw") {filesystem_config.passthrough_rw=serde_json::from_value(paths.clone())?;}
+        if let Some(paths) = config.get("passthrough_rw") {
+            filesystem_config.passthrough_rw = serde_json::from_value(paths.clone())?;
+        }
         if let Some(paths) = config.get("isolated_paths") {
-            let paths: Vec<PathBuf> = serde_json::from_value(paths.clone())?;
-            if paths.is_empty() || paths.iter().any(|p| !p.is_absolute() || p == std::path::Path::new("/") || !p.is_dir()) {
-                return Err("filesystem isolated_paths must contain existing absolute non-root directories".into());
+            let entries = paths
+                .as_array()
+                .ok_or("filesystem isolated_paths must be an array")?;
+            let mut isolated = Vec::new();
+            let mut targets = Vec::new();
+            for entry in entries {
+                let (path, target) = match entry {
+                    serde_json::Value::String(path) => (PathBuf::from(path), None),
+                    serde_json::Value::Object(object) => {
+                        let path = object
+                            .get("path")
+                            .and_then(|value| value.as_str())
+                            .ok_or("filesystem isolated_paths entry missing path")?;
+                        let target = object
+                            .get("target")
+                            .and_then(|value| value.as_str())
+                            .map(PathBuf::from);
+                        (PathBuf::from(path), target)
+                    }
+                    _ => {
+                        return Err(
+                            "filesystem isolated_paths entries must be strings or objects".into(),
+                        );
+                    }
+                };
+                if !path.is_absolute() || path == std::path::Path::new("/") || !path.is_dir() {
+                    return Err(
+                        "filesystem isolated_paths must contain existing absolute non-root directories"
+                            .into(),
+                    );
+                }
+                if let Some(target) = target {
+                    if !target.is_absolute() || target == std::path::Path::new("/") {
+                        return Err(
+                            "filesystem isolated_paths target must be an absolute non-root path"
+                                .into(),
+                        );
+                    }
+                    targets.push((path.clone(), target));
+                }
+                isolated.push(path);
             }
-            filesystem_config.isolated_paths = Some(paths);
+            if isolated.is_empty() {
+                return Err(
+                    "filesystem isolated_paths must contain existing absolute non-root directories"
+                        .into(),
+                );
+            }
+            filesystem_config.isolated_paths = Some(isolated);
+            filesystem_config.isolated_targets = targets;
         }
         if let Some(path) = config.get("bubblewrap_path").and_then(|v| v.as_str()) {
             filesystem_config.bubblewrap_path = PathBuf::from(path);

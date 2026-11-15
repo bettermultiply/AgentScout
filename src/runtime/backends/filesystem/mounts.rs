@@ -11,7 +11,11 @@ impl FilesystemBackend {
         {
             return targets.clone();
         }
-        let targets: Vec<PathBuf> = self.config.isolated_paths.clone().unwrap_or_else(real_writable_mounts)
+        let targets: Vec<PathBuf> = self
+            .config
+            .isolated_paths
+            .clone()
+            .unwrap_or_else(real_writable_mounts)
             .into_iter()
             .filter(|target| self.probe_mount_target(target))
             .collect();
@@ -109,7 +113,14 @@ impl FilesystemBackend {
     }
 
     pub(super) fn launch_lowers(&self, mount: &MountUnit) -> Vec<PathBuf> {
-        let mut lowers = vec![mount.saved_base.as_ref().unwrap_or(&mount.target).clone()];
+        let mut lowers = vec![
+            mount
+                .saved_base
+                .as_ref()
+                .or(mount.base.as_ref())
+                .unwrap_or(&mount.target)
+                .clone(),
+        ];
         for layer in &mount.lower {
             lowers.push(mount.layer_upper(layer));
         }
@@ -160,8 +171,12 @@ impl FilesystemBackend {
                 .map(|mount| mount.target.clone()),
         );
         self.ensure_state_directory_outside_isolated_mounts(isolated)?;
-        if environment.workspace_root.as_deref() != Some(launch.cwd.as_path()) {
-            environment.workspace_root = Some(launch.cwd.clone());
+        let workspace = self
+            .config
+            .sandbox_target(&launch.cwd)
+            .unwrap_or_else(|| launch.cwd.clone());
+        if environment.workspace_root.as_deref() != Some(workspace.as_path()) {
+            environment.workspace_root = Some(workspace.clone());
             self.persist_environment(&environment).map_err(|error| {
                 BackendError::new(format!("failed to persist workspace root: {error}"))
             })?;
@@ -172,10 +187,10 @@ impl FilesystemBackend {
         }
         let before = environment.mounts.len();
         self.discover_mounts(&mut environment)?;
-        if environment.mount_for_path(&launch.cwd).is_none() {
+        if environment.mount_for_path(&workspace).is_none() {
             return Err(BackendError::new(format!(
                 "workspace {} is not on an overlayable mounted filesystem; configure a separate writable mount or allow passthrough_rw",
-                launch.cwd.display()
+                workspace.display()
             )));
         }
         if environment.mounts.len() > before {
@@ -192,7 +207,11 @@ impl FilesystemBackend {
             if !target.is_dir() {
                 continue;
             }
-            let key = target.display().to_string();
+            let sandbox = self
+                .config
+                .sandbox_target(&target)
+                .unwrap_or_else(|| target.clone());
+            let key = sandbox.display().to_string();
             if environment.mounts.contains_key(&key) {
                 continue;
             }
@@ -204,10 +223,11 @@ impl FilesystemBackend {
             environment.mounts.insert(
                 key,
                 MountUnit {
+                    target: sandbox.clone(),
+                    base: (sandbox != target).then_some(target),
+                    saved_base: None,
                     upper: environment.root.join(&layer_key).join("upper"),
                     work: environment.root.join(&layer_key).join("work"),
-                    target,
-                    saved_base: None,
                     lower: Vec::new(),
                     layer_key,
                     volume_is_subvolume: self.uses_btrfs_storage(),
@@ -242,7 +262,9 @@ impl FilesystemBackend {
         }
         Self::prepare_mount_dirs(&units)?;
         self.persist_environment(environment).map_err(|error| {
-            BackendError::new(format!("failed to persist newly discovered mounts: {error}"))
+            BackendError::new(format!(
+                "failed to persist newly discovered mounts: {error}"
+            ))
         })?;
         let mut state = self.environment()?;
         state
@@ -257,9 +279,34 @@ impl FilesystemBackend {
         launch: &crate::protocol::contract::AgentLaunch,
     ) -> Result<LaunchFragment, BackendError> {
         let mut fragment = LaunchFragment {
-            chdir: Some(launch.cwd.clone()),
+            chdir: Some(
+                self.config
+                    .sandbox_target(&launch.cwd)
+                    .unwrap_or_else(|| launch.cwd.clone()),
+            ),
             ..LaunchFragment::default()
         };
+        // The host Pi process reads one tool plan per Branch. It never enters
+        // this namespace; the plan only tells its file tools where that
+        // Branch's holder and sandbox workspace are.
+        fragment.env.insert(
+            "ASCOUT_FILESYSTEM_TOOL_PLANS".into(),
+            self.config
+                .state_directory
+                .join("tool-plans")
+                .display()
+                .to_string(),
+        );
+        let holder_dir = self
+            .config
+            .state_directory
+            .join("holder-sockets")
+            .join(&environment.id);
+        fs::create_dir_all(&holder_dir).map_err(error)?;
+        // `/run` is part of the read-only host-root view in bubblewrap.  Use a
+        // dedicated root-level mount point so the holder socket is created in
+        // the assembled namespace rather than in that read-only tree.
+        fragment.holder_bind = Some((holder_dir, PathBuf::from("/dev/ascout-holder")));
         fragment
             .mounts
             .extend(crate::runtime::launch_plan::base_mount_entries());
@@ -269,7 +316,7 @@ impl FilesystemBackend {
         mounts.sort_by_key(|mount| mount.target.components().count());
         let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
         for mount in &mounts {
-            if !mount.target.is_dir() {
+            if !mount.target.is_dir() && mount.base.is_none() {
                 continue;
             }
             ensure_overlay_disjoint(&mount.target, &mount.upper)?;
@@ -290,9 +337,7 @@ impl FilesystemBackend {
             MountEntry::RoBind { .. } | MountEntry::Proc { .. } | MountEntry::Dev { .. } => 0,
             MountEntry::Bind { .. } => 1,
             MountEntry::Overlay { .. } => 2,
-            MountEntry::Tmpfs { .. }
-            | MountEntry::RemountRo { .. }
-            | MountEntry::Dir { .. } => 3,
+            MountEntry::Tmpfs { .. } | MountEntry::RemountRo { .. } | MountEntry::Dir { .. } => 3,
         });
         Ok(fragment)
     }
@@ -340,7 +385,6 @@ impl FilesystemBackend {
         });
     }
 }
-
 
 pub(super) fn real_writable_mounts() -> Vec<PathBuf> {
     let Ok(text) = fs::read_to_string("/proc/self/mountinfo") else {
@@ -392,7 +436,11 @@ pub(super) fn real_writable_mounts() -> Vec<PathBuf> {
         ) {
             continue;
         }
-        if target == Path::new("/") || target.starts_with("/proc") || target.starts_with("/sys") || target.starts_with("/dev") {
+        if target == Path::new("/")
+            || target.starts_with("/proc")
+            || target.starts_with("/sys")
+            || target.starts_with("/dev")
+        {
             continue;
         }
         if !mounts.contains(&target) {
@@ -401,7 +449,6 @@ pub(super) fn real_writable_mounts() -> Vec<PathBuf> {
     }
     mounts
 }
-
 
 pub(super) fn unescape_mount_path(value: &str) -> PathBuf {
     let mut result = String::new();

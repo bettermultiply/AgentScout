@@ -7,7 +7,9 @@ impl SpeculativeTree {
     pub fn handle_message(&mut self, message: AgentMessage) -> io::Result<Vec<AgentCommand>> {
         match message {
             AgentMessage::TurnFailed { .. } | AgentMessage::ModelChanged { .. } => Ok(vec![]),
-            AgentMessage::RecoverySuspended | AgentMessage::RecoverySaved { .. } | AgentMessage::RecoveryLoaded { .. } => Ok(vec![]),
+            AgentMessage::RecoverySuspended
+            | AgentMessage::RecoverySaved { .. }
+            | AgentMessage::RecoveryLoaded { .. } => Ok(vec![]),
             AgentMessage::AgentConnected { agent_id, .. } if agent_id == self.agent_id => {
                 Ok(vec![])
             }
@@ -44,24 +46,156 @@ impl SpeculativeTree {
                 action_kind,
                 status,
                 timestamp_ms,
-                ..
-            } => self.handle_action_finished(
-                &task_id,
-                &branch_id,
-                &action_id,
-                action_kind,
-                status,
-                timestamp_ms,
-            ),
+                result,
+                evidence,
+            } => {
+                let tool_calls = result.get("tool_calls").cloned().or_else(|| {
+                    evidence
+                        .as_ref()
+                        .and_then(|value| value.get("tool_calls"))
+                        .cloned()
+                });
+                self.action_facts
+                    .entry(branch_id.clone())
+                    .or_default()
+                    .insert(
+                        action_id.clone(),
+                        ActionFinishedFact {
+                            action_id: action_id.clone(),
+                            action_kind,
+                            status,
+                            timestamp_ms,
+                            result: Some(result.clone()),
+                            evidence: evidence.clone(),
+                            tool_calls: tool_calls.clone(),
+                        },
+                    );
+                let live = self
+                    .active_actions
+                    .get(&branch_id)
+                    .is_some_and(|a| a.contains_key(&action_id));
+                let mut pending_commands = Vec::new();
+                if live
+                    && action_kind == ActionKind::ModelInference
+                    && status == ActionStatus::Succeeded
+                {
+                    let ids: Vec<_> = self
+                        .chances
+                        .values()
+                        .filter(|c| {
+                            c.parent_branch_id == branch_id
+                                && c.operation_id == action_id
+                                && !c.stage.is_terminal()
+                        })
+                        .map(|c| c.chance_id.clone())
+                        .collect();
+                    for id in ids {
+                        self.record_authority_outcome(&id, result.clone(), evidence.clone())?;
+                        self.change_chance_stage(
+                            &id,
+                            ChanceStage::Resolving,
+                            "Model authority arrived",
+                        )?;
+                        // The authority fact closes the only window in which
+                        // an uncommitted Candidate may produce a Proposal.
+                        // Cancel those model continuations before processing
+                        // any later Candidate completion.  The returned
+                        // commands are sent through the normal connection
+                        // queue; this is deliberately not a direct Pi call.
+                        let unfinished: Vec<_> = self
+                            .chance(&id)?
+                            .branch_ids
+                            .iter()
+                            .filter(|candidate| {
+                                self.branch_proposal(candidate).is_none()
+                                    && self.branches.get(*candidate).is_some_and(|branch| {
+                                        branch.status.is_live_candidate()
+                                            && branch.pending_operations.iter().any(|operation| {
+                                                operation.kind == OperationKind::StartCandidate
+                                                    && operation.status
+                                                        == OperationStatus::Succeeded
+                                            })
+                                    })
+                            })
+                            .cloned()
+                            .collect();
+                        let mut cancellation_commands = Vec::new();
+                        for candidate in unfinished {
+                            self.pending_records.push(serde_json::json!({
+                                "branch_id": candidate,
+                                "hypothesis": Value::Null,
+                                "verdict": "incompatible",
+                                "policy_error": Value::Null,
+                                "disposition": "Discard"
+                            }));
+                            cancellation_commands.extend(self.discard_candidate(
+                                &candidate,
+                                DiscardedReason::Failed,
+                                "Authority value arrived before Candidate Proposal was ready",
+                            )?);
+                        }
+                        // `handle_message` returns one command vector below;
+                        // keep these receipts alongside the authority fact.
+                        pending_commands.extend(cancellation_commands);
+                    }
+                    let candidate_chance = self.branch(&branch_id)?.chance_id.clone();
+                    if let Some(id) = candidate_chance {
+                        if status == ActionStatus::Succeeded
+                            && self.branch_proposal(&branch_id).is_none()
+                            && self.chance(&id)?.operation_id == action_id
+                            && self.chance(&id)?.speculation_kind
+                                == Some(ActionKind::ModelInference)
+                            && !self.chance(&id)?.stage.is_terminal()
+                            && self.branch(&branch_id)?.status.is_live_candidate()
+                            && self.chance(&id)?.authority != AuthorityState::Arrived
+                        {
+                            let proposal_id = format!("proposal-{branch_id}");
+                            self.chance_mut(&id)?.proposals.push(ProposalRecord {
+                                proposal_id: proposal_id.clone(),
+                                payload: result.clone(),
+                            });
+                            self.branch_mut(&branch_id)?
+                                .assumption_set
+                                .push(Assumption {
+                                    chance_id: id.clone(),
+                                    proposal_id: proposal_id.clone(),
+                                });
+                            self.pending_observations.push(crate::control_plane::observation::ObservationContent::ProposalAdded { chance_id: id, proposal_id, payload: result });
+                        }
+                    }
+                }
+                pending_commands.extend(self.handle_action_finished(
+                    &task_id,
+                    &branch_id,
+                    &action_id,
+                    action_kind,
+                    status,
+                    timestamp_ms,
+                )?);
+                // The model-fact path above may have queued cancellation
+                // commands.  Keep the command transport serialized by
+                // returning them to the control-plane execution loop.
+                Ok(pending_commands)
+            }
             AgentMessage::TurnCompleted { branch_id } => {
                 let active = self.branch(&branch_id)?.execution_state.turn_active;
                 self.branch_mut(&branch_id)?.execution_state.turn_active = false;
-                if active && !self.recovering && !self.stopping && self.authority_branch_id.as_deref() == Some(&branch_id) {
+                if active
+                    && !self.recovering
+                    && !self.stopping
+                    && self.authority_branch_id.as_deref() == Some(&branch_id)
+                {
                     self.task_finishing = true;
                 }
                 Ok(vec![])
             }
-            AgentMessage::Transcript { branch_id, .. } => {
+            AgentMessage::Transcript {
+                branch_id, entry, ..
+            } => {
+                self.transcripts
+                    .entry(branch_id.clone())
+                    .or_default()
+                    .push(entry);
                 self.branch_mut(&branch_id)?
                     .execution_position
                     .transcript_index += 1;
@@ -82,14 +216,17 @@ impl SpeculativeTree {
                 ..
             } => {
                 self.branch(&branch_id)?;
-                self.model_usage.entry(branch_id).or_default().push(ModelUsageFact {
-                    action_id,
-                    model,
-                    started_at_ms,
-                    finished_at_ms,
-                    duration_ms: finished_at_ms.checked_sub(started_at_ms),
-                    cost: usage["cost"]["total"].as_f64(),
-                });
+                self.model_usage
+                    .entry(branch_id)
+                    .or_default()
+                    .push(ModelUsageFact {
+                        action_id,
+                        model,
+                        started_at_ms,
+                        finished_at_ms,
+                        duration_ms: finished_at_ms.checked_sub(started_at_ms),
+                        cost: usage["cost"]["total"].as_f64(),
+                    });
                 Ok(vec![])
             }
             AgentMessage::ActionStarted {
@@ -288,7 +425,33 @@ impl SpeculativeTree {
         if task_id != self.execution_id {
             return Err(invalid_input("action task does not match tree"));
         }
-        self.register_action(branch_id, action_id, action_kind, name, parent_action_id)
+        let commands =
+            self.register_action(branch_id, action_id, action_kind, name, parent_action_id)?;
+        if action_kind == ActionKind::ModelInference
+            && let Some(chance_id) = self.branch(branch_id)?.chance_id.clone()
+            && self.chance(&chance_id)?.authority == AuthorityState::Arrived
+            && self.branch_proposal(branch_id).is_none()
+            && self.branch(branch_id)?.role == BranchRole::Candidate
+            && self.branch(branch_id)?.status.is_live_candidate()
+        {
+            // The Candidate's model call started only after the authority
+            // value had already arrived. It can no longer produce a winning
+            // Proposal; cancel the request now that it has a real start fact
+            // and a truthful cancellation/usage can be observed.
+            self.pending_records.push(serde_json::json!({
+                "branch_id": branch_id,
+                "hypothesis": Value::Null,
+                "verdict": "incompatible",
+                "policy_error": Value::Null,
+                "disposition": "Discard"
+            }));
+            return self.discard_candidate(
+                branch_id,
+                DiscardedReason::Failed,
+                "Authority value arrived before Candidate Proposal was ready",
+            );
+        }
+        Ok(commands)
     }
 
     /// Pair an admitted action with its later ActionFinished. This registers

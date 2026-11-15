@@ -11,6 +11,28 @@ impl SpeculativeTree {
         chance_id: &str,
         prediction: Value,
     ) -> io::Result<AgentCommand> {
+        self.create_candidate(chance_id, prediction, false)
+    }
+
+    pub fn start_model_candidate(
+        &mut self,
+        chance_id: &str,
+        prediction: Value,
+    ) -> io::Result<AgentCommand> {
+        if self.chance(chance_id)?.speculation_kind != Some(ActionKind::ModelInference) {
+            return Err(invalid_input(
+                "branch_model requires a model inference boundary",
+            ));
+        }
+        self.create_candidate(chance_id, prediction, true)
+    }
+
+    fn create_candidate(
+        &mut self,
+        chance_id: &str,
+        prediction: Value,
+        deferred: bool,
+    ) -> io::Result<AgentCommand> {
         let chance = self.chance(chance_id)?.clone();
         let parent = chance.parent_branch_id.as_str();
         let sequence = self.next_generation;
@@ -33,18 +55,29 @@ impl SpeculativeTree {
             Some(chance_id.to_string()),
             (chance.speculation_kind, chance.speculation_started_at_ms),
         )?;
+        // The logical transcript belongs to the control plane. A Branch
+        // inherits its parent's transcript and appends only its own entries;
+        // native Pi session files remain the persistence/assembly form.
+        if let Some(history) = self.transcripts.get(parent).cloned() {
+            self.transcripts.insert(branch_id.clone(), history);
+        }
         let chance_record = self.chance_mut(chance_id)?;
-        chance_record.proposals.push(ProposalRecord {
-            proposal_id: proposal_id.clone(),
-            payload: prediction.clone(),
-        });
-        chance_record.branch_ids.push(branch_id.clone());
-        self.pending_observations
-            .push(crate::control_plane::observation::ObservationContent::ProposalAdded {
-                chance_id: chance_id.into(),
+        if !deferred {
+            chance_record.proposals.push(ProposalRecord {
                 proposal_id: proposal_id.clone(),
                 payload: prediction.clone(),
             });
+        }
+        chance_record.branch_ids.push(branch_id.clone());
+        if !deferred {
+            self.pending_observations.push(
+                crate::control_plane::observation::ObservationContent::ProposalAdded {
+                    chance_id: chance_id.into(),
+                    proposal_id: proposal_id.clone(),
+                    payload: prediction.clone(),
+                },
+            );
+        }
         let branch = self.branch_mut(&branch_id)?;
         branch.execution_position = ExecutionPosition {
             sequence,
@@ -52,10 +85,12 @@ impl SpeculativeTree {
             transcript_index,
         };
         branch.assumption_set = parent_assumptions;
-        branch.assumption_set.push(Assumption {
-            chance_id: chance_id.to_string(),
-            proposal_id,
-        });
+        if !deferred {
+            branch.assumption_set.push(Assumption {
+                chance_id: chance_id.to_string(),
+                proposal_id,
+            });
+        }
         branch.pending_operations.push(PendingOperation {
             operation_id: chance.operation_id.clone(),
             branch_id: branch_id.clone(),
@@ -82,6 +117,7 @@ impl SpeculativeTree {
             checkpoint: chance.checkpoint,
             command_id: format!("start-{branch_id}"),
             generation: self.branch(&branch_id)?.generation,
+            history: self.transcripts.get(parent).cloned().unwrap_or_default(),
         })
     }
 
@@ -99,7 +135,9 @@ impl SpeculativeTree {
 
     /// The authority's real result for the Chance this candidate belongs to.
     pub fn candidate_outcome(&self, candidate: &str) -> Option<&Value> {
-        let chance = self.chances.get(self.branches.get(candidate)?.chance_id.as_ref()?)?;
+        let chance = self
+            .chances
+            .get(self.branches.get(candidate)?.chance_id.as_ref()?)?;
         chance.authority_outcome.as_ref()
     }
 
@@ -107,7 +145,9 @@ impl SpeculativeTree {
     /// verifier input (`before`/`after` observations), not the model-facing
     /// tool result.
     pub fn candidate_evidence(&self, candidate: &str) -> Option<&Value> {
-        let chance = self.chances.get(self.branches.get(candidate)?.chance_id.as_ref()?)?;
+        let chance = self
+            .chances
+            .get(self.branches.get(candidate)?.chance_id.as_ref()?)?;
         chance.authority_evidence.as_ref()
     }
 
@@ -123,13 +163,17 @@ impl SpeculativeTree {
         {
             return false;
         }
-        (self.candidate_outcome(candidate).is_some() && branch.status.is_decidable())
-            || branch.pending_operations.iter().any(|operation| {
-                operation.kind == OperationKind::StartCandidate
-                    && operation
-                        .deadline_at
-                        .is_some_and(|deadline| deadline <= now_ms())
-            })
+        // A Candidate is matchable only after the authoritative operation has
+        // produced its real outcome.  In particular, a Candidate deadline is
+        // not a validation result: scheduling Validate without an outcome
+        // would make the pending Proposal look like a failed/empty Proposal
+        // and could discard work merely because the clock advanced.
+        // Match is evaluated for every Candidate once its authoritative
+        // operation produced a real outcome. Commit eligibility is a separate
+        // condition (`can_promote`); an unresolved ancestor keeps a matching
+        // nested Proposal in Resolving instead of suppressing the Match
+        // decision itself.
+        self.candidate_outcome(candidate).is_some() && branch.status.is_decidable()
     }
 
     /// A candidate may only win while the authority is still at the waiting
@@ -160,6 +204,7 @@ impl SpeculativeTree {
 
     pub fn can_promote(&self, candidate: &str, compatible: bool) -> bool {
         compatible
+            && self.branch_proposal(candidate).is_some()
             && self.branches.get(candidate).is_some_and(|branch| {
                 branch.role == BranchRole::Candidate
                     && branch.status.is_decidable()
@@ -207,6 +252,7 @@ impl SpeculativeTree {
             return Err(invalid_input("branch is not safe to archive"));
         }
         self.active_actions.remove(branch_id);
+        self.action_facts.remove(branch_id);
         self.speculations.remove(branch_id);
         self.model_usage.remove(branch_id);
         self.tool_finished_at_ms.remove(branch_id);

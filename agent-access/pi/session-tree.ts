@@ -81,8 +81,7 @@ export class SessionTree {
     assertCheckpoint(branchId,saved) {
         const manager=this.branches.get(branchId)?.manager??this.manager;
         const last=saved.at(-1),entry=[...manager.getBranch()].reverse().find(e=>e.type==='message');
-        if(!entry||JSON.stringify(entry.message)!==JSON.stringify(last))throw Error(`Checkpoint tree tail is not the saved final message for branch ${branchId}`);
-        if(last?.role!=='assistant'||!last.content?.some(p=>p.type==='toolCall'))throw Error(`Checkpoint final message is not a pending assistant tool call for branch ${branchId}`);
+        if((last||entry)&&(!entry||JSON.stringify(entry.message)!==JSON.stringify(last)))throw Error(`Checkpoint tree tail is not the saved final message for branch ${branchId}`);
         return manager.getLeafId();
     }
 

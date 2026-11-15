@@ -286,12 +286,11 @@ pub(super) fn validate_data(decision: Decision, binding: &Binding, data: &Value)
                 .as_object()
                 .ok_or_else(|| invalid("op must be an object"))?;
             require(
-                op.len() == 4
-                    && op.get("kind").is_some_and(Value::is_string)
-                    && ["produces_result", "result_pending", "has_predictor"]
+                op.get("kind").is_some_and(Value::is_string)
+                    && ["has_predictor"]
                         .iter()
                         .all(|k| op.get(*k).is_some_and(Value::is_boolean)),
-                "op must contain kind and three boolean opportunity facts",
+                "op must contain kind and the predictor fact",
             )?;
         }
         Decision::Select => {
@@ -412,29 +411,37 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
             })
         }
         Decision::Predict => {
-            result.as_object().is_some_and(|m| m.len() == 2)
-                && result["generation"] == "batch"
-                && result["proposals"].as_array().is_some_and(|items| {
-                    items.iter().all(|p| {
-                        p.as_object().is_some_and(|m| {
-                            m.contains_key("payload")
-                                && m.keys()
-                                    .all(|k| ["payload", "provenance"].contains(&k.as_str()))
+            (result.get("predict") == Some(&Value::String("branch_model".into()))
+                && result.get("model").is_some_and(Value::is_string))
+                || (result.as_object().is_some_and(|m| m.len() == 2)
+                    && result["generation"] == "batch"
+                    && result["proposals"].as_array().is_some_and(|items| {
+                        items.iter().all(|p| {
+                            p.as_object().is_some_and(|m| {
+                                m.contains_key("payload")
+                                    && m.keys()
+                                        .all(|k| ["payload", "provenance"].contains(&k.as_str()))
+                            })
                         })
-                    })
-                })
+                    }))
         }
         // Only plans without plugin-specific state/effect transfer can be checked yet.
         Decision::Effect => {
             result.as_object().is_some_and(|m| m.len() == 1)
                 && result["mode"]
                     .as_str()
-                    .is_some_and(|s| ["block", "deny"].contains(&s))
+                    .is_some_and(|s| ["block", "deny", "allow"].contains(&s))
         }
         Decision::Match => {
-            result
-                .as_object()
-                .is_some_and(|m| m.keys().all(|k| ["verdict", "score"].contains(&k.as_str())))
+            let facts_valid = data["match_context"].as_object().is_some_and(|context| {
+                ["operation_id", "authority", "candidate"]
+                    .iter()
+                    .all(|key| context.get(*key).is_some())
+            });
+            facts_valid
+                && result
+                    .as_object()
+                    .is_some_and(|m| m.keys().all(|k| ["verdict", "score"].contains(&k.as_str())))
                 && result["verdict"].as_str().is_some_and(|v| {
                     ["compatible", "incompatible", "indeterminate", "error"].contains(&v)
                 })
@@ -454,18 +461,18 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                         });
                         action.as_object().is_some_and(|m| {
                             (m.len() == 1 || (m.len() == 2 && action["intent"] == "Promote"))
-                                && m.keys().all(|key| ["intent", "notification"].contains(&key.as_str()))
-                                && (action.get("notification").is_none() || action["intent"] == "Promote")
+                                && m.keys()
+                                    .all(|key| ["intent", "notification"].contains(&key.as_str()))
+                                && (action.get("notification").is_none()
+                                    || action["intent"] == "Promote")
                                 && valid_notification
-                        })
-                            && (action["intent"] == "Reuse"
-                                || action["intent"] == "Salvage"
-                                || action["intent"] == "Re-execute"
-                                || action["intent"] == "Discard"
-                                || action["intent"] == "Compensate"
-                                || action["intent"] == "Overwrite"
-                                || (action["intent"] == "Promote"
-                                    && data["resolution"] == "accepted"))
+                        }) && (action["intent"] == "Reuse"
+                            || action["intent"] == "Salvage"
+                            || action["intent"] == "Re-execute"
+                            || action["intent"] == "Discard"
+                            || action["intent"] == "Compensate"
+                            || action["intent"] == "Overwrite"
+                            || (action["intent"] == "Promote" && data["resolution"] == "accepted"))
                     })
                 })
         }
@@ -501,16 +508,38 @@ mod notification_tests {
     #[test]
     fn dispose_notification_is_optional_nonblank_and_promote_only() {
         let input = json!({"resolution":"accepted"});
-        for action in [json!({"intent":"Promote"}), json!({"intent":"Promote","notification":"real result"})] {
+        for action in [
+            json!({"intent":"Promote"}),
+            json!({"intent":"Promote","notification":"real result"}),
+        ] {
             validate_result(Decision::Dispose, &input, &json!({"actions":[action]})).unwrap();
         }
-        for action in [json!({"intent":"Promote","notification":null}), json!({"intent":"Promote","notification":" \n"}), json!({"intent":"Promote","notification":2}), json!({"intent":"Discard","notification":"no"}), json!({"intent":"Promote","other":"no"})] {
-            assert!(validate_result(Decision::Dispose, &input, &json!({"actions":[action]})).is_err());
+        for action in [
+            json!({"intent":"Promote","notification":null}),
+            json!({"intent":"Promote","notification":" \n"}),
+            json!({"intent":"Promote","notification":2}),
+            json!({"intent":"Discard","notification":"no"}),
+            json!({"intent":"Promote","other":"no"}),
+        ] {
+            assert!(
+                validate_result(Decision::Dispose, &input, &json!({"actions":[action]})).is_err()
+            );
         }
-        let command: crate::control_plane::agent_control::AgentCommand = serde_json::from_value(json!({"command":"promote","branch_id":"winner"})).unwrap();
-        assert!(serde_json::to_value(command).unwrap().get("notification").is_none());
+        let command: crate::control_plane::agent_control::AgentCommand =
+            serde_json::from_value(json!({"command":"promote","branch_id":"winner"})).unwrap();
+        assert!(
+            serde_json::to_value(command)
+                .unwrap()
+                .get("notification")
+                .is_none()
+        );
         for value in [json!(null), json!(" \n"), json!(2)] {
-            assert!(serde_json::from_value::<crate::control_plane::agent_control::AgentCommand>(json!({"command":"promote","branch_id":"winner","notification":value})).is_err());
+            assert!(
+                serde_json::from_value::<crate::control_plane::agent_control::AgentCommand>(
+                    json!({"command":"promote","branch_id":"winner","notification":value})
+                )
+                .is_err()
+            );
         }
     }
 }

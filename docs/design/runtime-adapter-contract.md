@@ -17,7 +17,7 @@ Adapter 可以使用 Runtime 原生隔离、权限控制、代理、拦截或拒
 所有合格 Adapter 都必须支持以下固定操作语义，不把它们作为可选能力声明：
 
 - **`establish_environment`（建立环境）**：从控制面指定的环境基础建立可用的隔离环境；
-- **`operate_environment`（环境内操作）**：在环境内建立 Agent 接入侧，并执行接入侧无权完成的环境级操作；用哪个 Agent 产品与版本由控制面决定并作为启动参数给出，实际启动、监视和回收由 Runtime 负责；
+- **`operate_environment`（环境内操作）**：为环境建立 Agent 接入侧，并执行接入侧无权完成的环境级操作；用哪个 Agent 产品与版本由控制面决定并作为启动参数给出，实际启动、监视和回收由 Runtime 负责。Pi 接入侧是 run 唯一的宿主进程，不按 Branch 重复启动；Branch 是否另有 namespace-holder 由 Runtime 环境承载决定；
 - **`promote_environment`（提升环境）**：把 Candidate 环境提升为权威环境。共享底层环境的 Runtime 可以将其实现为 no-op，但必须接受该操作；控制面在 Agent 切换权威前调用，失败则不得切换；
 - **`suspend_environment`（静止环境）**：阻止新的环境操作，并让正在进行的环境操作完成或返回明确的未完成状态；
 - **`resume_environment`（恢复环境）**：让仍然有效的静止环境继续接受操作，且已有状态和隔离边界保持不变；

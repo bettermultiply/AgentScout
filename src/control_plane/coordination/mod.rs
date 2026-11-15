@@ -21,9 +21,9 @@ use crate::control_plane::agent_control::{
     ChanceStage, DiscardedReason, OperationKind, OperationStatus, ProposalRecord,
     RuntimeExecutionState, SpeculativeTree,
 };
-use crate::protocol::contract::{Operation, RuntimeCapabilities};
 use crate::control_plane::gateway::runtime::Runtime;
 use crate::control_plane::policy::{CompiledPolicy, Decision, PolicyEngine};
+use crate::protocol::contract::{Operation, RuntimeCapabilities};
 
 /// 一个 Chance 的等待点：权威 Branch 在哪个 operation 上等待哪个工具结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,9 +59,7 @@ impl ControlOperation {
     pub fn branch(&self) -> Option<&str> {
         match self {
             Self::Select(_) | Self::Rebalance => None,
-            Self::Predict(tool) | Self::Launch(tool) | Self::Invoke(tool) => {
-                Some(&tool.branch_id)
-            }
+            Self::Predict(tool) | Self::Launch(tool) | Self::Invoke(tool) => Some(&tool.branch_id),
             Self::Establish(command) => {
                 let AgentCommand::StartCandidate { branch_id, .. } = command else {
                     unreachable!()
@@ -76,9 +74,7 @@ impl ControlOperation {
 
     pub fn chance_id(&self) -> Option<&str> {
         match self {
-            Self::Predict(tool) | Self::Launch(tool) | Self::Invoke(tool) => {
-                Some(&tool.chance_id)
-            }
+            Self::Predict(tool) | Self::Launch(tool) | Self::Invoke(tool) => Some(&tool.chance_id),
             _ => None,
         }
     }
@@ -87,6 +83,7 @@ impl ControlOperation {
 pub enum ControlResult {
     Selected(Vec<String>),
     Predictions(Vec<Value>),
+    BranchModel(Value),
     Launch(bool),
     Outcome(Value, Value),
     Disposition(bool, String, Option<String>, Option<u64>),

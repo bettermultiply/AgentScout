@@ -46,28 +46,40 @@ impl Task<'_> {
 
     fn handle(&mut self, event: Event) -> io::Result<Option<ControlActions>> {
         let mut actions = match event {
-            Event::Request(ui::Request::Pause) => {
-                ControlActions {
-                    commands: self.recovery.pause(self.tree, now_ms())?,
-                    ..Default::default()
-                }
+            Event::Request(ui::Request::Pause) => ControlActions {
+                commands: self.recovery.pause(self.tree, now_ms())?,
+                ..Default::default()
             },
             Event::Request(ui::Request::Shutdown) | Event::Request(ui::Request::Interrupt) => {
                 self.notice = "Task cancellation requested".into();
                 ControlActions {
-                    commands: self.lifecycle.cancel(self.tree, matches!(event, Event::Request(ui::Request::Shutdown)))?,
+                    commands: self.lifecycle.cancel(
+                        self.tree,
+                        matches!(event, Event::Request(ui::Request::Shutdown)),
+                    )?,
                     ..Default::default()
                 }
-            },
+            }
             Event::Request(ui::Request::Model { model }) => {
-                if self.tree.recovering() || self.tree.authority_running() || self.tree.pending_work() || self.tree.recovery_pending_commands() || self.model_changing {
-                    self.notice="Model change failed: wait for an idle authority".into();
-                } else {self.pending_model=Some(model);}
+                if self.tree.recovering()
+                    || self.tree.authority_running()
+                    || self.tree.pending_work()
+                    || self.tree.recovery_pending_commands()
+                    || self.model_changing
+                {
+                    self.notice = "Model change failed: wait for an idle authority".into();
+                } else {
+                    self.pending_model = Some(model);
+                }
                 ControlActions::default()
             }
             Event::Request(ui::Request::Prompt { prompt }) => {
-                if prompt.trim() == "/pause" { return self.handle(Event::Request(ui::Request::Pause)); }
-                if !self.recovery.continue_execution(self.tree, now_ms()) { return Ok(Some(ControlActions::default())); }
+                if prompt.trim() == "/pause" {
+                    return self.handle(Event::Request(ui::Request::Pause));
+                }
+                if !self.recovery.continue_execution(self.tree, now_ms()) {
+                    return Ok(Some(ControlActions::default()));
+                }
                 if self.tree.task_finishing() {
                     self.lifecycle.retry_materialization();
                     self.notice = "Finishing previous task; input deferred".into();
@@ -82,7 +94,9 @@ impl Task<'_> {
             }
             Event::Completed(id, result) => self.tree.complete_work(id, result)?,
             Event::Timer => {
-                if !self.tree.recovering() {self.tree.check_command_deadlines()?;}
+                if !self.tree.recovering() {
+                    self.tree.check_command_deadlines()?;
+                }
                 ControlActions::default()
             }
             Event::Agent(message) => {
@@ -96,17 +110,27 @@ impl Task<'_> {
                     };
                 };
                 match &message {
-                    AgentMessage::TurnFailed {branch_id,reason,..} => {
+                    AgentMessage::TurnFailed {
+                        branch_id, reason, ..
+                    } => {
                         if self.tree.authority_branch_id.as_ref() == Some(branch_id) {
-                            self.input_error=Some(reason.clone());
-                             self.lifecycle.fail(self.tree);
+                            self.input_error = Some(reason.clone());
+                            self.lifecycle.fail(self.tree);
                         }
-                        self.notice=format!("Turn failed; session retained: {reason}");
+                        self.notice = format!("Turn failed; session retained: {reason}");
                     }
-                    AgentMessage::ModelChanged {model,error,..} => {self.model_changing=false;self.notice=match error {Some(error)=>format!("Model change failed: {error}"),None=>format!("Model changed: {model}")};}
-                    _=>{}
+                    AgentMessage::ModelChanged { model, error, .. } => {
+                        self.model_changing = false;
+                        self.notice = match error {
+                            Some(error) => format!("Model change failed: {error}"),
+                            None => format!("Model changed: {model}"),
+                        };
+                    }
+                    _ => {}
                 }
-                if let Some(notice) = self.recovery.handle(self.tree, &message)? { self.notice = notice; }
+                if let Some(notice) = self.recovery.handle(self.tree, &message)? {
+                    self.notice = notice;
+                }
                 let commands =
                     if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
                         Vec::new()
@@ -139,10 +163,15 @@ impl Task<'_> {
         if let Some(reason) = self.tree.authority_failure()
             && !self.tree.is_stopping()
         {
-            self.input_error=Some(reason.to_string());
+            self.input_error = Some(reason.to_string());
             self.lifecycle.fail(self.tree);
         }
-        let progress = if !self.tree.recovering() && (self.model_changing || self.pending_model.is_some()) {ControlActions::default()} else {self.tree.progress(self.capabilities)?};
+        let progress =
+            if !self.tree.recovering() && (self.model_changing || self.pending_model.is_some()) {
+                ControlActions::default()
+            } else {
+                self.tree.progress(self.capabilities)?
+            };
         actions.commands.extend(progress.commands);
         actions.operations.extend(progress.operations);
         actions.records.extend(progress.records);
@@ -150,11 +179,19 @@ impl Task<'_> {
         // Do not change a model beneath in-flight work or a pending Promote.
         // Descendants retain their own model; newly forked sessions inherit
         // the model from their actual parent, never a global replacement.
-        let idle=(!self.tree.recovering()||self.recovery.loaded)&&!self.model_changing&&self.tree.authority_ready()&&!self.tree.authority_running()&&!self.tree.pending_work()&&!self.tree.recovery_pending_commands();
+        let idle = (!self.tree.recovering() || self.recovery.loaded)
+            && !self.model_changing
+            && self.tree.authority_ready()
+            && !self.tree.authority_running()
+            && !self.tree.pending_work()
+            && !self.tree.recovery_pending_commands();
         if idle {
-            if let Some(model)=self.pending_model.take() {
-                self.model_changing=true;
-                actions.commands.push(AgentCommand::Model {branch_id:self.tree.authority_branch_id.clone().unwrap(),model});
+            if let Some(model) = self.pending_model.take() {
+                self.model_changing = true;
+                actions.commands.push(AgentCommand::Model {
+                    branch_id: self.tree.authority_branch_id.clone().unwrap(),
+                    model,
+                });
             }
         }
         Ok(Some(actions))
@@ -173,10 +210,21 @@ impl Task<'_> {
         failure.map_or(Ok(()), Err)
     }
 
+    fn flush_records(&mut self) -> io::Result<()> {
+        for record in self.tree.drain_records() {
+            self.ledger.record(record)?;
+        }
+        Ok(())
+    }
+
     fn publish(&mut self) -> io::Result<()> {
         self.flush_observations()?;
-        self.interface.publish_input_status(self.input_sequence,
-            self.tree.input_ready() && !self.model_changing && self.pending_model.is_none(), &self.input_error);
+        self.flush_records()?;
+        self.interface.publish_input_status(
+            self.input_sequence,
+            self.tree.input_ready() && !self.model_changing && self.pending_model.is_none(),
+            &self.input_error,
+        );
         self.interface.publish(
             self.ledger,
             self.tree.authority_ready(),
@@ -190,6 +238,7 @@ pub fn run(
     connection: &mut agent::Connection,
     tree: &mut SpeculativeTree,
     policy: &CompiledPolicy,
+    engine: &PolicyEngine,
     runtime: &dyn Runtime,
     capabilities: &RuntimeCapabilities,
     interface: &ui::Interface,
@@ -215,8 +264,8 @@ pub fn run(
         started: Instant::now(),
         draining: false,
         recovery: Recovery::new(run_dir),
-        pending_model:resume_model,
-        model_changing:false,
+        pending_model: resume_model,
+        model_changing: false,
         input_sequence: 0,
         input_error: None,
         lifecycle: task::Task::default(),
@@ -236,7 +285,11 @@ pub fn run(
         let result = (|| -> io::Result<()> {
             task.publish()?;
             loop {
-                let event = match if task.tree.recovering() {None} else {task.tree.next_deadline()} {
+                let event = match if task.tree.recovering() {
+                    None
+                } else {
+                    task.tree.next_deadline()
+                } {
                     Some(deadline) => match receiver
                         .recv_timeout(Duration::from_millis(deadline.saturating_sub(now_ms())))
                     {
@@ -255,7 +308,7 @@ pub fn run(
                     Ok(None) => break,
                     Err(error) if !task.tree.is_stopping() && !task.tree.recovering() => {
                         task.publish()?;
-                        task.input_error=Some(error.to_string());
+                        task.input_error = Some(error.to_string());
                         failure = Some(error);
                         ControlActions {
                             commands: task.lifecycle.fail_and_exit(task.tree)?,
@@ -287,6 +340,7 @@ pub fn run(
                             AgentController.perform(
                                 &tree_state,
                                 policy,
+                                engine,
                                 runtime,
                                 capabilities,
                                 &operation,
@@ -299,7 +353,10 @@ pub fn run(
                 if let Some(command) = task.recovery.save_command(task.tree) {
                     task.connection.send(command)?;
                 }
-                if let Some((command, notice)) = task.recovery.publish(task.tree, runtime, run_dir, task.draining) {
+                if let Some((command, notice)) =
+                    task.recovery
+                        .publish(task.tree, runtime, run_dir, task.draining)
+                {
                     task.connection.send(command)?;
                     task.notice = notice;
                 }
@@ -307,19 +364,36 @@ pub fn run(
                 let ledger = &mut task.ledger;
                 let terminating = task.lifecycle.terminating;
                 if let Some((commands, wake, result)) = task.lifecycle.materialize(
-                    task.tree, runtime, capabilities, task.input_error.is_some(), |mut value| {
+                    task.tree,
+                    runtime,
+                    capabilities,
+                    task.input_error.is_some(),
+                    |mut value| {
                         value["t_ms"] = json!(started.elapsed().as_millis() as u64);
                         ledger.record(value)
-                    })? {
+                    },
+                )? {
                     match result {
-                        Ok(()) => task.notice = if task.input_error.is_some() || terminating {"Task ended"} else {"Task succeeded"}.into(),
+                        Ok(()) => {
+                            task.notice = if task.input_error.is_some() || terminating {
+                                "Task ended"
+                            } else {
+                                "Task succeeded"
+                            }
+                            .into()
+                        }
                         Err(error) => {
                             task.input_error = Some(format!("Materialization failed: {error}"));
-                            task.notice = format!("Materialization failed; retained for retry: {error}");
+                            task.notice =
+                                format!("Materialization failed; retained for retry: {error}");
                         }
                     }
-                    for command in commands { task.connection.send(command)?; }
-                    if wake { let _ = events.send(Event::Timer); }
+                    for command in commands {
+                        task.connection.send(command)?;
+                    }
+                    if wake {
+                        let _ = events.send(Event::Timer);
+                    }
                 }
                 loop {
                     let ids = task.tree.evictable_branches();
@@ -335,14 +409,21 @@ pub fn run(
                     task.connection.finish()?;
                     task.draining = true;
                 }
-                if !task.tree.task_finishing() && !task.tree.recovering() && !task.notice.starts_with("Save failed") && !task.notice.starts_with("Turn failed") && !task.notice.starts_with("Model ") {task.notice = if task.tree.is_stopping() {
-                    "Stopping"
-                } else if task.tree.authority_running() {
-                    "Agent running"
-                } else {
-                    "Ready"
+                if !task.tree.task_finishing()
+                    && !task.tree.recovering()
+                    && !task.notice.starts_with("Save failed")
+                    && !task.notice.starts_with("Turn failed")
+                    && !task.notice.starts_with("Model ")
+                {
+                    task.notice = if task.tree.is_stopping() {
+                        "Stopping"
+                    } else if task.tree.authority_running() {
+                        "Agent running"
+                    } else {
+                        "Ready"
+                    }
+                    .into();
                 }
-                .into();}
                 task.publish()?;
             }
             failure.map_or(Ok(()), Err)

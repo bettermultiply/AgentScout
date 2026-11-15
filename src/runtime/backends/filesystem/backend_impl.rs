@@ -46,35 +46,26 @@ impl FilesystemBackend {
         current.state = to;
         Ok(())
     }
-
 }
 
 impl Backend for FilesystemBackend {
     fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
         self.materialize_authority(&context.environment_id)
     }
-    fn launch_fragment(&self, context:&BackendContext, launch:&crate::protocol::contract::AgentLaunch)->Result<LaunchFragment,BackendError> {
-        if launch.env.get("ASCOUT_PI_SESSION_HOST").is_some_and(|value|value=="1") {
-            let environment=Self::resolve_environment(&*self.lock()?,&context.environment_id)?;
-            self.persist_tool_plan(&environment)?;
-            let mut fragment=LaunchFragment {mounts:crate::runtime::launch_plan::base_mount_entries(),..Default::default()};
-            for path in &self.config.passthrough_rw {if path.exists(){fragment.mounts.push(MountEntry::Bind {source:path.clone(),target:path.clone()});}}
-            // Session artifacts are writable, but the Runtime's owned state is
-            // only readable to the integration host and masked in tool mounts.
-            if let Some(parent)=launch.log.parent(){
-                fragment.mounts.push(MountEntry::Bind {source:parent.into(),target:parent.into()});
-                let temporary=parent.join("agent-tmp");
-                fs::create_dir_all(&temporary).map_err(error)?;
-                fragment.env.insert("TMPDIR".into(),temporary.display().to_string());
-            }
-            fragment.env.insert("ASCOUT_FILESYSTEM_TOOL_PLANS".into(),self.config.state_directory.join("tool-plans").display().to_string());
-            return Ok(fragment);
-        }
-        FilesystemBackend::launch_fragment(self,context,launch)
+    fn launch_fragment(
+        &self,
+        context: &BackendContext,
+        launch: &crate::protocol::contract::AgentLaunch,
+    ) -> Result<LaunchFragment, BackendError> {
+        FilesystemBackend::launch_fragment(self, context, launch)
     }
-    fn save_runtime(&self, path: &Path) -> Result<(), BackendError> { self.save_recovery(path) }
+    fn save_runtime(&self, path: &Path) -> Result<(), BackendError> {
+        self.save_recovery(path)
+    }
 
-    fn load_runtime(&self, path: &Path) -> Result<(), BackendError> { self.load_recovery(path) }
+    fn load_runtime(&self, path: &Path) -> Result<(), BackendError> {
+        self.load_recovery(path)
+    }
 
     fn backend_id(&self) -> &str {
         "filesystem"
@@ -127,7 +118,11 @@ impl Backend for FilesystemBackend {
             if !target.is_dir() {
                 continue;
             }
-            let key = target.display().to_string();
+            let sandbox = self
+                .config
+                .sandbox_target(&target)
+                .unwrap_or_else(|| target.clone());
+            let key = sandbox.display().to_string();
             let layer_key = if self.uses_btrfs_storage() {
                 format!("mounts/{}/volume", short_hash(&key))
             } else {
@@ -136,10 +131,11 @@ impl Backend for FilesystemBackend {
             mounts.insert(
                 key,
                 MountUnit {
+                    target: sandbox.clone(),
+                    base: (sandbox != target).then_some(target),
+                    saved_base: None,
                     upper: root.join(&layer_key).join("upper"),
                     work: root.join(&layer_key).join("work"),
-                    target,
-                    saved_base: None,
                     lower: Vec::new(),
                     layer_key,
                     volume_is_subvolume: self.uses_btrfs_storage(),
@@ -160,11 +156,7 @@ impl Backend for FilesystemBackend {
             }
         }
         if let Err(error) = Self::prepare_mount_dirs(&units) {
-            let _ = remove_path(
-                &self.config.btrfs_path,
-                &root,
-                self.uses_btrfs_storage(),
-            );
+            let _ = remove_path(&self.config.btrfs_path, &root, self.uses_btrfs_storage());
             return Err(error);
         }
         let environment = Environment {
@@ -253,7 +245,7 @@ impl Backend for FilesystemBackend {
         let mut mounts: Vec<MountUnit> = environment.mounts.values().cloned().collect();
         mounts.sort_by_key(|mount| mount.target.components().count());
         for mount in &mounts {
-            if !mount.target.is_dir() {
+            if !mount.target.is_dir() && mount.base.is_none() {
                 continue;
             }
             ensure_overlay_disjoint(&mount.target, &mount.upper)?;
@@ -344,12 +336,23 @@ impl Backend for FilesystemBackend {
         };
         self.persist_all_snapshots()?;
         self.remove_environment_metadata(&environment.id)?;
+        let _ = fs::remove_dir_all(
+            self.config
+                .state_directory
+                .join("holder-sockets")
+                .join(&environment.id),
+        );
         self.schedule_gc(garbage)?;
         Ok(())
     }
 
     fn state(&self, id: &str) -> Option<EnvironmentState> {
-        self.state.lock().ok()?.environments.get(id).map(|value| value.state)
+        self.state
+            .lock()
+            .ok()?
+            .environments
+            .get(id)
+            .map(|value| value.state)
     }
 
     fn environments(&self) -> Vec<String> {
@@ -415,7 +418,7 @@ impl Backend for FilesystemBackend {
             _ => {
                 return Err(BackendError::new(
                     "filesystem dispatch requires a filesystem operation",
-                ))
+                ));
             }
         };
         match result {

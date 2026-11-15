@@ -142,8 +142,12 @@ pub struct RuntimeCapabilities {
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
     MaterializeAuthority,
-    SaveRuntime { path: std::path::PathBuf },
-    LoadRuntime { path: std::path::PathBuf },
+    SaveRuntime {
+        path: std::path::PathBuf,
+    },
+    LoadRuntime {
+        path: std::path::PathBuf,
+    },
     EstablishEnvironment,
     /// 环境内操作。`agent` 在场时表示在环境内建立 Agent 接入侧。
     OperateEnvironment {
@@ -153,6 +157,8 @@ pub enum Operation {
     },
     BranchEnvironment {
         child_environment_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentLaunch>,
     },
     /// 把 Candidate 的环境提升为权威环境。共享环境 Runtime 可以是 no-op。
     PromoteEnvironment,
@@ -169,28 +175,60 @@ pub enum Operation {
         tool_name: String,
         arguments: Value,
     },
-    FilesystemFork { parent_snapshot_id: String, child_snapshot_id: String, path_scope: Vec<PathScope> },
-    FilesystemMark { snapshot_id: String, mark_id: String, path_scope: Vec<PathScope> },
-    FilesystemDiff { base_snapshot_id: String, source_snapshot_id: String, path_scope: Vec<PathScope> },
-    FilesystemAccept { base_snapshot_id: String, source_snapshot_id: String, target_snapshot_id: String, path_scope: Vec<PathScope> },
-    FilesystemDiscard { snapshot_id: String, path_scope: Vec<PathScope> },
+    FilesystemFork {
+        parent_snapshot_id: String,
+        child_snapshot_id: String,
+        path_scope: Vec<PathScope>,
+    },
+    FilesystemMark {
+        snapshot_id: String,
+        mark_id: String,
+        path_scope: Vec<PathScope>,
+    },
+    FilesystemDiff {
+        base_snapshot_id: String,
+        source_snapshot_id: String,
+        path_scope: Vec<PathScope>,
+    },
+    FilesystemAccept {
+        base_snapshot_id: String,
+        source_snapshot_id: String,
+        target_snapshot_id: String,
+        path_scope: Vec<PathScope>,
+    },
+    FilesystemDiscard {
+        snapshot_id: String,
+        path_scope: Vec<PathScope>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PathScope { Workspace, Tmp }
+pub enum PathScope {
+    Workspace,
+    Tmp,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FilesystemConfirmation {
-    #[serde(default)] pub target_paused: bool,
-    #[serde(default)] pub context_ready: bool,
-    #[serde(default)] pub snapshot_created: bool,
-    #[serde(default)] pub metadata_durable: bool,
-    #[serde(default)] pub writers_quiesced: bool,
-    #[serde(default)] pub published: bool,
-    #[serde(default)] pub refs_updated: bool,
-    #[serde(default)] pub refs_released: bool,
-    #[serde(default)] pub gc_eligible: bool,
+    #[serde(default)]
+    pub target_paused: bool,
+    #[serde(default)]
+    pub context_ready: bool,
+    #[serde(default)]
+    pub snapshot_created: bool,
+    #[serde(default)]
+    pub metadata_durable: bool,
+    #[serde(default)]
+    pub writers_quiesced: bool,
+    #[serde(default)]
+    pub published: bool,
+    #[serde(default)]
+    pub refs_updated: bool,
+    #[serde(default)]
+    pub refs_released: bool,
+    #[serde(default)]
+    pub gc_eligible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -210,11 +248,16 @@ pub struct FilesystemConflict {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FilesystemResult {
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub snapshot_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub published_snapshot_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")] pub diff_ref: Option<String>,
-    #[serde(default)] pub confirmation: FilesystemConfirmation,
-    #[serde(default)] pub conflicts: Vec<FilesystemConflict>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_ref: Option<String>,
+    #[serde(default)]
+    pub confirmation: FilesystemConfirmation,
+    #[serde(default)]
+    pub conflicts: Vec<FilesystemConflict>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,26 +380,55 @@ mod filesystem_protocol_tests {
     fn filesystem_operations_round_trip_with_both_managed_scopes() {
         let scopes = vec![PathScope::Workspace, PathScope::Tmp];
         let operations = vec![
-            Operation::FilesystemFork { parent_snapshot_id: "base".into(), child_snapshot_id: "child".into(), path_scope: scopes.clone() },
-            Operation::FilesystemMark { snapshot_id: "child".into(), mark_id: "mark".into(), path_scope: scopes.clone() },
-            Operation::FilesystemDiff { base_snapshot_id: "base".into(), source_snapshot_id: "child".into(), path_scope: scopes.clone() },
-            Operation::FilesystemAccept { base_snapshot_id: "base".into(), source_snapshot_id: "child".into(), target_snapshot_id: "target".into(), path_scope: scopes.clone() },
-            Operation::FilesystemDiscard { snapshot_id: "child".into(), path_scope: scopes },
+            Operation::FilesystemFork {
+                parent_snapshot_id: "base".into(),
+                child_snapshot_id: "child".into(),
+                path_scope: scopes.clone(),
+            },
+            Operation::FilesystemMark {
+                snapshot_id: "child".into(),
+                mark_id: "mark".into(),
+                path_scope: scopes.clone(),
+            },
+            Operation::FilesystemDiff {
+                base_snapshot_id: "base".into(),
+                source_snapshot_id: "child".into(),
+                path_scope: scopes.clone(),
+            },
+            Operation::FilesystemAccept {
+                base_snapshot_id: "base".into(),
+                source_snapshot_id: "child".into(),
+                target_snapshot_id: "target".into(),
+                path_scope: scopes.clone(),
+            },
+            Operation::FilesystemDiscard {
+                snapshot_id: "child".into(),
+                path_scope: scopes,
+            },
         ];
         for operation in operations {
             let json = serde_json::to_value(&operation).unwrap();
             assert_eq!(json["path_scope"], serde_json::json!(["workspace", "tmp"]));
-            assert_eq!(serde_json::from_value::<Operation>(json).unwrap(), operation);
+            assert_eq!(
+                serde_json::from_value::<Operation>(json).unwrap(),
+                operation
+            );
         }
     }
 
     #[test]
     fn conflicts_and_confirmation_survive_wire_round_trip() {
         let result = FilesystemResult {
-            conflicts: vec![FilesystemConflict { path: "workspace/a".into(), kind: "modify_delete".into(), reason: "both sides changed".into(), ..Default::default() }],
+            conflicts: vec![FilesystemConflict {
+                path: "workspace/a".into(),
+                kind: "modify_delete".into(),
+                reason: "both sides changed".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
-        let decoded: FilesystemResult = serde_json::from_slice(&serde_json::to_vec(&result).unwrap()).unwrap();
+        let decoded: FilesystemResult =
+            serde_json::from_slice(&serde_json::to_vec(&result).unwrap()).unwrap();
         assert_eq!(decoded, result);
         assert!(!decoded.confirmation.published);
         assert!(!decoded.confirmation.gc_eligible);

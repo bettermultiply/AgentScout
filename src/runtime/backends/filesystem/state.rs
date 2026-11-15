@@ -15,6 +15,12 @@ use crate::runtime::backend::BackendError;
 pub(crate) struct MountUnit {
     /// Canonical absolute mount point, for example `/home` or `/var/tmp`.
     pub(crate) target: PathBuf,
+    /// Host directory this mount mirrors when the sandbox mount point is not a
+    /// host path, for example a workspace published to `/app`.  It is the
+    /// bottom overlay layer and the publication destination.  None means the
+    /// target itself is the host directory.
+    #[serde(default)]
+    pub(crate) base: Option<PathBuf>,
     /// Saved independent bottom layer. The target remains the sandbox mount point.
     #[serde(default)]
     pub(crate) saved_base: Option<PathBuf>,
@@ -48,7 +54,9 @@ fn default_layer_key() -> String {
 
 impl MountUnit {
     pub(crate) fn volume(&self) -> Result<&Path, BackendError> {
-        self.upper.parent().ok_or_else(|| BackendError::new("mount upper has no volume parent"))
+        self.upper
+            .parent()
+            .ok_or_else(|| BackendError::new("mount upper has no volume parent"))
     }
 
     pub(crate) fn layer_upper(&self, layer: &Path) -> PathBuf {
@@ -106,7 +114,10 @@ impl Environment {
         }
     }
 
-    pub(crate) fn selected_mounts(&self, scopes: &[PathScope]) -> Result<Vec<MountUnit>, BackendError> {
+    pub(crate) fn selected_mounts(
+        &self,
+        scopes: &[PathScope],
+    ) -> Result<Vec<MountUnit>, BackendError> {
         if self.mounts.is_empty() {
             return Err(BackendError::new(
                 "filesystem environment has no recorded mount units; launch it once or recreate it",
@@ -124,7 +135,9 @@ impl Environment {
             let target = self.scope_target(*scope);
             if let Some(target) = target
                 && let Some(mount) = self.mount_by_target(&target)
-                && !mounts.iter().any(|unit: &MountUnit| unit.target == mount.target)
+                && !mounts
+                    .iter()
+                    .any(|unit: &MountUnit| unit.target == mount.target)
             {
                 mounts.push(mount.clone());
             }
@@ -222,6 +235,7 @@ impl EnvironmentMetadata {
                         upper: root.join(key).join("upper"),
                         work: root.join(key).join("work"),
                         target: target.clone(),
+                        base: None,
                         saved_base: None,
                         lower: layers.clone(),
                         layer_key: key.clone(),

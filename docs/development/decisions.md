@@ -1,5 +1,36 @@
 # 开发决策
 
+## 2026-11-15：单一 Pi 宿主与每枝 namespace-holder，控制面持有唯一逻辑 transcript
+
+用户确认：Pi 是宿主上的单一进程，在同一进程内托管多个 Branch session。每个 Branch（Authority 也一样）拥有自己的 Runtime 环境和低成本常驻 namespace-holder；holder 只持有该 Branch 的 mount namespace，并通过最小 IPC 代执行 Branch 工具命令。环境 cleanup/discard 时 holder 一并结束，Pi 不进入 Branch namespace。
+
+对话历史归属采用方案一：控制面持有唯一逻辑 transcript，各 Branch session 的历史与 checkpoint 由控制面归属；Promote 后被提升分支的 transcript 成为权威历史，旧 Authority 环境及其 holder 一并结束，其它分支的记录不获得发布权。候选的 fork、暂停、恢复、Discard 与 cleanup 都以“该分支环境及其 holder”为单位进行，不依赖父子 Agent 进程共享内存状态。
+
+凭据与主目录不作为分支文件视图：`$HOME`（至少 `~/.pi`）直接读写，Pi 继续使用默认 `~/.pi/agent` 路径；不设置 `PI_CODING_AGENT_DIR`，不复制 credentials。宿主会出现 Pi 正常运行产生的锁与 `models-store.json`，不再要求宿主文件不变。分支文件中只有任务 workspace 需要 overlay。
+
+当前实现：
+
+- `agent-access/pi/main.ts` 是宿主上的单一进程，托管 authority 与全部 candidate；Runtime 只启动一次宿主 Pi，不为每个 Branch 启动第二个 Pi。
+- 每个环境有一个低成本常驻 namespace-holder（`src/runtime/process/holder.py`），运行在该 Branch 的 mount namespace 中，通过 Branch 专属 Unix socket 接收文件工具命令并代执行。holder 不是 Agent、不持有 transcript 或 Policy，也不让 Pi 进入 Branch namespace。
+- holder 的连接各自独立处理，不引入全局串行队列；一条命令使用独立 session/process group，直接 shell 退出即返回结果，后台后代继续留在 Branch namespace。取消或超时只结束该命令的 process group；环境结束时通过 cgroup/process group 与 mount namespace 扫描结束 holder 和残留后代。
+- 物化会发布 Authority 增量并轮换 execution generation，因此先结束旧 holder，发布后按新环境重新建立 holder；旧 holder 的 mount 不再是新 generation 的视图。
+- `/app` 映射由 FilesystemBackend 的 `isolated_paths: [{path, target}]` 表达：host 目录仍是 overlay lower 与 publication 目标，Branch 内看到的是 target。tool plan 同时携带 host/target，Pi 文件工具在 Branch 内使用 sandbox path。
+- 控制面持有逻辑 transcript，并在新建 Candidate 时继承父 Branch 的逻辑 transcript；Pi 的 Branch session 仍保留原生记录，用于最终单一权威 session 汇总与原生 checkpoint 续跑。
+
+本地脚本验收：`tests/benchmark-task.mjs` 的四个场景（match／mismatch／authority_first／fast_failure）使用真实 FS/Pi/控制面与本地 scripted SSE provider 全部通过；其中在 `materialization_started` 前检查 host workspace 未被工具写入，确认工具确实经 Branch overlay 执行，而不是落在宿主工作目录。`tests/fixtures/recover-obfuscated-files` 的原始 prompt 与验收文件未改。最终一次证据目录为 `/tmp/opencode/benchmark-task-xQJYmR`、`/tmp/opencode/benchmark-task-g1it8i`、`/tmp/opencode/benchmark-task-2KU6c2`、`/tmp/opencode/benchmark-task-eWZPCJ`。
+
+验证还包括：`cargo fmt -- --check`、`cargo check --all-targets`、`cargo test --lib`（167 项）、Pi TypeScript `tsc --noEmit` 与语法检查、`node --test tests/pi-access.mjs`（6 项），以及新增的 namespace-holder 并发/父子视图/后台清理测试和 materialize 后 holder 重建测试。
+
+真实 DeepSeek Flash 的最终验证为 `/tmp/opencode/deepseek-flash-final-FTGsuO`：在当前代码与本地脚本全部通过后只提交一次原始 instruction prompt，未设置 `PI_CODING_AGENT_DIR`、未复制 credentials，使用宿主默认 `~/.pi/agent`。运行产生 3 个真实 `branch_model` Candidate，Authority 先返回，三个 Candidate 均以 incompatible／late 取消并清理，没有伪造 Proposal 或 Promote；`task_completed` succeeded、materialization `published=true`、`materialization_started` 前 host workspace 未被写入，fixture 原始验收 3 项通过。
+
+同日更早的 `/tmp/opencode/deepseek-flash-branch-AxlJOR` 是在补充 `ASCOUT_FILESYSTEM_TOOL_PLANS` 宿主环境与修正真实运行 Policy 之前提交的预验证，工具没有经过 holder，且 Policy 的 `opportunity_pass` 场景未命中；它被排除在最终验证之外，最终验证本身只提交一次 prompt。修复前的 `/tmp/opencode/real-branch-model-1` 是旧二进制、0 Candidate，已终止其残留进程，也不作为本轮证据。
+
+## 2026-11-15：Pi 默认目录使用宿主 `~/.pi/agent`（取代 HOME overlay 方案）
+
+用户确认：Pi 使用宿主默认的 `~/.pi/agent` 路径与运行方式；不设置 `PI_CODING_AGENT_DIR`，不复制 credentials。认证读取和锁创建发生在宿主默认目录。同日早些时候“由 FilesystemBackend 的 `isolated_paths`／overlay 覆盖 HOME，使宿主文件保持不变”的方案废弃；那个方案与“Pi 是宿主进程、HOME 不作为分支文件视图”的当前语义冲突。
+
+本地脚本验收可以用临时 HOME（`tests/benchmark-task.mjs` 即如此）来隔离测试环境，但它是测试夹具，不是正式方案，也不代表需要复制 credentials。真实模型验证必须使用宿主默认配置。
+
 ## 2026-11-14：恢复使用当前宿主 bottom lower
 
 用户明确取消普通宿主文件的历史版本承诺：恢复允许读到后来修改的普通宿主文件，
@@ -8,8 +39,11 @@
 配置、依赖和保存资料的校验。恢复测试修改有契约变化注释，不是静默放宽断言。
 
 常驻 Pi 不再持有 Authority overlay；内建文件工具按 Branch 计划执行。废弃把常驻
-Pi 存活直接等同于活跃写者的判断；直接受管执行进程仍保留安全门槛。后台 shell
-必须等待所有后代结束，物化后新建 upper/work，不能清空 live upper。
+Pi 存活直接等同于活跃写者的判断；直接受管执行进程仍保留安全门槛。物化后新建
+upper/work，不能清空 live upper。该条当时按“每次工具启动一个 bwrap”写下“后台
+shell 必须等待所有后代结束”；2026-11-15 的单宿主 holder 语义取代它：工具命令在
+直接 shell 退出时返回，后台后代留在 Branch namespace 直到环境结束，物化前随旧
+holder 一起结束。
 
 废弃组合 Runtime 将任一组件可共享等同于整体可共享的能力汇总；各状态域必须都可
 共享才允许共享，否则在支持分支或共享引用的组件中逐个建立候选身份。晋级清理旧

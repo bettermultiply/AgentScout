@@ -14,7 +14,18 @@
 | 33 | `src/control_plane/agent_control/tests/nested.rs` 覆盖活跃祖先假设阻止提交和祖先丢弃失效。 | 单元回归不等于端到端祖先丢弃回放；该端到端覆盖仍为验证缺口。 |
 | 36 | `src/runtime/process/` 有进程身份、冻结、终止与清理，控制面已有 generation。 | 完整资源租约、跨重启恢复及执行延续方式仍不能据此认定完成。 |
 
-2026-11-14 补记：公共 `chance_created` 已有源侧投机开始时间，`proposal_validated` 已提供真实验证时刻，`chance_stage_changed` 的 Accepted 已关联所用验证 id；这两项不再是观察协议缺口。仍确认存在的具体缺口：session 保存主要随 message_end，compaction 覆盖不足；NLE 配置仍只有单个 seed；历史恢复、物化及通用事件级回放界面不能认定已完成。树形几何和 NLE 地图已有实现，完整交付与统计验收仍是单独事项。
+2026-11-14 补记：公共 `chance_created` 已有源侧投机开始时间，`proposal_validated` 已提供真实验证时刻，`chance_stage_changed` 的 Accepted 已关联所用验证 id；这两项不再是观察协议缺口。树形几何和 NLE 地图已有实现，完整交付与统计验收仍是单独事项。
+
+### Discussion 状态复核（静态核对，未重跑验证）
+
+早先关于 session 保存、NLE 种子、恢复与物化的笼统缺口描述未随实现更新，应以如下较具体的范围为准：
+
+- 第 18、30 项：`src/control_plane/coordination/task.rs` 已等待写者结束，调用 `MaterializeAuthority`，只在成功后记录 `task_completed`，失败保留重试状态；`coordination/recovery.rs` 已分开暂停保存与输入继续。`tests/authority-filesystem.mjs` 和恢复测试已有物化、SIGINT、候选晋级后文件写入等断言。剩余是扩展写者、深层候选、存储机制与竞态组合，不能再概称物化或独立 FS 退出未实现。已有执行证据见 [恢复](recovery.md)、[FS 现状](../fs-backend/current-state.md)。
+- 第 27、31 项：`agent-access/pi/session-tree.ts` 已保存完整原生条目并校验已知引用；`tests/pi-standalone-continuation.mjs` 已构造独立 Pi 从最终 session 继续文件任务，`tests/pi-session-history.mjs` 已含实际 `restoreSnapshot` 和 Git 对象断言。剩余是任意 custom 外部引用、跨仓库对象与外部运行资源的交接，不是所有脱离 AScout 续跑和 rollback 均未支持。compaction 摘要保留原文已定；实际验证范围见 [接入实现](agent-access.md#4-session-持久化与状态交接已定方向及实现差距)、[Pi 审查](pi-session-review-2026-11-13.md#实际验证)。
+- 第 31、34 项：主动保存恢复已覆盖树、原上下文和候选；NLE 恢复已保存初始 RNG／配置、动作序列和校验值。旧 run 的初始环境自动重建、任意外部资源恢复及全部长轨迹仍不保证，见 [恢复](recovery.md)、[回放](replay.md)。
+- 第 32 项：回放已有兼容源的两输入整链验证记录，不能继续笼统写“完整 NLE 回放仍失败”；也不能由该源通过推出任意源或机制整链已验收。匹配碰撞、取消时序、最终回答交付与环境前提仍按 [回放](replay.md) 保留。
+
+本次只核对文档、源码及已有测试断言，没有运行测试或模型；其余清单项保留原有设计／验收限定，不将“未发现完成证据”当成“已证明没有实现”。
 
 本轮实际运行：
 

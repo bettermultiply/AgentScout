@@ -106,6 +106,13 @@ impl ProcessBackend {
                 return Err(error(value));
             }
         }
+        // A descendant that created its own session can escape the group; its
+        // mount namespace is still the branch one and must not outlive the
+        // environment. The duplicated namespace fd keeps this inode from being
+        // reused while the sweep scans /proc.
+        if process.namespace_fd.is_some() {
+            super::kill_namespace_processes(process.mount_namespace)?;
+        }
         Ok(())
     }
 
@@ -140,8 +147,19 @@ impl ProcessBackend {
                 failures.push(format!("failed to kill process group: {failure}"));
             }
         }
+        // The environment owns every process in this mount namespace, not only
+        // the processes that stayed in the holder's group or cgroup. A
+        // descendant that changed session must end with the Branch too. The
+        // open namespace fd pins the inode for the whole sweep; without it a
+        // freed inode could already belong to a new Branch.
+        let swept = process.namespace_fd.as_ref().map(|_| {
+            super::kill_namespace_processes(process.mount_namespace)
+        });
         if let Err(failure) = process.child.wait() {
             failures.push(format!("failed to reap child process: {failure}"));
+        }
+        if let Some(Err(failure)) = swept {
+            failures.push(format!("failed to sweep branch mount namespace: {failure}"));
         }
         if failures.is_empty() {
             Ok(())
@@ -182,11 +200,23 @@ impl ProcessBackend {
     }
 
     pub fn stop_all(&self) {
+        let mut owned = Vec::new();
         if let Ok(mut processes) = self.processes.lock() {
-            for (_, mut process) in processes.drain() {
+            for (_, process) in processes.drain() {
                 let _ = unsafe { libc::kill(-process.process_group, libc::SIGKILL) };
-                let _ = process.child.wait();
+                owned.push(process);
             }
+        }
+        // Sweep while every namespace fd is still open, so an inode freed by
+        // one Branch cannot have been reused by another before the scan.
+        let mut swept = std::collections::BTreeSet::new();
+        for process in &owned {
+            if process.namespace_fd.is_some() && swept.insert(process.mount_namespace) {
+                let _ = super::kill_namespace_processes(process.mount_namespace);
+            }
+        }
+        for mut process in owned {
+            let _ = process.child.wait();
         }
     }
 
@@ -203,6 +233,12 @@ impl ProcessBackend {
         Ok(AgentProcessRef {
             process_group: process.process_group,
             cgroup_path: process.cgroup_path.clone(),
+            mount_namespace: process.mount_namespace,
+            namespace_fd: process
+                .namespace_fd
+                .as_ref()
+                .map(|fd| fd.try_clone().map_err(error))
+                .transpose()?,
         })
     }
 }
@@ -210,4 +246,7 @@ impl ProcessBackend {
 struct AgentProcessRef {
     process_group: libc::pid_t,
     cgroup_path: Option<PathBuf>,
+    mount_namespace: u64,
+    /// Keeps the branch namespace inode alive while terminate sweeps it.
+    namespace_fd: Option<OwnedFd>,
 }

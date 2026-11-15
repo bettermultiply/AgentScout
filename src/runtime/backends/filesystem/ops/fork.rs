@@ -35,12 +35,30 @@ pub(crate) enum ForkLayout {
 /// sequential (a writable child snapshot needs its layer snapshot first);
 /// different mounts may run concurrently.
 pub(super) enum ForkTask {
-    SnapshotLayer { source: PathBuf, target: PathBuf },
-    SnapshotChild { source: PathBuf, target: PathBuf },
-    CreateVolume { target: PathBuf },
-    CloneLayer { source: PathBuf, target: PathBuf, reflink: bool },
-    CloneChild { source: PathBuf, target: PathBuf, reflink: bool },
-    MakeDir { path: PathBuf },
+    SnapshotLayer {
+        source: PathBuf,
+        target: PathBuf,
+    },
+    SnapshotChild {
+        source: PathBuf,
+        target: PathBuf,
+    },
+    CreateVolume {
+        target: PathBuf,
+    },
+    CloneLayer {
+        source: PathBuf,
+        target: PathBuf,
+        reflink: bool,
+    },
+    CloneChild {
+        source: PathBuf,
+        target: PathBuf,
+        reflink: bool,
+    },
+    MakeDir {
+        path: PathBuf,
+    },
 }
 
 impl ForkTask {
@@ -78,12 +96,9 @@ impl FilesystemBackend {
         let mut profile = Profile::new("fork");
         let (parent_environment, existing, existing_snapshot) =
             self.load_fork_parent(parent, child, &mut profile)?;
-        if let Some(result) = self.replayed_fork(
-            child,
-            &parent_environment,
-            existing,
-            existing_snapshot,
-        )? {
+        if let Some(result) =
+            self.replayed_fork(child, &parent_environment, existing, existing_snapshot)?
+        {
             return Ok(result);
         }
         self.check_fork_parent(&parent_environment)?;
@@ -223,8 +238,7 @@ impl FilesystemBackend {
         layer_path: &Path,
         profile: &mut Profile,
     ) -> Result<ForkPlan, BackendError> {
-        let selected =
-            profile.run("scan", || parent_environment.selected_mounts(scopes))?;
+        let selected = profile.run("scan", || parent_environment.selected_mounts(scopes))?;
         // Empty uppers are not copied at all: the child mount inherits the
         // parent lower chain and starts with an empty upper.  This is the
         // dominant case for speculative branches (only the workspace mount
@@ -242,6 +256,7 @@ impl FilesystemBackend {
                 }
                 let unit = MountUnit {
                     target: mount.target.clone(),
+                    base: mount.base.clone(),
                     saved_base: mount.saved_base.clone(),
                     upper: child_root.join(&mount.layer_key).join("upper"),
                     work: child_root.join(&mount.layer_key).join("work"),
@@ -417,7 +432,10 @@ impl FilesystemBackend {
                     mount,
                     child_mount,
                     *producer,
-                    plan.layouts.get(&key).copied().unwrap_or(ForkLayout::Flatten),
+                    plan.layouts
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(ForkLayout::Flatten),
                     &staging,
                     &key,
                     &mut chain_targets,
@@ -434,8 +452,7 @@ impl FilesystemBackend {
                 }]);
             }
             self.run_fork_chains(profile, chains)?;
-            let units: Vec<MountUnit> =
-                plan.child_environment.mounts.values().cloned().collect();
+            let units: Vec<MountUnit> = plan.child_environment.mounts.values().cloned().collect();
             profile.run("prepare_dirs", || Self::prepare_mount_dirs(&units))?;
             Ok(())
         })();
@@ -457,22 +474,12 @@ impl FilesystemBackend {
         chain_targets: &mut BTreeSet<String>,
     ) -> Result<Vec<ForkTask>, BackendError> {
         match producer {
-            ForkProducer::Snapshot => self.overlay_snapshot_chain(
-                mount,
-                child_mount,
-                layout,
-                staging,
-                key,
-                chain_targets,
-            ),
-            ForkProducer::Clone => self.overlay_clone_chain(
-                mount,
-                child_mount,
-                layout,
-                staging,
-                key,
-                chain_targets,
-            ),
+            ForkProducer::Snapshot => {
+                self.overlay_snapshot_chain(mount, child_mount, layout, staging, key, chain_targets)
+            }
+            ForkProducer::Clone => {
+                self.overlay_clone_chain(mount, child_mount, layout, staging, key, chain_targets)
+            }
         }
     }
 
@@ -485,13 +492,15 @@ impl FilesystemBackend {
         key: &str,
         chain_targets: &mut BTreeSet<String>,
     ) -> Result<Vec<ForkTask>, BackendError> {
-        let parent_volume = mount.upper.parent().ok_or_else(|| {
-            BackendError::new("snapshot-copy mount upper has no volume parent")
-        })?;
+        let parent_volume = mount
+            .upper
+            .parent()
+            .ok_or_else(|| BackendError::new("snapshot-copy mount upper has no volume parent"))?;
         let layer_volume = staging.join(&mount.layer_key);
-        let child_volume = child_mount.upper.parent().ok_or_else(|| {
-            BackendError::new("snapshot-copy child upper has no volume parent")
-        })?;
+        let child_volume = child_mount
+            .upper
+            .parent()
+            .ok_or_else(|| BackendError::new("snapshot-copy child upper has no volume parent"))?;
         let mut chain = vec![ForkTask::SnapshotLayer {
             source: parent_volume.to_path_buf(),
             target: layer_volume.clone(),
@@ -605,10 +614,7 @@ impl FilesystemBackend {
     /// Decide per selected mount whether its upper is empty, and if not which
     /// producer to use.  Counting stops at the threshold so cost is
     /// O(min(entries, threshold)).
-    pub(crate) fn fork_producers(
-        &self,
-        selected: &[MountUnit],
-    ) -> BTreeMap<String, ForkProducer> {
+    pub(crate) fn fork_producers(&self, selected: &[MountUnit]) -> BTreeMap<String, ForkProducer> {
         let mut produced = BTreeMap::new();
         for mount in selected {
             if upper_is_empty(&mount.upper) {
@@ -673,7 +679,10 @@ impl FilesystemBackend {
     fn run_fork_chain(
         &self,
         chain: &[ForkTask],
-    ) -> (Result<(), BackendError>, Vec<(&'static str, std::time::Duration)>) {
+    ) -> (
+        Result<(), BackendError>,
+        Vec<(&'static str, std::time::Duration)>,
+    ) {
         let mut timings = Vec::new();
         for task in chain {
             let started = Instant::now();

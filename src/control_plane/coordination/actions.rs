@@ -156,7 +156,9 @@ impl SpeculativeTree {
             Err(error) => {
                 for id in ids {
                     if self.chance_is(&id, &ChanceStage::Pending) {
-                        actions.records.push(json!({"message":"policy_error", "chance_id":id, "reason":error}));
+                        actions.records.push(
+                            json!({"message":"policy_error", "chance_id":id, "reason":error}),
+                        );
                         self.change_chance_stage(
                             &id,
                             ChanceStage::Discarded(DiscardedReason::Failed),
@@ -179,6 +181,16 @@ impl SpeculativeTree {
         for id in ids.iter().filter(|id| !selected.contains(id)) {
             if self.chance_is(id, &ChanceStage::Pending) {
                 self.change_authority_state(id, AuthorityState::Fetching)?;
+                if self.chance(id)?.speculation_kind
+                    == Some(crate::control_plane::agent_control::ActionKind::ModelInference)
+                {
+                    let chance = self.chance(id)?.clone();
+                    actions.commands.push(self.resolve_pending(
+                        &chance.parent_branch_id,
+                        &chance.operation_id,
+                        json!({"phase":"execute"}),
+                    )?);
+                }
             }
         }
         Ok(())
@@ -195,11 +207,27 @@ impl SpeculativeTree {
             return Ok(());
         }
         match result {
+            Ok(ControlResult::BranchModel(prediction)) => {
+                let command = self.start_model_candidate(chance_id, prediction)?;
+                if let AgentCommand::StartCandidate { branch_id, .. } = &command {
+                    actions.records.push(json!({"message":"candidate_created","branch_id":branch_id,"parent":tool.branch_id,"chance_id":chance_id,"fork_at":self.branches[branch_id].execution_position.transcript_index}));
+                }
+                self.schedule(ControlOperation::Establish(command), actions);
+            }
             // An empty prediction set is not a failed speculation: this
             // boundary has no hypothesis to test. The authority value is
             // fetched as an ordinary action so the Agent's call is answered.
             Ok(ControlResult::Predictions(predictions)) if predictions.is_empty() => {
                 self.change_authority_state(chance_id, AuthorityState::Fetching)?;
+                if self.chance(chance_id)?.speculation_kind
+                    == Some(crate::control_plane::agent_control::ActionKind::ModelInference)
+                {
+                    actions.commands.push(self.resolve_pending(
+                        &tool.branch_id,
+                        &tool.operation_id,
+                        json!({"phase":"execute"}),
+                    )?);
+                }
             }
             Ok(ControlResult::Predictions(predictions)) => {
                 for prediction in predictions {
@@ -219,13 +247,24 @@ impl SpeculativeTree {
                 }
             }
             Err(error) => {
-                actions.records.push(json!({"message":"policy_error", "chance_id":chance_id, "reason":error}));
+                actions
+                    .records
+                    .push(json!({"message":"policy_error", "chance_id":chance_id, "reason":error}));
                 self.change_chance_stage(
                     chance_id,
                     ChanceStage::Discarded(DiscardedReason::Failed),
                     "predict failed",
                 )?;
                 self.change_authority_state(chance_id, AuthorityState::Fetching)?;
+                if self.chance(chance_id)?.speculation_kind
+                    == Some(crate::control_plane::agent_control::ActionKind::ModelInference)
+                {
+                    actions.commands.push(self.resolve_pending(
+                        &tool.branch_id,
+                        &tool.operation_id,
+                        json!({"phase":"execute"}),
+                    )?);
+                }
             }
             _ => unreachable!(),
         }
@@ -246,11 +285,20 @@ impl SpeculativeTree {
         match result {
             Ok(ControlResult::Launch(true)) if still_waiting => {
                 self.change_authority_state(chance_id, AuthorityState::Fetching)?;
+                if self.chance(chance_id)?.speculation_kind
+                    == Some(crate::control_plane::agent_control::ActionKind::ModelInference)
+                {
+                    actions.commands.push(self.resolve_pending(
+                        &tool.branch_id,
+                        &tool.operation_id,
+                        json!({"phase":"execute"}),
+                    )?);
+                }
             }
             Ok(ControlResult::Launch(_)) => {}
-            Err(error) => actions.records.push(
-                json!({"message":"policy_error", "chance_id":chance_id, "reason":error}),
-            ),
+            Err(error) => actions
+                .records
+                .push(json!({"message":"policy_error", "chance_id":chance_id, "reason":error})),
             _ => unreachable!(),
         }
         Ok(())
@@ -267,9 +315,9 @@ impl SpeculativeTree {
         let rebalance = match result {
             Ok(ControlResult::Rebalance(rebalance)) => rebalance,
             Err(error) => {
-                actions
-                    .records
-                    .push(json!({"message":"policy_error", "decision":"rebalance", "reason":error}));
+                actions.records.push(
+                    json!({"message":"policy_error", "decision":"rebalance", "reason":error}),
+                );
                 return Ok(());
             }
             _ => unreachable!(),
@@ -360,6 +408,12 @@ impl SpeculativeTree {
         };
         self.record_authority_outcome(&chance_id, outcome.clone(), Some(evidence.clone()))?;
         self.record_public_nle_map_action(&branch_id, &operation_id, &evidence)?;
+        // Tool Candidates already own a Proposal when they are created: the
+        // predicted result is the thing being compared. A still-running
+        // Candidate is therefore not cancelled here; validation decides it
+        // against the authoritative value. Model Candidates have no Proposal
+        // until their model call finishes and are closed by the Agent message
+        // path when the authority arrives first.
         if self.chance(&chance_id)?.branch_ids.is_empty() {
             // No Proposal was tested; nothing was speculated on this Chance.
             self.change_chance_stage(
@@ -377,9 +431,14 @@ impl SpeculativeTree {
         self.complete_operation(&branch_id, Some(&operation_id), OperationStatus::Succeeded)?;
         if live {
             // The extent hold ends once the authority value is handed back.
-            if self.branch(&branch_id)?.status == BranchStatus::Blocked(BlockedReason::ExtentReached)
+            if self.branch(&branch_id)?.status
+                == BranchStatus::Blocked(BlockedReason::ExtentReached)
             {
-                self.change_status(&branch_id, BranchStatus::Running, "Authority value delivered")?;
+                self.change_status(
+                    &branch_id,
+                    BranchStatus::Running,
+                    "Authority value delivered",
+                )?;
             }
             actions
                 .commands
@@ -405,16 +464,47 @@ impl SpeculativeTree {
             Err(error) => (false, "error".into(), None, None, Some(error)),
             _ => unreachable!(),
         };
-        let proposal = self
-            .branch_proposal(&candidate)
-            .ok_or_else(|| io::Error::other("candidate Proposal is missing"))?
-            .clone();
-        let chance_id = self.branch(&candidate)?.chance_id.clone()
+        let proposal = self.branch_proposal(&candidate).cloned();
+        let chance_id = self
+            .branch(&candidate)?
+            .chance_id
+            .clone()
             .ok_or_else(|| io::Error::other("candidate Chance is missing"))?;
-        if error.is_none() {
-            self.record_validation(&chance_id, &proposal.proposal_id, validation_id, validated_at_ms);
+        if verdict == "indeterminate" {
+            return Ok(());
         }
-        let record = json!({"branch_id":candidate, "hypothesis":proposal.payload, "verdict":verdict, "policy_error":error});
+        // A Candidate without a Proposal cannot be compared. This happens on
+        // a failed/cancelled model call and also when the authority value
+        // arrived before the Candidate produced its result. Its truthful
+        // terminal fact is enough to close its lifecycle, but it must not be
+        // sent through Policy with a fabricated null Proposal.
+        if proposal.is_none() {
+            let record = json!({
+                "branch_id": candidate,
+                "hypothesis": Value::Null,
+                "verdict": "incompatible",
+                "policy_error": Value::Null,
+                "disposition": "Discard"
+            });
+            actions.commands.extend(self.discard_candidate(
+                &candidate,
+                DiscardedReason::Failed,
+                "Candidate did not produce a Proposal before validation",
+            )?);
+            actions.records.push(record);
+            return Ok(());
+        }
+        if error.is_none()
+            && let Some(proposal) = &proposal
+        {
+            self.record_validation(
+                &chance_id,
+                &proposal.proposal_id,
+                validation_id,
+                validated_at_ms,
+            );
+        }
+        let record = json!({"branch_id":candidate, "hypothesis":proposal.as_ref().map(|p|&p.payload), "verdict":verdict, "policy_error":error});
         if self.can_promote(&candidate, compatible) {
             self.chance_mut(&chance_id)?.validation_id = Some(validation_id);
             self.record_runtime_state(&candidate, RuntimeExecutionState::PromotionRequested)?;
@@ -482,9 +572,11 @@ impl SpeculativeTree {
                 .get("notification")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            actions
-                .commands
-                .extend(self.finish_runtime_promotion(&candidate, succeeded, notification)?);
+            actions.commands.extend(self.finish_runtime_promotion(
+                &candidate,
+                succeeded,
+                notification,
+            )?);
             record["disposition"] = json!(if succeeded { "Promote" } else { "Discard" });
             record["runtime_promote_error"] = json!(result.err());
             actions.records.push(record);
@@ -534,6 +626,29 @@ impl SpeculativeTree {
         }
         let ids: Vec<String> = self.chances.keys().cloned().collect();
         for id in ids {
+            let chance = self.chance(&id)?;
+            if chance.speculation_kind
+                == Some(crate::control_plane::agent_control::ActionKind::ModelInference)
+                && chance.authority == AuthorityState::Arrived
+                && (chance.branch_ids.is_empty() || chance.stage.is_terminal())
+                && self
+                    .branch(&chance.parent_branch_id)?
+                    .pending_operations
+                    .iter()
+                    .any(|op| {
+                        op.operation_id == chance.operation_id
+                            && op.status == OperationStatus::Requested
+                    })
+            {
+                let parent = chance.parent_branch_id.clone();
+                let operation = chance.operation_id.clone();
+                actions.commands.push(self.resolve_pending(
+                    &parent,
+                    &operation,
+                    json!({"phase":"continue"}),
+                )?);
+                self.complete_operation(&parent, Some(&operation), OperationStatus::Succeeded)?;
+            }
             let chance = self.chance(&id)?;
             if !self.chance_waiting_live(chance)
                 || self
@@ -599,16 +714,7 @@ impl SpeculativeTree {
                         .values()
                         .any(|work| work.branch() == Some(candidate.as_str()))
                 {
-                    if self.candidate_outcome(&candidate).is_some() {
-                        self.schedule(ControlOperation::Validate(candidate), &mut actions);
-                    } else {
-                        actions.commands.extend(self.discard_candidate(
-                            &candidate,
-                            DiscardedReason::Failed,
-                            "Candidate validation deadline expired",
-                        )?);
-                        actions.records.push(json!({"branch_id":candidate,"disposition":"Discard","verdict":"timeout"}));
-                    }
+                    self.schedule(ControlOperation::Validate(candidate), &mut actions);
                 }
             }
             if self.rebalance_epoch != Some(self.epoch)
@@ -620,7 +726,8 @@ impl SpeculativeTree {
                     branch.role == BranchRole::Candidate
                         && matches!(
                             branch.status,
-                            BranchStatus::Running | BranchStatus::Blocked(BlockedReason::Rebalanced)
+                            BranchStatus::Running
+                                | BranchStatus::Blocked(BlockedReason::Rebalanced)
                         )
                 })
             {

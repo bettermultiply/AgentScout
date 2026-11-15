@@ -75,16 +75,14 @@ impl SpeculativeTree {
             Some(ActionKind::ModelInference) => {
                 let operation = branch.execution_position.operation_id.as_deref();
                 let fast = self.fast_model_usage(branch, operation);
-                let authority = branch
-                    .parent_branch_id
-                    .as_ref()
-                    .zip(operation)
-                    .and_then(|(parent, operation)| {
+                let authority = branch.parent_branch_id.as_ref().zip(operation).and_then(
+                    |(parent, operation)| {
                         self.model_usage
                             .get(parent)?
                             .iter()
                             .find(|usage| usage.action_id.as_deref() == Some(operation))
-                    });
+                    },
+                );
                 match (fast, authority) {
                     (Some(fast), Some(authority)) => {
                         // 有权威侧同一 operation 的模型用量，按权威模型校验处理。

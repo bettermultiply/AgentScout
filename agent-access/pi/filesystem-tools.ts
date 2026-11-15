@@ -3,6 +3,7 @@
 // replacement between tasks without touching any live overlay.
 import {readFileSync} from 'node:fs';
 import {spawn} from 'node:child_process';
+import {connect as connectSocket} from 'node:net';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import {join} from 'node:path';
 
@@ -19,63 +20,123 @@ while True:
 sys.exit(code if code is not None and code>=0 else 1)
 `;
 
-export function filesystemTools(directory, branch, cwd, sdk) {
+type ToolResult = {exitCode: number | undefined};
+type ToolOptions = {
+    onData?: (chunk: Buffer) => void;
+    signal?: AbortSignal;
+    timeout?: number;
+    env?: Record<string, string>;
+    input?: Buffer | string;
+};
+
+export function filesystemTools(directory: string, branch: string, cwd: string, sdk: any) {
     if(!directory)return [];
-    const context=new AsyncLocalStorage();
-    let tail=Promise.resolve();
-    const exec=(command,cwd,options={})=>{
-        const signal=options.signal??context.getStore();
-        const running=tail.then(()=>run(command,cwd,{...options,signal}));
-        tail=running.catch(()=>{});
-        return running;
+    const context=new AsyncLocalStorage<AbortSignal | undefined>();
+    const planFile=join(directory,branch+'.json');
+    const readPlan=()=>JSON.parse(readFileSync(planFile,'utf8'));
+    // An isolated host directory can be mounted at another path inside the
+    // branch namespace (for example a Terminal-Bench workspace at /app). Pi's
+    // session cwd is the host path; tool operations run in the branch and must
+    // use the sandbox path. This mapping comes from the branch tool plan, not
+    // from a hard-coded workload path.
+    const translate=(value: string): string=>{
+        let plan;
+        try{plan=readPlan()}catch{return value}
+        const workspace=plan.workspace,target=workspace?.target,host=workspace?.host;
+        if(!plan.holder_socket||!target||!host||host===target)return value;
+        if(value===host)return target;
+        return value.startsWith(host+'/')?target+value.slice(host.length):value;
     };
-    const run=(command,cwd,{onData,signal,timeout,env,input}={})=>new Promise((resolve,reject)=>{
+    const exec=(command: string, cwd: string, options: ToolOptions = {}): Promise<ToolResult>=>{
+        const signal=options.signal??context.getStore();
+        return run(command,translate(cwd),{...options,signal});
+    };
+    const run=(command: string, cwd: string, options: ToolOptions = {}): Promise<ToolResult>=>new Promise((resolve,reject)=>{
+        let {onData,signal,timeout,env,input}=options;
         signal??=context.getStore();
         if(signal?.aborted){reject(Error('Tool cancelled'));return}
         let plan;
-        try{plan=JSON.parse(readFileSync(join(directory,branch+'.json'),'utf8'))}catch(error){reject(error);return}
+        try{plan=readPlan()}catch(error){reject(error);return}
+        if(plan.holder_socket){
+            const socket=connectSocket(plan.holder_socket);
+            let finished=false,timedOut=false,buffer='';
+            const timer=timeout?setTimeout(()=>{timedOut=true;socket.destroy()},timeout*1000):undefined;
+            const stop=()=>socket.destroy();
+            const finish=(error?: Error | null, result?: ToolResult)=>{
+                if(finished)return;finished=true;
+                if(timer)clearTimeout(timer);
+                signal?.removeEventListener('abort',stop);
+                error?reject(error):resolve(result as ToolResult);
+            };
+            signal?.addEventListener('abort',stop,{once:true});
+            socket.on('data',chunk=>{
+                buffer+=chunk.toString();
+                let index;
+                while((index=buffer.indexOf('\n'))>=0){
+                    const line=buffer.slice(0,index);buffer=buffer.slice(index+1);
+                    if(!line)continue;
+                    let event;
+                    try{event=JSON.parse(line)}catch(error){finish(error instanceof Error?error:Error(String(error)));socket.destroy();return}
+                    if(event.stdout)onData?.(Buffer.from(event.stdout,'base64'));
+                    if(event.stderr)onData?.(Buffer.from(event.stderr,'base64'));
+                    if(event.error!==undefined){finish(Error(event.error));socket.destroy();return}
+                    if(event.exit_code!==undefined){finish(null,{exitCode:event.exit_code});socket.destroy();return}
+                }
+            });
+            socket.once('error',error=>finish(error));
+            socket.once('close',()=>finish(timedOut?Error('Tool timed out'):signal?.aborted?Error('Tool cancelled'):Error('Namespace holder closed before returning a result')));
+            socket.write(JSON.stringify({
+                op:'exec',
+                command,
+                cwd:translate(cwd),
+                env:env??{},
+                ...(input!==undefined?{input:Buffer.from(input).toString('base64')}:{}),
+                ...(timeout?{timeout}:{}),
+            })+'\n');
+            return;
+        }
         const child=spawn(plan.program,[...plan.args,'--chdir',cwd,'--','python3','-c',supervisor,'/bin/bash','-c',command],{env:env??process.env,stdio:[input===undefined?'ignore':'pipe','pipe','pipe'],detached:true});
         // Contents travel only through the pipe into the isolated process, never
         // argv or a host temporary file. Wait for close even if the reader exits
         // early: the namespace supervisor must finish reaping descendants first.
-        let inputError;
+        let inputError: Error | undefined;
         if(child.stdin){child.stdin.on('error',error=>{inputError=error});child.stdin.end(input)}
-        child.stdout.on('data',data=>onData?.(data));child.stderr.on('data',data=>onData?.(data));
+        child.stdout?.on('data',data=>onData?.(data));child.stderr?.on('data',data=>onData?.(data));
         let timedOut=false;
-        const stop=()=>{try{process.kill(-child.pid,'SIGKILL')}catch(error){if(error.code!=='ESRCH')throw error}};
+        const stop=()=>{try{if(child.pid!==undefined)process.kill(-child.pid,'SIGKILL')}catch(error){if((error as NodeJS.ErrnoException).code!=='ESRCH')throw error}};
         const timer=timeout?setTimeout(()=>{timedOut=true;stop()},timeout*1000):undefined;
         signal?.addEventListener('abort',stop,{once:true});
         // Abort may arrive between the pre-spawn check and listener setup.
         if(signal?.aborted)stop();
         child.once('error',reject);
-        child.once('close',code=>{clearTimeout(timer);signal?.removeEventListener('abort',stop);if(signal?.aborted||timedOut)reject(Error(timedOut?'Tool timed out':'Tool cancelled'));else if(inputError)reject(inputError);else resolve({exitCode:code})});
+        child.once('close',code=>{clearTimeout(timer);signal?.removeEventListener('abort',stop);if(signal?.aborted||timedOut)reject(Error(timedOut?'Tool timed out':'Tool cancelled'));else if(inputError)reject(inputError);else resolve({exitCode:code??undefined})});
     });
-    const python=async(code,args,input=undefined)=>{
-        const quote=value=>"'"+String(value).replaceAll("'","'\\''")+"'";
-        const chunks=[];
+    const python=async(code: string, args: string[], input: Buffer | string | undefined = undefined): Promise<Buffer>=>{
+        const quote=(value: unknown)=>"'"+String(value).replaceAll("'","'\\''")+"'";
+        const chunks: Buffer[]=[];
         const result=await exec('python3 -c '+quote(code)+' '+args.map(quote).join(' '),cwd,{input,onData:data=>chunks.push(data)});
         const output=Buffer.concat(chunks);
         if(result.exitCode!==0)throw Error(output.toString());
         return output;
     };
-    const readFile=path=>python('import sys,base64; print(base64.b64encode(open(sys.argv[1],"rb").read()).decode())',[path]).then(data=>Buffer.from(data.toString().trim(),'base64'));
-    const writeFile=(path,content)=>python('import sys; open(sys.argv[1],"wb").write(sys.stdin.buffer.read())',[path],Buffer.from(content));
-    const access=path=>python('import os,sys; assert os.access(sys.argv[1],os.R_OK), "File is not readable"',[path]);
+    const readFile=(path: string)=>python('import sys,base64; print(base64.b64encode(open(sys.argv[1],"rb").read()).decode())',[translate(path)]).then(data=>Buffer.from(data.toString().trim(),'base64'));
+    const writeFile=(path: string, content: Buffer | string)=>python('import sys; open(sys.argv[1],"wb").write(sys.stdin.buffer.read())',[translate(path)],Buffer.from(content));
+    const access=(path: string)=>python('import os,sys; assert os.access(sys.argv[1],os.R_OK), "File is not readable"',[translate(path)]);
     // Reuse Pi's signature detector (including APNG exclusion), not extensions
     // or a second implementation. Both sniffing and reading run in the Branch.
-    const detectImageMimeType=async path=>{
-        const quote=value=>"'"+String(value).replaceAll("'","'\\''")+"'";
+    const detectImageMimeType=async (path: string): Promise<string | null>=>{
+        const quote=(value: unknown)=>"'"+String(value).replaceAll("'","'\\''")+"'";
         const module=new URL('../../../pi/packages/coding-agent/src/utils/mime.ts',import.meta.url).href;
         const code=`import {detectSupportedImageMimeTypeFromFile as detect} from ${JSON.stringify(module)}; console.log(await detect(process.argv[1])??'')`;
-        const chunks=[];
-        const result=await exec('node --input-type=module -e '+quote(code)+' -- '+quote(path),cwd,{onData:data=>chunks.push(data)});
+        const chunks: Buffer[]=[];
+        const result=await exec('node --input-type=module -e '+quote(code)+' -- '+quote(translate(path)),cwd,{onData:data=>chunks.push(data)});
         const output=Buffer.concat(chunks).toString().trim();
         if(result.exitCode!==0)throw Error(output);
         return output||null;
     };
-    const options={bash:{operations:{exec}},read:{operations:{readFile,access,detectImageMimeType}},edit:{operations:{readFile,writeFile,access}},write:{operations:{writeFile,mkdir:path=>python('import os,sys; os.makedirs(sys.argv[1],exist_ok=True)',[path])}}};
-    return ['read','bash','edit','write'].map(name=>{
+    const options={bash:{operations:{exec}},read:{operations:{readFile,access,detectImageMimeType}},edit:{operations:{readFile,writeFile,access}},write:{operations:{writeFile,mkdir:(path: string)=>python('import os,sys; os.makedirs(sys.argv[1],exist_ok=True)',[translate(path)])}}};
+    return ['read','bash','edit','write'].map((name: string)=>{
         const tool=sdk.createToolDefinition(name,cwd,options),execute=tool.execute;
-        return {...tool,execute:(id,args,signal,...rest)=>context.run(signal,()=>execute(id,args,signal,...rest))};
+        return {...tool,execute:(id: any,args: any,signal?: AbortSignal,...rest: any[])=>context.run(signal,()=>execute(id,args,signal,...rest))};
     });
 }

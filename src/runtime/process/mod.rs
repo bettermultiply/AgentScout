@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::os::fd::{IntoRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::Child;
 mod cgroup;
@@ -13,24 +14,39 @@ mod launch;
 
 pub use freeze::{FreezeMechanism, ProcessHandle};
 
+use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
-use std::sync::Mutex;
 
-use crate::runtime::backend::{BackendError, BackendContext};
 use crate::protocol::contract::AgentLaunch;
 #[cfg(test)]
 use crate::protocol::contract::RuntimeCapabilities;
+use crate::runtime::backend::{BackendContext, BackendError};
+use crate::runtime::launch_plan::LaunchFragment;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProcessRole {
+    /// A real Agent process; it owns the execution path and its writes.
+    Agent,
+    /// A branch namespace holder; it owns no Agent state and never writes the
+    /// task workspace by itself.
+    NamespaceHolder,
+}
 
 struct AgentProcess {
     instance_id: String,
+    role: ProcessRole,
     child: Child,
     process_group: libc::pid_t,
     inner_pid: u32,
     mount_namespace: u64,
+    /// Open while this process is owned. It pins the branch namespace inode so
+    /// a later last-resort sweep cannot match an unrelated newer namespace that
+    /// reused a stale inode number.
+    namespace_fd: Option<OwnedFd>,
     cgroup_path: Option<PathBuf>,
 }
 
@@ -42,13 +58,15 @@ struct PendingStatus {
 }
 
 #[cfg(test)]
-use crate::runtime::launch_plan::{LaunchFragment, MountEntry};
+use crate::runtime::launch_plan::MountEntry;
 
 pub struct ProcessBackend {
     bubblewrap_path: PathBuf,
     freeze: FreezeMechanism,
     cgroup_root: Option<PathBuf>,
     processes: Mutex<HashMap<String, AgentProcess>>,
+    /// The Pi host process is owned by the run, not by a branch namespace.
+    host_agent: Mutex<Option<Child>>,
     pending_status: Mutex<HashMap<String, PendingStatus>>,
     #[cfg(test)]
     fail_thaw: AtomicBool,
@@ -58,31 +76,52 @@ pub struct ProcessBackend {
     fail_mount_wait: AtomicBool,
 }
 
-
-
 impl ProcessBackend {
     /// Temporarily stop all owned execution while filesystem state is copied.
     /// Thaw even when the copy fails so the user can continue or retry saving.
-    pub(crate) fn with_frozen<T>(&self, operation: impl FnOnce()->Result<T,BackendError>) -> Result<T,BackendError> {
-        let ids:Vec<_>=self.processes.lock().map_err(|_|BackendError::new("Process table poisoned"))?.keys().cloned().collect();
-        let mut frozen:Vec<String>=Vec::new();
+    pub(crate) fn with_frozen<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, BackendError>,
+    ) -> Result<T, BackendError> {
+        let ids: Vec<_> = self
+            .processes
+            .lock()
+            .map_err(|_| BackendError::new("Process table poisoned"))?
+            .keys()
+            .cloned()
+            .collect();
+        let mut frozen: Vec<String> = Vec::new();
         for id in ids {
-            let running=self.is_running(&id);
-            if let Err(error)=running {
-                for previous in &frozen {let _=self.thaw(previous);}
+            let running = self.is_running(&id);
+            if let Err(error) = running {
+                for previous in &frozen {
+                    let _ = self.thaw(previous);
+                }
                 return Err(error);
             }
-            if !running.unwrap() {continue;}
-            if let Err(error)=self.freeze(&id) {
-                for previous in &frozen {let _=self.thaw(previous);}
+            if !running.unwrap() {
+                continue;
+            }
+            if let Err(error) = self.freeze(&id) {
+                for previous in &frozen {
+                    let _ = self.thaw(previous);
+                }
                 return Err(error);
             }
             frozen.push(id);
         }
-        let result=operation();
-        let mut thaw_error=None;
-        for id in frozen {if let Err(error)=self.thaw(&id) {thaw_error=Some(error);}}
-        if let Some(error)=thaw_error {return Err(BackendError::new(format!("Recovery process thaw failed: {error}")));}
+        let result = operation();
+        let mut thaw_error = None;
+        for id in frozen {
+            if let Err(error) = self.thaw(&id) {
+                thaw_error = Some(error);
+            }
+        }
+        if let Some(error) = thaw_error {
+            return Err(BackendError::new(format!(
+                "Recovery process thaw failed: {error}"
+            )));
+        }
         result
     }
 
@@ -112,6 +151,7 @@ impl ProcessBackend {
             freeze,
             cgroup_root,
             processes: Mutex::new(HashMap::new()),
+            host_agent: Mutex::new(None),
             pending_status: Mutex::new(HashMap::new()),
             #[cfg(test)]
             fail_thaw: AtomicBool::new(false),
@@ -168,13 +208,146 @@ impl ProcessBackend {
         }
     }
 
+    /// Start the single Pi host process.  It intentionally receives no launch
+    /// fragment: Pi owns sessions for all branches and must remain in the host
+    /// namespace.
+    pub fn launch_host(
+        &self,
+        launch: &AgentLaunch,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), BackendError> {
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&launch.log)
+            .map_err(error)?;
+        // Pi runs on the host, so its own temporary files must stay on the
+        // host. Tool commands receive their own namespace through the holder
+        // and are not given this Pi-owned temp directory.
+        let temporary = launch
+            .log
+            .parent()
+            .map(|parent| parent.join("agent-tmp"))
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        fs::create_dir_all(&temporary).map_err(error)?;
+        let mut environment = launch.env.clone();
+        environment.extend(env.clone());
+        environment
+            .entry("TMPDIR".into())
+            .or_insert_with(|| temporary.display().to_string());
+        let mut host = self
+            .host_agent
+            .lock()
+            .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?;
+        if let Some(existing) = host.as_mut() {
+            match existing.try_wait().map_err(error)? {
+                None => return Ok(()),
+                Some(status) => {
+                    return Err(BackendError::new(format!(
+                        "Pi host process exited before the run completed: {status}"
+                    )));
+                }
+            }
+        }
+        let child = std::process::Command::new(&launch.command)
+            .args(&launch.args)
+            .current_dir(&launch.cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log.try_clone().map_err(error)?))
+            .stderr(std::process::Stdio::from(log))
+            .envs(&environment)
+            .spawn()
+            .map_err(error)?;
+        *host = Some(child);
+        Ok(())
+    }
+
+    /// Keep one inexpensive process alive in the branch mount namespace.  The
+    /// process is deliberately independent from the Pi host process; its only
+    /// ownership is the namespace and the branch environment lifetime.
+    pub fn launch_holder(
+        &self,
+        context: &BackendContext,
+        fragment: &LaunchFragment,
+    ) -> Result<(), BackendError> {
+        let launch = AgentLaunch {
+            command: "python3".into(),
+            args: vec![
+                "-c".into(),
+                include_str!("holder.py").into(),
+                "/dev/ascout-holder/cmd.sock".into(),
+            ],
+            cwd: PathBuf::from("/"),
+            log: PathBuf::from("/dev/null"),
+            instance_id: Some(format!("namespace-holder:{}", context.environment_id)),
+            env: std::collections::BTreeMap::new(),
+        };
+        self.launch_with_role(context, &launch, fragment, ProcessRole::NamespaceHolder)?;
+        if let Some((directory, _)) = &fragment.holder_bind {
+            let socket = directory.join("cmd.sock");
+            for _ in 0..200 {
+                if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                    return Ok(());
+                }
+                if !self.is_running(&context.environment_id)? {
+                    return Err(BackendError::new(
+                        "namespace holder exited before accepting commands",
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            return Err(BackendError::new(format!(
+                "namespace holder did not open command socket {}",
+                socket.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether this environment is owned by a namespace holder instead of a
+    /// real Agent process.
+    pub fn is_holder(&self, environment_id: &str) -> Result<bool, BackendError> {
+        let processes = self
+            .processes
+            .lock()
+            .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?;
+        Ok(processes
+            .get(environment_id)
+            .is_some_and(|process| process.role == ProcessRole::NamespaceHolder))
+    }
+
+    /// Whether a real Agent process is still running in this environment.  A
+    /// holder keeps the namespace but is not a writer, so it must not block
+    /// filesystem materialization.
+    pub fn writer_active(&self, environment_id: &str) -> Result<bool, BackendError> {
+        let mut processes = self
+            .processes
+            .lock()
+            .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?;
+        let Some(process) = processes.get_mut(environment_id) else {
+            return Ok(false);
+        };
+        if process.role != ProcessRole::Agent {
+            return Ok(false);
+        }
+        Ok(process.child.try_wait().map_err(error)?.is_none())
+    }
+
+    pub fn stop_host(&self) -> Result<(), BackendError> {
+        let mut host = self
+            .host_agent
+            .lock()
+            .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?;
+        let Some(mut child) = host.take() else {
+            return Ok(());
+        };
+        let _ = child.kill();
+        child.wait().map(|_| ()).map_err(error)
+    }
+
     #[cfg(test)]
     pub fn new_process_group(_id: impl Into<String>, bubblewrap_path: impl Into<PathBuf>) -> Self {
-        Self::empty(
-            bubblewrap_path.into(),
-            FreezeMechanism::ProcessGroup,
-            None,
-        )
+        Self::empty(bubblewrap_path.into(), FreezeMechanism::ProcessGroup, None)
     }
 
     pub fn freeze_mechanism(&self) -> FreezeMechanism {
@@ -195,10 +368,7 @@ impl ProcessBackend {
         process.child.try_wait().map_err(error)
     }
 
-    pub fn wait(
-        &self,
-        environment_id: &str,
-    ) -> Result<std::process::ExitStatus, BackendError> {
+    pub fn wait(&self, environment_id: &str) -> Result<std::process::ExitStatus, BackendError> {
         let mut processes = self
             .processes
             .lock()
@@ -227,12 +397,57 @@ impl ProcessBackend {
             process_group: process.process_group,
         })
     }
+}
 
+/// Kill every process that still references the branch mount namespace.  The
+/// holder and its descendants are normally reached by cgroup/process-group
+/// termination; this is the last-resort sweep for a descendant that detached
+/// from the group.  A process outside a private mount namespace is never
+/// swept because that namespace belongs to the host.
+fn kill_namespace_processes(namespace: u64) -> Result<(), BackendError> {
+    let host = fs::metadata("/proc/self/ns/mnt").map_err(error)?.ino();
+    if namespace == host {
+        return Ok(());
+    }
+    let directory = match fs::read_dir("/proc") {
+        Ok(directory) => directory,
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(failure) => return Err(error(failure)),
+    };
+    let own = std::process::id();
+    for entry in directory.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == own {
+            continue;
+        }
+        let path = entry.path().join("ns/mnt");
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.ino() == namespace {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Drop for ProcessBackend {
     fn drop(&mut self) {
         self.stop_all();
+        if let Ok(mut host) = self.host_agent.lock() {
+            if let Some(mut child) = host.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
         if let Some(root) = &self.cgroup_root {
             let _ = fs::remove_dir_all(root);
         }
@@ -259,11 +474,16 @@ fn sanitize(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::contract::AgentLaunch;
     use std::collections::BTreeMap;
     use std::path::Path;
-    use crate::protocol::contract::AgentLaunch;
 
-    fn launch(backend: &ProcessBackend, command: &str, args: Vec<String>, cwd: &Path) -> BackendContext {
+    fn launch(
+        backend: &ProcessBackend,
+        command: &str,
+        args: Vec<String>,
+        cwd: &Path,
+    ) -> BackendContext {
         let context = BackendContext::new("env");
         let launch = AgentLaunch {
             command: command.to_string(),
@@ -292,7 +512,10 @@ mod tests {
     fn terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup() {
         let root = tempfile::tempdir().unwrap();
         let backend = ProcessBackend::new("process", "bwrap");
-        report_freeze(&backend, "terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup");
+        report_freeze(
+            &backend,
+            "terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup",
+        );
         let context = launch(&backend, "/bin/sleep", vec!["30".into()], root.path());
         let handle = backend.process_handle(&context.environment_id).unwrap();
         assert!(backend.is_running(&context.environment_id).unwrap());
@@ -327,7 +550,10 @@ mod tests {
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
         let backend = ProcessBackend::new("process", &script);
-        report_freeze(&backend, "failed_launch_cleans_process_pending_status_and_cgroup");
+        report_freeze(
+            &backend,
+            "failed_launch_cleans_process_pending_status_and_cgroup",
+        );
         let cgroup = backend
             .cgroup_root
             .as_ref()
@@ -437,6 +663,44 @@ mod tests {
             "the handle should remain observable after exit"
         );
         assert!(!backend.is_running(&context.environment_id).unwrap());
+        backend.cleanup(&context.environment_id).unwrap();
+    }
+
+    #[test]
+    fn launch_passes_agent_environment_to_child() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = ProcessBackend::new("process", "bwrap");
+        let context = BackendContext::new("env");
+        let output = root.path().join("agent-env.txt");
+        let launch = AgentLaunch {
+            command: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '%s' \"$PI_CODING_AGENT_DIR\" > \"$ASCOUT_ENV_OUTPUT\"".into(),
+            ],
+            cwd: root.path().to_path_buf(),
+            log: root.path().join("process-test.log"),
+            instance_id: Some("test-instance".into()),
+            env: BTreeMap::from([(
+                String::from("PI_CODING_AGENT_DIR"),
+                String::from("/parent/pi"),
+            )]),
+        };
+        let fragment = LaunchFragment {
+            env: BTreeMap::from([(
+                String::from("ASCOUT_ENV_OUTPUT"),
+                output.display().to_string(),
+            )]),
+            ..LaunchFragment::default()
+        };
+        backend.launch(&context, &launch, &fragment).unwrap();
+        for _ in 0..3000 {
+            if output.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(fs::read_to_string(&output).unwrap(), "/parent/pi");
         backend.cleanup(&context.environment_id).unwrap();
     }
 }

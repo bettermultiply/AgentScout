@@ -261,10 +261,16 @@ pub(super) fn merge_launch_fragment(
     target: &mut LaunchFragment,
     source: LaunchFragment,
 ) -> Result<(), BackendError> {
-    let previous_targets: Vec<_>=target.mounts.iter().map(|entry|mount_target(entry).to_path_buf()).collect();
+    let previous_targets: Vec<_> = target
+        .mounts
+        .iter()
+        .map(|entry| mount_target(entry).to_path_buf())
+        .collect();
     for entry in source.mounts {
         let source_target = mount_target(&entry).to_path_buf();
-        if previous_targets.iter().any(|existing| existing == &source_target)
+        if previous_targets
+            .iter()
+            .any(|existing| existing == &source_target)
         {
             return Err(BackendError::new(format!(
                 "multiple Backends provide a launch mount for target {}",
@@ -277,5 +283,8 @@ pub(super) fn merge_launch_fragment(
         target.chdir = source.chdir;
     }
     target.env.extend(source.env);
+    if target.holder_bind.is_none() {
+        target.holder_bind = source.holder_bind;
+    }
     Ok(())
 }

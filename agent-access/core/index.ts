@@ -59,6 +59,8 @@ export type AgentAccess = {
     releaseAll(): void;
     snapshot(): unknown;
     restore(record: any): void;
+    predict(branch: string, data: unknown, signal?: AbortSignal): Promise<any>;
+    hasPredictor(branch: string, op: unknown, signal?: AbortSignal): Promise<boolean>;
 };
 
 type Hold = { promise: Promise<void>; release: () => void };
@@ -71,7 +73,7 @@ type Options = {
 };
 
 function makeHold(): Hold {
-    let release;
+    let release!: () => void;
     const promise = new Promise<void>(resolve => (release = resolve));
     return { promise, release };
 }
@@ -110,10 +112,11 @@ export function createAgentAccess({ taskId, report, evaluate, now = Date.now }: 
                         tool: point.name,
                         arguments: point.arguments,
                     },
-                    context: { branch_id: point.branch },
+                    context: { branch_id: point.branch, capabilities:point.contractContext },
                 },
                 point.signal,
             );
+            if ((plan as { mode?: string } | null)?.mode === 'allow' && (point.contractContext as any)?.isolated === true) return;
             if ((plan as { mode?: string } | null)?.mode === 'deny') {
                 throw Error('Effect denied by Policy');
             }
@@ -160,6 +163,14 @@ export function createAgentAccess({ taskId, report, evaluate, now = Date.now }: 
 
     return {
         setPolicy,
+        async hasPredictor(branch, op, signal) {
+            const artifact=policies.get(branch);
+            return !!artifact && await evaluate(artifact,'admit.opportunity_pass',{op},signal) === true;
+        },
+        async predict(branch, data, signal) {
+            const artifact=policies.get(branch);
+            return artifact?.decisions.predict ? evaluate(artifact,'predict',data,signal) : {proposals:[],generation:'batch'};
+        },
 
         snapshot() {
             return {policies:[...policies],effectHolds:[...effectHolds.keys()],pauseHolds:[...pauseHolds.keys()],
@@ -253,11 +264,9 @@ export function createAgentAccess({ taskId, report, evaluate, now = Date.now }: 
             }
 
             const admit = typeof point.admit === 'function' ? point.admit() : point.admit;
-            if (!admit || !policies.has(point.branch)) return { kind: 'allow' };
+            if (!admit || !policies.has(point.branch) || point.op.has_predictor === false) return { kind: 'allow' };
             if (!(await localAdmission(point))) return { kind: 'allow' };
-            // Model inference is a PURE step: it may be evaluated by `admit`
-            // but never creates a Chance or consumes extent by itself.
-            if (!effectful) return { kind: 'allow' };
+            if (!effectful && point.actionKind !== 'model_inference') return { kind: 'allow' };
 
             const artifact = policies.get(point.branch)!;
             const facts = typeof point.admissionFacts === 'function'

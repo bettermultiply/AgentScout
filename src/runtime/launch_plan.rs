@@ -3,8 +3,10 @@
 //! Backends contribute mount entries; ProcessBackend is the only component
 //! that translates them into bubblewrap arguments.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone, Default)]
@@ -12,12 +14,21 @@ pub struct LaunchFragment {
     pub mounts: Vec<MountEntry>,
     pub chdir: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
+    /// Optional host directory bind-mounted into the branch namespace for the
+    /// namespace-holder command socket.
+    pub holder_bind: Option<(PathBuf, PathBuf)>,
 }
 
 #[derive(Debug, Clone)]
 pub enum MountEntry {
-    RoBind { source: PathBuf, target: PathBuf },
-    Bind { source: PathBuf, target: PathBuf },
+    RoBind {
+        source: PathBuf,
+        target: PathBuf,
+    },
+    Bind {
+        source: PathBuf,
+        target: PathBuf,
+    },
     Overlay {
         /// Bottom to top.
         lowers: Vec<PathBuf>,
@@ -25,11 +36,21 @@ pub enum MountEntry {
         work: PathBuf,
         target: PathBuf,
     },
-    Proc { target: PathBuf },
-    Dev { target: PathBuf },
-    Tmpfs { target: PathBuf },
-    RemountRo { target: PathBuf },
-    Dir { target: PathBuf },
+    Proc {
+        target: PathBuf,
+    },
+    Dev {
+        target: PathBuf,
+    },
+    Tmpfs {
+        target: PathBuf,
+    },
+    RemountRo {
+        target: PathBuf,
+    },
+    Dir {
+        target: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -39,10 +60,90 @@ pub struct MountSpec {
     pub json_status_fd: Option<libc::c_int>,
 }
 
+impl MountEntry {
+    fn target(&self) -> Option<&Path> {
+        match self {
+            MountEntry::RoBind { target, .. }
+            | MountEntry::Bind { target, .. }
+            | MountEntry::Overlay { target, .. }
+            | MountEntry::Proc { target }
+            | MountEntry::Dev { target }
+            | MountEntry::Tmpfs { target }
+            | MountEntry::RemountRo { target }
+            | MountEntry::Dir { target } => Some(target),
+        }
+    }
+}
+
+/// The sandbox root is a read-only bind of the host root, so mount targets that
+/// do not exist on the host (a workload-owned path such as `/app`) cannot be
+/// created below it.  When that happens the sandbox root is rebuilt as a tmpfs
+/// holding read-only binds of every top-level host entry that is not itself
+/// replaced by a mount entry.  The visible top level is unchanged for existing
+/// paths; only the absent targets become creatable.
+fn sandbox_root_needs_assembly(entries: &[MountEntry]) -> bool {
+    entries
+        .iter()
+        .filter_map(MountEntry::target)
+        .any(|target| !target.exists())
+}
+
+fn apply_sandbox_root_assembly(command: &mut Command, entries: &[MountEntry]) {
+    command.arg("--tmpfs").arg("/");
+    let replaced: BTreeSet<OsString> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            MountEntry::RoBind { .. } | MountEntry::Proc { .. } | MountEntry::Dev { .. } => None,
+            other => other
+                .target()
+                .and_then(|target| target.components().next())
+                .map(|component| component.as_os_str().to_os_string()),
+        })
+        .collect();
+    let Ok(read_dir) = fs::read_dir("/") else {
+        return;
+    };
+    let mut names: Vec<OsString> = read_dir
+        .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+        .filter(|name| name != "dev" && name != "proc")
+        .filter(|name| !replaced.contains(name))
+        .collect();
+    names.sort();
+    for name in names {
+        let path = PathBuf::from("/").join(&name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if let Ok(link) = fs::read_link(&path) {
+                    command.arg("--symlink").arg(link).arg(&path);
+                }
+            }
+            Ok(_) => {
+                command.arg("--ro-bind").arg(&path).arg(&path);
+            }
+            Err(_) => {}
+        }
+    }
+    command.args(["--dev", "/dev", "--proc", "/proc"]);
+}
+
 impl MountSpec {
     pub fn apply(&self, command: &mut Command) {
         command.arg("--die-with-parent").arg("--unshare-user");
+        let assemble_root = sandbox_root_needs_assembly(&self.entries);
+        if assemble_root {
+            apply_sandbox_root_assembly(command, &self.entries);
+        }
         for entry in &self.entries {
+            if assemble_root
+                && matches!(entry, MountEntry::RoBind { source, target } if source == Path::new("/") && target == Path::new("/"))
+            {
+                continue;
+            }
+            if let Some(target) = entry.target() {
+                if !target.exists() {
+                    command.arg("--dir").arg(target);
+                }
+            }
             match entry {
                 MountEntry::RoBind { source, target } => {
                     command.arg("--ro-bind").arg(source).arg(target);

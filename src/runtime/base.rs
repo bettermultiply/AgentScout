@@ -1,18 +1,19 @@
 //! BaseRuntime：在另一个 Backend 上管理 Agent 进程与数据面装配。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::protocol::contract::{
-    AgentLaunch, BackendState, CommandOutput, EnvironmentState, FilesystemResult, Operation,
-    RuntimeCapabilities,
-};
 use super::backend::{Backend, BackendContext, BackendError, BackendExecution, CancelHandle};
 use super::launch_plan::LaunchFragment;
 use super::process::{FreezeMechanism, ProcessBackend, ProcessHandle};
 use super::selection::merge_launch_fragment;
+use crate::protocol::contract::{
+    AgentLaunch, BackendState, CommandOutput, EnvironmentState, FilesystemResult, Operation,
+    RuntimeCapabilities,
+};
 
 pub struct BaseRuntime {
     id: String,
@@ -22,7 +23,13 @@ pub struct BaseRuntime {
     /// occupy this slot; BaseRuntime does not know filesystem types.
     data_plane: Option<Arc<dyn Backend>>,
     pub(super) process: ProcessBackend,
-    session_hosts: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Launch template per environment.  A namespace holder is restarted
+    /// after materialization rotates the filesystem execution generation.
+    launches: Mutex<HashMap<String, AgentLaunch>>,
+    /// Environments whose Runtime owns a Branch namespace holder.  The fact is
+    /// kept even while the holder is between lifetimes, so a failed restart
+    /// after publication is repaired by the retry instead of being forgotten.
+    holders: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl BaseRuntime {
@@ -32,7 +39,8 @@ impl BaseRuntime {
             inner,
             data_plane: None,
             process: ProcessBackend::new("process", "bwrap"),
-            session_hosts: Default::default(),
+            launches: Mutex::new(HashMap::new()),
+            holders: Mutex::new(std::collections::BTreeSet::new()),
         }
     }
 
@@ -58,15 +66,43 @@ impl BaseRuntime {
         if let Some(data_plane) = &self.data_plane {
             merge_launch_fragment(&mut fragment, data_plane.launch_fragment(context, launch)?)?;
         }
-        self.process.launch(context, launch, &fragment)?;
-        if launch.env.get("ASCOUT_PI_SESSION_HOST").is_some_and(|value|value=="1") {
-            self.session_hosts.lock().map_err(|_|BackendError::new("Session host table poisoned"))?.insert(context.environment_id.clone());
+        // Filesystem environments use a run-scoped Pi host plus a branch-only
+        // namespace holder.  A Runtime without a data-plane namespace keeps
+        // its historical direct process path; it has no branch namespace to
+        // hold and must not silently lose its writer lifecycle semantics.
+        let holder = fragment.holder_bind.is_some();
+        if holder {
+            self.process.launch_host(launch, &fragment.env)?;
+            // The holder belongs to this Branch; the Pi host belongs to the run
+            // and still serves every other Branch. A Branch that cannot get its
+            // namespace holder fails on its own instead of taking the host down.
+            self.process.launch_holder(context, &fragment)?;
+        } else {
+            self.process.launch(context, launch, &fragment)?;
+        }
+        self.launches
+            .lock()
+            .map_err(|_| BackendError::new("Launch template table poisoned"))?
+            .insert(context.environment_id.clone(), launch.clone());
+        if holder {
+            self.holders
+                .lock()
+                .map_err(|_| BackendError::new("Namespace holder table poisoned"))?
+                .insert(context.environment_id.clone());
         }
         Ok(())
     }
 
+    fn requires_holder(&self, environment_id: &str) -> bool {
+        self.holders
+            .lock()
+            .map(|holders| holders.contains(environment_id))
+            .unwrap_or(false)
+    }
+
     fn stop_agent_process(&self) -> Result<(), BackendError> {
         self.process.stop_all();
+        self.process.stop_host()?;
         Ok(())
     }
 
@@ -116,33 +152,86 @@ impl Drop for BaseRuntime {
 
 impl Backend for BaseRuntime {
     fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
-        if self.data_plane.is_some()
-            && !self.session_hosts.lock().map_err(|_|BackendError::new("Session host table poisoned"))?.contains(&context.environment_id)
-            && self.process.process_handle(&context.environment_id).is_some()
-            && self.process.is_running(&context.environment_id)?
-        {
+        if self.data_plane.is_some() && self.process.writer_active(&context.environment_id)? {
             return Err(BackendError::new(
                 "cannot materialize while Runtime-managed execution is active; task writers have not been confirmed drained",
             ));
         }
-        let mut result = self.inner.materialize(context)?;
-        if let Some(data_plane) = &self.data_plane {
-            let publication = data_plane.materialize(context)?;
-            result.confirmation = publication.confirmation;
-            result.conflicts.extend(publication.conflicts);
+        // A holder mounts the environment's overlay for its whole lifetime.
+        // Materialization publishes a delta and rotates the execution
+        // generation, so the old holder namespace must end before the view is
+        // replaced and a fresh holder must mount the new generation afterwards.
+        // The expected-holder fact outlives a failed restart, so retrying the
+        // publication restores the missing holder on the current generation.
+        let holder_launch = if self.requires_holder(&context.environment_id) {
+            let launch = self
+                .launches
+                .lock()
+                .map_err(|_| BackendError::new("Launch template table poisoned"))?
+                .get(&context.environment_id)
+                .cloned()
+                .ok_or_else(|| {
+                    BackendError::new(
+                        "namespace holder launch template is missing; cannot mount the new generation",
+                    )
+                })?;
+            self.process.terminate(&context.environment_id)?;
+            self.process.stop(&context.environment_id)?;
+            Some(launch)
+        } else {
+            None
+        };
+        let materialized = (|| -> Result<FilesystemResult, BackendError> {
+            let mut result = self.inner.materialize(context)?;
+            if let Some(data_plane) = &self.data_plane {
+                let publication = data_plane.materialize(context)?;
+                result.confirmation = publication.confirmation;
+                result.conflicts.extend(publication.conflicts);
+            }
+            Ok(result)
+        })();
+        if let Some(launch) = holder_launch
+            && let Err(error) = self.launch_agent_process(context, &launch)
+        {
+            return match materialized {
+                Ok(_) => Err(error),
+                Err(mut original) => {
+                    original.add_cleanup_failure(
+                        "process",
+                        format!("failed to restart namespace holder: {error}"),
+                    );
+                    Err(original)
+                }
+            };
         }
-        Ok(result)
+        materialized
     }
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        if let Some(data_plane)=&self.data_plane {
-            return self.process.with_frozen(||super::recovery::save(path, &[("inner", self.inner.as_ref()), ("data-plane", data_plane.as_ref())], Value::Null));
+        if let Some(data_plane) = &self.data_plane {
+            return self.process.with_frozen(|| {
+                super::recovery::save(
+                    path,
+                    &[
+                        ("inner", self.inner.as_ref()),
+                        ("data-plane", data_plane.as_ref()),
+                    ],
+                    Value::Null,
+                )
+            });
         }
         self.inner.save_runtime(path)
     }
 
     fn load_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        if let Some(data_plane)=&self.data_plane {
-            return super::recovery::load(path, &[("inner", self.inner.as_ref()), ("data-plane", data_plane.as_ref())]).map(|_|());
+        if let Some(data_plane) = &self.data_plane {
+            return super::recovery::load(
+                path,
+                &[
+                    ("inner", self.inner.as_ref()),
+                    ("data-plane", data_plane.as_ref()),
+                ],
+            )
+            .map(|_| ());
         }
         self.inner.load_runtime(path)
     }
@@ -163,8 +252,10 @@ impl Backend for BaseRuntime {
         let mut capabilities = self.inner.capabilities();
         if let Some(data_plane) = &self.data_plane {
             let data_plane_capabilities = data_plane.capabilities();
-            capabilities.branch_environment = (capabilities.branch_environment || capabilities.shared_environment)
-                && (data_plane_capabilities.branch_environment || data_plane_capabilities.shared_environment);
+            capabilities.branch_environment = (capabilities.branch_environment
+                || capabilities.shared_environment)
+                && (data_plane_capabilities.branch_environment
+                    || data_plane_capabilities.shared_environment);
             // A composed environment is shareable only when every state domain
             // can be shared. NLE sharing cannot bypass the FS branch fork.
             capabilities.shared_environment &= data_plane_capabilities.shared_environment;
@@ -176,8 +267,7 @@ impl Backend for BaseRuntime {
             capabilities.state_directory_overlaps_mount =
                 data_plane_capabilities.state_directory_overlaps_mount;
         }
-        capabilities.freeze_mechanism =
-            Some(self.process.freeze_mechanism().as_str().to_string());
+        capabilities.freeze_mechanism = Some(self.process.freeze_mechanism().as_str().to_string());
         capabilities
     }
 
@@ -360,9 +450,7 @@ impl Backend for BaseRuntime {
         }
         let inner = self.inner.suspend_with_context(context);
         if let Err(mut error) = inner {
-            if running
-                && let Err(thaw) = self.process.thaw(&context.environment_id)
-            {
+            if running && let Err(thaw) = self.process.thaw(&context.environment_id) {
                 error.add_cleanup_failure("process", format!("thaw after suspend failure: {thaw}"));
             }
             return Err(error);
@@ -370,9 +458,7 @@ impl Backend for BaseRuntime {
         if let Some(data_plane) = &self.data_plane
             && let Err(mut error) = data_plane.suspend_with_context(context)
         {
-            if running
-                && let Err(thaw) = self.process.thaw(&context.environment_id)
-            {
+            if running && let Err(thaw) = self.process.thaw(&context.environment_id) {
                 error.add_cleanup_failure("process", format!("thaw after suspend failure: {thaw}"));
             }
             return Err(error);
@@ -400,20 +486,22 @@ impl Backend for BaseRuntime {
         }
         let inner = self.inner.resume_with_context(context);
         if let Err(mut error) = inner {
-            if thaw_needed
-                && let Err(freeze) = self.process.freeze(&context.environment_id)
-            {
-                error.add_cleanup_failure("process", format!("freeze after resume failure: {freeze}"));
+            if thaw_needed && let Err(freeze) = self.process.freeze(&context.environment_id) {
+                error.add_cleanup_failure(
+                    "process",
+                    format!("freeze after resume failure: {freeze}"),
+                );
             }
             return Err(error);
         }
         if let Some(data_plane) = &self.data_plane
             && let Err(mut error) = data_plane.resume_with_context(context)
         {
-            if thaw_needed
-                && let Err(freeze) = self.process.freeze(&context.environment_id)
-            {
-                error.add_cleanup_failure("process", format!("freeze after resume failure: {freeze}"));
+            if thaw_needed && let Err(freeze) = self.process.freeze(&context.environment_id) {
+                error.add_cleanup_failure(
+                    "process",
+                    format!("freeze after resume failure: {freeze}"),
+                );
             }
             return Err(error);
         }
@@ -425,14 +513,12 @@ impl Backend for BaseRuntime {
     }
 
     fn terminate_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        // A Pi session host owns the whole tree, not the retired Authority
-        // Branch. Its Branch work is aborted by the Agent protocol; stop the
-        // host only at Runtime shutdown, otherwise promotion kills its winner.
-        let host = self.session_hosts.lock().map_err(|_| BackendError::new("Session host table poisoned"))?.contains(&context.environment_id);
-        let stopped = if host { Ok(()) } else { self
+        // Each environment owns exactly one Agent process. Stop only this
+        // process before terminating the environment; never stop all branches.
+        let stopped = self
             .process
             .terminate(&context.environment_id)
-            .and_then(|_| self.process.stop(&context.environment_id)) };
+            .and_then(|_| self.process.stop(&context.environment_id));
         let inner = self.inner.terminate_with_context(context);
         let filesystem = self
             .data_plane
@@ -449,6 +535,12 @@ impl Backend for BaseRuntime {
             failures.push(format!("data_plane terminate failed: {error}"));
         }
         if failures.is_empty() {
+            if let Ok(mut launches) = self.launches.lock() {
+                launches.remove(&context.environment_id);
+            }
+            if let Ok(mut holders) = self.holders.lock() {
+                holders.remove(&context.environment_id);
+            }
             Ok(())
         } else {
             Err(BackendError::new(failures.join("; ")))
@@ -460,8 +552,7 @@ impl Backend for BaseRuntime {
     }
 
     fn cleanup_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        let host = self.session_hosts.lock().map_err(|_| BackendError::new("Session host table poisoned"))?.contains(&context.environment_id);
-        let process = if host { Ok(()) } else { self.process.cleanup(&context.environment_id) };
+        let process = self.process.cleanup(&context.environment_id);
         let inner = self.inner.cleanup_with_context(context);
         let filesystem = self
             .data_plane
@@ -478,6 +569,12 @@ impl Backend for BaseRuntime {
             failures.push(format!("data_plane cleanup failed: {error}"));
         }
         if failures.is_empty() {
+            if let Ok(mut launches) = self.launches.lock() {
+                launches.remove(&context.environment_id);
+            }
+            if let Ok(mut holders) = self.holders.lock() {
+                holders.remove(&context.environment_id);
+            }
             Ok(())
         } else {
             Err(BackendError::new(failures.join("; ")))
@@ -497,7 +594,9 @@ impl Backend for BaseRuntime {
             (Some(left), Some(right)) if left == right => Some(left),
             // Backends may remove cleaned records or retain their terminal
             // fact. Both representations mean all owned resources are gone.
-            (Some(EnvironmentState::Cleaned), None) | (None, Some(EnvironmentState::Cleaned)) => Some(EnvironmentState::Cleaned),
+            (Some(EnvironmentState::Cleaned), None) | (None, Some(EnvironmentState::Cleaned)) => {
+                Some(EnvironmentState::Cleaned)
+            }
             (Some(_), Some(_)) => Some(EnvironmentState::PartiallyAvailable),
             (Some(_), None) | (None, Some(_)) => Some(EnvironmentState::PartiallyAvailable),
             (None, None) => None,

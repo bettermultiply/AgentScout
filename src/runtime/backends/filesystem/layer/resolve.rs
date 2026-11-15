@@ -4,8 +4,8 @@ use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
-use super::*;
 use super::super::util::*;
+use super::*;
 
 use super::super::state::MountUnit;
 
@@ -29,7 +29,10 @@ pub(crate) fn read_layer_entries() -> usize {
 }
 use crate::runtime::backend::BackendError;
 
-pub(crate) fn node_from_metadata(path: &Path, metadata: &fs::Metadata) -> Result<Node, BackendError> {
+pub(crate) fn node_from_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<Node, BackendError> {
     let file_type = metadata.file_type();
     let mode = metadata.mode();
     let mut opaque = false;
@@ -45,8 +48,7 @@ pub(crate) fn node_from_metadata(path: &Path, metadata: &fs::Metadata) -> Result
         opaque = overlay_xattr(path, "opaque")
             .map(|value| value == b"y" || value == b"Y")
             .unwrap_or(false);
-        redirect = overlay_xattr(path, "redirect")
-            .and_then(|value| String::from_utf8(value).ok());
+        redirect = overlay_xattr(path, "redirect").and_then(|value| String::from_utf8(value).ok());
         NodeKind::Dir
     } else if file_type.is_file() {
         metacopy = has_overlay_xattr(path, "metacopy");
@@ -117,9 +119,7 @@ pub(crate) fn resolve_node(maps: &[View], path: &str) -> Option<Node> {
                     return None;
                 }
                 if let Some(target) = &node.redirect {
-                    let suffix = lookup
-                        .strip_prefix(&format!("{ancestor}/"))
-                        .unwrap_or("");
+                    let suffix = lookup.strip_prefix(&format!("{ancestor}/")).unwrap_or("");
                     lookup = if suffix.is_empty() {
                         target.clone()
                     } else {
@@ -173,9 +173,7 @@ pub(crate) fn resolve_path_in_upper(
                     return Ok(PathResolution::Hidden);
                 }
                 if let Some(target) = node.redirect {
-                    let suffix = lookup
-                        .strip_prefix(&format!("{ancestor}/"))
-                        .unwrap_or("");
+                    let suffix = lookup.strip_prefix(&format!("{ancestor}/")).unwrap_or("");
                     redirected = Some(if suffix.is_empty() {
                         target
                     } else {
@@ -213,20 +211,28 @@ pub(crate) fn resolve_path_in_layers(
         }
     }
     // The bottom of every mount-backed chain is the host mount point itself.
-    match resolve_path_in_upper(mount.saved_base.as_deref().unwrap_or(&mount.target), &lookup)? {
+    match resolve_path_in_upper(
+        mount
+            .saved_base
+            .as_deref()
+            .or(mount.base.as_deref())
+            .unwrap_or(&mount.target),
+        &lookup,
+    )? {
         PathResolution::Node(node) => Ok(Some(node)),
         PathResolution::Hidden | PathResolution::NotPresent => Ok(None),
     }
 }
 
-pub(crate) fn redirected_lookup(upper: &Path, lookup: &str) -> Result<Option<String>, BackendError> {
+pub(crate) fn redirected_lookup(
+    upper: &Path,
+    lookup: &str,
+) -> Result<Option<String>, BackendError> {
     for ancestor in ancestors(lookup) {
         if let Some(node) = layer_node_at(upper, &ancestor)?
             && let Some(target) = node.redirect
         {
-            let suffix = lookup
-                .strip_prefix(&format!("{ancestor}/"))
-                .unwrap_or("");
+            let suffix = lookup.strip_prefix(&format!("{ancestor}/")).unwrap_or("");
             return Ok(Some(if suffix.is_empty() {
                 target
             } else {

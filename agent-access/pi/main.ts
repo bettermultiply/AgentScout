@@ -62,6 +62,10 @@ const cancelled = new Set(), generations = new Map(), commands = new Map();
 const activeActions = new Map(), reportedActions = new Set();
 const aborting = new Set();
 const modelActions = new Map();
+const modelForks = new Map();
+const modelHolds = new Map();
+const modelResultHolds = new Map();
+const modelRestores = new Map();
 const transcriptQueues = new Map();
 const reportedEntries = new Set();
 const candidateWaiters = new Map();
@@ -170,9 +174,13 @@ async function finishActions(branch,status) {
 }
 function tools(branch) {
     const cwd=tree.branches.get(branch)?.manager.getHeader().cwd??process.cwd();
-    const fileTools=filesystemTools(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS,branch,cwd,require(resolve(root,'packages/coding-agent/src/core/tools/index.ts')));
+    const fileTools=process.env.ASCOUT_FILESYSTEM_TOOL_PLANS
+        ? filesystemTools(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS,branch,cwd,require(resolve(root,'packages/coding-agent/src/core/tools/index.ts')))
+        : [];
     return [...fileTools,...runtimeTools.map(spec=>({name:spec.name,label:spec.name,description:spec.description,parameters:Type.Unsafe(spec.parameters),execute:async(operation,_args,signal)=>{
-        if (branch!==authority) throw Error('Candidate action is unavailable before acceptance');
+        // Candidate access is decided by the control-plane Policy/Runtime
+        // gates. Pi must report the attempted call and its real failure, not
+        // encode a business admission rule here.
         const id=key(branch,operation);
         let value;
         if(results.has(id)){value=results.get(id);results.delete(id)}
@@ -192,30 +200,48 @@ const filesystemToolSelection=process.env.ASCOUT_FILESYSTEM_TOOL_PLANS
     ? {tools:['read','bash','edit','write',...runtimeTools.map(tool=>tool.name)]}
     : {};
 async function beforeModelInference(branch, modelValue, context, signal) {
+    await modelRestores.get(branch);
     syncTranscript(branch);
     // Model inference is a PURE step: the generic layer evaluates `admit` but
     // never applies the effect gate, reports an admission, or counts extent.
     if(saving||closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
-    const op={kind:'model_inference',produces_result:true,result_pending:true,has_predictor:false};
-    await access.beforeAction({
+    const actionId=modelForks.get(branch)?.operation_id??`model-${nextAction++}`;
+    const op={kind:'model_inference',name:'model',arguments:{model:`${modelValue.provider}/${modelValue.id}`},branch_id:branch,predicting:modelForks.has(branch),authority:branch===authority};
+    op.has_predictor=await access.hasPredictor(branch,op,signal);
+    const hold=Promise.withResolvers();modelHolds.set(key(branch,actionId),hold);
+    const disposition=await access.beforeAction({
         branch,
-        actionId:'model',
+        actionId,
         actionKind:'model_inference',
         name:'model',
         arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length},
         op,
         contractContext:{model:`${modelValue.provider}/${modelValue.id}`,message_count:context.messages.length,runtime_capabilities:runtimeTools},
         admit:true,
+        admissionFacts:()=>{
+            const saved=structuredClone(sessions.get(branch).messages),manager=tree.branches.get(branch).manager;
+            const checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${actionId}:${saved.length}`};
+            checkpoints.set(key(branch,actionId),{saved,checkpoint,treeTail:tree.assertCheckpoint(branch,saved),manager,model:true});
+            return {checkpoint};
+        },
         signal,
     });
+    if(disposition.kind==='admit')await new Promise((resolve,reject)=>{
+        const abort=()=>reject(Error('Model admission cancelled'));
+        signal?.addEventListener('abort',abort,{once:true});
+        hold.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
+        if(signal?.aborted)abort();
+    });
+    modelHolds.delete(key(branch,actionId));
     if(closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
-    const actionId=`model-${nextAction++}`, startedAt=Date.now();
+    const startedAt=Date.now();
     const queue=modelActions.get(branch)??[];
     const action={action_id:actionId,started_at_ms:startedAt,seen_message:false};
     queue.push(action);
     modelActions.set(branch,queue);
-    await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',result_pending:true,name:'model',arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length},timestamp_ms:startedAt});
+    await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',name:'model',arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length},timestamp_ms:startedAt});
     return async status=>{
+        if(status==='succeeded')return;
         // Pi settles the stream and runs this callback before the agent loop
         // emits the assistant message_end. Keep the action while its message
         // has started so message_end can still pair the usage. Only forget an
@@ -226,13 +252,22 @@ async function beforeModelInference(branch, modelValue, context, signal) {
             if(index>=0)pending.splice(index,1);
             if(pending?.length===0)modelActions.delete(branch);
         }
-        await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',status:status??(signal?.aborted?'cancelled':'succeeded'),result:null,timestamp_ms:Date.now()});
+        if(!action.seen_message)await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',status:status??(signal?.aborted?'cancelled':'failed'),result:null,timestamp_ms:Date.now()});
     };
 }
 function install(session,branch) {
     const before=session.agent.beforeToolCall, after=session.agent.afterToolCall;
     session.agent.beforeToolCall=async(context,signal)=>{
         if(saving)throw Error('Save requested before tool execution');
+        if(cancelled.has(branch))throw Error('Tool cancelled');
+        await modelRestores.get(branch);
+        const resultHold=modelResultHolds.get(branch);
+        if(resultHold)await new Promise((resolve,reject)=>{
+            const abort=()=>reject(Error('Model continuation cancelled'));
+            signal?.addEventListener('abort',abort,{once:true});
+            resultHold.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
+            if(signal?.aborted)abort();
+        });
         const hookKey=key(branch,context.toolCall.id);
         pendingHooks.set(hookKey,{branch,toolCall:structuredClone(context.toolCall),args:structuredClone(context.args),assistantMessage:structuredClone(context.assistantMessage)});
         try {
@@ -259,16 +294,16 @@ function install(session,branch) {
             actionKind:'tool_execution',
             name:context.toolCall.name,
             arguments:context.args,
-            op:{kind:context.toolCall.name,produces_result:true,result_pending:true,has_predictor:true},
-            contractContext:{arguments:context.args,runtime_capabilities:runtimeTools},
+            op:{kind:context.toolCall.name,name:context.toolCall.name,arguments:context.args,has_predictor:await access.hasPredictor(branch,{kind:context.toolCall.name,name:context.toolCall.name,arguments:context.args,authority:branch===authority},signal)},
+            contractContext:{arguments:context.args,runtime_capabilities:runtimeTools,isolated:!!process.env.ASCOUT_FILESYSTEM_TOOL_PLANS&&!runtimeTools.some(t=>t.name===context.toolCall.name)},
             admit:()=>branch===authority,
             admissionFacts:()=>({checkpoint:prepareCheckpoint()}),
             admitted:suspendedHooks.get(hookKey)?.admitted??false,
             signal,
         });
-        if(signal?.aborted||branch!==authority)return previous;
+        if(signal?.aborted)throw Error('Tool cancelled');
         const toolCheckpoint=prepareCheckpoint();
-        await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',result_pending:true,name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
+        await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
         const hook=pendingHooks.get(hookKey);if(hook)hook.started=true;
         return previous;
         } catch(error) {
@@ -308,6 +343,10 @@ function install(session,branch) {
                 const pending=modelActions.get(branch),index=pending?.findIndex(action=>action.seen_message)??-1;
                 const action=index>=0?pending.splice(index,1)[0]:undefined;
                 if(pending?.length===0)modelActions.delete(branch);
+                if(action&&checkpoints.get(key(branch,action.action_id))?.model)modelResultHolds.set(branch,Promise.withResolvers());
+                if(action)void report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:'model_inference',status:['error','aborted'].includes(event.message.stopReason)?'failed':'succeeded',result:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},evidence:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},timestamp_ms:Date.now()});
+                const fork=modelForks.get(branch);
+                if(fork){modelForks.delete(branch);const restoring=session.setModel(fork.model).then(()=>session.setThinkingLevel(fork.thinkingLevel));modelRestores.set(branch,restoring);void restoring.catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error)}));}
                 const started_at_ms=Number.isFinite(event.message.timestamp)?event.message.timestamp:(action?.started_at_ms??Date.now());
                 const duration_ms=Number.isFinite(event.message.durationMs)?event.message.durationMs:Math.max(0,Date.now()-started_at_ms);
                 // Usage is never dropped: a model call that cannot be paired
@@ -521,12 +560,28 @@ async function handle(command) {
             candidateSetups.set(branch,structuredClone(command));
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
-            const messages=structuredClone(checkpoint.saved),last=messages.at(-1);
-            if(last?.role!=='assistant'||!last.content.some(p=>p.type==='toolCall'&&p.id===command.operation_id&&p.name===command.tool_name))throw Error('Invalid pending checkpoint');
+            // The control plane owns the logical transcript.  Native session
+            // records remain branch-local implementation details; the
+            // supplied history is the checkpoint context for this process.
+            const messages=structuredClone(command.history?.length?command.history:checkpoint.saved);
+            if(command.prediction?.predict==='branch_model'){
+                const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail);
+                await access.control(command);
+                const resolved=resolveCliModel({cliModel:command.prediction.model,cliThinking:parent.thinkingLevel,modelRuntime:parent.modelRuntime});
+                if(resolved.error||!resolved.model)throw Error(resolved.error??'Unknown predictor model');
+                const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:resolved.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+                sessions.set(branch,session);install(session,branch);
+                modelForks.set(branch,{model:parent.model,thinkingLevel:parent.thinkingLevel,operation_id:command.operation_id});
+                candidateSetups.delete(branch);
+                await report({message:'branch_created',branch_id:branch});await report({message:'branch_started',branch_id:branch});await report({message:'branch_ready',branch_id:branch});
+                if(!saving&&!recoveryPaused)executeTurn(session,branch,()=>session.continue());return;
+            }
+            const checkpointMessage=messages.findLast(message=>message.role==='assistant'&&message.content?.some(p=>p.type==='toolCall'&&p.id===command.operation_id&&p.name===command.tool_name));
+            if(!checkpointMessage)throw Error('Invalid pending checkpoint');
             const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail);
             if(saving)return;
             const paired: any[]=[];
-            for(const part of last.content){
+             for(const part of checkpointMessage.content){
                 if(part.type!=='toolCall')continue;
                 if(part.id===command.operation_id)paired.push({role:'toolResult',toolCallId:part.id,toolName:part.name,content:[{type:'text',text:text(command.prediction)}],isError:false,timestamp:Date.now()});
                 else {
@@ -565,6 +620,9 @@ async function handle(command) {
             return;
         case 'resolve_pending': {
             if(command.outcome===undefined)return;
+            const modelHold=modelHolds.get(key(branch,command.operation_id));
+            if(modelHold){modelHold.resolve();return;}
+            if(command.outcome?.phase==='continue'){modelResultHolds.get(branch)?.resolve();modelResultHolds.delete(branch);return;}
             const id=key(branch,command.operation_id),waiter=waiters.get(id);if(waiter){waiters.delete(id);waiter(command.outcome)}else results.set(id,command.outcome);
             return;
         }

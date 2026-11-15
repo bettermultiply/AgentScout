@@ -4,12 +4,14 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use crate::protocol::contract::{AdapterMessage, EnvironmentState, Event, EventPayload, Operation, OperationRequest, ResultStatus};
+use crate::protocol::contract::{
+    AdapterMessage, EnvironmentState, Event, EventPayload, Operation, OperationRequest,
+    ResultStatus,
+};
 use crate::runtime::backend::CancelHandle;
 
-use super::*;
 use super::result::result as make_result;
-
+use super::*;
 
 #[derive(Default)]
 struct Pending {
@@ -84,10 +86,8 @@ impl Queue {
                         "adapter: operation {} panicked; the queue continues with a failed result",
                         request.request_id
                     );
-                    let mut result =
-                        make_result(&request, ResultStatus::Failed, None, false);
-                    result.reason =
-                        Some("runtime operation panicked".to_string());
+                    let mut result = make_result(&request, ResultStatus::Failed, None, false);
+                    result.reason = Some("runtime operation panicked".to_string());
                     result
                 }
             };
@@ -109,6 +109,7 @@ impl Queue {
                 shared.set_known(&request.environment_id, state);
                 if let Operation::BranchEnvironment {
                     child_environment_id,
+                    ..
                 } = &request.operation
                     && result.status == ResultStatus::Completed
                 {

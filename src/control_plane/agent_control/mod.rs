@@ -175,6 +175,17 @@ pub struct ActionRecord {
     pub parent_action_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ActionFinishedFact {
+    pub action_id: String,
+    pub action_kind: ActionKind,
+    pub status: ActionStatus,
+    pub timestamp_ms: u64,
+    pub result: Option<Value>,
+    pub evidence: Option<Value>,
+    pub tool_calls: Option<Value>,
+}
+
 /// 控制面操作的种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -399,6 +410,8 @@ pub struct SpeculativeTree {
     /// Only live actions are retained; completed facts belong to the Ledger.
     #[serde(default)]
     pub active_actions: BTreeMap<String, BTreeMap<String, ActionRecord>>,
+    #[serde(default)]
+    pub(crate) action_facts: BTreeMap<String, BTreeMap<String, ActionFinishedFact>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_binding: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -452,6 +465,15 @@ pub struct SpeculativeTree {
     next_command_id: u64,
     #[serde(skip)]
     pending_observations: Vec<crate::control_plane::observation::ObservationContent>,
+    #[serde(skip)]
+    pending_records: Vec<Value>,
+    /// The control plane's logical transcript, retained independently of
+    /// native Agent session files.
+    #[serde(default)]
+    pub(crate) transcripts: BTreeMap<String, Vec<Value>>,
+    /// Runtime launch template used to derive one Agent process per branch.
+    #[serde(default)]
+    pub(crate) agent_launch: Option<crate::protocol::contract::AgentLaunch>,
 }
 
 impl SpeculativeTree {
@@ -464,6 +486,7 @@ impl SpeculativeTree {
             branches: BTreeMap::new(),
             chances: BTreeMap::new(),
             active_actions: BTreeMap::new(),
+            action_facts: BTreeMap::new(),
             policy_binding: None,
             runtime_binding: None,
             capability_view: None,
@@ -487,6 +510,9 @@ impl SpeculativeTree {
             next_generation: 1,
             next_command_id: 1,
             pending_observations: Vec::new(),
+            pending_records: Vec::new(),
+            transcripts: BTreeMap::new(),
+            agent_launch: None,
         }
     }
 
@@ -537,7 +563,9 @@ impl SpeculativeTree {
 }
 
 /// 控制面向 Pi 接入侧发送的命令。
-fn deserialize_notification<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+fn deserialize_notification<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
     let text = String::deserialize(deserializer)?;
     if text.trim().is_empty() {
         return Err(serde::de::Error::custom("notification must be nonblank"));
@@ -548,11 +576,24 @@ fn deserialize_notification<'de, D: serde::Deserializer<'de>>(deserializer: D) -
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AgentCommand {
-    Model { branch_id: String, model: String },
-    SuspendRecovery { branch_id: String },
-    CancelSave { branch_id: String },
-    Save { branch_id: String, path: PathBuf },
-    Load { branch_id: String, path: PathBuf },
+    Model {
+        branch_id: String,
+        model: String,
+    },
+    SuspendRecovery {
+        branch_id: String,
+    },
+    CancelSave {
+        branch_id: String,
+    },
+    Save {
+        branch_id: String,
+        path: PathBuf,
+    },
+    Load {
+        branch_id: String,
+        path: PathBuf,
+    },
     /// Delivers the compiled local Decision artifact. The adapter may reject
     /// it when it has no real Hook/evaluation seam.
     LocalPolicy {
@@ -589,6 +630,8 @@ pub enum AgentCommand {
         command_id: String,
         #[serde(default)]
         generation: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        history: Vec<Value>,
     },
     ResolvePending {
         branch_id: String,
@@ -609,7 +652,11 @@ pub enum AgentCommand {
     },
     Promote {
         branch_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_notification")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_notification"
+        )]
         notification: Option<String>,
         #[serde(default)]
         command_id: String,
@@ -637,11 +684,23 @@ pub enum AgentCommand {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AgentMessage {
-    TurnFailed { branch_id: String, reason: String },
-    ModelChanged { branch_id: String, model: String, error: Option<String> },
+    TurnFailed {
+        branch_id: String,
+        reason: String,
+    },
+    ModelChanged {
+        branch_id: String,
+        model: String,
+        error: Option<String>,
+    },
     RecoverySuspended,
-    RecoverySaved { path: PathBuf, error: Option<String> },
-    RecoveryLoaded { error: Option<String> },
+    RecoverySaved {
+        path: PathBuf,
+        error: Option<String>,
+    },
+    RecoveryLoaded {
+        error: Option<String>,
+    },
     Output {
         branch_id: String,
         #[serde(default)]
@@ -658,8 +717,6 @@ pub enum AgentMessage {
         action_kind: ActionKind,
         #[serde(default)]
         parent_action_id: Option<String>,
-        /// true 表示接入侧停在执行前边界，尚未执行真实 action。
-        result_pending: bool,
         name: String,
         arguments: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]

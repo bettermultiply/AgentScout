@@ -161,6 +161,25 @@ impl SpeculativeTree {
     /// Proposal。`AssumptionSet` 清空前该 Branch 没有提交资格；这里不新增
     /// 依赖机制，只根据现有引用与 Chance 阶段判断。
     pub(crate) fn ancestor_assumptions_unresolved(&self, branch: &BranchRecord) -> bool {
+        // A branch_model execution can exist before its Proposal. Its ownership
+        // is already in the Tree, but there is no Proposal reference to invent.
+        // Descendants still cannot commit through that unresolved ancestor.
+        let mut parent = branch.parent_branch_id.as_deref();
+        while let Some(id) = parent {
+            let Some(ancestor) = self.branches.get(id) else {
+                break;
+            };
+            // `change_authority` changes the former authority's role to
+            // Candidate for history, but that branch has no Chance of its
+            // own. It is not an unresolved speculative ancestor.
+            if ancestor.role == BranchRole::Candidate
+                && ancestor.chance_id.is_some()
+                && self.branch_proposal(id).is_none()
+            {
+                return true;
+            }
+            parent = ancestor.parent_branch_id.as_deref();
+        }
         branch.assumption_set.iter().any(|assumption| {
             Some(&assumption.chance_id) != branch.chance_id.as_ref()
                 && !self
@@ -230,7 +249,10 @@ impl SpeculativeTree {
         let live = chance.branch_ids.iter().any(|id| {
             self.branches.get(id).is_some_and(|branch| {
                 branch.status.is_live_candidate()
-                    || matches!(branch.status, BranchStatus::Promoting | BranchStatus::Promoted)
+                    || matches!(
+                        branch.status,
+                        BranchStatus::Promoting | BranchStatus::Promoted
+                    )
             })
         });
         if !live {
@@ -255,12 +277,13 @@ impl SpeculativeTree {
         validation_id: u64,
         validated_at_ms: Option<u64>,
     ) {
-        self.pending_observations.push(ObservationContent::ProposalValidated {
-            chance_id: chance_id.into(),
-            proposal_id: proposal_id.into(),
-            validation_id,
-            validated_at_ms,
-        });
+        self.pending_observations
+            .push(ObservationContent::ProposalValidated {
+                chance_id: chance_id.into(),
+                proposal_id: proposal_id.into(),
+                validation_id,
+                validated_at_ms,
+            });
     }
 
     /// 权威值和验证依据属于 Chance。
@@ -307,7 +330,8 @@ impl SpeculativeTree {
             }
             Some(Value::Object(value))
         };
-        let (Some(before), Some(after)) = (public_observation(before), public_observation(after)) else {
+        let (Some(before), Some(after)) = (public_observation(before), public_observation(after))
+        else {
             return Ok(());
         };
         self.pending_observations.push(

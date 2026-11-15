@@ -7,6 +7,7 @@ impl AgentController {
         &self,
         tree: &SpeculativeTree,
         policy: &CompiledPolicy,
+        engine: &PolicyEngine,
         runtime: &dyn Runtime,
         capabilities: &RuntimeCapabilities,
         work: &ControlOperation,
@@ -27,7 +28,7 @@ impl AgentController {
         };
         match work {
             ControlOperation::Select(ids) => self
-                .select(tree, policy, ids)
+                .select(tree, policy, engine, ids)
                 .map(ControlResult::Selected)
                 .map_err(|error| error.to_string()),
             ControlOperation::Predict(tool) => {
@@ -48,16 +49,15 @@ impl AgentController {
                 } else {
                     None
                 };
-                self.predict(tree, policy, tool, observation.as_ref())
-                    .map(ControlResult::Predictions)
+                self.predict(tree, policy, engine, tool, observation.as_ref())
                     .map_err(|error| error.to_string())
             }
             ControlOperation::Launch(tool) => self
-                .launch_allowed(tree, policy, tool)
+                .launch_allowed(tree, policy, engine, tool)
                 .map(ControlResult::Launch)
                 .map_err(|error| error.to_string()),
             ControlOperation::Rebalance => self
-                .rebalance(tree, policy)
+                .rebalance(tree, policy, engine)
                 .map(ControlResult::Rebalance)
                 .map_err(|error| error.to_string()),
             ControlOperation::Validate(candidate) => {
@@ -67,12 +67,28 @@ impl AgentController {
                     .as_ref()
                     .and_then(|id| tree.chances.get(id))
                     .ok_or("candidate Chance is missing")?;
+                // A Candidate without a Proposal has nothing to compare. Do not
+                // invent a null Proposal and send it through Policy Match: the
+                // missing Proposal is itself the truthful terminal fact.
+                let Some(proposal) = tree.branch_proposal(candidate) else {
+                    return Ok(ControlResult::Disposition(
+                        false,
+                        "incompatible".into(),
+                        None,
+                        None,
+                    ));
+                };
                 self.disposition(
                     policy,
-                    tree.branch_proposal(candidate)
-                        .ok_or("candidate Proposal is missing")?,
+                    engine,
+                    tree,
+                    candidate,
+                    proposal,
                     &chance.operation_id,
-                    &tree.candidate_evidence(candidate).cloned().unwrap_or(Value::Null),
+                    &tree
+                        .candidate_evidence(candidate)
+                        .cloned()
+                        .unwrap_or(Value::Null),
                     &tree
                         .candidate_outcome(candidate)
                         .cloned()
@@ -119,6 +135,7 @@ impl AgentController {
                         parent_branch_id,
                         Operation::BranchEnvironment {
                             child_environment_id: branch_id.clone(),
+                            agent: tree.agent_launch_for(branch_id),
                         },
                     )?;
                 }
@@ -147,6 +164,7 @@ impl AgentController {
         &self,
         tree: &SpeculativeTree,
         policy: &CompiledPolicy,
+        engine: &PolicyEngine,
         ids: &[String],
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let frontier: Vec<Value> = ids
@@ -160,7 +178,7 @@ impl AgentController {
                 })
             })
             .collect();
-        let selected = PolicyEngine::default().evaluate(
+        let selected = engine.evaluate(
             policy,
             Decision::Select,
             &json!({"frontier_view": frontier, "scheduling_context": {}}),
@@ -177,9 +195,10 @@ impl AgentController {
         &self,
         tree: &SpeculativeTree,
         policy: &CompiledPolicy,
+        engine: &PolicyEngine,
         tool: &ToolPending,
         observation: Option<&Value>,
-    ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    ) -> Result<ControlResult, Box<dyn std::error::Error>> {
         let assumptions: Vec<Value> = tree
             .branches
             .get(&tool.branch_id)
@@ -192,7 +211,7 @@ impl AgentController {
                 })
             })
             .collect();
-        let result = PolicyEngine::default().evaluate(
+        let result = engine.evaluate(
             policy,
             Decision::Predict,
             &json!({
@@ -200,6 +219,11 @@ impl AgentController {
                     "chance_id": tool.chance_id,
                     "tool_name": tool.tool_name,
                     "arguments": tool.arguments,
+                    "kind": tree
+                        .chances
+                        .get(&tool.chance_id)
+                        .and_then(|chance| chance.speculation_kind)
+                        .map(|kind| format!("{kind:?}").to_lowercase()),
                 },
                 "process_context": {
                     "operation_id": tool.operation_id,
@@ -214,12 +238,17 @@ impl AgentController {
                 },
             }),
         )?;
-        Ok(result["proposals"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.get("payload").cloned())
-            .collect())
+        if result["predict"] == "branch_model" {
+            return Ok(ControlResult::BranchModel(result));
+        }
+        Ok(ControlResult::Predictions(
+            result["proposals"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("payload").cloned())
+                .collect(),
+        ))
     }
 
     /// `launch` decides whether the authority value is fetched now. `false`
@@ -228,6 +257,7 @@ impl AgentController {
         &self,
         tree: &SpeculativeTree,
         policy: &CompiledPolicy,
+        engine: &PolicyEngine,
         tool: &ToolPending,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         let authority = tree
@@ -239,7 +269,7 @@ impl AgentController {
             .iter()
             .map(|id| tree.branches[id].clone())
             .collect();
-        let allowed = PolicyEngine::default().evaluate(
+        let allowed = engine.evaluate(
             policy,
             Decision::Launch,
             &json!({
@@ -256,10 +286,9 @@ impl AgentController {
         &self,
         tree: &SpeculativeTree,
         policy: &CompiledPolicy,
+        engine: &PolicyEngine,
     ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-        let view = |branch: &crate::control_plane::agent_control::BranchRecord| {
-            json!({"branch_id": branch.branch_id, "chance_id": branch.chance_id})
-        };
+        let view = |branch: &crate::control_plane::agent_control::BranchRecord| json!({"branch_id": branch.branch_id, "chance_id": branch.chance_id});
         let candidates = || {
             tree.branches
                 .values()
@@ -273,7 +302,7 @@ impl AgentController {
             .filter(|branch| branch.status == BranchStatus::Blocked(BlockedReason::Rebalanced))
             .map(view)
             .collect();
-        let actions = PolicyEngine::default().evaluate(
+        let actions = engine.evaluate(
             policy,
             Decision::Rebalance,
             &json!({"active_view": active, "paused_view": paused, "scheduling_context": {}}),
@@ -294,18 +323,25 @@ impl AgentController {
     pub fn disposition(
         &self,
         policy: &CompiledPolicy,
+        engine: &PolicyEngine,
+        tree: &SpeculativeTree,
+        candidate_id: &str,
         proposal: &ProposalRecord,
         operation_id: &str,
         evidence: &Value,
         outcome: &Value,
     ) -> Result<(bool, String, Option<String>, Option<u64>), Box<dyn std::error::Error>> {
-        let engine = PolicyEngine::default();
         let result = engine.evaluate(
             policy,
             Decision::Match,
             &json!({
                 "proposal": {"payload": proposal.payload}, "evidence": evidence,
-                "match_context": {"operation_id": operation_id}
+                "match_context": {
+                    "operation_id": operation_id,
+                    "proposal_pending": proposal.payload.is_null(),
+                    "authority": match_facts(tree, tree.authority_branch_id.as_deref(), operation_id, Some(outcome)),
+                    "candidate": match_facts(tree, Some(candidate_id), operation_id, Some(&proposal.payload)),
+                }
             }),
         )?;
         // Match is the validation operation; Dispose and Promote may take
@@ -321,7 +357,7 @@ impl AgentController {
             Decision::Dispose,
             &json!({
                 "branch": {"operation_id": operation_id},
-                "resolution": if compatible {"accepted"} else {"rejected"},
+                "resolution": if compatible {"accepted"} else if verdict == "indeterminate" {"indeterminate"} else if verdict == "error" {"error"} else {"rejected"},
                 "context": {
                     "match": result,
                     "authority_outcome": outcome
@@ -337,6 +373,63 @@ impl AgentController {
         let promote = disposition["actions"]
             .as_array()
             .is_some_and(|actions| actions.iter().any(|action| action["intent"] == "Promote"));
-        Ok((compatible && promote, verdict, notification, validated_at_ms))
+        Ok((
+            compatible && promote,
+            verdict,
+            notification,
+            validated_at_ms,
+        ))
     }
+}
+
+fn match_facts(
+    tree: &SpeculativeTree,
+    branch_id: Option<&str>,
+    operation_id: &str,
+    result: Option<&Value>,
+) -> Value {
+    let branch = branch_id.and_then(|id| tree.branches.get(id));
+    let usage = branch_id.and_then(|id| tree.model_usage.get(id));
+    let fact = branch_id
+        .and_then(|id| tree.action_facts.get(id))
+        .and_then(|facts| facts.get(operation_id));
+    let fact_result = fact.and_then(|item| item.result.as_ref());
+    let fact_evidence = fact.and_then(|item| item.evidence.as_ref());
+    let selected_result = result
+        .filter(|value| !value.is_null())
+        .or(fact_result)
+        .or_else(|| branch_id.and_then(|id| tree.candidate_outcome(id)));
+    let selected_evidence =
+        fact_evidence.or_else(|| branch_id.and_then(|id| tree.candidate_evidence(id)));
+    let selected_tool_calls = fact
+        .and_then(|item| item.tool_calls.as_ref())
+        .or_else(|| selected_result.and_then(|item| item.get("tool_calls")))
+        .or_else(|| selected_evidence.and_then(|item| item.get("tool_calls")));
+    let selected_action_id = fact
+        .map(|item| item.action_id.as_str())
+        .unwrap_or(operation_id);
+    let selected_model = usage.and_then(|items| {
+        items
+            .iter()
+            .find(|item| item.action_id.as_deref() == Some(selected_action_id))
+            .map(|item| item.model.as_str())
+    });
+    let speculation_kind = branch_id
+        .and_then(|id| tree.branches.get(id))
+        .and_then(|branch| branch.chance_id.as_ref())
+        .and_then(|id| tree.chances.get(id))
+        .and_then(|chance| chance.speculation_kind);
+    json!({
+        "branch": branch,
+        "action_id": selected_action_id,
+        "action_kind": fact.map(|item| item.action_kind),
+        "status": fact.map(|item| item.status),
+        "speculation_kind": speculation_kind,
+        "model": selected_model,
+        "result": selected_result,
+        "evidence": selected_evidence,
+        "usage": usage,
+        "tool_calls": selected_tool_calls,
+        "pairing": {"operation_id": operation_id, "action_id": selected_action_id, "branch_id": branch_id},
+    })
 }

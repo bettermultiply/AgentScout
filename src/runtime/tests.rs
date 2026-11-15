@@ -481,3 +481,78 @@ fn base_runtime_cleanup_accepts_removed_data_plane_and_retained_cleaned_inner() 
         );
         assert_eq!(result.unwrap_err().message, "filesystem operation is unsupported by this Backend");
     }
+
+fn holder_request(socket: &std::path::Path, command: &str) -> serde_json::Value {
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    stream
+        .write_all(
+            (serde_json::json!({"op":"exec","command":command,"cwd":"/app"}).to_string() + "\n")
+                .as_bytes(),
+        )
+        .unwrap();
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap() == 0 {
+            panic!("holder closed without a result");
+        }
+        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if event.get("exit_code").is_some() || event.get("error").is_some() {
+            return event;
+        }
+    }
+}
+
+#[test]
+fn materialization_restarts_the_namespace_holder_on_the_new_generation() {
+    use crate::runtime::backends::filesystem::{FilesystemBackend, FilesystemConfig};
+    let root = tempfile::Builder::new()
+        .prefix("materialize-holder-")
+        .tempdir_in("/tmp/opencode")
+        .unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let mut config = FilesystemConfig::new(root.path().join("state"));
+    config.force_overlay = true;
+    config.allow_overlapping_state_directory = true;
+    config.isolated_paths = Some(vec![workspace.clone()]);
+    config.isolated_targets = vec![(workspace.clone(), PathBuf::from("/app"))];
+    let plane = Arc::new(FilesystemBackend::new(config).unwrap());
+    let runtime = BaseRuntime::new("runtime", MockBackend::new("inner"))
+        .with_data_plane(plane.clone())
+        .with_bubblewrap(plane.bubblewrap_path());
+    let context = BackendContext::new("authority");
+    runtime.establish_with_context(&context).unwrap();
+    let launch = AgentLaunch {
+        command: "/bin/sleep".into(),
+        args: vec!["30".into()],
+        cwd: workspace.clone(),
+        log: workspace.join("agent.log"),
+        instance_id: Some("host".into()),
+        env: BTreeMap::new(),
+    };
+    runtime.launch_agent(&context, &launch).unwrap();
+    let socket = root.path().join("state/holder-sockets/authority/cmd.sock");
+    assert_eq!(
+        holder_request(&socket, "printf before > /app/before")["exit_code"],
+        0
+    );
+    assert!(!workspace.join("before").exists());
+    assert!(runtime.process.is_holder("authority").unwrap());
+
+    let materialized = runtime.materialize(&context).unwrap();
+    assert!(materialized.confirmation.published);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("before")).unwrap(),
+        "before"
+    );
+    assert!(runtime.process.is_holder("authority").unwrap());
+    assert_eq!(
+        holder_request(&socket, "test \"$(cat /app/before)\" = before")["exit_code"],
+        0,
+        "the restarted holder must mount the new execution generation"
+    );
+    runtime.terminate("authority").unwrap();
+    runtime.cleanup("authority").unwrap();
+}

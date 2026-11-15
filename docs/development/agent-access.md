@@ -9,6 +9,20 @@
 
 通用层不读取 Pi 的消息结构、checkpoint、session、SDK、模型对象，也不读取 NLE 专有字段。Pi 把 `checkpoint` 作为不透明的 admission fact 交给通用层，通用层只把它原样放进 `speculative_admission_request`，不解释其内容。
 
+## 2.1 模型投机（`branch_model`）当前语义
+
+这条路径与工具等待路径不同，但已经有明确的接入顺序：
+
+1. Pi 在真正调用 `streamSimple` 前执行模型推理前 Hook，登记模型 action、checkpoint 和模型上下文；`message_start` 只是 SDK 的消息边界，不能替代这个 Hook。
+2. Hook 通过当前 Policy 的 `admit.opportunity_pass`／`admit.feasibility_pass` 判断是否有机会。Policy 的 `predict` 返回 `branch_model` 及候选模型（当前实现从 Policy artifact 的场景选择该模型），而不是由控制面或 Pi 硬编码模型选择。
+3. 控制面先按该等待点建立候选 Branch，再让候选使用指定模型继续推理；候选模型产生的 assistant 结果中，完整的 `tool_calls` 列表是比较输入。当前语义不是先创建一个只作占位的 Proposal 再补候选产出：候选先启动，模型完成后才以完整调用列表形成可比较的结果。
+4. 完整列表参与匹配：调用名称、参数以及调用数量／顺序均属于候选与权威模型调用列表的比较范围；不能只比较第一个调用，也不能用普通文本、思考文本或其他 assistant 输出判定命中。未满足确定等价规则的调用列表不能 Promote。
+5. 候选的模型推理和工具调用在 Promote 前仍受候选生命周期约束。候选不能把工具效果写入权威路径；Promote 只保留一个胜者并切换后续权威会话，旧 Parent 与其他候选按既有清理流程处置；Discard 取消并清理该候选，未验证输出不进入主对话。
+
+上述语义只说明当前已接通的模型投机接缝，不表示已经解决所有模型投机策略问题。调用列表等价的规范化／语义相似规则、多模型成本与失败回退仍由 `Discussion.md` 第 40 项保留为未决问题。
+
+当前实现中 Pi 是宿主上的单一进程，Authority 与全部 Candidate session 都由它托管；每个 Branch 的 Runtime 环境另外持有一个常驻 namespace-holder，文件工具通过该 Branch 专属 socket 在已有 mount namespace 中执行，Pi 不进入 Branch namespace。控制面持有逻辑 transcript，并在创建 Candidate 时继承父 Branch 的逻辑 transcript；Pi 的 Branch session 继续保留原生记录，以便最终汇总和从原生 checkpoint 续跑。`/app` 这类 workload 路径由 FilesystemBackend 的 `isolated_paths: [{path, target}]` 映射，host 目录仍是 overlay lower 与 publication 目标。holder 的命令各自独立执行，直接 shell 退出即返回，后台后代留在 Branch namespace 直到环境结束；物化轮换 execution generation 时旧 holder 结束，发布后建立新 holder。
+
 ## 2. 接口
 
 `agent-access/core/index.ts` 导出 `createAgentAccess(options)`。调用方提供：
@@ -48,7 +62,7 @@
 尚未解决的实现差距：
 
 - 完整持久化及汇总已保留原生身份、预测与原主／丢弃历史；剩余为并发配对、冲突与失败的完整验收。未额外要求另存完整投机后续路径。
-- compaction/custom 记录必须保存，但历史整理后如何处理其中的引用、摘要及其覆盖内容仍未定。
+- compaction/custom 记录必须保存；原生父引用与已知 `targetId`／`firstKeptEntryId`／`fromId` 已有校验，任意 custom payload 的外部引用仍不能通用解释。compaction 摘要保留原文已确定，不阻塞汇总或满足其他条件后的源清理，不再列作待议事项。
 - 在飞推理如何与历史整理、状态交接协调仍未定；不擅定重启、强制取消或替换运行中上下文。
 - rollback 与外部资源状态如何关联仍未定；最终 session 能恢复对话历史不等于已证明工具、环境和外部资源可完整继续。
 - 历史重挂后，系统外导出按原生 session/events 还原请求关系；正常运行不计算或保存回放专用键，还原算法与验证边界见 [回放](replay.md)。

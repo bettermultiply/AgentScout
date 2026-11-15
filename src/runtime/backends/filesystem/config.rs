@@ -13,6 +13,11 @@ pub struct FilesystemConfig {
     /// Explicit directory isolation, with all other host paths read-only.
     /// None retains automatic writable-mount discovery.
     pub isolated_paths: Option<Vec<PathBuf>>,
+    /// Sandbox path of an isolated path.  An isolated host directory is still
+    /// the overlay lower and the publication destination; this only changes
+    /// where the Agent sees that directory inside the sandbox.  A workload that
+    /// names its workspace `/app` maps the host workspace there.
+    pub isolated_targets: Vec<(PathBuf, PathBuf)>,
     /// Paths explicitly allowed to pass through read-write to the host.
     pub passthrough_rw: Vec<PathBuf>,
     /// Make unmanaged writable mounts read-only inside the sandbox.
@@ -39,11 +44,26 @@ impl FilesystemConfig {
             btrfs_path: PathBuf::from("btrfs"),
             force_overlay: false,
             isolated_paths: None,
+            isolated_targets: Vec::new(),
             passthrough_rw: Vec::new(),
             isolate_unmanaged_mounts: true,
             allow_overlapping_state_directory: false,
             fork_flatten_entry_limit: super::DEFAULT_FORK_FLATTEN_ENTRY_LIMIT,
         }
+    }
+
+    /// The path the Agent sees for an isolated host directory, when this
+    /// deployment maps it somewhere else inside the sandbox.
+    pub fn sandbox_target(&self, host: &std::path::Path) -> Option<PathBuf> {
+        self.isolated_targets
+            .iter()
+            .filter(|(source, _)| host.starts_with(source))
+            .max_by_key(|(source, _)| source.as_os_str().len())
+            .map(|(source, target)| match host.strip_prefix(source) {
+                Ok(relative) if relative.as_os_str().is_empty() => target.clone(),
+                Ok(relative) => target.join(relative),
+                Err(_) => target.clone(),
+            })
     }
 }
 

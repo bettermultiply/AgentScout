@@ -24,38 +24,36 @@ use std::thread;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::protocol::contract::{
+    EnvironmentState, FilesystemResult, Operation, PathScope, RuntimeCapabilities,
+};
 use crate::runtime::backend::{Backend, BackendContext, BackendError, CancelHandle};
 use crate::runtime::launch_plan::{LaunchFragment, MountEntry, MountSpec};
-use crate::protocol::contract::{
-    EnvironmentState, FilesystemResult, Operation, PathScope,
-    RuntimeCapabilities,
-};
-
 
 mod backend_impl;
 mod btrfs;
 mod config;
 mod copy;
+mod layer;
+mod materialize;
+mod merge;
 mod mounts;
 mod ops;
 mod probe;
 mod profile;
-mod refs;
-mod state;
-mod layer;
-mod merge;
-mod replay;
-mod util;
 mod recovery;
-mod materialize;
+mod refs;
+mod replay;
+mod state;
 mod tool_execution;
+mod util;
 
 pub use config::{FilesystemConfig, FilesystemMechanism, ForkCost};
 use copy::*;
 use layer::*;
 use merge::*;
 use profile::Profile;
-use refs::{spawn_delete_worker, DeleteWorker};
+use refs::{DeleteWorker, spawn_delete_worker};
 use replay::*;
 use util::*;
 
@@ -190,8 +188,8 @@ impl FilesystemBackend {
             fork_cost.as_str(),
             snapshot_copies
         );
-        let use_btrfs = mechanism == FilesystemMechanism::Btrfs
-            || fork_cost == ForkCost::BtrfsSnapshot;
+        let use_btrfs =
+            mechanism == FilesystemMechanism::Btrfs || fork_cost == ForkCost::BtrfsSnapshot;
         let delete_worker = Arc::new(DeleteWorker::new(&config, use_btrfs, fast_delete));
         let backend = Self {
             config,
@@ -284,11 +282,15 @@ impl FilesystemBackend {
     }
 
     pub(super) fn environment_metadata_path(&self, id: &str) -> PathBuf {
-        self.metadata_root().join("environments").join(format!("{id}.json"))
+        self.metadata_root()
+            .join("environments")
+            .join(format!("{id}.json"))
     }
 
     pub(super) fn snapshot_metadata_path(&self, id: &str) -> PathBuf {
-        self.metadata_root().join("snapshots").join(format!("{id}.json"))
+        self.metadata_root()
+            .join("snapshots")
+            .join(format!("{id}.json"))
     }
 
     pub(super) fn operations_path(&self) -> PathBuf {
@@ -345,7 +347,8 @@ impl FilesystemBackend {
                                     "cannot restore btrfs environment {}: upper {} must be a directory \
                                      inside its volume subvolume; preserve the state directory and recreate \
                                      the environment (automatic layout migration is not supported)",
-                                    environment.id, mount.upper.display()
+                                    environment.id,
+                                    mount.upper.display()
                                 )));
                             }
                         }
@@ -383,40 +386,46 @@ impl FilesystemBackend {
         }
         let operations_path = self.operations_path();
         match fs::read(&operations_path) {
-            Ok(bytes) => match serde_json::from_slice::<BTreeMap<String, OperationRecord>>(&bytes) {
-                Ok(operations) => state.operations = operations,
-                Err(error) => {
-                    let corrupt = self
-                        .metadata_root()
-                        .join(format!("operations.json.corrupt-{}", std::process::id()));
-                    match fs::rename(&operations_path, &corrupt) {
-                        Ok(()) => eprintln!(
-                            "filesystem: operations metadata is corrupt ({error}); isolated at {}",
-                            corrupt.display()
-                        ),
-                        Err(rename_error) => {
-                            return Err(BackendError::new(format!(
-                                "operations metadata {} is corrupt ({error}) and could not be isolated at {}: {rename_error}",
-                                operations_path.display(),
+            Ok(bytes) => {
+                match serde_json::from_slice::<BTreeMap<String, OperationRecord>>(&bytes) {
+                    Ok(operations) => state.operations = operations,
+                    Err(error) => {
+                        let corrupt = self
+                            .metadata_root()
+                            .join(format!("operations.json.corrupt-{}", std::process::id()));
+                        match fs::rename(&operations_path, &corrupt) {
+                            Ok(()) => eprintln!(
+                                "filesystem: operations metadata is corrupt ({error}); isolated at {}",
                                 corrupt.display()
-                            )))
+                            ),
+                            Err(rename_error) => {
+                                return Err(BackendError::new(format!(
+                                    "operations metadata {} is corrupt ({error}) and could not be isolated at {}: {rename_error}",
+                                    operations_path.display(),
+                                    corrupt.display()
+                                )));
+                            }
                         }
                     }
                 }
-            },
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(BackendError::new(format!(
                     "cannot read operations metadata {}: {error}",
                     operations_path.display()
-                )))
+                )));
             }
         }
         drop(state);
         Ok(())
     }
 
-    pub(super) fn write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<(), BackendError> {
+    pub(super) fn write_json<T: Serialize>(
+        &self,
+        path: &Path,
+        value: &T,
+    ) -> Result<(), BackendError> {
         #[cfg(test)]
         {
             let delay = self.persist_delay_ms.load(Ordering::SeqCst);
@@ -432,7 +441,9 @@ impl FilesystemBackend {
             if self.persist_fail_environment.load(Ordering::SeqCst)
                 && text.contains("/environments/")
             {
-                return Err(BackendError::new("injected environment persistence failure"));
+                return Err(BackendError::new(
+                    "injected environment persistence failure",
+                ));
             }
         }
         let parent = path
@@ -457,7 +468,10 @@ impl FilesystemBackend {
         Ok(())
     }
 
-    pub(super) fn persist_environment(&self, environment: &Environment) -> Result<(), BackendError> {
+    pub(super) fn persist_environment(
+        &self,
+        environment: &Environment,
+    ) -> Result<(), BackendError> {
         self.write_json(
             &self.environment_metadata_path(&environment.id),
             &EnvironmentMetadata::from_environment(environment),
@@ -472,7 +486,10 @@ impl FilesystemBackend {
         )
     }
 
-    pub(super) fn persist_operations(&self, operations: &BTreeMap<String, OperationRecord>) -> Result<(), BackendError> {
+    pub(super) fn persist_operations(
+        &self,
+        operations: &BTreeMap<String, OperationRecord>,
+    ) -> Result<(), BackendError> {
         self.write_json(&self.operations_path(), operations)
     }
 
@@ -489,7 +506,10 @@ impl FilesystemBackend {
         let _ = fs::remove_file(self.snapshot_metadata_path(id));
     }
 
-    pub(super) fn resolve_environment(state: &BackendState, id: &str) -> Result<Environment, BackendError> {
+    pub(super) fn resolve_environment(
+        state: &BackendState,
+        id: &str,
+    ) -> Result<Environment, BackendError> {
         if let Some(environment) = state.environments.get(id) {
             return Ok(environment.clone());
         }
@@ -517,8 +537,16 @@ impl FilesystemBackend {
             let existed = mount.upper.exists();
             fs::create_dir_all(&mount.upper).map_err(error)?;
             if !existed {
-                let base = mount.saved_base.as_deref().unwrap_or(&mount.target);
-                fs::set_permissions(&mount.upper, fs::metadata(base).map_err(error)?.permissions()).map_err(error)?;
+                let base = mount
+                    .saved_base
+                    .as_deref()
+                    .or(mount.base.as_deref())
+                    .unwrap_or(&mount.target);
+                fs::set_permissions(
+                    &mount.upper,
+                    fs::metadata(base).map_err(error)?.permissions(),
+                )
+                .map_err(error)?;
             }
             reset_dir(&mount.work)?;
             ensure_overlay_work(&mount.upper, &mount.work)?;
@@ -656,10 +684,7 @@ impl FilesystemBackend {
 
     #[cfg(test)]
     pub(super) fn inject_replay_failure_after(&self, value: Option<usize>) {
-        *self
-            .replay_fail_after
-            .lock()
-            .expect("replay failure lock") = value;
+        *self.replay_fail_after.lock().expect("replay failure lock") = value;
     }
 
     #[cfg(test)]
@@ -672,14 +697,12 @@ impl FilesystemBackend {
 
     #[cfg(test)]
     pub(super) fn inject_operation_persist_failure(&self, value: bool) {
-        self.persist_fail_operations
-            .store(value, Ordering::SeqCst);
+        self.persist_fail_operations.store(value, Ordering::SeqCst);
     }
 
     #[cfg(test)]
     pub(super) fn inject_environment_persist_failure(&self, value: bool) {
-        self.persist_fail_environment
-            .store(value, Ordering::SeqCst);
+        self.persist_fail_environment.store(value, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -688,8 +711,7 @@ impl FilesystemBackend {
     }
 
     pub(super) fn uses_btrfs_storage(&self) -> bool {
-        self.mechanism == FilesystemMechanism::Btrfs
-            || self.fork_cost == ForkCost::BtrfsSnapshot
+        self.mechanism == FilesystemMechanism::Btrfs || self.fork_cost == ForkCost::BtrfsSnapshot
     }
 
     pub(super) fn layer_path_for(&self, snapshot_id: &str) -> PathBuf {
@@ -708,7 +730,6 @@ impl FilesystemBackend {
     pub(super) fn paths(&self, id: &str) -> PathBuf {
         self.environments_root().join(id)
     }
-
 }
 
 impl Drop for FilesystemBackend {

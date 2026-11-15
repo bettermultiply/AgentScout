@@ -516,6 +516,7 @@ fn branch_restores_real_siblings_with_inherited_process_and_disk_state() {
                 parent,
                 Operation::BranchEnvironment {
                     child_environment_id: child.to_string(),
+                    agent: None,
                 },
             )
             .unwrap();

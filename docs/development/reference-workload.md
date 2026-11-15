@@ -10,11 +10,27 @@ Pi 握手中的能力字段是接入原语声明，不是模型推理或 sub-age
 
 Rust 协议、控制循环与 Pi 接入同步切换为 `ActionStarted` / `ActionFinished`。action 包含 task/Branch/action identity、类型、可选父 action、结果终态和 evidence，并携带接入侧测量的 `timestamp_ms`；`SpeculativeAdmissionRequest` 也携带该时刻，`Usage` 必须关联模型 `action_id` 并提供接入侧开始与结束时间。Tree 只保存活动 action，完成事实进入 Ledger。Pi 从 SDK assistant message 边界报告模型推理，从工具 Hook 报告工具 action，输出与使用量可关联模型 action。`result_pending=true` 表示 action 已登记但真实执行仍停在执行前边界。Candidate 推理不再使用角色专用完成事件。Agent session 与 Branch 执行释放分开报告；命令接收/开始回执不提前完成 Tree 操作。Runtime Adapter 独立报告操作开始/结果及环境事件，环境建立失败不再伪装成 Agent 失败。
 
-能力边界：通用协议可表达 sub-agent 等 action，但 Pi 当前只采集模型推理与工具执行；工具 Hook 已执行控制面下发的已编译本地 Decision，普通工具仍沿原有 Runtime 等待路径继续，Policy 允许时才产生 `speculative_admission_request`。模型推理前 Hook 为 true，sub-agent 启动前 Hook 为 false；不要把 `message_start` 当作推理前 Hook。只有 `predict` 返回非空预测才是投机机会；空预测直接按权威路径执行，不保留挂起的 Proposal。投机预测、checkpoint 续跑和 Runtime invoke 仍只接通工具等待路径，不宣称任意 action 均可投机。模型开始时间是真实请求前 Hook 的时刻，不是 SDK 首次 assistant message 事实。extent stop 可在工具 Hook 边界暂停，discard、cleanup、取消和合法恢复会释放等待；断线不会伪造完成。Agent 自身超时须由接入侧实际观察后报告，控制面超时不伪造 timed_out action 事实。Agent 命令的分阶段回执当前覆盖已有身份管理的 Promote、ResolvePending、Discard、Cleanup；其他命令仍依其 Branch/回合事实。Runtime 资源清单仍随 OperationResult 返回，独立资源/效果事件尚未接通。
+能力边界：通用协议可表达 sub-agent 等 action，但 Pi 当前只采集模型推理与工具执行；工具 Hook 已执行控制面下发的已编译本地 Decision，普通工具仍沿原有 Runtime 等待路径继续，Policy 允许时才产生 `speculative_admission_request`。模型推理前 Hook 为 true，sub-agent 启动前 Hook 为 false；不要把 `message_start` 当作模型推理前 Hook。只有 `predict` 返回非空预测才是投机机会；空预测直接按权威路径执行，不保留挂起的 Proposal。投机预测、checkpoint 续跑和 Runtime invoke 仍只接通工具等待路径，不宣称任意 action 均可投机。模型开始时间是真实请求前 Hook 的时刻，不是 SDK 首次 assistant message 事实。extent stop 可在工具 Hook 边界暂停，discard、cleanup、取消和合法恢复会释放等待；断线不会伪造完成。Agent 自身超时须由接入侧实际观察后报告，控制面超时不伪造 timed_out action 事实。Agent 命令的分阶段回执当前覆盖已有身份管理的 Promote、ResolvePending、Discard、Cleanup；其他命令仍依其 Branch/回合事实。Runtime 资源清单仍随 OperationResult 返回，独立资源/效果事件尚未接通。
 
-本次使用当前协议完成了真实 NLE 验收：`/usr/bin/node` v26.12.1、`deepseek/deepseek-flash --thinking low`、NLE 策略（当前本地路径 `assets/policy/nle/policy.yaml`），运行目录 `/tmp/opencode/nle-auth-run-4`。共 10 次真实 `nle_action`，18 次模型推理 action；模型与工具 action 均 28/28 配对，0 未完成、0 孤儿完成。7 个候选全部 `Promote`，0 次 `BranchFailed`；8 个 Branch 全部清理，退出码 0。此前 10 步失败时发现的 `evaluatePolicyArtifact` 未定义、Policy 输出通道、空预测挂起和验证 evidence 取值错误均已修复。检查通过：`cargo test --lib`（14 项）、`cargo check --all-targets`、`cargo clippy --all-targets --all-features -- -D warnings`、Pi TypeScript 检查、`/usr/bin/node --test tests/pi-access.mjs`（3 项）。未提交、未 push，未运行 Firecracker E2E。
+### 模型投机 `branch_model`（当前已接通的语义）
 
-运行方式见 [README](../../README.md)。控制面提供权威 Tree、Policy 和生命周期事实；Pi 接入侧使用 Pi 公开 SDK 管理 AgentSession，报告消息、思考、工具调用、结果和执行事件。浏览器 UI 与 TUI 通过共同接口读取这些事实并各自排版。Runtime Adapter 在环境内启动 Pi 接入进程，控制面只决定用哪个产品并把路径和版本交给它。Pi 接入没有 Tree 或 Policy 裁决权。
+模型请求在真正进入 `streamSimple` 前经过模型推理前 Hook。Hook 先登记 action 和 checkpoint，再由当前 Policy 选择是否投机；`branch_model` 及其候选模型来自 Policy 的场景选择，不由 Pi 或控制面写死。候选建立在该等待点之后先于 Proposal 的可比较产出：候选使用指定模型继续推理，模型完成后才以完整的 assistant `tool_calls` 列表形成结果，而不是创建一个“Proposal 只作占位”再补结果。
+
+匹配使用完整工具调用列表，而不是只看第一项或其他输出文本；调用数量、顺序、名称和参数都属于列表比较输入。候选在 Promote 前不把工具效果写入权威路径，候选工具调用受 AScout 生命周期控制；单一胜者 Promote 后切换后续权威会话并清理旧 Parent／其他候选，Discard 则取消并清理候选，未验证输出不进入主对话。调用列表的规范化／语义相似口径、模型成本和失败回退仍未定，见 `Discussion.md` 第 40 项。
+
+当前承载语义：Pi 是宿主上的单一进程，不按 Branch 启动多份 Pi；每个 Branch 环境有一个常驻 namespace-holder，文件工具经 Branch 专属 socket 在该 mount namespace 中执行。`/app` 映射由 `isolated_paths` 的 `{path, target}` 提供，host 目录是 overlay lower 和 publication 目标；物化轮换 generation 会结束旧 holder 并建立新 holder。工具命令并发执行，直接 shell 退出即返回，后台后代保留到环境结束。
+
+### 四个本地脚本场景（不是付费模型证据）
+
+`tests/benchmark-task.mjs` 用本地 scripted SSE provider 驱动同一 FS/Pi/control-plane workload，循环覆盖四个场景：`match`（候选调用与权威调用一致，验证 Promote）、`mismatch`（候选调用不同，验证不能 Promote 且候选写入不落地）、`authority_first`（权威先完成，验证时序竞争）、`fast_failure`（候选模型请求返回 500，验证失败路径）。这四项是本地脚本模拟，不是付费模型调用，也不能证明真实模型的推理质量、成本或服务稳定性；脚本中的 `fixture`／`fast` 只是本地端点模型标识。
+
+该脚本还检查完整任务完成、Candidate 创建、处置结果、丢弃写入不物化以及最终 FS materialization。脚本在 `materialization_started` 前轮询 host workspace，确认工具写入只落在 Branch overlay，而不是宿主工作目录；这验证了 holder 路径实际被执行。它证明的是当前接缝和生命周期在可控输入下的行为，不替代真实模型端到端验收或 Runtime 故障矩阵。
+
+本轮修复后的真实模型验证使用 `/tmp/opencode/deepseek-flash-final-FTGsuO`：宿主默认 `~/.pi/agent`、未设置 `PI_CODING_AGENT_DIR`、未复制 credentials，一次原始 instruction prompt，3 个真实 `branch_model` Candidate 全部因 Authority 先返回而被取消并清理，`task_completed` succeeded、materialization published、fixture 原始验收 3 项通过，物化前 host workspace 无工具写入。
+
+此前 NLE 验收：`/usr/bin/node` v26.12.1、`deepseek/deepseek-flash --thinking low`、NLE 策略（当前本地路径 `assets/policy/nle/policy.yaml`），运行目录 `/tmp/opencode/nle-auth-run-4`。共 10 次真实 `nle_action`，18 次模型推理 action；模型与工具 action 均 28/28 配对，0 未完成、0 孤儿完成。7 个候选全部 `Promote`，0 次 `BranchFailed`；8 个 Branch 全部清理，退出码 0。此前 10 步失败时发现的 `evaluatePolicyArtifact` 未定义、Policy 输出通道、空预测挂起和验证 evidence 取值错误均已修复。检查通过：`cargo test --lib`（14 项）、`cargo check --all-targets`、`cargo clippy --all-targets --all-features -- -D warnings`、Pi TypeScript 检查、`/usr/bin/node --test tests/pi-access.mjs`（3 项）。未提交、未 push，未运行 Firecracker E2E。
+
+运行方式见 [README](../../README.md)。控制面提供权威 Tree、Policy 和生命周期事实；Pi 接入侧使用 Pi 公开 SDK 管理 AgentSession，报告消息、思考、工具调用、结果和执行事件。浏览器 UI 与 TUI 通过共同接口读取这些事实并各自排版。Runtime 负责启动唯一的宿主 Pi 接入进程（不按 Branch 重复启动），控制面只决定用哪个产品并把路径和版本交给它；文件系统 Branch 的工具命令由该环境的 namespace-holder 在 Branch namespace 内执行。Pi 接入没有 Tree 或 Policy 裁决权。
 
 `/ascout` 选择 Branch 后，默认显示由 AScout 根据 SDK 消息排版的对话内容；Tab 切换 AScout 运行事实，↑/↓ 滚动，Esc 返回主对话。候选窗口不接收用户输入。当前仍使用 AScout 输入栏，不支持 Pi 完整编辑器、命令菜单或图片，也不承诺显示 Pi 原生终端画面。候选的独有输出分隔来自 Pi 接入侧的真实消息边界，不再复制 Rust 展示文本。
 
@@ -177,11 +193,13 @@ PI_CODING_AGENT_DIR=/tmp/opencode/ascout-check-config cargo run --bin ascout-con
 
 ## 尚未完成
 
-嵌套、并行工具专项验证、非标准消息、图像等复杂结果转换、多种结果元数据的一致性、Extent/Rebalance 的持续运行管理和完整依赖/效果提交仍未完成。当前不能推广为任意 coding workload 的正确 Promote。字符串枚举和布尔预测已支持，但 Pi 仍把它们转换成工具接口所需的文本内容；图像、结构化多段结果和工具专有元数据尚未转换。Candidate 共同上下文保存在独立内存 SessionManager 中，不提供进程重启后的恢复保证。
+嵌套、并行工具专项验证、非标准消息、图像等复杂结果转换、多种结果元数据的一致性、Extent/Rebalance 的持续运行管理和完整依赖/效果提交仍未完成。当前不能推广为任意 coding workload 的正确 Promote。字符串枚举和布尔预测已支持，但 Pi 仍把它们转换成工具接口所需的文本内容；图像、结构化多段结果和工具专有元数据尚未转换。Candidate 的会话由独立原生 SessionManager 文件承载，可在最终汇总与恢复流程中使用；在飞模型请求和候选推理上下文仍不构成跨进程恢复协议。
+
+`branch_model` 的模型候选、在飞模型请求和候选推理上下文目前不构成可跨进程保存的恢复协议；保存恢复会保存已定义的 Tree、原生 session、Policy artifact、模型绑定和 Runtime 绑定，但恢复后不会自动重新推理或自动处置候选。无限阻塞 Runtime、任意外部工具副作用、子进程内存和任意旧 run 的隐藏环境等价性仍不保证；详细限制见 [恢复](recovery.md)。
 
 完整多行编辑、Markdown 和工具专门排版、宽字符排版、产品特有交互、断线恢复、资源硬限制与确认式退出清理尚未实现。当前是简单终端原型，不宣称已达到原 Agent 全部交互能力。
 
-环境管理已由 Runtime Adapter 接通文件系统与进程 Backend；NLE 路径仍使用共享环境。目录不代表任意 shell 或外部效果已隔离，尤其不隔离扩展自身的代码及网络行为。接入进程退出只确认该进程退出，不证明任意工具后代均已停止或环境资源已清理。文件系统 Backend 的覆盖范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
+环境管理已由 Runtime Adapter 接通文件系统与进程 Backend；NLE 路径仍使用共享环境。目录不代表任意 shell 或外部效果已隔离，尤其不隔离扩展自身的代码及网络行为。环境结束时 holder 会按 cgroup/process group 和 mount namespace 结束工具后代，但退出另一个 namespace、改变 cgroup 或依赖外部服务的进程不在该保证内；接入进程退出也不证明任意外部效果已撤回。文件系统 Backend 的覆盖范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
 
 ## 真实游戏端到端验证方向（2026-10-28）
 

@@ -3,11 +3,30 @@
 use super::*;
 
 impl SpeculativeTree {
-    pub fn recovering(&self) -> bool { self.recovering }
+    pub fn set_agent_launch(&mut self, launch: crate::protocol::contract::AgentLaunch) {
+        self.agent_launch = Some(launch);
+    }
 
-    pub fn task_finishing(&self) -> bool { self.task_finishing }
+    pub fn agent_launch_for(&self, branch: &str) -> Option<crate::protocol::contract::AgentLaunch> {
+        let mut launch = self.agent_launch.clone()?;
+        launch.instance_id = Some(branch.to_string());
+        launch
+            .env
+            .insert("ASCOUT_AGENT_BRANCH".into(), branch.into());
+        Some(launch)
+    }
 
-    pub fn load_recovery(&mut self) { self.recovering = true; }
+    pub fn recovering(&self) -> bool {
+        self.recovering
+    }
+
+    pub fn task_finishing(&self) -> bool {
+        self.task_finishing
+    }
+
+    pub fn load_recovery(&mut self) {
+        self.recovering = true;
+    }
 
     pub(crate) fn pause_recovery(&mut self, at: u64) -> AgentCommand {
         self.recovering = true;
@@ -31,7 +50,9 @@ impl SpeculativeTree {
         self.recovering = false;
     }
 
-    pub(crate) fn finish_task(&mut self) { self.task_finishing = true; }
+    pub(crate) fn finish_task(&mut self) {
+        self.task_finishing = true;
+    }
 
     pub(crate) fn cancel_task(&mut self) -> io::Result<Vec<AgentCommand>> {
         self.recovering = false;
@@ -39,22 +60,35 @@ impl SpeculativeTree {
         self.interrupt()
     }
 
-    pub(crate) fn complete_task(&mut self) { self.task_finishing = false; }
+    pub(crate) fn complete_task(&mut self) {
+        self.task_finishing = false;
+    }
 
     pub fn task_writers_drained(&self) -> bool {
-        self.active_actions.values().all(|actions| actions.is_empty())
-            && !self.pending_work() && !self.recovery_pending_commands()
+        self.active_actions
+            .values()
+            .all(|actions| actions.is_empty())
+            && !self.pending_work()
+            && !self.recovery_pending_commands()
             && self.branches.values().all(|branch| {
-                branch.role == BranchRole::Authority ||
-                (branch.status == BranchStatus::Cleaned &&
-                 (self.capability_view.as_ref().and_then(|v|v["shared_environment"].as_bool()) == Some(true)
-                  || branch.execution_state.runtime == RuntimeExecutionState::Cleaned))
+                branch.role == BranchRole::Authority
+                    || (branch.status == BranchStatus::Cleaned
+                        && (self
+                            .capability_view
+                            .as_ref()
+                            .and_then(|v| v["shared_environment"].as_bool())
+                            == Some(true)
+                            || branch.execution_state.runtime == RuntimeExecutionState::Cleaned))
             })
     }
     pub fn drain_observations(
         &mut self,
     ) -> Vec<crate::control_plane::observation::ObservationContent> {
         std::mem::take(&mut self.pending_observations)
+    }
+
+    pub fn drain_records(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.pending_records)
     }
 
     pub(crate) fn change_status(
@@ -288,7 +322,11 @@ impl SpeculativeTree {
         Ok(id)
     }
 
-    pub(super) fn make_promote_command(&mut self, branch_id: &str, notification: Option<String>) -> io::Result<AgentCommand> {
+    pub(super) fn make_promote_command(
+        &mut self,
+        branch_id: &str,
+        notification: Option<String>,
+    ) -> io::Result<AgentCommand> {
         let generation = self.branch(branch_id)?.generation;
         let command_id = self.register(branch_id, CommandOperation::Promote, None, generation)?;
         Ok(AgentCommand::Promote {

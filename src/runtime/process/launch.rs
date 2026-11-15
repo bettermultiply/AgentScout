@@ -19,6 +19,16 @@ impl ProcessBackend {
         launch: &AgentLaunch,
         fragment: &LaunchFragment,
     ) -> Result<(), BackendError> {
+        self.launch_with_role(context, launch, fragment, ProcessRole::Agent)
+    }
+
+    pub(super) fn launch_with_role(
+        &self,
+        context: &BackendContext,
+        launch: &AgentLaunch,
+        fragment: &LaunchFragment,
+        role: ProcessRole,
+    ) -> Result<(), BackendError> {
         let instance_id = launch
             .instance_id
             .clone()
@@ -70,9 +80,7 @@ impl ProcessBackend {
                     Ok(pending) => pending,
                     Err(_) => {
                         remove_cgroup(&cgroup_path);
-                        return Err(BackendError::new(
-                            "ProcessBackend status lock poisoned",
-                        ));
+                        return Err(BackendError::new("ProcessBackend status lock poisoned"));
                     }
                 };
                 pending.insert(
@@ -81,7 +89,16 @@ impl ProcessBackend {
                 );
             }
             let spec = MountSpec {
-                entries: fragment.mounts.clone(),
+                entries: {
+                    let mut entries = fragment.mounts.clone();
+                    if let Some((source, target)) = &fragment.holder_bind {
+                        entries.push(MountEntry::Bind {
+                            source: source.clone(),
+                            target: target.clone(),
+                        });
+                    }
+                    entries
+                },
                 chdir: fragment.chdir.clone().or_else(|| Some(launch.cwd.clone())),
                 json_status_fd: Some(status_fd),
             };
@@ -181,7 +198,10 @@ impl ProcessBackend {
                     .collect();
                 if !overlay_targets.is_empty() {
                     #[cfg(test)]
-                    if self.fail_mount_wait.load(std::sync::atomic::Ordering::SeqCst) {
+                    if self
+                        .fail_mount_wait
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
                         return Err(BackendError::new(
                             "injected overlay mount readiness failure",
                         ));
@@ -207,12 +227,32 @@ impl ProcessBackend {
                 return Err(failure);
             }
         };
+        // Pin the branch namespace while it is owned. Without the open fd the
+        // inode can be freed and reused by another Branch, which would make a
+        // later namespace sweep kill the wrong processes. A short command can
+        // already be reaped (and even reuse its pid), so only keep the fd when
+        // it still denotes the namespace reported by bwrap.
+        let namespace_fd = if use_bwrap {
+            fs::File::open(format!("/proc/{inner_pid}/ns/mnt"))
+                .ok()
+                .and_then(|file| {
+                    let matches = file
+                        .metadata()
+                        .map(|metadata| metadata.ino() == mount_namespace)
+                        .unwrap_or(false);
+                    matches.then(|| OwnedFd::from(file))
+                })
+        } else {
+            None
+        };
         let mut process = AgentProcess {
             instance_id,
+            role,
             child,
             process_group,
             inner_pid,
             mount_namespace,
+            namespace_fd,
             cgroup_path,
         };
         let mut processes = match self.processes.lock() {
@@ -269,9 +309,7 @@ impl ProcessBackend {
             ));
         }
         // Keep draining so bwrap does not SIGPIPE on later status updates.
-        let reader = read
-            .try_clone()
-            .map_err(error)?;
+        let reader = read.try_clone().map_err(error)?;
         drop(read);
         std::thread::spawn(move || {
             let mut buffer = [0u8; 4096];
@@ -286,7 +324,6 @@ impl ProcessBackend {
         });
         Ok((child_pid, namespace))
     }
-
 }
 
 /// spawn 之后任一准备步骤失败时的统一回收：杀掉整个进程组、等待回收、
@@ -374,15 +411,19 @@ fn wait_for_mounts(
                     return Ok(());
                 }
             }
-            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound
-                || failure.raw_os_error() == Some(libc::EINVAL) => {
+            Err(failure)
+                if failure.kind() == std::io::ErrorKind::NotFound
+                    || failure.raw_os_error() == Some(libc::EINVAL) =>
+            {
                 // Exiting processes have no mount namespace: mountinfo may
                 // return EINVAL before reap or ENOENT after reap. The exit check
                 // below also covers readable but incomplete mountinfo.
             }
-            Err(failure) => return Err(BackendError::new(format!(
-                "cannot inspect sandbox overlay readiness at {path}: {failure}"
-            ))),
+            Err(failure) => {
+                return Err(BackendError::new(format!(
+                    "cannot inspect sandbox overlay readiness at {path}: {failure}"
+                )));
+            }
         }
         // A short command can finish between the readiness checks. Only the
         // owned outer child's exit confirms completion; an incomplete or
@@ -400,30 +441,36 @@ fn wait_for_mounts(
 fn overlay_targets_ready(text: &str, targets: &[PathBuf]) -> bool {
     use std::os::unix::ffi::OsStringExt;
 
-    let mounted: Vec<PathBuf> = text.lines().filter_map(|line| {
-        let Some((left, right)) = line.split_once(" - ") else {
-            return None;
-        };
-        if !right.starts_with("overlay ") {
-            return None;
-        }
-        let encoded = left.split_whitespace().nth(4)?.as_bytes();
-        let mut decoded = Vec::new();
-        let mut index = 0;
-        while index < encoded.len() {
-            if encoded[index] == b'\\' && index + 3 < encoded.len()
-                && encoded[index + 1..index + 4].iter().all(|byte| (b'0'..=b'7').contains(byte))
-            {
-                let octal = std::str::from_utf8(&encoded[index + 1..index + 4]).ok()?;
-                decoded.push(u8::from_str_radix(octal, 8).ok()?);
-                index += 4;
-            } else {
-                decoded.push(encoded[index]);
-                index += 1;
+    let mounted: Vec<PathBuf> = text
+        .lines()
+        .filter_map(|line| {
+            let Some((left, right)) = line.split_once(" - ") else {
+                return None;
+            };
+            if !right.starts_with("overlay ") {
+                return None;
             }
-        }
-        Some(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
-    }).collect();
+            let encoded = left.split_whitespace().nth(4)?.as_bytes();
+            let mut decoded = Vec::new();
+            let mut index = 0;
+            while index < encoded.len() {
+                if encoded[index] == b'\\'
+                    && index + 3 < encoded.len()
+                    && encoded[index + 1..index + 4]
+                        .iter()
+                        .all(|byte| (b'0'..=b'7').contains(byte))
+                {
+                    let octal = std::str::from_utf8(&encoded[index + 1..index + 4]).ok()?;
+                    decoded.push(u8::from_str_radix(octal, 8).ok()?);
+                    index += 4;
+                } else {
+                    decoded.push(encoded[index]);
+                    index += 1;
+                }
+            }
+            Some(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
+        })
+        .collect();
     targets.iter().all(|target| mounted.contains(target))
 }
 
@@ -449,7 +496,11 @@ mod tests {
             let exit = child.wait().unwrap();
             assert_eq!(waited, 0);
             assert!(result.is_ok(), "exited child mountinfo: {result:?}");
-            assert_eq!(exit.code(), Some(code), "readiness must retain the exit status");
+            assert_eq!(
+                exit.code(),
+                Some(code),
+                "readiness must retain the exit status"
+            );
         }
     }
 
@@ -463,7 +514,12 @@ mod tests {
         let mut child = Command::new("/bin/true").spawn().unwrap();
         let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
         let waited = unsafe {
-            libc::waitid(libc::P_PID, child.id(), &mut status, libc::WEXITED | libc::WNOWAIT)
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                &mut status,
+                libc::WEXITED | libc::WNOWAIT,
+            )
         };
         // Hold a real readable /proc entry independently of the managed child.
         // This exercises successful reads with incomplete mounts deterministically,
@@ -471,11 +527,7 @@ mod tests {
         let pid = namespace_holder.id();
         let targets = [PathBuf::from("/not-a-sandbox-overlay")];
         let mountinfo = fs::read_to_string(format!("/proc/{pid}/mountinfo"));
-        let result = wait_for_mounts(
-            pid,
-            &targets,
-            &mut child,
-        );
+        let result = wait_for_mounts(pid, &targets, &mut child);
         let exit = child.wait().unwrap();
         drop(namespace_holder.stdin.take());
         let holder_exit = namespace_holder.wait().unwrap();
@@ -490,7 +542,10 @@ mod tests {
     fn readiness_requires_every_overlay_and_decodes_mount_paths() {
         let targets = vec![PathBuf::from("/workspace"), PathBuf::from("/extra mount")];
         let first = "21 1 0:1 / /workspace rw - overlay overlay rw\n";
-        assert!(!overlay_targets_ready(first, &targets), "one overlay is not all overlays");
+        assert!(
+            !overlay_targets_ready(first, &targets),
+            "one overlay is not all overlays"
+        );
         let both = format!("{first}22 1 0:2 / /extra\\040mount rw - overlay overlay rw\n");
         assert!(overlay_targets_ready(&both, &targets));
     }
