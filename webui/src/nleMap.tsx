@@ -41,6 +41,7 @@ export function NleMapPage() {
     let sequence = 0
     let stream: EventSource | null = null
     let resyncing = false
+    let resyncRequested = false
 
     const applyEvents = (nextEvents: ObservationEvent[], initial = false) => {
       const result = eventHistory(nextEvents)
@@ -63,8 +64,12 @@ export function NleMapPage() {
     }
 
     const resync = async (initial = false) => {
-      if (resyncing && !initial) return
+      if (resyncing) {
+        if (!initial) resyncRequested = true
+        return
+      }
       resyncing = true
+      resyncRequested = false
       stream?.close()
       stream = null
       try {
@@ -93,6 +98,7 @@ export function NleMapPage() {
         if (initial) { setHistory(DEMO_HISTORY); setSource('unavailable') }
       } finally {
         resyncing = false
+        if (active && resyncRequested) void resync(false)
       }
     }
 
@@ -100,33 +106,40 @@ export function NleMapPage() {
     return () => { active = false; stream?.close() }
   }, [])
 
-  const snapshot = history[step] ?? DEMO_HISTORY[0]
+  const displayedHistory = history.length ? history : DEMO_HISTORY
+  const snapshot = displayedHistory[step] ?? displayedHistory[0]
   const changeStep = (next: number) => {
-    const bounded = Math.max(0, Math.min(history.length - 1, next))
+    const bounded = Math.max(0, Math.min(displayedHistory.length - 1, next))
     stepRef.current = bounded
-    followRef.current = bounded >= history.length - 1
+    followRef.current = bounded >= displayedHistory.length - 1
     setStep(bounded)
   }
   const currentVisible = useMemo(() => new Map(snapshot.visible.map((cell) => [`${cell.x},${cell.y}`, cell])), [snapshot])
   const explored = useMemo(() => {
     const cells = new Map<string, Cell>()
-    history.slice(0, step + 1).forEach((item) => item.visible.forEach((cell) => cells.set(`${cell.x},${cell.y}`, cell)))
+    displayedHistory.slice(0, step + 1).forEach((item) => item.visible.forEach((cell) => cells.set(`${cell.x},${cell.y}`, cell)))
     return cells
-  }, [history, step])
+  }, [displayedHistory, step])
   const bounds = useMemo(() => {
-    const all = history.flatMap((item) => item.visible)
+    const all = displayedHistory.flatMap((item) => item.visible)
     const xs = all.map((cell) => cell.x).concat(snapshot.player.x)
     const ys = all.map((cell) => cell.y).concat(snapshot.player.y)
     return { minX: Math.min(...xs, -3) - 1, maxX: Math.max(...xs, 4) + 1, minY: Math.min(...ys, -3) - 1, maxY: Math.max(...ys, 2) + 1 }
-  }, [history, snapshot])
-  const cells = []
-  for (let y = bounds.minY; y <= bounds.maxY; y += 1) for (let x = bounds.minX; x <= bounds.maxX; x += 1) cells.push({ x, y })
+  }, [displayedHistory, snapshot])
+  const cells = useMemo(() => {
+    const result = [...explored.values()]
+    const playerKey = `${snapshot.player.x},${snapshot.player.y}`
+    if (!explored.has(playerKey)) result.push({ x: snapshot.player.x, y: snapshot.player.y, glyph: '@' })
+    return result
+  }, [explored, snapshot.player.x, snapshot.player.y])
+  const mapWidth = Math.max(620, (bounds.maxX - bounds.minX + 1) * 38)
+  const mapHeight = Math.max(228, (bounds.maxY - bounds.minY + 1) * 38)
   const sourceLabel = source === 'real' ? '真实 Runtime 公开观测' : source === 'loading' ? '正在读取 Runtime 公开事件…' : source === 'demo' ? '演示公开观测（无地图事件）' : '无运行实例 · 演示 fallback'
 
   return <main className="nle-map-page">
     <header className="nle-map-header"><div><p className="eyebrow">ASCOUT / NLE RUNTIME</p><h1>NetHack 地图回放</h1><p className="nle-map-subtitle">固定绝对坐标 · 只读历史浏览 · 不会发送 NLE 动作</p></div><div className={`nle-map-source source-${source}`}><span className="status-dot" />{sourceLabel}<br /><small>{source === 'real' ? '来自控制面公开观察事件' : '真实 Runtime 地图通道未提供本次运行数据'}</small>{error ? <small className="map-error">{error}</small> : null}</div></header>
-     <section className="nle-map-layout"><div className="nle-map-card"><div className="nle-map-toolbar"><strong>公开地图</strong><span>东 →　北 ↑</span><span className="coordinate-readout">当前位置 ({snapshot.player.x}, {snapshot.player.y})</span></div><div className="nle-map-viewport" aria-label="NLE 固定绝对坐标地图"><div className="nle-map-grid" style={{ gridTemplateColumns: `repeat(${bounds.maxX - bounds.minX + 1}, minmax(32px, 1fr))`, gridTemplateRows: `repeat(${bounds.maxY - bounds.minY + 1}, 1fr)` }}>{cells.map(({ x, y }) => { const key = `${x},${y}`; const exploredCell = explored.get(key); const visibleCell = currentVisible.get(key); const isPlayer = snapshot.player.x === x && snapshot.player.y === y; return <div key={key} className={`nle-cell ${visibleCell ? 'is-visible' : exploredCell ? 'is-explored' : 'is-unknown'} ${isPlayer ? 'is-player' : ''}`} title={`绝对坐标 (${x}, ${y})`}><span>{visibleCell?.glyph ?? (exploredCell ? '·' : '')}</span></div> })}</div><div className="nle-map-axis axis-x">X 轴（东）</div><div className="nle-map-axis axis-y">Y 轴（北）</div></div><div className="nle-map-legend"><span><b className="legend-swatch visible" />当前可见</span><span><b className="legend-swatch explored" />已知但当前不可见</span><span><b className="legend-swatch unknown" />未知（不绘制内容）</span><span><b className="legend-player">@</b>玩家</span></div></div>
-       <aside className="nle-map-sidebar"><div className="nle-history-card"><div className="card-label">权威窗口动作历史</div>{branchId ? <div className="map-meta">动作来源：<code>{branchId}</code> · {quality === 'complete' ? '完整' : '不完整'}</div> : null}{qualityMessage ? <p className="readonly-note">{qualityMessage}</p> : null}<div className="step-count"><strong>{snapshot.actionNumber}</strong><span>/ {Math.max(0, history.length - 1)} 个已发生动作</span></div><div className="history-track"><div style={{ width: `${history.length <= 1 ? 0 : (step / (history.length - 1)) * 100}%` }} /></div><div className="history-actions"><button type="button" onClick={() => changeStep(0)} disabled={step === 0}>起点</button><button type="button" onClick={() => changeStep(step - 1)} disabled={step === 0}>← 后退</button><button type="button" onClick={() => changeStep(step + 1)} disabled={step >= history.length - 1}>前进 →</button><button type="button" onClick={() => changeStep(history.length - 1)} disabled={step >= history.length - 1}>终点</button></div><p className="readonly-note">这些按钮只重建已发生动作的历史状态，不会触发、重试或撤销 NLE 动作。{followRef.current ? ' 当前跟随最新事件。' : ' 当前正在回看，不会被新事件跳转。'}</p></div><div className="nle-action-card"><div className="card-label">当前历史位置</div><h2>{snapshot.action}</h2><p>{snapshot.message}</p><dl><dt>动作序号</dt><dd>{snapshot.actionNumber}</dd><dt>玩家绝对坐标</dt><dd>({snapshot.player.x}, {snapshot.player.y})</dd><dt>已知单元格</dt><dd>{explored.size}</dd><dt>当前可见单元格</dt><dd>{currentVisible.size}</dd></dl></div><div className="nle-boundary-card"><strong>只读接入状态</strong><p>{source === 'real' ? '地图数据已从控制面发布的 NLE 公开观察事件读取。页面只使用 Runtime 已公开的 chars/blstats，不读取隐藏地图。' : '当前页面没有可用的真实 NLE 地图事件，已使用明确标注的演示数据。页面不会因 fallback 而声称 Runtime 已接通。'}</p></div></aside>
+     <section className="nle-map-layout"><div className="nle-map-card"><div className="nle-map-toolbar"><strong>公开地图</strong><span>东 →　北 ↑</span><span className="coordinate-readout">当前位置 ({snapshot.player.x}, {snapshot.player.y})</span></div><div className="nle-map-viewport" aria-label="NLE 固定绝对坐标地图"><div className="nle-map-grid" style={{ width: `${mapWidth}px`, height: `${mapHeight}px` }}>{cells.map(({ x, y }) => { const key = `${x},${y}`; const exploredCell = explored.get(key); const visibleCell = currentVisible.get(key); const isPlayer = snapshot.player.x === x && snapshot.player.y === y; return <div key={key} className={`nle-cell ${visibleCell ? 'is-visible' : exploredCell ? 'is-explored' : 'is-unknown'} ${isPlayer ? 'is-player' : ''}`} style={{ left: `${(x - bounds.minX) * 38}px`, top: `${(y - bounds.minY) * 38}px` }} title={`绝对坐标 (${x}, ${y})`}><span>{visibleCell?.glyph ?? (exploredCell ? '·' : '')}</span></div> })}</div><div className="nle-map-axis axis-x">X 轴（东）</div><div className="nle-map-axis axis-y">Y 轴（北为负，南为正）</div></div><div className="nle-map-legend"><span><b className="legend-swatch visible" />当前可见</span><span><b className="legend-swatch explored" />已知但当前不可见</span><span><b className="legend-swatch unknown" />未知（不绘制内容）</span><span><b className="legend-player">@</b>玩家</span></div></div>
+        <aside className="nle-map-sidebar"><div className="nle-history-card"><div className="card-label">权威窗口动作历史</div>{branchId ? <div className="map-meta">动作来源：<code>{branchId}</code> · {quality === 'complete' ? '完整' : '不完整'}</div> : null}{qualityMessage ? <p className="readonly-note">{qualityMessage}</p> : null}<div className="step-count"><strong>{snapshot.actionNumber}</strong><span>/ {Math.max(0, displayedHistory.length - 1)} 个已发生动作</span></div><div className="history-track"><div style={{ width: `${displayedHistory.length <= 1 ? 0 : (step / (displayedHistory.length - 1)) * 100}%` }} /></div><div className="history-actions"><button type="button" onClick={() => changeStep(0)} disabled={step === 0}>起点</button><button type="button" onClick={() => changeStep(step - 1)} disabled={step === 0}>← 后退</button><button type="button" onClick={() => changeStep(step + 1)} disabled={step >= displayedHistory.length - 1}>前进 →</button><button type="button" onClick={() => changeStep(displayedHistory.length - 1)} disabled={step >= displayedHistory.length - 1}>终点</button></div><p className="readonly-note">这些按钮只重建已发生动作的历史状态，不会触发、重试或撤销 NLE 动作。{followRef.current ? ' 当前跟随最新事件。' : ' 当前正在回看，不会被新事件跳转。'}</p></div><div className="nle-action-card"><div className="card-label">当前历史位置</div><h2>{snapshot.action}</h2><p>{snapshot.message}</p><dl><dt>动作序号</dt><dd>{snapshot.actionNumber}</dd><dt>玩家绝对坐标</dt><dd>({snapshot.player.x}, {snapshot.player.y})</dd><dt>已知单元格</dt><dd>{explored.size}</dd><dt>当前可见单元格</dt><dd>{currentVisible.size}</dd></dl></div><div className="nle-boundary-card"><strong>只读接入状态</strong><p>{source === 'real' ? '地图数据已从控制面发布的 NLE 公开观察事件读取。页面只使用 Runtime 已公开的 chars/blstats，不读取隐藏地图。' : '当前页面没有可用的真实 NLE 地图事件，已使用明确标注的演示数据。页面不会因 fallback 而声称 Runtime 已接通。'}</p></div></aside>
     </section>
   </main>
 }
