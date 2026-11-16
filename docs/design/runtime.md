@@ -8,11 +8,15 @@ Runtime 面向一般投机执行，不专门为 NLE 或某个 Agent 产品设计
 
 ## Adapter Registry
 
-Adapter Registry（简称 Registry）属于 Runtime，负责 Adapter 登记、契约兼容性和能力声明校验，维护接入状态、契约版本、声明快照与验证结果。它自主建立验证环境、执行验证场景并观察结果，生成可复核的验证状态与独立证据；Adapter 提供接入信息，不得自行填写验证状态、验证证据，或以自测结果代替 Registry 验证。接入验证为主要证明手段，运行期验证用于发现遗漏与偏差。
+Adapter Registry（简称 Registry）属于 Runtime，负责 Adapter 登记、契约兼容性和能力声明校验，维护接入状态、契约版本和声明快照。首期只检查控制面需要的 API 是否存在并可解析，不主动建立验证环境或执行验证场景；因此首期不产生环境保证已验证的结论。Adapter 提供接入信息，不得自行填写验证状态、验证证据，或以自测结果代替未来的 Registry 验证。
 
 Registry 向控制面提供带验证状态的能力视图，Policy Engine 据此检查 Policy 要求；Registry 不拥有 Tree、Branch 生命周期或 Runtime 执行状态，也不编排投机活动。能力降级、未验证范围与验证失败的处理遵守 [Runtime Adapter 契约](runtime-adapter-contract.md)，不因 Registry 属于 Runtime 而放宽证明要求。
 
 ## 状态与接入侧
+
+Environment 的身份由 Runtime 创建并随建立或派生结果返回；控制面持久化 Branch 与该身份的独占绑定。初始 Authority 同样先请求 Runtime 建立环境；Candidate 派生只指定父 Environment。创建前 Branch 可无绑定，后续操作与恢复一律使用已返回的身份，不用 Branch 名称、authority 或工作区路径代替。内部 workload 可共享，但各 Environment 的生命周期独立；Backend 组合及其身份不交给控制面决定。
+
+控制面与 Adapter 的 `ControlSession` 只承担网络连接、握手和请求/结果关联；单个 Runtime 对控制面表现为统一身份和统一入口，内部节点、进程、Backend instance 及路由不暴露。控制面为每个 Branch 显式维护独占的 `environment_id`，Runtime 普通请求只接收 `environment_id` 与 operation，不能从环境推导 Branch。Runtime 内部维护 Environment 与 Backend instance 的多对多组合，并以 `backend_id` 区分实例；控制面不传 `backend_id`。Adapter Registry 首期的 API 存在性/可解析检查也不等于环境保证已验证，Agent 接入验证与 Runtime 能力验证保持独立边界。
 
 系统最终必须把 Authority 的结果物化到现实。Agent 完成本轮工作、开始等待用户输入时，task 完成；正常完成时，在没有存活候选且任务相关写入完成后物化并重置基准，不为物化暂停执行。取消、失败或终止任务立即进入物化处理，先结束候选并等待任务相关写入完成，再实际写回。Agent 常用的 Ctrl-C 或退出均表示终止任务；这不规定 Ctrl-C 是否同时关闭整个程序。暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，保留整棵有效树、候选和环境等待继续；它与原 Agent 的 Ctrl-C／退出终止语义分开，暂停不意味着退出程序。Runtime 经接入边界向控制面报告物化完成或失败，物化失败等同操作失败；控制面必须等物化成功后才能宣告任务成功。旧环境及基准在无人引用时释放。
 

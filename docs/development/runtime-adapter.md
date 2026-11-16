@@ -130,7 +130,7 @@ Pi 接入采用宿主单一进程托管全部 Branch session；文件系统 Bran
 
 当前仓库提供主机侧 `ascout-runtime-adapter` 和 guest 内 `ascout-agent-access`。主机程序通过 `--config <path>` 读取 JSON；首版配置字段为：
 
-- `control_socket`：控制面 Unix socket；
+- `control_address`：控制面 TCP 地址（例如 `127.0.0.1:8180`）；
 - `adapter_instance`：本次 Adapter 实例标识；
 - `firecracker_path`、`kernel_path`、`rootfs_path`：部署方提供的 Firecracker 资产；
 - `guest_access_path`：写入每个 rootfs 副本的 `ascout-agent-access`；

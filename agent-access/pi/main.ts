@@ -27,6 +27,7 @@ const args = process.argv.slice(2);
 const socketPath = args.shift();
 const agentId = args.shift() ?? 'agent';
 const taskId = process.env.ASCOUT_TASK_ID ?? '';
+const environments=new Map<string,string>();
 let nextAction = 1;
 if (!socketPath) throw Error('usage: main.ts <socket> <agent> [--model provider/model] [--thinking level]');
 let modelPattern, modelsPath, additionalModels, thinkingLevel = 'low';
@@ -175,7 +176,7 @@ async function finishActions(branch,status) {
 function tools(branch) {
     const cwd=tree.branches.get(branch)?.manager.getHeader().cwd??process.cwd();
     const fileTools=process.env.ASCOUT_FILESYSTEM_TOOL_PLANS
-        ? filesystemTools(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS,branch,cwd,require(resolve(root,'packages/coding-agent/src/core/tools/index.ts')))
+        ? filesystemTools(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS,environments.get(branch)??'',cwd,require(resolve(root,'packages/coding-agent/src/core/tools/index.ts')))
         : [];
     return [...fileTools,...runtimeTools.map(spec=>({name:spec.name,label:spec.name,description:spec.description,parameters:Type.Unsafe(spec.parameters),execute:async(operation,_args,signal)=>{
         // Candidate access is decided by the control-plane Policy/Runtime
@@ -202,12 +203,12 @@ const filesystemToolSelection=process.env.ASCOUT_FILESYSTEM_TOOL_PLANS
 async function beforeModelInference(branch, modelValue, context, signal) {
     await modelRestores.get(branch);
     syncTranscript(branch);
-    // Model inference is a PURE step: the generic layer evaluates `admit` but
-    // never applies the effect gate, reports an admission, or counts extent.
+    // Model inference does not pass the tool effect gate; admission and extent
+    // remain owned by the generic access layer.
     if(saving||closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
     const actionId=modelForks.get(branch)?.operation_id??`model-${nextAction++}`;
     const op={kind:'model_inference',name:'model',arguments:{model:`${modelValue.provider}/${modelValue.id}`},branch_id:branch,predicting:modelForks.has(branch),authority:branch===authority};
-    op.has_predictor=await access.hasPredictor(branch,op,signal);
+    op.has_predictor=await access.hasPredictor(branch);
     const hold=Promise.withResolvers();modelHolds.set(key(branch,actionId),hold);
     const disposition=await access.beforeAction({
         branch,
@@ -294,7 +295,7 @@ function install(session,branch) {
             actionKind:'tool_execution',
             name:context.toolCall.name,
             arguments:context.args,
-            op:{kind:context.toolCall.name,name:context.toolCall.name,arguments:context.args,has_predictor:await access.hasPredictor(branch,{kind:context.toolCall.name,name:context.toolCall.name,arguments:context.args,authority:branch===authority},signal)},
+            op:{kind:context.toolCall.name,name:context.toolCall.name,arguments:context.args,authority:branch===authority,has_predictor:await access.hasPredictor(branch)},
             contractContext:{arguments:context.args,runtime_capabilities:runtimeTools,isolated:!!process.env.ASCOUT_FILESYSTEM_TOOL_PLANS&&!runtimeTools.some(t=>t.name===context.toolCall.name)},
             admit:()=>branch===authority,
             admissionFacts:()=>({checkpoint:prepareCheckpoint()}),
@@ -435,6 +436,7 @@ async function handle(command) {
             return;
         }
         case 'load': {
+            for(const [branch,environment] of Object.entries(command.environments))environments.set(branch,environment as string);
             // A failed load must not settle/delete the saved native sources.
             saving=true;
             let error;
@@ -492,6 +494,7 @@ async function handle(command) {
             await report({message:'recovery_suspended'});return;
         }
         case 'start_branch': {
+            environments.set(branch,command.environment_id);
             // The control plane explicitly starts this Branch as the authority;
             // a leftover authority marker in a reused session file must not
             // keep a previous run's winner in charge.
@@ -557,6 +560,7 @@ async function handle(command) {
             executeTurn(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));return;
         }
         case 'start_candidate': {
+            environments.set(branch,command.environment_id);
             candidateSetups.set(branch,structuredClone(command));
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');

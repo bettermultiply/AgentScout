@@ -5,9 +5,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use super::layer::View;
 use crate::protocol::contract::PathScope;
 use crate::runtime::backend::BackendError;
-use super::layer::View;
 
 pub(super) fn error(value: impl std::fmt::Display) -> BackendError {
     BackendError::new(value.to_string())
@@ -122,7 +122,8 @@ pub(super) fn ensure_overlay_work(upper: &Path, work: &Path) -> Result<(), Backe
              copy-up rename would fail with EXDEV. Preserve this state directory and recreate \
              the environment with upper/work inside one volume subvolume; automatic migration \
              of the old upper-as-subvolume layout is not supported",
-            upper.display(), work.display()
+            upper.display(),
+            work.display()
         )));
     }
     Ok(())
@@ -257,18 +258,15 @@ pub(crate) fn normalize_relative_path(value: &str) -> Result<String, BackendErro
     Ok(normalized.to_string_lossy().into_owned())
 }
 
-
 pub(crate) fn remove_subtree(view: &mut View, path: &str) {
     let prefix = format!("{path}/");
     view.retain(|key, _| key != path && !key.starts_with(&prefix));
 }
 
-
 pub(crate) fn remove_children(view: &mut View, path: &str) {
     let prefix = format!("{path}/");
     view.retain(|key, _| !key.starts_with(&prefix));
 }
-
 
 pub(crate) fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, BackendError> {
     let path = Path::new(relative);
@@ -283,13 +281,11 @@ pub(crate) fn safe_join(root: &Path, relative: &str) -> Result<PathBuf, BackendE
     Ok(root.join(path))
 }
 
-
 pub(crate) fn short_hash(value: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(value.as_bytes());
     format!("{:x}", digest)[..16].to_string()
 }
-
 
 pub(crate) fn now_nanos() -> u128 {
     std::time::SystemTime::now()

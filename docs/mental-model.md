@@ -71,6 +71,8 @@ Policy Action -> 控制面编排 -> Gateway 送达 -> Runtime Adapter 接入 -> 
 
 Adapter Registry 属于 Runtime，负责登记、契约与能力声明校验、主动验证及独立验证证据，向控制面提供带验证状态的能力事实；控制面据此匹配 Policy 并作出投机裁决。Registry 的归属不允许 Adapter 自行证明其声明成立。Agent 与接入进程的实际启动、监视和回收由 Runtime 负责。
 
+Runtime 创建 Environment 并返回身份，控制面独占绑定 `Branch -> Environment`，每个 Environment 只属于一个 Branch。建立初始环境不预定身份，派生仅指定父 Environment；创建前 Branch 可以无绑定。Runtime 不接收 `branch_id`，对外统一使用 Environment identity；其内部以独立 `BackendConnection.id` 标识 Backend instance，并维护 Environment 与 Backend instance 的多对多关联。因而不同 Environment 可以分别选择 `fs1/process1` 与 `fs1/process2/network1`，而不把共享的 Backend 内部世界误认为共享 Environment 生命周期。Candidate 建立、Promote、暂停与恢复使用实际返回并保存的 Environment identity，不能以 Branch 或 authority 常量替代。
+
 ### 4.2 核心对象与所有权
 
 ```text

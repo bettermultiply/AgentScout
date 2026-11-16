@@ -1,5 +1,27 @@
 # 开发决策
 
+## 2026-11-16：Environment 身份归 Runtime
+
+废弃控制面根据 execution_id、Branch generation 或 Branch 名称生成 Environment id 的实现。Runtime 建立或派生后返回环境身份，控制面只保存 Branch 绑定；创建前用无绑定状态，不保留占位身份。内部 Backend 组合仍属于 Runtime，单世界 workload 共享不等于 Environment 生命周期共享。
+
+## 2026-11-16：撤销 NLE branch 世界复制
+
+废弃本轮将 NLE `branch` 改为 seed/action 重放并复制世界的实现：该修改未经批准，且把 Environment 独占身份错误地扩展成内部世界独占。恢复既定单世界引用方案；save/load 的世界重建继续保留，Environment 生命周期分别保存，最后一个引用释放后关闭世界。旧 `shared_environment` 能力字段及其生产消费者已删除，不保留恒 false 或 AND 聚合替代。
+
+## 2026-11-16：恢复绑定沿用 Pi 的目录解析
+
+核对相邻 Pi 的公开 coding-agent 入口后，恢复绑定不再自行用 `homedir()` 推测 agent 目录；它改用 Pi 导出的 `getAgentDir()`。因此显式 `PI_CODING_AGENT_DIR` 仍由 Pi 正常尊重，未设置时仍使用宿主 `~/.pi/agent`，恢复路径不复制 credentials，也不修改用户配置。
+
+恢复仍使用 Pi 导出的 `DefaultPackageManager` 与 `SettingsManager` 做资源解析，并把缺失源回调固定为错误：恢复前只解析已存在的资源，禁止安装或执行扩展。资源指纹和配置变化检查保留，因为它们是恢复一致性校验而不是重复的 Pi 加载器。
+
+## 2026-11-16：共性沿用已有路径，真实差异集中
+
+本轮代码整理遵循用户确认的偏好：相同语义沿用同一条已有处理路径，真实差异集中在各自边界，不增加新的命名或绕路层，并以保持现有能力优先。控制面 `AgentController::perform` 的 Runtime 成功／失败判定改为复用已有 `runtime_call`，保留原错误文本和外部签名；未把 Adapter 的 run 级 Agent 启动槽位套到 Branch 启动上。
+
+核查结论：`Runtime Adapter` 的 `launch_agent` 使用单个 run 级 `Option<Child>`；已有进程时会直接返回，因此不能用它代替每个 Branch holder 的启动。`BaseRuntime` 则按 `environment_id` 保存 launch template 和 namespace-holder，并由各环境的 Runtime 生命周期负责启动、重建和停止。控制面不再以 `shared_environment` 把环境映射到 `authority`；它始终沿用每个 Branch 独占的真实 `environment_id`。NLE 的内部 workload 世界不改变控制面的 Branch→Environment 独占绑定；组合 Runtime 的 Environment→Backend instance 关系由 Runtime 内部维护。建立、恢复、物化和清理均沿用这个物理环境语义。Save/Load 保护状态继续共用同一处理。
+
+本轮还删除了 `examples/ascout.ts`：调用链核对确认仓库没有引用它，当前控制面入口是 `src/bin/ascout-control-plane.rs`，Pi 接入入口是 `agent-access/pi/main.ts`；开发决策中已将该一次性 Pi 驱动记录为废弃实验材料。`agent-access/core`、`session-tree`、文件工具、NLE bridge、`fs_bench` 和 `tools/replay` 均仍有生产代码、测试或文档调用，因此未删除。
+
 ## 2026-11-15：单一 Pi 宿主与每枝 namespace-holder，控制面持有唯一逻辑 transcript
 
 用户确认：Pi 是宿主上的单一进程，在同一进程内托管多个 Branch session。每个 Branch（Authority 也一样）拥有自己的 Runtime 环境和低成本常驻 namespace-holder；holder 只持有该 Branch 的 mount namespace，并通过最小 IPC 代执行 Branch 工具命令。环境 cleanup/discard 时 holder 一并结束，Pi 不进入 Branch namespace。
@@ -524,7 +546,7 @@ Agent 接入侧仍然是唯一控制 Agent 会话的地方：创建会话、克�
 
 - **Branch 的固定要求是非干扰**：一个 Branch 不得影响权威路径，也不得影响其他 Branch。独立执行环境只是实现非干扰的一种方式，不是 Branch 的定义，也不是所有 Runtime 的前提。
 - **`branch_environment` 只表示派生独立子环境**。不能派生独立环境的后端不得用共享别名伪装成功；该操作是可选能力，不是所有合格 Adapter 都必须具备的固定操作。
-- **共享环境 + 作用前阻止**是另一类非干扰实现。NLE 采用这种方式，但它属于 NLE 专用 Runtime／测试 workload 的描述，不属于 AScout 核心契约。AScout 只要求 Adapter 声明并兑现所选非干扰机制的范围与限制。
+- **共享 Backend 实例不等于共享 Environment**。NLE bridge 可在一个进程内维护多个独立 World，并按父 World 的初始记录和公开动作历史重建子 Environment；作用前阻止仍是 Candidate 工具暂存策略，而不是用共享 Environment 伪装 `branch_environment`。
 - **NLE 只是测试用例，不属于 AScout 实现**。NLE 的 bridge、策略和运行环境作为外部 workload／适配保留，不进入核心 crate 的能力边界；核心契约不得出现 NLE 专用语义。
 - **AScout 不与 Pi 耦合**。Pi 是首个接入实现，不是架构组成；设计文档不得把 Pi 写成 AScout 的前提，控制面也不应把 Pi 的路径、工具或会话结构固化进核心协议。
 
@@ -541,7 +563,7 @@ Agent 接入侧仍然是唯一控制 Agent 会话的地方：创建会话、克�
 
 CRIU 一类进程快照同样不采用：需要特权、镜像 I/O 和 FD 重绑，每步一条分支不划算。
 
-现行实现：环境单实例；`branch` 只是同一世界的别名，控制面不再使用它；Candidate 只在预测结果下推演一步，工具调用暂存到 Promote；动作前固定延迟（`action_delay_seconds`，当前配置 1 秒）；预测由固定程序从公开观测枚举，模型不负责预测。旧内容不再出现在正式文档。这里的 `branch` 是 NLE 专用测试适配的逻辑视图，不是 AScout 的 `branch_environment`；边界见 2026-11-01 条。
+现行实现：NLE bridge 可在同一 Backend 进程中维护多个独立 World；`branch` 按父 World 的初始记录和公开动作历史重建独立 Environment，Backend 进程和依赖仍可共享。Candidate 只在预测结果下推演一步，工具调用暂存到 Promote；动作前固定延迟（`action_delay_seconds`，当前配置 1 秒）；预测由固定程序从公开观测枚举，模型不负责预测。
 
 ## 2026-10-25：随机双 Candidate 与 Parent 不等待裁决
 
@@ -684,7 +706,7 @@ Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义�
 - `agent-access.ts` 只保留入口连接与生命周期，Pi 的 session、transcript、checkpoint、工具拦截和候选续跑全部移入 `PiAdapter`。
 - Runtime Adapter 在 `Hello` 中声明 `RuntimeCapabilities`：可执行的 `RuntimeTool` 列表、是否共享底层环境、是否支持独立 `branch_environment`。
 - 控制面不再识别 `nle_action`。它按 Runtime 声明的工具名调用 `tool_context` 和 `invoke_tool`，用 Runtime 返回的 `result` 更新 Agent 工具通道，用 `evidence` 交给 Policy 匹配。
-- NLE Runtime 声明 `shared_environment: true`、`branch_environment: false` 和 `nle_action` 工具；Candidate 不再创建虚假的 `branch_environment` 视图，环境动作只发生在权威环境。
+- NLE Runtime 声明 `nle_action` 工具；Candidate 仍使用控制面分配的独占 Environment，具体 workload 内部世界行为不暴露给控制面。
 - Pi Adapter 从 `ASCOUT_RUNTIME_TOOLS` 读取 Runtime 工具描述并动态注册；它不知道 NetHack、动作编号或 NLE 语义。
 - 控制面在 ToolPending 后立即发送一次 `resolve_pending`；候选处置阶段只决定 Candidate 生命周期，不再重复发送同一 `command_id` 的 resolve 命令。
 

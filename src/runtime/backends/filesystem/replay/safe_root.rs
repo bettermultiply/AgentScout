@@ -6,8 +6,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::runtime::backend::BackendError;
 use super::super::util::*;
+use crate::runtime::backend::BackendError;
 
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_IN_ROOT: u64 = 0x10;
@@ -52,8 +52,8 @@ impl SafeRoot {
         mode: u32,
         resolve: u64,
     ) -> Result<OwnedFd, BackendError> {
-        let path = CString::new(path)
-            .map_err(|_| BackendError::new("invalid target-relative path"))?;
+        let path =
+            CString::new(path).map_err(|_| BackendError::new("invalid target-relative path"))?;
         let how = OpenHow {
             flags: flags as u64,
             mode: mode as u64,
@@ -104,9 +104,7 @@ impl SafeRoot {
                         Some(parent) => unsafe {
                             OwnedFd::from_raw_fd(libc::dup(parent.as_raw_fd()))
                         },
-                        None => unsafe {
-                            OwnedFd::from_raw_fd(libc::dup(self.fd.as_raw_fd()))
-                        },
+                        None => unsafe { OwnedFd::from_raw_fd(libc::dup(self.fd.as_raw_fd())) },
                     };
                     let name = CString::new(component)
                         .map_err(|_| BackendError::new("invalid target directory name"))?;
@@ -126,7 +124,11 @@ impl SafeRoot {
         current.ok_or_else(|| BackendError::new("target path has no components"))
     }
 
-    pub(crate) fn parent(&self, path: &str, create: bool) -> Result<(OwnedFd, String), BackendError> {
+    pub(crate) fn parent(
+        &self,
+        path: &str,
+        create: bool,
+    ) -> Result<(OwnedFd, String), BackendError> {
         let path = normalize_relative_path(path)?;
         let (parent, name) = path
             .rsplit_once('/')
@@ -171,7 +173,8 @@ impl SafeRoot {
             ) {
                 remove_dir_fd(&child)?;
             }
-            if unsafe { libc::unlinkat(parent.as_raw_fd(), c_name.as_ptr(), libc::AT_REMOVEDIR) } != 0
+            if unsafe { libc::unlinkat(parent.as_raw_fd(), c_name.as_ptr(), libc::AT_REMOVEDIR) }
+                != 0
             {
                 return Err(error(std::io::Error::last_os_error()));
             }
@@ -229,19 +232,38 @@ impl SafeRoot {
             let (parent, name) = self.parent(&path, true)?;
             let c_name = CString::new(name)
                 .map_err(|_| BackendError::new("invalid target directory name"))?;
-            if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), (mode & 0o7777) as libc::mode_t) } != 0 {
+            if unsafe {
+                libc::mkdirat(
+                    parent.as_raw_fd(),
+                    c_name.as_ptr(),
+                    (mode & 0o7777) as libc::mode_t,
+                )
+            } != 0
+            {
                 return Err(error(std::io::Error::last_os_error()));
             }
             return Ok(());
         }
-        if unsafe { libc::mkdirat(parent.as_raw_fd(), c_name.as_ptr(), (mode & 0o7777) as libc::mode_t) } != 0 {
+        if unsafe {
+            libc::mkdirat(
+                parent.as_raw_fd(),
+                c_name.as_ptr(),
+                (mode & 0o7777) as libc::mode_t,
+            )
+        } != 0
+        {
             return Err(error(std::io::Error::last_os_error()));
         }
         let _ = mode;
         Ok(())
     }
 
-    pub(crate) fn write_file(&self, path: &str, source: &Path, mode: u32) -> Result<(), BackendError> {
+    pub(crate) fn write_file(
+        &self,
+        path: &str,
+        source: &Path,
+        mode: u32,
+    ) -> Result<(), BackendError> {
         let path = normalize_relative_path(path)?;
         let (parent, name) = self.parent(&path, true)?;
         let c_name = CString::new(name.clone())
@@ -263,11 +285,7 @@ impl SafeRoot {
         drop(parent);
         let output = self.openat2(
             &path,
-            libc::O_WRONLY
-                | libc::O_CREAT
-                | libc::O_TRUNC
-                | libc::O_NOFOLLOW
-                | libc::O_CLOEXEC,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             mode & 0o7777,
             RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
         )?;
@@ -354,4 +372,3 @@ pub(crate) fn remove_dir_fd(fd: &OwnedFd) -> Result<(), BackendError> {
     unsafe { libc::closedir(directory) };
     Ok(())
 }
-

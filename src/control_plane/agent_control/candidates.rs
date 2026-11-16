@@ -108,6 +108,7 @@ impl SpeculativeTree {
         self.branch_mut(&branch_id)?.execution_state.turn_active = true;
         self.record_runtime_state(&branch_id, RuntimeExecutionState::EnvironmentRequested)?;
         Ok(AgentCommand::StartCandidate {
+            environment_id: self.branches[&branch_id].environment_id.clone(),
             branch_id: branch_id.clone(),
             parent_branch_id: parent.to_string(),
             operation_id: chance.operation_id,

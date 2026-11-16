@@ -90,6 +90,8 @@ pub enum ControlResult {
     /// `(branch_id, action)` pairs returned by `rebalance`.
     Rebalance(Vec<(String, String)>),
     Completed,
+    Environment(String),
+    EnvironmentFailed(String, String),
 }
 
 #[derive(Default)]

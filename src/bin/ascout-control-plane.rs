@@ -113,12 +113,10 @@ fn start_adapter(
 ) -> Result<(std::process::Child, ControlSession, RuntimeCapabilities), Box<dyn std::error::Error>>
 {
     let config: Value = serde_json::from_slice(&fs::read(config_path)?)?;
-    let socket = std::path::PathBuf::from(
-        config["control_socket"]
-            .as_str()
-            .ok_or("runtime config missing control_socket")?,
-    );
-    let server = ControlServer::bind(&socket)?;
+    let address = config["control_address"]
+        .as_str()
+        .ok_or("runtime config missing control_address")?;
+    let server = ControlServer::bind(address)?;
     server.set_nonblocking(true)?;
     let binary = env::var_os("ASCOUT_RUNTIME_ADAPTER")
         .map(std::path::PathBuf::from)
@@ -397,6 +395,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     tree.set_agent_launch(agent_launch.clone());
     let (events, receiver) = mpsc::channel();
+    let runtime_events = events.clone();
+    session.set_event_waker(move || {
+        let _ = runtime_events.send(execution::Event::Timer);
+    });
     let requests = events.clone();
     let mut ledger = Ledger::open(&run_dir.join("events.jsonl"))?;
     ledger.record(json!({
@@ -413,41 +415,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|_| "Control plane disconnected".into())
         });
     let mut tui_thread = None;
+    let mut authority_command = if resume {
+        AgentCommand::Load {
+            environments: tree
+                .branches
+                .iter()
+                .filter_map(|(id, record)| {
+                    record.environment_id.clone().map(|env| (id.clone(), env))
+                })
+                .collect(),
+            branch_id: tree
+                .authority_branch_id
+                .clone()
+                .ok_or("Recovery authority missing")?,
+            path: recovery_generation.as_ref().unwrap().join("agent.json"),
+        }
+    } else {
+        tree.create_authority("authority", "")?
+    };
+    let authority_id = tree
+        .authority_branch_id
+        .clone()
+        .ok_or("authority missing")?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        runtime_call(
-            &session,
-            "authority",
-            if resume {
+        if resume {
+            runtime_call(
+                &session,
+                "",
                 Operation::LoadRuntime {
                     path: recovery_generation.as_ref().unwrap().join("runtime.json"),
-                }
-            } else {
-                Operation::EstablishEnvironment
-            },
-        )?;
+                },
+            )?;
+        } else {
+            let established = session.establish()?;
+            if !established.environment_id.is_empty() {
+                tree.branches
+                    .get_mut(&authority_id)
+                    .ok_or("authority Branch missing")?
+                    .environment_id = Some(established.environment_id.clone());
+            }
+            if established.status != ascout::protocol::contract::ResultStatus::Completed
+                || established.environment_id.is_empty()
+            {
+                return Err("Runtime failed to establish the authority Environment".into());
+            }
+            if let AgentCommand::StartBranch { environment_id, .. } = &mut authority_command {
+                *environment_id = Some(established.environment_id);
+            }
+        }
+        let authority_environment = tree.branches[&authority_id]
+            .environment_id
+            .as_deref()
+            .ok_or("authority Environment missing")?;
         // 环境建立后，由 Runtime 在其中建立 Agent 接入侧。
         runtime_call(
             &session,
-            "authority",
+            authority_environment,
             Operation::OperateEnvironment {
                 command: Vec::new(),
-                agent: Some(agent_launch),
+                agent: Some(agent_launch.clone()),
             },
         )?;
-        let mut connection = listener.accept("agent", Duration::from_secs(30))?;
-        let command = if resume {
-            AgentCommand::Load {
-                branch_id: tree
-                    .authority_branch_id
-                    .clone()
-                    .ok_or("Recovery authority missing")?,
-                path: recovery_generation.as_ref().unwrap().join("agent.json"),
+        if resume {
+            for branch in tree.branches.values().filter(|branch| {
+                branch.branch_id != authority_id
+                    && (branch.status.is_live_candidate() || branch.status.is_live_authority())
+            }) {
+                runtime_call(
+                    &session,
+                    branch
+                        .environment_id
+                        .as_deref()
+                        .ok_or("live Branch Environment missing")?,
+                    Operation::OperateEnvironment {
+                        command: Vec::new(),
+                        agent: Some(agent_launch.clone()),
+                    },
+                )?;
             }
-        } else {
-            tree.create_authority("authority", "")?
-        };
+        }
+        let mut connection = listener.accept("agent", Duration::from_secs(30))?;
+        let command = authority_command;
         tree.record_runtime_state(
-            "authority",
+            &authority_id,
             ascout::control_plane::agent_control::RuntimeExecutionState::Ready,
         )?;
         let decisions = Decision::ALL

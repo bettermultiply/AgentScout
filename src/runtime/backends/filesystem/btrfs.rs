@@ -63,7 +63,11 @@ fn btrfs_send_dump_with(
 }
 
 impl FilesystemBackend {
-    pub(super) fn btrfs_send_dump(&self, base: &Path, snapshot: &Path) -> Result<String, BackendError> {
+    pub(super) fn btrfs_send_dump(
+        &self,
+        base: &Path,
+        snapshot: &Path,
+    ) -> Result<String, BackendError> {
         btrfs_send_dump_with(&self.config.btrfs_path, base, snapshot)
     }
 
@@ -103,7 +107,12 @@ impl FilesystemBackend {
         ])
     }
 
-    pub(super) fn btrfs_snapshot(&self, source: &Path, target: &Path, read_only: bool) -> Result<(), BackendError> {
+    pub(super) fn btrfs_snapshot(
+        &self,
+        source: &Path,
+        target: &Path,
+        read_only: bool,
+    ) -> Result<(), BackendError> {
         let mut arguments = vec![
             std::ffi::OsStr::new("subvolume"),
             std::ffi::OsStr::new("snapshot"),
@@ -115,7 +124,6 @@ impl FilesystemBackend {
         arguments.push(target.as_os_str());
         self.run_btrfs(&arguments)
     }
-
 
     pub(super) fn probe_btrfs_snapshot_copies(&self) -> bool {
         let root = self.config.state_directory.join(".probe-btrfs-snapshot");
@@ -173,12 +181,7 @@ impl FilesystemBackend {
             // fallback must actually clean a read-only snapshot.
             let _ = self.btrfs_delete_strict(&snap);
             let _ = self.btrfs_delete_strict(&sub);
-            let _ = remove_path_with_mode(
-                &self.config.btrfs_path,
-                &root,
-                true,
-                false,
-            );
+            let _ = remove_path_with_mode(&self.config.btrfs_path, &root, true, false);
             !path_exists(&root)
         } else {
             false
@@ -194,9 +197,7 @@ impl FilesystemBackend {
         base: &Path,
     ) -> Result<(View, Vec<(String, String)>, Vec<FilesystemChange>), BackendError> {
         let token = self.token();
-        let snapshot_root = self
-            .snapshots_root()
-            .join(format!("diff-snapshot-{token}"));
+        let snapshot_root = self.snapshots_root().join(format!("diff-snapshot-{token}"));
         let current = snapshot_root.join(&mount.layer_key);
         if let Some(parent) = current.parent() {
             fs::create_dir_all(parent).map_err(error)?;
@@ -226,7 +227,8 @@ fn send_dump_upper_delta(
         .into_iter()
         .filter_map(|change| {
             let path = change.path.strip_prefix("upper/").map(str::to_string);
-            let old_path = change.old_path
+            let old_path = change
+                .old_path
                 .and_then(|path| path.strip_prefix("upper/").map(str::to_string));
             match (path, old_path) {
                 (Some(path), old_path) => Some(FilesystemChange {
@@ -239,7 +241,9 @@ fn send_dump_upper_delta(
                     old_path,
                 }),
                 (None, Some(path)) => Some(FilesystemChange {
-                    path, kind: "delete".to_string(), old_path: None,
+                    path,
+                    kind: "delete".to_string(),
+                    old_path: None,
                 }),
                 (None, None) => None,
             }
@@ -490,7 +494,11 @@ mod tests {
                 .any(|c| c.path == "upper/kept" && c.kind == "change")
         );
         assert_eq!(changes.iter().filter(|c| c.path == "replaced").count(), 1);
-        assert!(changes.iter().any(|c| c.path == "replaced" && c.kind == "change"));
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.path == "replaced" && c.kind == "change")
+        );
         assert!(!changes.iter().any(|c| c.path.contains("o300-")
             || c.path.contains("o301-")
             || c.path == "ephemeral"));
@@ -554,7 +562,13 @@ mod tests {
         fs::write(root.path().join("parent/nested/newfile"), b"new").unwrap();
         let (_, _, changes) = send_dump_upper_delta(dump, root.path()).unwrap();
         assert_eq!(
-            changes.iter().map(|change| (change.path.as_str(), change.kind.as_str(), change.old_path.as_deref()))
+            changes
+                .iter()
+                .map(|change| (
+                    change.path.as_str(),
+                    change.kind.as_str(),
+                    change.old_path.as_deref()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("parent", "change", None),

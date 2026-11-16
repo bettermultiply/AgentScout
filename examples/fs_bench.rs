@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 
 use ascout::protocol::contract::AgentLaunch;
 use ascout::runtime::backend::{Backend, BackendContext};
-use ascout::runtime::backends::filesystem::{
-    FilesystemBackend, FilesystemConfig,
-};
+use ascout::runtime::backends::filesystem::{FilesystemBackend, FilesystemConfig};
 use ascout::runtime::launch_plan::MountEntry;
 
 const CHANGED_FILES: usize = 10;
@@ -142,62 +140,64 @@ fn run() -> Result<(), String> {
     ];
 
     let execution = (|| -> Result<(), String> {
-    println!("machine:");
-    println!("  kernel: {}", uname("-r"));
-    println!("  cpu: {}", cpu_model());
-    for case in &cases {
-        fs::create_dir_all(&case.root).map_err(|e| format!("create root: {e}"))?;
-        fs::create_dir_all(&case.state).map_err(|e| format!("create state: {e}"))?;
-        fs::create_dir_all(&case.workspace).map_err(|e| format!("create workspace: {e}"))?;
-        let fs_type = Command::new("stat")
-            .args(["-f", "-c", "%T"])
-            .arg(&case.state)
-            .output()
-            .ok()
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        println!("  case {} state_fs={fs_type}", case.name);
-    }
-
-    println!("\ncase,N,operation,p50_ms,p95_ms,fork_cost,mechanism,overlaps");
-    let filter = std::env::var("ASCOUT_BENCH_CASES").unwrap_or_default();
-    for case in &cases {
-        if !filter.is_empty() && !case.name.contains(&filter) {
-            continue;
+        println!("machine:");
+        println!("  kernel: {}", uname("-r"));
+        println!("  cpu: {}", cpu_model());
+        for case in &cases {
+            fs::create_dir_all(&case.root).map_err(|e| format!("create root: {e}"))?;
+            fs::create_dir_all(&case.state).map_err(|e| format!("create state: {e}"))?;
+            fs::create_dir_all(&case.workspace).map_err(|e| format!("create workspace: {e}"))?;
+            let fs_type = Command::new("stat")
+                .args(["-f", "-c", "%T"])
+                .arg(&case.state)
+                .output()
+                .ok()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            println!("  case {} state_fs={fs_type}", case.name);
         }
-        for &n in &sizes {
-            if let Err(error) = run_case(case, n, iterations) {
-                match error {
-                CaseError::Unsupported(error) => {
-                    println!("{},{},{},SKIP: {},,,", case.name, n, "all", error);
-                }
-                CaseError::Failed(error) => {
-                    return Err(format!("{} N={n}: {error}", case.name));
-                }
+
+        println!("\ncase,N,operation,p50_ms,p95_ms,fork_cost,mechanism,overlaps");
+        let filter = std::env::var("ASCOUT_BENCH_CASES").unwrap_or_default();
+        for case in &cases {
+            if !filter.is_empty() && !case.name.contains(&filter) {
+                continue;
+            }
+            for &n in &sizes {
+                if let Err(error) = run_case(case, n, iterations) {
+                    match error {
+                        CaseError::Unsupported(error) => {
+                            println!("{},{},{},SKIP: {},,,", case.name, n, "all", error);
+                        }
+                        CaseError::Failed(error) => {
+                            return Err(format!("{} N={n}: {error}", case.name));
+                        }
+                    }
                 }
             }
         }
-    }
-    Ok(())
+        Ok(())
     })();
     let cleanup_errors = cleanup_paths(cases.iter().flat_map(|case| case.cleanup.iter()));
     match (execution, cleanup_errors.is_empty()) {
         (result, true) => result,
-        (result, false) => Err(format!("{}cleanup failed: {}",
+        (result, false) => Err(format!(
+            "{}cleanup failed: {}",
             result.err().map(|e| format!("{e}; ")).unwrap_or_default(),
-            cleanup_errors.join("; "))),
+            cleanup_errors.join("; ")
+        )),
     }
 }
 
 fn cleanup_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> Vec<String> {
     let mut cleanup_errors = Vec::new();
-        for path in paths {
-            if let Err(error) = fs::remove_dir_all(path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    cleanup_errors.push(format!("remove {}: {error}", path.display()));
-                }
+    for path in paths {
+        if let Err(error) = fs::remove_dir_all(path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                cleanup_errors.push(format!("remove {}: {error}", path.display()));
             }
         }
+    }
     cleanup_errors
 }
 
@@ -212,7 +212,9 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
     let backend = FilesystemBackend::new(config).map_err(|e| e.to_string())?;
     let capabilities = backend.capabilities();
     if !capabilities.branch_environment {
-        return Err(CaseError::Unsupported("bubblewrap overlay probe failed".into()));
+        return Err(CaseError::Unsupported(
+            "bubblewrap overlay probe failed".into(),
+        ));
     }
     let overlaps = capabilities
         .state_directory_overlaps_mount
@@ -223,7 +225,9 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
         .clone()
         .unwrap_or_else(|| "unknown".into());
     if case.name.starts_with("btrfs-snapshot") && fork_cost != "btrfs_snapshot" {
-        return Err(CaseError::Unsupported("btrfs snapshot copies unavailable".into()));
+        return Err(CaseError::Unsupported(
+            "btrfs snapshot copies unavailable".into(),
+        ));
     }
     let mechanism = backend.mechanism().as_str().to_string();
     let cwd = case.workspace.clone();
@@ -238,7 +242,9 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
         let child = format!("child-{iteration}");
         let mark = format!("mark-{iteration}");
         let fork_start = Instant::now();
-        backend.fork("root", &child, &[]).map_err(|e| e.to_string())?;
+        backend
+            .fork("root", &child, &[])
+            .map_err(|e| e.to_string())?;
         total.entry("fork").or_default().push(fork_start.elapsed());
         let base = FilesystemBackend::base_snapshot_id_for_child(&child);
         let mark_start = Instant::now();
@@ -260,7 +266,10 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
         let accepted = backend
             .accept(&base, &child, "root", &[], None, None)
             .map_err(|e| e.to_string())?;
-        total.entry("accept").or_default().push(accept_start.elapsed());
+        total
+            .entry("accept")
+            .or_default()
+            .push(accept_start.elapsed());
         if !accepted.conflicts.is_empty() {
             return Err(format!("accept conflicts: {:?}", accepted.conflicts).into());
         }
@@ -268,7 +277,10 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
         backend.terminate(&child).map_err(|e| e.to_string())?;
         let discard_start = Instant::now();
         backend.discard(&child, &[]).map_err(|e| e.to_string())?;
-        total.entry("discard").or_default().push(discard_start.elapsed());
+        total
+            .entry("discard")
+            .or_default()
+            .push(discard_start.elapsed());
     }
     backend.terminate("root").map_err(|e| e.to_string())?;
     backend.cleanup("root").map_err(|e| e.to_string())?;

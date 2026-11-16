@@ -1,6 +1,93 @@
 # 首要验证 Workload
 
+## 纯 FS 真实模型短 session 成功（2026-11-16）
+
+用户授权的唯一一次 `openai/gpt-6.1-sol --thinking low` 真实 FS session 已成功，主动耗时 **21.333 秒**，未使用 NLE、替代 Adapter 或宿主文件工具。证据根目录 `/tmp/opencode/fs-real-20261116-mfUC97`；`acceptance.json` 为汇总，`timeline.json`、`session/events.jsonl`、`session/session.jsonl` 为可独立核对的记录，`final-reply.txt` 保存完整最终回复。旧证据不动，未提交、未派生 subagent，已有工作区修改保留。
+
+首次请求前确实遇到入口缺口。原拒绝配置、stderr、`entry-results.json` 与当时的 `acceptance.json` 保留于 `/tmp/opencode/fs-real-20261116-preflight`；其中“未运行、请求为 0”仅描述初始预检，**不是本次最终结论**。修复前单 FS 配置误走 Firecracker、多 Backend 拒绝 filesystem、空 Backend 也被拒绝。按“可离线复现先修复”的授权，`src/bin/ascout-runtime-adapter.rs` 新增 `backend=filesystem` 的正常装配，复用现有 `BaseRuntime` 和 `FilesystemBackend`；`src/runtime/base.rs` 将物化写者检查扩至持有 namespace holder 的纯 FS 环境。未改变既有身份、晋级、匹配或物化语义，未添加 NLE 依赖。现有 FS 生命周期及恢复脚本仍是 NLE inner 加 FS 数据面，不能当作本次纯 FS 入口证据。
+
+先完成离线构建和文件工具回归 5/5；修复后构建通过、Runtime 单元测试 141/141。本地伪模型经正常控制面→Runtime→真实 Pi→真实 FS 完成同一任务，证据 `/tmp/opencode/fs-local-20261116-MGZZSb`，9 次本地模型请求。临时 runner 与统计脚本保留于预检目录；尚未将纯 FS 入口用例纳入仓库持久回归，这是测试交接缺口，不影响已有原始验收证据。
+
+真实任务读取 `input.csv`，计算并生成 `result.json`，再读回并独立重算断言。Authority **4 次工具**，候选 candidate-5 **1 次只读工具**，整场共 5 次工具。期望与实际逐字节一致：`{"total_cents":2021,"quantity":12}\n`；输入与 baseline 均未改，最终中文回复完成。`input.csv`、`expected/result.json`、`actual-result.json`、脱敏 `command.json` 与 `runtime.json` 均已保存。
+
+文件工具使用 Runtime 为各 Environment 生成的计划及 holder socket，计划按真实 Environment ID 留于 `plans/`。Authority 与 candidate-5 的工具输出分别报告 mount namespace `mnt:[4026533058]`、`mnt:[4026533238]`。`snapshots/` 与 `host-samples.json` 记录 overlay 已产生结果、宿主尚不存在结果；随后正常 `materialization_completed` 回执 `published=true`，没有私自复制到工作区充当物化。
+
+沿用旧 FS `branch_model` Policy 声明和当前默认算法，仅将候选模型绑定到本次指定模型，未禁用投机或强制晋级。自然产生 **5 Candidate、5 Discard、0 Promote**。candidate-5 在独立环境提前完成只读核验，但命令结构与 Authority 不同，严格匹配不通过而自然丢弃。因此本次覆盖 Authority 多步、候选隔离只读执行及 Discard；**不覆盖 Promote 后续跑、候选写入发布或恢复**。
+
+模型请求前 action 启动 **11 次**（全部保守计入，含取消），原生记录有 **9 个 provider response ID、7 个 completed 回执**。原生 assistant **5 条标记 aborted，其中 4 条零 usage，1 条已有 completed 回执及完整 usage**；这些分类有重叠，不可相加。candidate-3 的 action failed 不代表 provider 未完成。Usage 合计 input 2183、output 752、reasoning 0、cacheRead 37888、cacheWrite 0、totalTokens 40823；Pi 配置估算 **$0.0156748**，非服务账单，取消的零 usage 也不能证明服务端不收费。120 秒主动预算、18 次 action 停止阈值、目标不超过 20 次请求，关闭重试与压缩；不是外部硬费用上限。沿用凭证，不输出密钥。
+
+任务先记录 `task_completed=succeeded`；正常 Shutdown 随后又产生 cancelled 记录，后者是退出阶段事实，不覆盖前者。进程退出码 0，监控记录的自有 PID 无残留；Web 36905、Runtime 37271 均可重新 bind。完整回执与清理核对见 `acceptance.json`、`run-result.json`。
+
+## Promote 在途模型等待点修复（2026-11-16）
+
+原 `/tmp/opencode/runtime-id-real-success-20261116` 失败证据保持不变。原事件中，candidate-2 的 model-2 在 12.56 秒开始，13.52 秒 Branch 进入 Promoting 时，其 chance-3 被 sweep 标为 Unavailable／Discarded，17.35 秒模型成功结束时不再进入 `record_authority_outcome` 的非终态 Chance 路径，故正常 `ResolvePending(phase=continue)` 永远不会产生。Pi 在 assistant 结束时创建的 `modelResultHolds` 随后挡住工具 Hook。Promote Applied 已释放 effect／extent gate，现场没有 pause hold；因此不能靠重复 Promote、手动放行或修改 Pi 权限解决。
+
+最小修复位于 `src/control_plane/agent_control/chances.rs`：`chance_waiting_live` 将 `Promoting` 也视为现有等待点仍存活。晋级是角色过渡，不是终止该 Branch 的在飞操作；Discarding 及之后的失效传播保持原规则。未修改 Policy、模型准入、暂停语义、Runtime 身份生成或 NLE 单世界。
+
+先红后绿证据集中于 `/tmp/opencode/promote-continuation-20261116`（检查日志原路径为 `/tmp/opencode/promote-*.log`）。新增 Rust 回归先证明 sweep 错删在飞模型 Chance，修复后证明真实 ActionFinished 推进到 Arrived 并由正常 progress 生成 continue。`tests/predictor-fact-e2e.mjs` 新增本地 SSE 延迟响应场景，保留原完整 Policy，真实 Pi→Runtime→NLE；原版在 `/tmp/opencode/predictor-fact-e2e-v6Ti3K` 超时，修复后 `/tmp/opencode/predictor-fact-e2e-yL408f` 完成 5 次实际动作、首次 Promote 后 4 次工具、完整原生最终回复及正常退出（7 次本地伪模型请求、5 个 Candidate）。首次绿色尝试的最终回复断言误查 Ledger output（Ledger 不保存该正文），改为检查原生 session 完整 stop 回复；该脚本失败证据 `/tmp/opencode/predictor-fact-e2e-C3gJPQ` 保留。
+
+真实模型补验 **成功**：`/tmp/opencode/promote-continuation-20261116/real/acceptance.json`。沿用宿主凭证、`openai/gpt-6.1-sol --thinking low`、原 5 步任务、NLE seed 7／1 秒延迟、原 Policy、关闭重试／压缩，120 秒上限和 18 次 action 停止阈值，最多 20 请求预算。仅一个 session；10 次请求前模型 action（保守全部计请求），6 个 provider response ID，另 4 次启动后被丢弃取消、无成功回执。Usage input 6841、cacheRead 30336、output 305、reasoning 8、totalTokens 37482；Pi 配置估算 **$0.0197656**，非服务账单。原失败费用 $0.0060204 保留，两次合计估算 $0.0257860。
+
+真实动作恰好 5 次（向西 4 次、向南 1 次），最终公开位置 `(22,6)`、HP 14/14、turn 5，完整中文最终回复已保存于原生 session。5 个 Candidate 自然产生 1 Promote Applied、4 Discard；首次 Promote 后再完成 3 次真实工具。任务先 `task_completed=succeeded`，然后正常 Shutdown；Shutdown 又记录 cancelled task_completed，为退出阶段事实，不覆盖成功任务。全部 6 个创建的 Branch 绑定各自 Runtime 返回的不同 Environment ID，完整映射见 acceptance 的 `branch_bindings_all_created`；最终全部 Environment cleaned，自有进程无残留，退出码 0。8080／18180 无 listener，SO_REUSEADDR bind 成功；普通 bind 暂受 TIME_WAIT 影响，未误报成残留服务。
+
+监控工具插曲也保留在证据中：首个 background shell 被显式 1000ms 工具超时终止，仅杀掉监控脚本，控制面仍是同一个 idle session，事件只有 branch_ready、没有 prompt／模型请求。`continue-monitor.py` 接回同一 PID，才发送唯一 prompt，并从发送前维持 120 秒监控；任务约 52.53 秒完成，没有第二次启动或模型重试。原生 t_ms 包含此前空闲间隔，不应与主动任务耗时混淆。
+
+检查：Rust lib 171/171、Pi 接入及 predictor 10/10、本地 E2E 2/2、`cargo build --bins`、`cargo check --all-targets`、`cargo fmt -- --check`、`git diff --check` 均通过。没有提交；全部既有修改保留。
+
+## 用户重新授权后的单次真实模型验证（2026-11-16）
+
+**结果：真实模型成功返回，但多步 E2E 仍被阻塞。** 本次独立证据目录为 `/tmp/opencode/runtime-id-real-success-20261116`（目录名不代表验收成功）；原 `/tmp/opencode/runtime-id-real-e2e-20261116` 及其他旧失败证据未改动。没有创建 subagent、提交或修改实现，没有禁用 Policy／投机，没有用伪模型或回放替代本次运行。
+
+- 无付费预检：`cargo build --offline --bins` 成功（`build.log`），系统 Node v26.13.0、NLE 1.3.0、Policy 存在，8080／18180 空闲。认证仅检查现有文件存在，不复制或输出秘密；未设置独立 Pi 配置目录。沿用宿主认证、`openai/gpt-6.1-sol --thinking low`、现有 NLE seed 7／1 秒延迟和 NLE Policy。workspace 设置关闭重试和压缩。未重跑主 Agent 已通过的测试集。
+- 仅运行一个真实 session，输入要求恰好 5 次、最多 6 次单步动作；120 秒截止，18 次模型 action 停止阈值（含候选，不是外部服务硬配额）。脱敏启动参数、输入、监控与清理脚本分别为 `command.json`、`prompt.txt`、`run.py`。
+- 真实模型请求按请求前 `action_started` 与非零 provider 回复交叉核对为 **2 次，成功 2、失败 0**（Authority／Candidate 各一次，原生 transcript 含两个 response ID）。另有 2 条本地零 token 取消 usage，不算外部请求。没有代理截获或服务方账单，计数依据明确留在 `acceptance.json`。
+- Usage 合计：input 1996、cacheRead 9984、output 103、reasoning 11、totalTokens 12083；reasoning 不额外重复加入总数。Pi 按配置估算费用 **$0.0060204**，`totalFromProvider=false`，不是服务记录费用。
+- 真实 NLE 仅完成 1 次 `nle_action(action=4)`：位置 `(26,5)` → `(25,5)`，turn 2，HP 14/14，游戏 message 为空。候选预测 `moved`，比较 `compatible`，**1 次 Promote Applied**；旧 Authority 的 Discard Applied 1 次，不能称作预测不匹配丢弃。Candidate 模型生成第二次西移调用后没有进入工具 action／Runtime invoke，故不能算第二次真实动作。
+- Runtime `req-1` 返回 `env-2d10e5-18e87efa5ff61e2b-1`，绑定 `authority`；`req-4` 返回 `env-2d10e5-18e87efd8a2c011b-2`，绑定 `candidate-2`。最终 Tree 与返回值一致，两个 Branch 的 ID 不同；该共享 NLE 世界的独立身份不代表世界复制。
+- 约 13.57 秒 Promote Applied，17.35 秒 Candidate 模型成功完成后持续停滞；120 秒监控截止后 Interrupt／Shutdown，最终 `task_completed=cancelled`，**没有最终自然语言总结**。最后模型说明为“第1步返回‘moved’，未报告障碍；第2步继续向西。”，不是最终回答。退出码 0 仅证明正常清理，不代表任务成功。
+- 离线核对的具体挂起边界：`agent-access/pi/main.ts:347` 在模型 assistant 结束时设置 `modelResultHolds`，`:265–270` 在工具 Hook 等待该 hold，`:629` 仅收到 `ResolvePending(outcome.phase=continue)` 时释放。本次日志存在 `model-2` 完成，但没有之后针对它的 continue 命令，直到中断出现 `Model continuation cancelled`。上游为何未发送 continue 尚需控制面回归定位，不能将此直接认定为旧 Chance 路由错误或宣称已修复；付费开始后的阻塞未自动重试。
+- 两 Branch 最终均 Cleaned／Agent Released／Runtime Cleaned，`turn_active=false`；记录到的自有子进程无残留，8080／18180 再次可绑定。只向本次控制面发 Interrupt／Shutdown，没有操作无关进程或端口。
+
+独立核对入口：`acceptance.json` 汇总；`timeline.json` 为原事件过滤视图；`session/events.jsonl`、`session/session.jsonl`、`session/final-tree.json`、`end-state.json` 保留事实，`run-result.json` 保存进程清单及清理结果，`source-sha256.json` 保存本次关键源码／构建指纹。当前证明真实模型、真实动作、自然比较／Promote、多 Branch 返回身份绑定及清理；**未证明 4–6 步任务成功与最终回答**。
+
+## Runtime 返回 Environment ID 修正后的单次真实路径验收（2026-11-16）
+
+本次结果为 **失败，尚未完成真实模型 E2E**。用户授权一次真实模型 session；仅启动一次正常 control plane → NLE Runtime → Pi session，失败后只做离线定位，没有重试真实运行。没有提交或修改既有实现。
+
+- 证据目录：`/tmp/opencode/runtime-id-real-e2e-20261116`。`command.json` 保存脱敏启动参数，`prompt.txt` 保存输入，`session/events.jsonl`、`session/session.jsonl`、`session/final-tree.json` 保存原始事实；`acceptance.json` 与 `run-result.json` 保存统计和清理结果。
+- 选择现有配置模型 `openai/gpt-6.1-sol --thinking low`，认证仍用宿主 Pi 配置，未复制或输出凭证；使用现有 `nle-runtime.json`（seed 7、1 秒动作延迟）及 `assets/policy/nle/policy.yaml`。输入要求 5 次实际动作，最多 6 次，监控 18 次模型 action 停止阈值和 120 秒截止；workspace `.pi/settings.json` 关闭自动重试及压缩，不修改宿主配置。模型 action 监控不是外部 API 请求硬配额。
+- 无付费预检：`cargo build --bins`、`cargo check --all-targets`、`cargo test --lib --bins`（170 个 lib 测试、1 个 bin 测试）、`/usr/bin/node --test tests/pi-access.mjs` 通过；NLE 1.3.0 可导入，Node v26.13.0，18180／8080 启动前空闲。已有 Runtime identity 测试覆盖返回独立身份、重试复用原创建结果及失败创建的身份保留，但不替代真实候选验收。
+- Runtime 的 `req-1` 真实建立 NLE Environment，返回 `env-2c4e69-18e87ad0c800b262-1`，与最终 Tree 的 `authority.environment_id` 一致。没有 Candidate，故本次只验证单 Branch 的返回 ID 绑定，未真实验证多 Branch 独占绑定。
+- session 在约 1.75 秒内出现 `task_completed: failed`；首个模型请求前即 `turn_failed: Policy evaluation failed`。模型 action 开始数为 0，实际外部模型请求为 0，实际 NLE 工具动作为 0，Candidate／比较／Promote／Discard 均为 0。原生 session 中 assistant 文本为空、`stopReason=error`；唯一 Usage 是本地失败消息的零 token／零费用记录，不是成功的 provider 回执，也没有服务方账单证据。
+- 离线根因：`agent-access/pi/main.ts` 的 `beforeModelInference` 在赋值 `op.has_predictor` 之前调用 `access.hasPredictor`；`agent-access/core/index.ts` 将尚无该字段的 `op` 交给 `admit.opportunity_pass`，现有 NLE Policy 直接读取 `op["has_predictor"]`。使用本次保存的 Policy 源与相同输入离线复现 `KeyError: 'has_predictor'`（`offline-policy-traceback.txt`）；同一输入经 Rust Policy Engine 被拒为 `op must contain kind and the predictor fact`（`offline-admit.stderr`）。后续需修正 predictor 事实的提供与准入求值顺序；本次不以默认真假值绕过准入，也不宣称已修复。
+- Shutdown 正常退出，控制面退出码 0；Runtime terminate／cleanup completed，最终 Authority 为 Cleaned／Agent Released／Runtime Cleaned，`turn_active=false`。已记录的本 session 子进程均无残留，未操作无关进程。退出码 0 只说明退出清理成功，不代表任务通过。
+
+覆盖仅限真实 NLE 建立、Runtime 返回身份绑定、Agent 启动、失败报告和清理；没有证明真实模型推理、4–6 步动作、Candidate 比较或 Promote／Discard。该失败 session 已消耗本轮一次运行额度，未因实际请求数为 0 而自动补跑。
+
 首个真实接入对象是 Pi，当前源码位于相邻的 `pi`。本文只记录当前交互实现，不定义完整 Runtime 或 coding workload。
+
+## 首次请求 predictor 事实修复的离线与本地伪模型验证（2026-11-16）
+
+上述失败记录及 `/tmp/opencode/runtime-id-real-e2e-20261116` 原始文件保持原样。后续修复原因和事实来源见 [Policy Engine 开发记录](policy-engine.md)。本轮没有真实模型 API 请求、付费预检或重跑；**尚未真实模型 E2E 通过**。
+
+`tests/predictor-fact-e2e.mjs` 默认从仓库 fixture `tests/fixtures/predictor-fact-policy.json` 读取原失败 Policy 的 YAML 与完整源码，不依赖临时失败 session。fixture 只脱敏不进入 digest 的来源路径；共享 helper 验证留档 digest，E2E 在独立 run 走普通控制面启动编译并检查语义和摘要（不同 Python build 仅允许 Python identity 解释变化）。不修改 Policy 函数、配置、预测或选择。独立 Pi 配置仅注册 `fixture/fixture`，端点为本地 loopback SSE。Runtime 使用真实 NLE、seed 7 和 1 秒动作延迟，正常控制面 Web prompt → Runtime 启动 Pi → 首次推理 → `nle_action(action=4)` → 真实西移动作及公开 observation → 任务成功 → Shutdown。最新收口结果、文件工具根因与 Rust 扩展回归失败证据见 [测试讨论](test-discussion.md)。
+
+首次通过证据 `/tmp/opencode/predictor-fact-e2e-SV88y9`：`command.json`、`policy.json`、`requests.jsonl`、`events.jsonl`、`session.jsonl`、`agent.log`、`adapter.log`、`control.log`、`acceptance.json`。3 次本地伪模型请求，3 个模型 action 开始，4 次准入请求，1 个 Candidate；实际西移工具成功并返回 `position=(25,5)` 与地图，模型/工具均经过真实 Policy 准入，任务 succeeded，退出码 0。Ledger 另记录 compatible 后 Discard，不能把“生成候选”或“compatible”写成 Promote 验收。
+
+在完成最终文档和检查后再次运行同一 E2E 的证据 `/tmp/opencode/predictor-fact-e2e-YmqJax`：2 次本地伪模型请求，2 个模型 action，4 次准入，1 个 Candidate，真实 NLE 工具及正常退出同样通过。最终证据的验收 JSON 明确标记未重跑真实模型。
+
+第一轮脚本证据 `/tmp/opencode/predictor-fact-e2e-h4Jtwk` 保留：实际路径已执行成功，验收脚本错误地在 Agent 公开文本结果中查找内部 `blstats` 字段而失败。只把断言修正为真实公开坐标和地图后重新运行本地伪模型，未改生产结果格式。
+
+检查命令和日志统一位于 `/tmp/opencode/predictor-fact-fix-20261116`：
+
+- `node --experimental-strip-types --test tests/predictor-fact.mjs`：原版 0/3（`red.log`），首次修复后 3/3（`green.log`）；最终另加异常传播覆盖。
+- `node --experimental-strip-types --test tests/pi-access.mjs tests/predictor-fact.mjs`：最终 10/10，`focused.log`。
+- `node --test tests/predictor-fact-e2e.mjs`：两次通过均为 1/1，`e2e-green.log`、构建后再次运行的 `e2e-after-build.log`；首轮脚本断言失败见 `e2e.log`。
+- `cargo test --test policy`：1/1，`policy-integration.log`；`cargo test --lib control_plane::policy`：3/3，`policy-unit.log`；`cargo test --lib control_plane`：26/26，`control-plane.log`。
+- `cargo check --all-targets`、`cargo build --bins --example policy`：通过，`check.log`、`build.log`。
+- `git diff --check`：通过，`diff-check.log`。退出后进程检查未发现本次三个 E2E run 的残留进程。
+- `python3 tests/policy-proposal-order.py`：1/1，`proposal-order.log`。
+- `node --experimental-strip-types --test tests/pi-*.mjs tests/predictor-fact.mjs`：当时 33/34（新增异常测试前），`pi-core.log`。唯一失败为 `tests/pi-filesystem-tools.mjs:100` 的后代进程等待断言 `1 !== 0`；`node --test tests/pi-filesystem-tools.mjs` 独立重跑仍 4/5（`pi-filesystem-rerun.log`）。该文件工具实现和测试本轮未修改，入口也未调用本次修改的 access core 或 main；保留给主审检查已有工作，不宣称 Pi 全部通过。
 
 ## 当前可运行范围
 
@@ -184,7 +271,8 @@ Workload 是具体运行场景，Policy 不选择业务场景，只对等待点�
 启动脚本：`python3 examples/random-workload-provider.py`。使用独立临时 Pi 配置（不要覆盖用户配置），在 `models.json` 中添加 `openai-completions` provider，baseUrl 为 `http://127.0.0.1:18764/v1`，apiKey 为任意非空本地占位值，model id 为 `boundary-check`，contextWindow 为 `32000`，maxTokens 为 `1000`；`settings.json` 指定对应 defaultProvider/defaultModel。随后：
 
 ```sh
-PI_CODING_AGENT_DIR=/tmp/opencode/ascout-check-config cargo run --bin ascout-control-plane -- /tmp/opencode ../pi assets/policy/pi-tool/policy.yaml
+PI_CODING_AGENT_DIR=/tmp/opencode/ascout-check-config \
+cargo run --bin ascout-control-plane -- /tmp/opencode ../pi assets/policy/pi-tool/policy.yaml
 ```
 
 输入任意请求触发场景。2026-10-25 实测日志 `/tmp/opencode/ascout-f7tYJy/events.jsonl`：两个 Candidate 均在 Parent 返回前执行完成，真实值 `example` 后一个 Promote、另一个 Discard，旧 Parent 开始默认命令后被取消，Tree 确认旧 Parent 与 loser 已 Cleaned。这是脚本模型接口加真实工具验证，不是真实大模型成功证据。
@@ -199,7 +287,7 @@ PI_CODING_AGENT_DIR=/tmp/opencode/ascout-check-config cargo run --bin ascout-con
 
 完整多行编辑、Markdown 和工具专门排版、宽字符排版、产品特有交互、断线恢复、资源硬限制与确认式退出清理尚未实现。当前是简单终端原型，不宣称已达到原 Agent 全部交互能力。
 
-环境管理已由 Runtime Adapter 接通文件系统与进程 Backend；NLE 路径仍使用共享环境。目录不代表任意 shell 或外部效果已隔离，尤其不隔离扩展自身的代码及网络行为。环境结束时 holder 会按 cgroup/process group 和 mount namespace 结束工具后代，但退出另一个 namespace、改变 cgroup 或依赖外部服务的进程不在该保证内；接入进程退出也不证明任意外部效果已撤回。文件系统 Backend 的覆盖范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
+环境管理已由 Runtime Adapter 接通文件系统与进程 Backend；NLE 路径的不同 Environment 引用同一 workload 世界，各自生命周期独立。目录不代表任意 shell 或外部效果已隔离，尤其不隔离扩展自身的代码及网络行为。环境结束时 holder 会按 cgroup/process group 和 mount namespace 结束工具后代，但退出另一个 namespace、改变 cgroup 或依赖外部服务的进程不在该保证内；接入进程退出也不证明任意外部效果已撤回。文件系统 Backend 的覆盖范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
 
 ## 真实游戏端到端验证方向（2026-10-28）
 
@@ -217,11 +305,11 @@ NLE 是 AScout 的外部测试 workload，不属于 AScout 实现。下面描述
 
 ### NLE workload bridge（当前外部适配原型）
 
-`examples/nle-runtime-bridge.py` 在不修改通用 Runtime 契约的前提下，把 NLE 的公开 `reset`／`step` 能力包成 JSON Lines workload 接口。它支持建立、逻辑视图、执行一步、读取最近公开观测、暂停、恢复、终止和清理，也提供 `invoke` 工具入口：`nle_action` 返回可读摘要和结构化 evidence，`nethack_guide` 读取官方 Guidebook。它不读取隐藏地图或 NLE 内部状态。这里的 `branch` 是 NLE 测试适配内部的逻辑视图，不是 `branch_environment`；它不派生独立环境。
+`examples/nle-runtime-bridge.py` 在不修改通用 Runtime 契约的前提下，把 NLE 的公开 `reset`／`step` 能力包成 JSON Lines workload 接口。它支持建立、增加世界引用、执行一步、读取最近公开观测、恢复、终止和清理，也提供 `invoke` 工具入口：`nle_action` 返回可读摘要和结构化 evidence，`nethack_guide` 读取官方 Guidebook。它不读取隐藏地图或 NLE 内部状态。`branch` 为新 Environment 保留同一世界的引用；Environment 身份与生命周期由 NleBackend 分别管理。
 
-环境只有一个真实实例。NLE 适配用 `branch` 给同一个世界增加一个逻辑名字，不复制状态，也不把它声明为 `branch_environment`；Candidate 与权威看到的是同一份世界，区别只在 AScout 是否允许它动作。Candidate 的动作在 Agent 接入侧被暂存，Promote 前不进入环境；这是 NLE 专用 Runtime 的“共享环境 + 作用前阻止”实现，不是 AScout 核心契约。动作前可配置固定延迟（`action_delay_seconds`），用来模拟慢动作并把投机推理的窗口显性化。种子必须通过 `env.unwrapped.seed(seed)` 再 `reset()` 设置；NLE 忽略 `reset(seed=...)`。Agent 权限和 Policy 准入不由这个 bridge 代替。
+NLE workload 保持单世界方案，不改变控制面的 Branch→Environment 独占绑定；Candidate 创建仍必须得到不同的 Environment id。NleBackend 声明 `branch_environment: true`，表示建立独立身份与生命周期，不表示复制世界。暂停一个 Environment 不暂停其他引用；终止或清理一个引用不销毁其他使用者的世界，最后一个引用释放时才关闭世界。保存恢复继续按唯一世界记录 seed 与公开动作历史，重建世界后恢复各 Environment 原身份和生命周期。Runtime 内部如何组合 Backend instance 不暴露给控制面。Candidate 的动作在 Agent 接入侧被暂存，Promote 前不进入环境；这是该 workload 的共享资源约束，不是 AScout 核心的自动隔离保证。动作前可配置固定延迟（`action_delay_seconds`），用来模拟慢动作并把投机推理的窗口显性化。种子必须通过 `env.unwrapped.seed(seed)` 再 `reset()` 设置；NLE 忽略 `reset(seed=...)`。Agent 权限和 Policy 准入不由这个 bridge 代替。
 
-Rust 的 `NleBackend` 通过已有 `Backend` 接口调用该 bridge。运行时 Adapter 配置使用 `"backend": "nle"`、Python 解释器和 bridge 路径。Runtime 在握手中声明 `nle_action` 和 `nethack_guide` 工具、`shared_environment: true` 和 `branch_environment: false`；控制面只使用通用的 `tool_context` 和 `invoke_tool` 操作，不再识别工具名或动作编号。NLE 的 `invoke_tool` 返回工具通道结果 `result` 与 Policy 匹配证据 `evidence`，两者都只含公开观察。游戏观察的摘要和 `Guidebook` 章节都由 bridge 生成，`NleBackend` 只转发；控制面不解析 `blstats`、`chars` 或 `message`。
+Rust 的 `NleBackend` 通过已有 `Backend` 接口调用该 bridge。运行时 Adapter 配置使用 `"backend": "nle"`、Python 解释器和 bridge 路径。Runtime 在握手中声明 `nle_action` 和 `nethack_guide` 工具；控制面仍为每个 Branch 维护独占 Environment，控制面只使用通用的 `tool_context` 和 `invoke_tool` 操作，不再识别工具名或动作编号。NLE 的 `invoke_tool` 返回工具通道结果 `result` 与 Policy 匹配证据 `evidence`，两者都只含公开观察。游戏观察的摘要和 `Guidebook` 章节都由 bridge 生成，`NleBackend` 只转发；控制面不解析 `blstats`、`chars` 或 `message`。
 
 已完成的实际验证：
 
@@ -350,7 +438,6 @@ Node 使用系统 `/usr/bin/node`（v26.12.1，满足 Pi 要求的 ≥22.19）�
 
 ```sh
 PATH=/usr/bin:$PATH \
-PI_CODING_AGENT_DIR=/tmp/ascout-config \
 ASCOUT_RUNTIME_CONFIG=nle-runtime.json \
 ./target/debug/ascout-control-plane /tmp/ascout-run6 ../pi assets/policy/pi-tool/policy.yaml
 ```
@@ -378,7 +465,6 @@ Promote 后继续输入第四轮，`candidate-5` 作为当前权威 Branch 接�
 
 ```sh
 PATH=/usr/bin:$PATH \
-PI_CODING_AGENT_DIR=/tmp/ascout-real-config \
 ASCOUT_RUNTIME_CONFIG=nle-runtime.json \
 ./target/debug/ascout-control-plane /tmp/ascout-real2 ../pi assets/policy/nle/policy.yaml
 ```

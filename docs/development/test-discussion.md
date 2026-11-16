@@ -1,5 +1,41 @@
 # 测试删除与合并审查
 
+## 无 NLE 的 FS 真实模型短任务通过（2026-11-16）
+
+付费前发现并复现的纯 FS 装配缺口已按授权修复：正常 Adapter 新增单 filesystem 装配，BaseRuntime 的物化写者检查覆盖纯 FS holder。初始三种配置拒绝证据保留于 `/tmp/opencode/fs-real-20261116-preflight`，其中零请求与阻塞状态只描述当时预检。没有用 NLE 或宿主工具绕过。
+
+修复后本地伪模型全链路证据 `/tmp/opencode/fs-local-20261116-MGZZSb`；唯一真实 session `/tmp/opencode/fs-real-20261116-mfUC97`，21.333 秒成功，11 次模型启动，Authority 4 次工具、候选 1 次只读工具，结果、最终回复、隔离、正常物化和 Shutdown 均通过。5 Candidate／5 Discard／0 Promote，不能声称覆盖晋级或晋级后续跑。Pi 估算 $0.0156748（非账单；取消零 usage 不保证不计费）；9 个 response ID、7 个 completed，5 条 aborted 中有 1 条已 completed 且有完整 usage。统计和完整边界见 [参考负载](reference-workload.md)。
+
+离线构建、文件工具 5/5、Runtime 单元测试 141/141 通过。未提交、未派生 subagent，保留已有修改与旧证据。纯 FS 入口用例目前仅在临时 runner 中，尚未纳入仓库持久回归；主 Agent 需审查这两处最小改动及该测试缺口，不再自动付费补验 Promote。
+
+## 重新授权真实调用后的阻塞交接（2026-11-16）
+
+单次真实 session 已执行，证据 `/tmp/opencode/runtime-id-real-success-20261116`，完整统计见 [参考负载](reference-workload.md)。真实模型 2 次均成功，真实 NLE 西移 1 次、compatible／Promote Applied 1 次，两个 Branch 取得不同 Runtime 返回 ID；随后候选模型结果的 continuation hold 未收到释放命令，第二个工具调用挂起。120 秒截止取消，未完成 5 步与最终总结，因此仍不得宣称真实模型多步 E2E 通过。
+
+本次只做构建、运行和离线检查，不再付费重试、不改实现或新增测试；需主 Agent 后续用手工事件／本地模型稳定复现“工具候选 Promote 后模型完成却无 continue”的路径，再修复。旧失败证据与全部工作树修改保留，未提交、未派生 subagent。估算费用 $0.0060204（非服务账单），两 Branch 和自有进程正常清理，相关端口释放。
+
+## Predictor fixture 与文件工具后代等待收口（2026-11-16）
+
+两份 predictor 测试默认改读仓库 `tests/fixtures/predictor-fact-policy.json`，不再读本次临时证据目录。与原失败留档逐字段比较，除 `source` 与 `runtime_config_path` 脱敏外完全相同；未修改 Policy 语义、绑定或原 digest。共享 helper 按 Rust 编译产物的顺序验证 executable digest，E2E 重新编译后检查原 YAML、源码、绑定及 runtime；Python 完整版本属于 digest 输入，不同 Python build 时仅允许这一字段解释摘要变化。fixture 无认证、prompt、模型回复。其余输入为仓库源码、相邻 Pi、现有 NLE venv 与构建后二进制，临时 run 只保存输出。原真实失败证据不动。
+
+文件工具复现日志 `/tmp/opencode/filesystem-before-fix-20261116.log` 保存原第 100 行 `1 !== 0`。根因不是 namespace supervisor 漏等后代，而是临时 bwrap 路径根本没有代码注释和测试所说的串行队列：`early` 和 `after` 同时 spawn，`after` 在 `late` 写入前执行。最小修复是在该路径加每 Branch 工具集合的 promise 队列，前项等 namespace `close` 后才放行下一项；错误吞在队列尾部但仍向原调用者报告，失败写入不会堵死队列。取消/超时仍杀 namespace 入口，PID namespace 清理跨 process group 后代；stdin EPIPE/ECONNRESET 仍记录到 close 后报告，不提前释放队列。未延长 sleep、未改或删原断言。
+
+必须区分常驻 holder：`src/runtime/process/holder.py`、Rust `namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace` 测试和 reference-workload 已明确规定连接并发、直接 shell 结束可返回、后台工作归环境管理。本次不将临时 namespace 队列套到 holder，也不改变它的后台工作/取消契约。上述 Rust holder 并发测试本轮通过。两条路径的生命周期不同，没有新增全局语义或技术选型。
+
+最终本地结果：
+
+- `node --test tests/predictor-fact.mjs tests/pi-filesystem-tools.mjs`：9/9，`/tmp/opencode/closeout-focused-20261116.log`。
+- `node --test tests/pi-*.mjs tests/predictor-fact.mjs`：35/35，`/tmp/opencode/closeout-pi-core-20261116.log`，含取消、超时、失败写入恢复、EPIPE/早关管道和 setsid 后代等待；全部原断言保留。
+- `node --test tests/predictor-fact-e2e.mjs`：1/1，`/tmp/opencode/closeout-local-e2e-20261116.log`；run `/tmp/opencode/predictor-fact-e2e-afEJS9`，3 次 loopback 伪模型请求、3 个模型 action、4 次准入、1 个 Candidate、真实西移动作成功、退出码 0。
+- `cargo test --offline --lib --bins`：首次 lib 为 169/170，btrfs snapshot-copy 子环境 overlay mount 报 `Device or resource busy`，完整失败证据 `/tmp/opencode/closeout-rust-core-20261116.log`。单项复跑 1/1，`/tmp/opencode/closeout-rust-btrfs-rerun-20261116.log`；不据此抹去首次失败，也未在本轮修改 Rust 挂载逻辑。bin 单独运行通过，日志 `/tmp/opencode/closeout-rust-bins-20261116.log`。
+- `node --check agent-access/pi/filesystem-tools.ts`、`git diff --check` 通过。
+
+没有调用真实模型、没有再启动 subagent、没有提交，原有共享修改均保留。**真实模型 E2E 仍未通过，未重跑付费验证。**
+
+## 首次模型请求失败的必要回归（2026-11-16）
+
+本次仅因已发生且可稳定复现的 `has_predictor` 循环依赖新增测试，遵守先红后绿：`tests/predictor-fact.mjs` 以真实失败 session 保存的 Policy 和手工事件复现模型/工具两路，`tests/predictor-fact-e2e.mjs` 以同份 Policy、正常控制面/真实 Runtime/Pi 和本地 SSE 验证首次请求通过。两个脚本的留档依赖、日志、误断言修正及未通过的已有文件工具测试，均记于 [验证记录](reference-workload.md)。没有引入真实模型调用或通用测试框架，没有改动既有文件工具的并行工作；原真实 E2E 仍未通过，保留原失败证据待主审复核。
+
 ## 范围与执行约定
 
 本轮只清理有直接证据的重复测试和重复资源启动，不改产品行为、不修复路径、不移动真实模型测试、不提交。开始时已检查 git 状态与根 AGENTS.md；工作区已有大量修改及未跟踪测试，均按现状保留。仓库内未发现其他 AGENTS.md。

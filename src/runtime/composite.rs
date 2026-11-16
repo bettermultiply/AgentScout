@@ -5,21 +5,21 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
-use crate::protocol::contract::{
-    AgentLaunch, BackendState, CommandOutput, EnvironmentState, Operation, RuntimeCapabilities,
-    FilesystemResult,
-};
 use super::backend::{Backend, BackendContext, BackendError, BackendExecution, CancelHandle};
-use super::selection::{merge_launch_fragment, BackendConnection, BackendOperation, BackendPolicy};
 use super::launch_plan::LaunchFragment;
+use super::selection::{BackendConnection, BackendOperation, BackendPolicy, merge_launch_fragment};
+use crate::protocol::contract::{
+    AgentLaunch, BackendState, CommandOutput, EnvironmentState, FilesystemResult, Operation,
+    RuntimeCapabilities,
+};
 
 pub struct CompositeRuntime {
     id: String,
     connections: Vec<BackendConnection>,
     policy: BackendPolicy,
-    /// 每个环境参与过 establish/branch 的 Backend id 集合。只有成功完成
-    /// 的 establish/branch 才登记；cleanup/terminate 后仍保留，用于解释
-    /// 最终状态。空的或缺席的记录走旧路径兼容行为。
+    /// 每个环境参与过 establish/branch 的 Backend id 集合。成功时记录全部
+    /// 参与者；失败时记录仍持有环境状态的参与者，供后续清理。
+    /// cleanup/terminate 后仍保留，用于解释最终状态。
     participants: Mutex<HashMap<String, BTreeSet<String>>>,
 }
 
@@ -77,6 +77,34 @@ impl CompositeRuntime {
         Ok((result, selection.output_backend))
     }
 
+    fn selected_existing(
+        &self,
+        context: &BackendContext,
+        operation: BackendOperation,
+    ) -> Result<(Vec<&BackendConnection>, Option<String>), BackendError> {
+        let (selected, output_backend) = self.selected(context, operation)?;
+        let participants = self
+            .participants_for(&context.environment_id)
+            .ok_or_else(|| {
+                BackendError::new(format!(
+                    "environment {} has no recorded Backend participants",
+                    context.environment_id
+                ))
+            })?;
+        let selected_ids: BTreeSet<_> = selected
+            .iter()
+            .map(|connection| connection.id.as_str())
+            .collect();
+        let participant_ids: BTreeSet<_> = participants.iter().map(String::as_str).collect();
+        if !selected_ids.is_subset(&participant_ids) {
+            return Err(BackendError::new(format!(
+                "Runtime Policy selection does not match participants for environment {}",
+                context.environment_id
+            )));
+        }
+        Ok((selected, output_backend))
+    }
+
     fn execute_outputs<F>(
         &self,
         context: &BackendContext,
@@ -91,7 +119,7 @@ impl CompositeRuntime {
             &CancelHandle,
         ) -> Result<BackendExecution, BackendError>,
     {
-        let (connections, output_backend) = self.selected(context, operation)?;
+        let (connections, output_backend) = self.selected_existing(context, operation)?;
         let ids: Vec<_> = connections
             .iter()
             .map(|connection| connection.id.clone())
@@ -132,7 +160,7 @@ impl CompositeRuntime {
         })
     }
 
-    fn execute_lifecycle<F>(
+    fn execute_lifecycle_existing<F>(
         &self,
         context: &BackendContext,
         operation: BackendOperation,
@@ -141,7 +169,7 @@ impl CompositeRuntime {
     where
         F: FnMut(&BackendConnection, &BackendContext) -> Result<(), BackendError>,
     {
-        let (connections, _) = self.selected(context, operation)?;
+        let (connections, _) = self.selected_existing(context, operation)?;
         let ids: Vec<_> = connections
             .iter()
             .map(|connection| connection.id.clone())
@@ -188,18 +216,40 @@ impl CompositeRuntime {
                     error.completed = completed.iter().map(|value| value.id.clone()).collect();
                     error.remaining = ids[index..].to_vec();
                     error.cleanup_failures.extend(cleanup_failures);
+                    let retained: Vec<_> = connections[..=index]
+                        .iter()
+                        .filter(|connection| {
+                            connection.backend.state(&context.environment_id).is_some()
+                        })
+                        .map(|connection| connection.id.clone())
+                        .collect();
+                    if !retained.is_empty() {
+                        self.record_participants(&context.environment_id, &retained)?;
+                        error.created_environment_id = Some(context.environment_id.clone());
+                    }
                     return Err(error);
                 }
             }
         }
-        // 只有全部 Backend 建立成功才登记参与者；中途失败已经回滚并返回错误，
-        // 不会把失败环境登记成完整参与者。
+        // 成功记录全部参与者；失败路径仅记录仍持有环境状态的参与者供清理。
         self.record_participants(&context.environment_id, &ids)?;
         Ok(())
     }
 
     fn cleanup_all(&self, context: &BackendContext) -> Result<(), BackendError> {
-        let (connections, _) = self.selected(context, BackendOperation::Cleanup)?;
+        let participants = self
+            .participants_for(&context.environment_id)
+            .ok_or_else(|| {
+                BackendError::new(format!(
+                    "cannot clean environment {} without recorded Backend participants",
+                    context.environment_id
+                ))
+            })?;
+        let connections: Vec<_> = self
+            .connections
+            .iter()
+            .filter(|connection| participants.contains(&connection.id))
+            .collect();
         let mut completed = Vec::new();
         let mut failed = Vec::new();
         let mut messages = Vec::new();
@@ -219,6 +269,7 @@ impl CompositeRuntime {
             // 清理会尽力覆盖所有选中的 Backend，不因为单个失败就跳过后续；
             // 因此 `remaining` 保持为空，失败以 `cleanup_failures` 如实上报。
             Err(BackendError {
+                created_environment_id: None,
                 message: format!("Runtime cleanup partially failed: {}", messages.join("; ")),
                 cancelled: false,
                 completed,
@@ -277,27 +328,13 @@ impl CompositeRuntime {
                 .then_some(first)
                 .or(Some(EnvironmentState::PartiallyAvailable));
         }
-        // 没有参与者记录（未知环境或旧路径）：保持观察所有报告状态的 Backend 的兼容行为。
-        let states: Vec<_> = self
-            .connections
-            .iter()
-            .filter_map(|connection| connection.backend.state(environment_id))
-            .collect();
-        if states.is_empty() {
-            return None;
-        }
-        let first = states[0];
-        states
-            .iter()
-            .all(|state| *state == first)
-            .then_some(first)
-            .or(Some(EnvironmentState::PartiallyAvailable))
+        // 未知环境不观察或操作未绑定的 Backend。
+        None
     }
 
     fn merged_capabilities(&self) -> RuntimeCapabilities {
         super::capabilities::merged_capabilities(&self.connections)
     }
-
 }
 
 fn normalize_outputs(
@@ -322,48 +359,94 @@ fn normalize_outputs(
 impl Backend for CompositeRuntime {
     fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
         let mut result = FilesystemResult::default();
-        for connection in &self.connections {
-            if connection.backend.state(&context.environment_id).is_some() {
-                let publication = connection.backend.materialize(context)?;
-                result.confirmation.published |= publication.confirmation.published;
-                result.conflicts.extend(publication.conflicts);
-            }
+        let (connections, _) = self.selected_existing(context, BackendOperation::Materialize)?;
+        for connection in connections {
+            let publication = connection.backend.materialize(context)?;
+            result.confirmation.published |= publication.confirmation.published;
+            result.conflicts.extend(publication.conflicts);
         }
         Ok(result)
     }
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        if self.connections.len()==1 { return self.connections[0].backend.save_runtime(path); }
-        let backends: Vec<_> = self.connections.iter().map(|c|(c.id.as_str(),c.backend.as_ref())).collect();
-        super::recovery::save(path, &backends, serde_json::json!({"participants":*self.participants.lock().map_err(|_|BackendError::new("Runtime participants poisoned"))?}))
+        let backends: Vec<_> = self
+            .connections
+            .iter()
+            .map(|c| (c.id.as_str(), c.backend.as_ref()))
+            .collect();
+        super::recovery::save(
+            path,
+            &backends,
+            serde_json::json!({"participants":*self.participants.lock().map_err(|_|BackendError::new("Runtime participants poisoned"))?}),
+        )
     }
 
     fn load_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        if self.connections.len()==1 { return self.connections[0].backend.load_runtime(path); }
-        let backends: Vec<_> = self.connections.iter().map(|c|(c.id.as_str(),c.backend.as_ref())).collect();
-        let record:Value=serde_json::from_slice(&std::fs::read(path).map_err(|e|BackendError::new(e.to_string()))?).map_err(|e|BackendError::new(e.to_string()))?;
-        let metadata=&record["metadata"];
-        let participants: HashMap<String,BTreeSet<String>>=serde_json::from_value(metadata["participants"].clone()).map_err(|e|BackendError::new(e.to_string()))?;
+        let backends: Vec<_> = self
+            .connections
+            .iter()
+            .map(|c| (c.id.as_str(), c.backend.as_ref()))
+            .collect();
+        let record: Value = serde_json::from_slice(
+            &std::fs::read(path).map_err(|e| BackendError::new(e.to_string()))?,
+        )
+        .map_err(|e| BackendError::new(e.to_string()))?;
+        let metadata = &record["metadata"];
+        let participants: HashMap<String, BTreeSet<String>> =
+            serde_json::from_value(metadata["participants"].clone())
+                .map_err(|e| BackendError::new(e.to_string()))?;
         for ids in participants.values() {
-            if ids.iter().any(|id|!self.connections.iter().any(|c| &c.id==id)) {return Err(BackendError::new("Unknown saved runtime participant"));}
+            if ids
+                .iter()
+                .any(|id| !self.connections.iter().any(|c| &c.id == id))
+            {
+                return Err(BackendError::new("Unknown saved runtime participant"));
+            }
         }
         super::recovery::load(path, &backends)?;
-        let validation=(|| {
-            for (environment,ids) in &participants {
-                if ids.is_empty() {return Err(BackendError::new("Empty saved runtime participant set"));}
+        let validation = (|| {
+            for (environment, ids) in &participants {
+                if ids.is_empty() {
+                    return Err(BackendError::new("Empty saved runtime participant set"));
+                }
                 for connection in &self.connections {
-                    let present=connection.backend.environments().iter().any(|id|id==environment);
-                    if present!=ids.contains(&connection.id) {return Err(BackendError::new(format!("Runtime participant environment mismatch: {environment}/{}",connection.id)));}
+                    let present = connection
+                        .backend
+                        .environments()
+                        .iter()
+                        .any(|id| id == environment);
+                    if present != ids.contains(&connection.id) {
+                        return Err(BackendError::new(format!(
+                            "Runtime participant environment mismatch: {environment}/{}",
+                            connection.id
+                        )));
+                    }
                 }
             }
             for connection in &self.connections {
                 for environment in connection.backend.environments() {
-                    if !participants.get(&environment).is_some_and(|ids|ids.contains(&connection.id)) {return Err(BackendError::new(format!("Untracked runtime participant: {environment}/{}",connection.id)));}
+                    if !participants
+                        .get(&environment)
+                        .is_some_and(|ids| ids.contains(&connection.id))
+                    {
+                        return Err(BackendError::new(format!(
+                            "Untracked runtime participant: {environment}/{}",
+                            connection.id
+                        )));
+                    }
                 }
             }
             Ok(())
         })();
-        if let Err(error)=validation {for connection in &self.connections {let _=connection.backend.shutdown();}return Err(error);}
-        *self.participants.lock().map_err(|_|BackendError::new("Runtime participants poisoned"))?=participants;
+        if let Err(error) = validation {
+            for connection in &self.connections {
+                let _ = connection.backend.shutdown();
+            }
+            return Err(error);
+        }
+        *self
+            .participants
+            .lock()
+            .map_err(|_| BackendError::new("Runtime participants poisoned"))? = participants;
         Ok(())
     }
     fn backend_id(&self) -> &str {
@@ -386,7 +469,7 @@ impl Backend for CompositeRuntime {
         context: &BackendContext,
         launch: &AgentLaunch,
     ) -> Result<LaunchFragment, BackendError> {
-        let (connections, _) = self.selected(context, BackendOperation::Operate)?;
+        let (connections, _) = self.selected_existing(context, BackendOperation::Operate)?;
         let mut fragment = LaunchFragment::default();
         for connection in connections {
             merge_launch_fragment(
@@ -538,11 +621,15 @@ impl Backend for CompositeRuntime {
         if cancel.is_cancelled() {
             return Err(BackendError::interrupted());
         }
-        let (connections, _) = self.selected(context, backend_operation)?;
+        let (connections, _) = self.selected_existing(context, backend_operation)?;
         if connections.len() != 1 {
-            return Err(BackendError::new("filesystem operation requires exactly one selected Backend"));
+            return Err(BackendError::new(
+                "filesystem operation requires exactly one selected Backend",
+            ));
         }
-        connections[0].backend.filesystem_operation(context, operation, cancel)
+        connections[0]
+            .backend
+            .filesystem_operation(context, operation, cancel)
     }
 
     fn branch(&self, parent: &str, child: &str) -> Result<(), BackendError> {
@@ -571,7 +658,6 @@ impl Backend for CompositeRuntime {
             environment_id: child.to_string(),
             parent_environment_id: Some(parent.to_string()),
             task_id: context.task_id.clone(),
-            branch_id: context.branch_id.clone(),
             target_mount_pid: context.target_mount_pid,
             target_mount_namespace: context.target_mount_namespace,
         };
@@ -597,11 +683,20 @@ impl Backend for CompositeRuntime {
                     error.completed = completed.iter().map(|value| value.id.clone()).collect();
                     error.remaining = ids[index..].to_vec();
                     error.cleanup_failures.extend(cleanup_failures);
+                    let retained: Vec<_> = connections[..=index]
+                        .iter()
+                        .filter(|connection| connection.backend.state(child).is_some())
+                        .map(|connection| connection.id.clone())
+                        .collect();
+                    if !retained.is_empty() {
+                        self.record_participants(child, &retained)?;
+                        error.created_environment_id = Some(child.to_string());
+                    }
                     return Err(error);
                 }
             }
         }
-        // 只有全部 Backend 派生成功才登记子环境参与者；失败已回滚并返回错误。
+        // 成功记录全部参与者；失败路径保留实际参与者以继续清理。
         self.record_participants(child, &ids)?;
         Ok(())
     }
@@ -611,9 +706,11 @@ impl Backend for CompositeRuntime {
     }
 
     fn promote_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.execute_lifecycle(context, BackendOperation::Promote, |connection, context| {
-            connection.backend.promote_with_context(context)
-        })
+        self.execute_lifecycle_existing(
+            context,
+            BackendOperation::Promote,
+            |connection, context| connection.backend.promote_with_context(context),
+        )
     }
 
     fn suspend(&self, environment_id: &str) -> Result<(), BackendError> {
@@ -621,9 +718,11 @@ impl Backend for CompositeRuntime {
     }
 
     fn suspend_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.execute_lifecycle(context, BackendOperation::Suspend, |connection, context| {
-            connection.backend.suspend_with_context(context)
-        })
+        self.execute_lifecycle_existing(
+            context,
+            BackendOperation::Suspend,
+            |connection, context| connection.backend.suspend_with_context(context),
+        )
     }
 
     fn resume(&self, environment_id: &str) -> Result<(), BackendError> {
@@ -631,7 +730,7 @@ impl Backend for CompositeRuntime {
     }
 
     fn resume_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.execute_lifecycle(context, BackendOperation::Resume, |connection, context| {
+        self.execute_lifecycle_existing(context, BackendOperation::Resume, |connection, context| {
             connection.backend.resume_with_context(context)
         })
     }
@@ -641,7 +740,7 @@ impl Backend for CompositeRuntime {
     }
 
     fn terminate_with_context(&self, context: &BackendContext) -> Result<(), BackendError> {
-        self.execute_lifecycle(
+        self.execute_lifecycle_existing(
             context,
             BackendOperation::Terminate,
             |connection, context| connection.backend.terminate_with_context(context),
@@ -674,13 +773,7 @@ impl Backend for CompositeRuntime {
                 })
                 .collect();
         }
-        self.connections
-            .iter()
-            .map(|connection| BackendState {
-                backend_id: connection.id.clone(),
-                state: connection.backend.state(environment_id),
-            })
-            .collect()
+        Vec::new()
     }
 
     fn environments(&self) -> Vec<String> {

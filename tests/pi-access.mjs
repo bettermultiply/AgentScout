@@ -142,7 +142,7 @@ export async function createAgentSession(options) {
     if (shutdownAt === 'admission') {
         const runner = 'import sys\npayload=b"true"\nsys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n';
         send({command:'local_policy',branch_id:'authority',policy_digest:'test-policy',decisions:{
-            'admit.opportunity_pass':'import json,sys\nrequest=json.load(open("/request.json"))\npayload=json.dumps(request["data"]["op"]["kind"]!="model_inference").encode()\nsys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n','admit.feasibility_pass':runner,'extent':runner}});
+            'admit.opportunity_pass':'import json,sys\nrequest=json.load(open("/request.json"))\npayload=json.dumps(request["data"]["op"]["kind"]!="model_inference").encode()\nsys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n','admit.feasibility_pass':runner,'extent':runner,'predict':runner}});
     }
     send({command:'start_branch',branch_id:'authority',workspace:root,prompt:''});
     await expectMessage(m => m.message === 'branch_started');

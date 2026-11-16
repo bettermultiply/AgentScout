@@ -2,10 +2,10 @@
 use ascout::control_plane::agent_control::{
     ActionKind, AgentMessage, BranchRole, BranchStatus, RuntimeExecutionState,
 };
+pub use ascout::control_plane::gateway::ui::Request;
 use ascout::control_plane::ledger::{Ledger, LedgerReader};
 use ascout::control_plane::observation::{ObservationContent, StateEventSet};
 use serde::Serialize;
-pub use ascout::control_plane::gateway::ui::Request;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io;
@@ -146,12 +146,11 @@ pub struct Interface {
 }
 
 impl Interface {
-    pub fn new(
-        task_id: String,
-        reader: LedgerReader,
-    ) -> Self {
+    pub fn new(task_id: String, reader: LedgerReader) -> Self {
         Self {
-            input_status: Arc::new(Mutex::new(serde_json::json!({"sequence":0,"ready":false,"error":null}))),
+            input_status: Arc::new(Mutex::new(
+                serde_json::json!({"sequence":0,"ready":false,"error":null}),
+            )),
             task_id,
             conversations: Default::default(),
             action_starts: Default::default(),
@@ -176,7 +175,8 @@ impl Interface {
         self.input_status.lock().unwrap().clone()
     }
     pub fn publish_input_status(&self, sequence: u64, ready: bool, error: &Option<String>) {
-        *self.input_status.lock().unwrap() = serde_json::json!({"sequence":sequence,"ready":ready,"error":error});
+        *self.input_status.lock().unwrap() =
+            serde_json::json!({"sequence":sequence,"ready":ready,"error":error});
     }
     pub fn publish(
         &self,
@@ -346,7 +346,7 @@ impl ascout::control_plane::gateway::ui::Presentation for Interface {
     }
 
     fn conversation(&self, branch: &str) -> Option<Value> {
-        self.conversation(branch).map(|value| serde_json::to_value(value).unwrap())
+        self.conversation(branch)
+            .map(|value| serde_json::to_value(value).unwrap())
     }
-
 }

@@ -46,7 +46,7 @@ node tools/replay/run.ts /path/to/source-run /tmp/opencode/replay-run ../pi \
   --runtime /path/to/runtime.json --web 127.0.0.1:8080
 ```
 
-源 run 的 `policy.json` 优先，经正常 `--policy-artifact` 加载；不存在时必须在 Pi 路径后显式提供 `original-policy.yaml`，不得回退默认策略。若两者都提供，核对编译 digest。外部工具要求显式 `--runtime`；配置须使用新 control_socket，不得位于源目录。新 run 不得位于源目录内。Runtime 的其他可写路径和初始环境由调用方明确提供，工具不会猜测目录布局或拿退出快照当初始状态。
+源 run 的 `policy.json` 优先，经正常 `--policy-artifact` 加载；不存在时必须在 Pi 路径后显式提供 `original-policy.yaml`，不得回退默认策略。若两者都提供，核对编译 digest。外部工具要求显式 `--runtime`；配置须使用 `control_address` TCP 地址，不得位于源目录。新 run 不得位于源目录内。Runtime 的其他可写路径和初始环境由调用方明确提供，工具不会猜测目录布局或拿退出快照当初始状态。
 
 `tools/replay/recording.ts` 每次启动读取原生 session/events，在内存恢复候选请求上下文。外部本地 HTTP 服务以 OpenAI SSE 返回记录回复，通过通用 `--models` 追加模型配置；普通 Pi 模型、认证和扩展仍可用，重复 provider 拒绝覆盖。运行侧不导入测试工具。按 events 文件顺序、原生 ID 去重，仅将已消费 `message.role=user` 的纯文本输入经 `POST /api/request` 送入当前权威；通知不作为用户输入。不重现墙钟时刻、Interrupt 或未消费队列。
 
@@ -72,7 +72,7 @@ HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已�
 
 `cancellation.test.ts` 的四项取消／延迟回归修前全部失败，修后通过；端到端又发现跨 HTTP chunk 的 UTF-8 字符被 Buffer 字符串拼接损坏，新增真实分块请求回归先得到 400，改用 `req.setEncoding("utf8")` 后通过。归一化及上下文重建规则保持原有行为。
 
-独立真实 NLE 验证 `/tmp/opencode/run1-cancel-STTMVB`：源 `/tmp/opencode/run-1` 的两条输入 `cd8248f0`、`fdbd1515` 顺序完成，`finished=true`、`sequence=2`、`error=null`；40 requests/hits/consumed，23 成功、17 客户端取消，misses/exhausted/unconsumed/pending/cancel_timeouts 均为 0。原首错 `bc8aef78…` 正常命中；中途新增缺键 `813e77c9…` 的 UTF-8 根因也已消除。使用原 `nle-runtime.json` 的初始配置，仅更换 control_socket；保留正常 Pi 环境，模型服务均为本地录制回复。源 session/events/policy SHA-256 前后一致。`result.json`、`report.json`、`requests.jsonl`、原生 run 和日志保留证据，`cleanup.json` 确认退出码 0 和正常 recovery 保存。原 8180 实例未操作。
+独立真实 NLE 验证 `/tmp/opencode/run1-cancel-STTMVB`：源 `/tmp/opencode/run-1` 的两条输入 `cd8248f0`、`fdbd1515` 顺序完成，`finished=true`、`sequence=2`、`error=null`；40 requests/hits/consumed，23 成功、17 客户端取消，misses/exhausted/unconsumed/pending/cancel_timeouts 均为 0。原首错 `bc8aef78…` 正常命中；中途新增缺键 `813e77c9…` 的 UTF-8 根因也已消除。使用原 `nle-runtime.json` 的初始配置，仅更换 control_address；保留正常 Pi 环境，模型服务均为本地录制回复。源 session/events/policy SHA-256 前后一致。`result.json`、`report.json`、`requests.jsonl`、原生 run 和日志保留证据，`cleanup.json` 确认退出码 0 和正常 recovery 保存。原 8180 实例未操作。
 
 此次证明该源两输入完成与请求消费正确，不宣称任意源的取消时序或同键碰撞均确定。验证中间产物 `/tmp/opencode/run1-cancel-dxvq5D`、`/tmp/opencode/run1-cancel-CF1SI7` 保留 UTF-8 修复前的失败。B1、B1-PI、native 和 8 项 Node 回归通过；没有付费模型调用。
 
@@ -171,7 +171,7 @@ explicit core+disp changed byte_equal= False bytes= 49961 51146
 
 每轮 13 条响应均 ok。后两项使用临时 bridge 副本，只把 seed 调用改成显式 core=disp=seed、reseed=False；不是仓库修复。当前序列通过不证明 disp 不影响其他轨迹，也不证明完整游戏确定性。
 
-Candidate 不取得 NLE 快照、不 fork 进程、不重放动作。Runtime 声明 shared_environment=true、branch_environment=false（nle.rs:189-190），Controller 将操作映射到同一个 authority 环境（coordination/controller.rs:14-18）。候选复制 Agent checkpoint 并注入预测工具结果（main.ts:247-278），推进推理；真实工具在接受前 gate，tools.execute 还有角色检查（main.ts:86-90）。所有 Branch 实际共享一个 NLE 进程和 RNG，没有独立复制的 RNG 状态；bridge 的 branch 操作本身也只是 World 别名（187-194），不是实际隔离能力。
+Candidate 不取得 NLE 快照、不 fork 进程、不重放动作。控制面为每个 Branch 分配独占的 Environment；NLE Backend 的内部世界实现不构成控制面的 Environment 共享契约。候选复制 Agent checkpoint 并注入预测工具结果（main.ts:247-278），推进推理；真实工具在接受前 gate，tools.execute 还有角色检查（main.ts:86-90）。所有 Branch 实际共享一个 NLE 进程和 RNG，没有独立复制的 RNG 状态；bridge 的 branch 操作本身也只是 World 别名（187-194），不是实际隔离能力。
 
 结论：仅替换模型输出在限定动作轨迹上可行，但不能无条件保证旧运行逐字复现。需固定完整 RNG 配置、NLE/NetHack 版本、日期策略、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。bridge 的运行恢复保存已包含 initial 种子、kwargs、版本和配置，但旧 run 没有这些原生保存资料；不能向 session/events 补写测试专用元数据。异步调度不因模型输出固定就自动稳定。
 

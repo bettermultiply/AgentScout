@@ -6,9 +6,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use crate::runtime::backend::BackendError;
 use super::layer::*;
 use super::util::*;
+use crate::runtime::backend::BackendError;
 
 const FICLONE: libc::c_ulong = 0x4004_9409;
 
@@ -85,13 +85,7 @@ pub(crate) fn reflink_file(source: &Path, target: &Path) -> std::io::Result<()> 
         .truncate(true)
         .write(true)
         .open(target)?;
-    let result = unsafe {
-        libc::ioctl(
-            target_file.as_raw_fd(),
-            FICLONE,
-            source_file.as_raw_fd(),
-        )
-    };
+    let result = unsafe { libc::ioctl(target_file.as_raw_fd(), FICLONE, source_file.as_raw_fd()) };
     if result == 0 {
         Ok(())
     } else {
@@ -140,11 +134,26 @@ pub(crate) fn upper_entry_count(path: &Path, limit: usize) -> usize {
 
 /// Clone only one upper directory.  Preserves overlay markers, whiteouts,
 /// modes, symlinks and mtimes.  Never uses hard links.
-pub(crate) fn clone_upper(source: &Path, target: &Path, use_reflink: bool) -> Result<(), BackendError> {
-    clone_upper_excluding(source,target,use_reflink,&std::collections::BTreeSet::new())
+pub(crate) fn clone_upper(
+    source: &Path,
+    target: &Path,
+    use_reflink: bool,
+) -> Result<(), BackendError> {
+    clone_upper_excluding(
+        source,
+        target,
+        use_reflink,
+        &std::collections::BTreeSet::new(),
+    )
 }
 
-pub(crate) fn clone_upper_excluding(source: &Path, target: &Path, use_reflink: bool, excluded: &std::collections::BTreeSet<PathBuf>) -> Result<(), BackendError> {    if !path_exists(source) {
+pub(crate) fn clone_upper_excluding(
+    source: &Path,
+    target: &Path,
+    use_reflink: bool,
+    excluded: &std::collections::BTreeSet<PathBuf>,
+) -> Result<(), BackendError> {
+    if !path_exists(source) {
         return Ok(());
     }
     fs::create_dir_all(target).map_err(error)?;
@@ -169,7 +178,10 @@ pub(crate) fn clone_upper_excluding(source: &Path, target: &Path, use_reflink: b
         }
         let from = entry.path();
         let to = target.join(entry.file_name());
-        if excluded.contains(&from) { fs::create_dir_all(&to).map_err(error)?; continue; }
+        if excluded.contains(&from) {
+            fs::create_dir_all(&to).map_err(error)?;
+            continue;
+        }
         let metadata = fs::symlink_metadata(&from).map_err(error)?;
         let file_type = metadata.file_type();
         if file_type.is_dir() {
@@ -210,14 +222,7 @@ pub(crate) fn clone_upper_excluding(source: &Path, target: &Path, use_reflink: b
         } else {
             let c_path = CString::new(to.as_os_str().as_bytes())
                 .map_err(|_| BackendError::new("invalid special file path"))?;
-            if unsafe {
-                libc::mknod(
-                    c_path.as_ptr(),
-                    metadata.mode(),
-                    metadata.rdev(),
-                )
-            } != 0
-            {
+            if unsafe { libc::mknod(c_path.as_ptr(), metadata.mode(), metadata.rdev()) } != 0 {
                 return Err(error(std::io::Error::last_os_error()));
             }
             set_times(&to, &metadata)?;
@@ -269,17 +274,14 @@ pub(crate) fn set_times(path: &Path, metadata: &fs::Metadata) -> Result<(), Back
 }
 
 pub(crate) fn copy_file(source: &Path, target: &Path) -> Result<(), BackendError> {
-    let mut input = File::open(source).map_err(|value| {
-        BackendError::new(format!("open source {}: {value}", source.display()))
-    })?;
+    let mut input = File::open(source)
+        .map_err(|value| BackendError::new(format!("open source {}: {value}", source.display())))?;
     let mut output = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(target)
-        .map_err(|value| {
-            BackendError::new(format!("open target {}: {value}", target.display()))
-        })?;
+        .map_err(|value| BackendError::new(format!("open target {}: {value}", target.display())))?;
     std::io::copy(&mut input, &mut output).map_err(error)?;
     // Persistence is finalized by the caller with one directory sync after
     // the complete copy layer is atomically renamed into place.

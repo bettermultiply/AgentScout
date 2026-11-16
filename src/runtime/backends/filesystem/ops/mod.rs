@@ -98,5 +98,4 @@ impl FilesystemBackend {
         }
         Ok((delta, redirects))
     }
-
 }

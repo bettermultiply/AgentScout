@@ -1,6 +1,6 @@
 # Gateway 实现核查（2026-11-14）
 
-目标依据：[控制面 §2.1](../design/control-plane.md#21-gateway)。本轮保持现有协议、Unix socket、HTTP/SSE 和进程部署；不实现 Registry，不改变投机语义或决定启动协调归属。
+目标依据：[控制面 §2.1](../design/control-plane.md#21-gateway)。本轮保持现有协议、HTTP/SSE 和进程部署；不实现 Registry，不改变投机语义。启动协调归控制面负责，实际 Agent 进程启动仍由 Runtime/Adapter 执行。
 
 ## 实际调用与责任
 
@@ -12,9 +12,9 @@
 
 Runtime 通信调用统一使用 `gateway::runtime`。三侧统一的是源码通信责任边界，不增加一个无业务作用的总对象，也不统一三侧线协议。Gateway 不持有 Tree、Branch 生命周期、Policy、调度预算或 Runtime 执行状态。
 
-`Presentation` 仅提供 `input_status` 与 `conversation` 展示查询，`Interface` 不持有请求连接。Runtime 请求统一由 `send` 构造，保留 `call_with_id`、`wait_event` 等既有测试调用入口；请求仍为 `task_id: None`、`branch_id: Some(environment_id)`、`generation: 0`，结果等待仍为 30 秒。结果缓存读取仅克隆一次。
+`Presentation` 仅提供 `input_status` 与 `conversation` 展示查询，`Interface` 不持有请求连接。Runtime 请求统一由 `send` 构造，保留 `call_with_id`、`wait_event` 等既有测试调用入口。`Runtime::establish()` 不传预定身份，`Runtime::branch(parent_environment_id, agent)` 只传父环境和启动参数，创建结果返回新环境身份。后续 `Runtime::call(environment_id, operation)` 使用已保存的绑定，不接收逻辑 `branch_id`；不能用 `environment_id` 代填任何 Branch 字段。结果缓存读取仅克隆一次。
 
-Runtime 仍通过 OperateEnvironment 的 AgentLaunch 实际启动 Agent，负责监视和回收。main 保持现有 Adapter 进程启动／退出协调与配置装配；未把它移入 Gateway，也未将未决部署问题定案。
+Runtime 仍通过 OperateEnvironment 的 AgentLaunch 实际启动 Agent，负责监视和回收。控制面负责启动协调，main 保持现有 Adapter 进程启动／退出协调与配置装配；启动协调不移入 Gateway，部署形态仍不在本轮展开。
 
 ## 失败与关闭路径
 
@@ -66,4 +66,4 @@ Runtime 仍通过 OperateEnvironment 的 AgentLaunch 实际启动 Agent，负责
 - 独立候选 `cargo check --all-targets`、`cargo build --bins`、`cargo test --lib`（148 项）通过，恢复 5 项与 Pi 接入 18 项通过；恢复同时覆盖 HTTP 请求、展示查询及恢复后的连续输入。日志为 `check-candidate-final.log`、`build-candidate.log`、`lib-candidate.log`、`recovery-candidate.log`、`pi-candidate.log`。
 - 独立候选保留 HEAD 的 Shutdown 保存行为及原 Policy 路径，不纳入新的 Pause／物化协议；Gateway 的现有工作区 Request::Pause 属于任务生命周期改动。编译需要既有、未跟踪的本地 Policy YAML 和预构建 `webui/dist`，这些只作为本地验证前提提供，不进入候选提交。没有对其他未提交 Rust 源码的依赖。
 
-通用认证、凭证校验与授权未实现；当前 agent_id／能力和本地 HTTP 检查不是通用安全机制。Branch/task/command 合法性依然由 Tree 校验，未复制到 Gateway。Runtime Hello 仍保留既有接入行为，未完成 Registry 的契约版本／能力验证；Runtime 读线程尚未有可等待的 join／断线错误传播。UI listener 仍无显式停止／线程回收句柄。main 在 Adapter 启动后、进入执行保护区之前的配置／能力不匹配等提前返回路径仍需统一资源清理审查；本轮仅覆盖并清理握手超时分支。启动阶段信号处理、跨重启幂等、完整事件顺序及部署／启动协调继续未定或未验收。
+通用认证、凭证校验与授权未实现；当前 agent_id／能力和本地 HTTP 检查不是通用安全机制。Branch/task/command 合法性依然由 Tree 校验，未复制到 Gateway。Runtime Hello 仍保留既有接入行为，未完成 Registry 的契约版本／能力验证；Runtime 读线程尚未有可等待的 join／断线错误传播。UI listener 仍无显式停止／线程回收句柄。main 在 Adapter 启动后、进入执行保护区之前的配置／能力不匹配等提前返回路径仍需统一资源清理审查；本轮仅覆盖并清理握手超时分支。启动阶段信号处理、跨重启幂等和完整事件顺序仍未验收；启动协调归控制面负责，部署形态仍未展开。

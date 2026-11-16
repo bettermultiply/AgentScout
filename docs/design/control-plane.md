@@ -34,7 +34,7 @@
 
 Gateway 是控制面面向 Agent 接入侧、UI 与 Runtime 的统一受管通信边界，负责通信如何接入、消息交给谁以及如何送达。消息对投机执行的变化由相应控制逻辑决定；Runtime 的消息仍遵守 Runtime Adapter 契约，不因通信统一而绕过 Adapter 或 Registry。
 
-Gateway 的通信职责包括：管理连接、会话、握手与断线；进行入口格式、身份、上下文与权限检查；接收请求、执行事实与命令回执并转交相应处理方；交付命令、已编译的本地 Decision、结果及观察事件。消息覆盖 Agent、UI 和 Runtime 三侧，各侧既有协议和权限边界继续有效。除通信所需的暂时状态外，它不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态，也不承担投机编排。实际启动 Agent 与接入进程由 Runtime 负责；部署与启动协调的未决事项见 [Discussion 第 14 项](../../Discussion.md)。
+Gateway 的通信职责包括：管理连接、会话、握手与断线；进行入口格式、身份、上下文与权限检查；接收请求、执行事实与命令回执并转交相应处理方；交付命令、已编译的本地 Decision、结果及观察事件。Gateway 与 Runtime 采用网络通信；UI 可以与控制面一起部署，也不因此取得 Tree 或生命周期权威。消息覆盖 Agent、UI 和 Runtime 三侧，各侧既有协议和权限边界继续有效。除通信所需的暂时状态外，Gateway 不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态，也不承担投机编排。控制面负责启动协调；Runtime 负责实际启动 Agent 与接入进程，Adapter 长期作为独立部署的接入边界存在。
 
 ### 2.2 Policy Engine
 
@@ -46,15 +46,17 @@ Policy Engine 是可替换 Policy 进入控制面的固定入口，只有两项�
 
 ### 2.3 与 Runtime 内 Adapter Registry 的协作
 
-Adapter Registry 属于 Runtime，负责 Adapter 的接入登记、契约兼容性检查、能力声明校验，以及建立验证环境、执行验证场景和观察结果。接入验证应尽可能通过真实环境操作完成；运行期持续验证用于发现接入验证遗漏和实际偏差，不代替接入验证。Runtime 侧职责见 [Runtime 设计](runtime.md#adapter-registry)。
+Adapter Registry 属于 Runtime，负责 Adapter 的接入登记、契约兼容性检查和能力声明解析。首期只检查控制面当前需要的 API 是否存在且可解析，不建立验证环境、不执行验证场景，也不把 API 检查写成环境保证已经验证；主动验证与独立证据保留为后续能力。Runtime 侧职责见 [Runtime 设计](runtime.md#adapter-registry)。
 
-Registry 维护 Adapter 的接入状态、契约版本、能力声明快照和校验结果，但不持有 Speculative Tree、Branch 生命周期或 Runtime 的执行状态。它向 Policy Engine 发布能力事实及其验证状态。未验证能力默认视为不可用，只有部署方主动确认后才能在指定部署范围内使用；验证失败不能通过确认绕过。具体的 operation/event 契约与校验标准见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
+Registry 维护 Adapter 的接入状态、契约版本、能力声明快照和 API 检查结果，但不持有 Speculative Tree、Branch 生命周期或 Runtime 的执行状态。它向 Policy Engine 发布能力事实及其当前检查状态；首期不能据此宣称环境保证已验证。具体的 operation/event 契约与检查标准见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
 
 Adapter 配置在运行期不允许变化。若运行期发现 Adapter 的实际能力不符合声明，Registry 将能力视图降级到仍然经过验证的范围；控制面让全部任务使用降级后的能力视图，协调停止并清理依赖失效能力的投机活动，不依赖的活动可以继续。重新验证通过后，Adapter 才能恢复新的能力范围。
 
-Registry 不直接编排 Branch 生命周期，也不替代 Speculation Coordinator 解释运行期事件。Speculation Coordinator 只使用 Registry 提供的接入结果和能力信息协调 Task 运行。Registry 保留既有声明解析、校验、主动验证和独立验证证据职责；Adapter 不得自行填写验证状态或以自测结果自证。
+Registry 不直接编排 Branch 生命周期，也不替代 Speculation Coordinator 解释运行期事件。Speculation Coordinator 只使用 Registry 提供的接入结果和能力信息协调 Task 运行。首期 Registry 只做声明解析和所需 API 检查；主动验证和独立验证证据属于后续能力。Adapter 不得自行填写验证状态或以自测结果自证。
 
 ### 2.4 Speculation Coordinator
+
+Environment 创建由 Runtime 完成并返回身份。协调侧先登记无环境绑定的 Branch，再发出建立请求；派生只传 Parent 的 Environment 身份及启动参数。Runtime 返回后，协调侧把身份写入 BranchRecord 并交付 Agent 启动命令。后续操作及恢复使用该持久化绑定，不生成环境身份。创建失败但已产生环境时仍保存返回绑定，以便清理；未产生环境的 Branch 清理不调用 Runtime。
 
 控制面围绕 Speculative Tree 组织。建立 session 的 AScoutAgent 时建立对应的树，树持有该 session 的 Chance、Branch、Proposal、`AssumptionSet`、待选机会、调度状态和未完成操作，以及逻辑状态与 Runtime 实际事实之间的对应关系。树的方法检查转换是否合法，更新状态并产生后续操作要求；策略选择由 Policy 函数计算。
 
@@ -64,7 +66,7 @@ Speculation Coordinator 协调树、Policy 和外部操作，可以服务多棵�
 
 Speculation Coordinator 通过 Policy Engine 对需要全局视图的 Decision 求值，并接收 Agent 接入侧已经完成的、不依赖或不改变全局状态的本地 Decision 结果；对已经满足本地范围条件的 Decision 不重复求值。它根据 Policy Decision 和当前全局视图形成操作意图，经 Gateway 按 Runtime Adapter 契约交给 Runtime，并根据实际结果或事件更新全局视图；需要交付 Agent 的结果经 Gateway 返回。
 
-每棵树维护通过 `admit` 但尚未启动的待选机会及其有效性，向 Policy 提供同一 AScoutAgent 内的待选、运行和暂停工作，以及预算、资源压力、等待时间、依赖和成本等事实；接收 `select` 对当前启动机会的选择和 `rebalance` 对已启动工作的暂停、恢复或抢占意图，并在 Contract、资源与正确性硬约束内执行。逻辑 Branch 可以先推进而不立即创建独立 Runtime 环境；当接入侧识别出即将发生需要独立 Branch-local 状态的变化时，Coordinator 经 Adapter 请求 Runtime 建立独立环境，并在收到实际完成事件后把逻辑状态标记为已对齐。独立环境尚未建立完成时，Coordinator 不把预期状态当作 Runtime 已确认的事实。未被选择的有效机会继续保留；pending result 到达、任务结束、祖先依赖被否定或其他必要前提失效时，Coordinator 将其移出集合。task 的预算计数归对应树，协调侧读取这些事实进行求值和操作协调。
+每棵树维护通过 `admit` 但尚未启动的待选机会及其有效性，向 Policy 提供同一 AScoutAgent 内的待选、运行和暂停工作，以及预算、资源压力、等待时间、依赖和成本等事实；接收 `select` 对当前启动机会的选择和 `rebalance` 对已启动工作的暂停、恢复或抢占意图，并在 Contract、资源与正确性硬约束内执行。每个 Branch 在 Tree 中显式绑定独占的 `environment_id`；Candidate 创建时必须通过 Adapter 请求 Runtime 创建自己的 Environment，不复用 parent Environment。独立环境尚未建立完成时，Coordinator 不把预期状态当作 Runtime 已确认的事实。未被选择的有效机会继续保留；pending result 到达、任务结束、祖先依赖被否定或其他必要前提失效时，Coordinator 将其移出集合。task 的预算计数归对应树，协调侧读取这些事实进行求值和操作协调。
 
 Coordinator 不使用固定价值公式替代 Policy 的跨 Chance 权衡，也不在 `select` 前重复 `admit` 精判。启动或调整运行状态前的有效性、后端能力与硬约束复核属于机制校验；条件暂时不满足时可以延后执行 Policy 的意图。`rebalance` 的抢占结果以 `preempted` 原因进入 `dispose`，而不是由 Coordinator 自行决定清理方式。
 

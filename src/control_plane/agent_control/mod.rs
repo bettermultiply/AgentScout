@@ -242,6 +242,8 @@ pub enum RuntimeExecutionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchRecord {
     pub branch_id: String,
+    #[serde(default)]
+    pub environment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_branch_id: Option<String>,
     pub role: BranchRole,
@@ -593,6 +595,7 @@ pub enum AgentCommand {
     Load {
         branch_id: String,
         path: PathBuf,
+        environments: BTreeMap<String, String>,
     },
     /// Delivers the compiled local Decision artifact. The adapter may reject
     /// it when it has no real Hook/evaluation seam.
@@ -619,6 +622,7 @@ pub enum AgentCommand {
     },
     StartCandidate {
         branch_id: String,
+        environment_id: Option<String>,
         parent_branch_id: String,
         operation_id: String,
         tool_name: String,
@@ -646,6 +650,7 @@ pub enum AgentCommand {
     },
     StartBranch {
         branch_id: String,
+        environment_id: Option<String>,
         role: BranchRole,
         workspace: PathBuf,
         prompt: String,

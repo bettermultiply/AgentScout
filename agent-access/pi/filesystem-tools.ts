@@ -1,11 +1,11 @@
 // Pi sessions remain in their host process; every built-in file operation uses
 // the plan of its own Branch. A fresh mount per operation permits baseline
 // replacement between tasks without touching any live overlay.
-import {readFileSync} from 'node:fs';
+import {readFileSync,openSync,closeSync} from 'node:fs';
 import {spawn} from 'node:child_process';
 import {connect as connectSocket} from 'node:net';
 import {AsyncLocalStorage} from 'node:async_hooks';
-import {join} from 'node:path';
+import {join,dirname,basename} from 'node:path';
 
 // This process is PID 1 in a private PID namespace. Reap *all* descendants,
 // including background children that closed stdio or changed process groups.
@@ -32,6 +32,10 @@ type ToolOptions = {
 export function filesystemTools(directory: string, branch: string, cwd: string, sdk: any) {
     if(!directory)return [];
     const context=new AsyncLocalStorage<AbortSignal | undefined>();
+    // Per-operation namespaces must finish (including adopted descendants)
+    // before the next operation sees their writes. Persistent holders instead
+    // own background work for the environment and deliberately allow concurrency.
+    let pending: Promise<unknown>=Promise.resolve();
     const planFile=join(directory,branch+'.json');
     const readPlan=()=>JSON.parse(readFileSync(planFile,'utf8'));
     // An isolated host directory can be mounted at another path inside the
@@ -49,7 +53,13 @@ export function filesystemTools(directory: string, branch: string, cwd: string, 
     };
     const exec=(command: string, cwd: string, options: ToolOptions = {}): Promise<ToolResult>=>{
         const signal=options.signal??context.getStore();
-        return run(command,translate(cwd),{...options,signal});
+        const execute=()=>run(command,translate(cwd),{...options,signal});
+        try{if(readPlan().holder_socket)return execute()}catch(error){return Promise.reject(error)}
+        const result=pending.then(execute);
+        // A failed write must not poison subsequent operations. run still waits
+        // for close before rejecting EPIPE, cancellation or timeout.
+        pending=result.catch(()=>{});
+        return result;
     };
     const run=(command: string, cwd: string, options: ToolOptions = {}): Promise<ToolResult>=>new Promise((resolve,reject)=>{
         let {onData,signal,timeout,env,input}=options;
@@ -58,17 +68,22 @@ export function filesystemTools(directory: string, branch: string, cwd: string, 
         let plan;
         try{plan=readPlan()}catch(error){reject(error);return}
         if(plan.holder_socket){
-            const socket=connectSocket(plan.holder_socket);
+            const directoryFd=openSync(dirname(plan.holder_socket),'r');
+            let socket: ReturnType<typeof connectSocket>;
+            try{socket=connectSocket(`/proc/self/fd/${directoryFd}/${basename(plan.holder_socket)}`)}
+            catch(error){closeSync(directoryFd);reject(error);return}
             let finished=false,timedOut=false,buffer='';
             const timer=timeout?setTimeout(()=>{timedOut=true;socket.destroy()},timeout*1000):undefined;
             const stop=()=>socket.destroy();
             const finish=(error?: Error | null, result?: ToolResult)=>{
                 if(finished)return;finished=true;
+                closeSync(directoryFd);
                 if(timer)clearTimeout(timer);
                 signal?.removeEventListener('abort',stop);
                 error?reject(error):resolve(result as ToolResult);
             };
             signal?.addEventListener('abort',stop,{once:true});
+            if(signal?.aborted)stop();
             socket.on('data',chunk=>{
                 buffer+=chunk.toString();
                 let index;

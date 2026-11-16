@@ -3,8 +3,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use super::*;
 use super::cgroup::{sanitize, wait_frozen};
+use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FreezeMechanism {
@@ -30,7 +30,6 @@ pub struct ProcessHandle {
     pub cgroup_path: Option<PathBuf>,
     pub process_group: i32,
 }
-
 
 impl ProcessBackend {
     pub fn freeze(&self, environment_id: &str) -> Result<(), BackendError> {
@@ -133,10 +132,9 @@ impl ProcessBackend {
                 match fs::write(&kill, "1") {
                     Ok(()) => killed = true,
                     Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(failure) => failures.push(format!(
-                        "failed to write {}: {failure}",
-                        kill.display()
-                    )),
+                    Err(failure) => {
+                        failures.push(format!("failed to write {}: {failure}", kill.display()))
+                    }
                 }
             }
         }
@@ -152,9 +150,10 @@ impl ProcessBackend {
         // descendant that changed session must end with the Branch too. The
         // open namespace fd pins the inode for the whole sweep; without it a
         // freed inode could already belong to a new Branch.
-        let swept = process.namespace_fd.as_ref().map(|_| {
-            super::kill_namespace_processes(process.mount_namespace)
-        });
+        let swept = process
+            .namespace_fd
+            .as_ref()
+            .map(|_| super::kill_namespace_processes(process.mount_namespace));
         if let Err(failure) = process.child.wait() {
             failures.push(format!("failed to reap child process: {failure}"));
         }

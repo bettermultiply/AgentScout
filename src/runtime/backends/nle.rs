@@ -15,12 +15,13 @@ use std::sync::Mutex;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::protocol::contract::{
+    CommandOutput, EnvironmentState, RuntimeCapabilities, RuntimeTool,
+};
 use crate::runtime::backend::{Backend, BackendError, CancelHandle};
-use crate::protocol::contract::{CommandOutput, EnvironmentState, RuntimeCapabilities, RuntimeTool};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NleConfig {
-    pub control_socket: PathBuf,
     pub adapter_instance: String,
     pub python: PathBuf,
     #[serde(default = "default_bridge")]
@@ -35,6 +36,93 @@ pub struct NleConfig {
     /// speculation has a window to hide its reasoning in.
     #[serde(default)]
     pub action_delay_seconds: Option<f64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{
+        composite::CompositeRuntime,
+        selection::{BackendConnection, BackendPolicy},
+    };
+    use std::sync::Arc;
+
+    // The fake workload deliberately has shared world state. Lifecycle must
+    // stay in NleBackend, and single-component recovery must restore bindings.
+    #[test]
+    fn shared_world_lifecycles_and_single_composite_participants_survive_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let bridge = root.path().join("bridge.py");
+        std::fs::write(&bridge, r#"
+import json,sys
+worlds={}
+states={}
+for line in sys.stdin:
+ r=json.loads(line); op=r['op']; name=r.get('environment'); reply={'ok':True}
+ if op=='establish': worlds[name]=0; states[name]='available'
+ elif op=='branch': worlds[r['child']]=worlds[name]; states[r['child']]='available'
+ elif op=='suspend': states[name]='suspended'
+ elif op=='resume': states[name]='available'
+ elif op=='observe':
+   if name not in worlds or states.get(name)!='available': reply={'ok':False,'error':'world unavailable'}
+   else: reply['observation']={'visible':True}
+ elif op=='terminate': states[name]='terminated'
+ elif op=='cleanup': worlds.pop(name,None); states[name]='cleaned'
+ elif op=='save':
+  with open(r['path'],'w') as f: json.dump({'environments':worlds,'environment_states':states},f)
+ elif op=='load':
+  with open(r['path']) as f: data=json.load(f); worlds=data['environments']; states=data['environment_states']; reply['states']=states
+ print(json.dumps(reply),flush=True)
+"#).unwrap();
+        let config = NleConfig {
+            adapter_instance: "nle".into(),
+            python: "python3".into(),
+            bridge,
+            guidebook: root.path().join("guide"),
+            env_id: None,
+            seed: None,
+            action_delay_seconds: None,
+        };
+        let make = || {
+            let backend = Arc::new(NleBackend::new(config.clone()).unwrap());
+            CompositeRuntime::new(
+                "runtime",
+                vec![BackendConnection::new("nle", backend).unwrap()],
+                BackendPolicy::single("nle"),
+            )
+            .unwrap()
+        };
+        let runtime = make();
+        runtime.establish("parent").unwrap();
+        runtime.branch("parent", "child").unwrap();
+        runtime.suspend("child").unwrap();
+        runtime
+            .operate("parent", &["observe".into()], &CancelHandle::default())
+            .unwrap();
+        let save = root.path().join("runtime.json");
+        runtime.save_runtime(&save).unwrap();
+        let restored = make();
+        restored.load_runtime(&save).unwrap();
+        assert_eq!(restored.state("parent"), Some(EnvironmentState::Available));
+        assert_eq!(restored.state("child"), Some(EnvironmentState::Suspended));
+        restored.resume("child").unwrap();
+        restored.terminate("parent").unwrap();
+        restored.cleanup("parent").unwrap();
+        restored
+            .operate("child", &["observe".into()], &CancelHandle::default())
+            .unwrap();
+        let again = root.path().join("again.json");
+        restored.save_runtime(&again).unwrap();
+        let final_runtime = make();
+        final_runtime.load_runtime(&again).unwrap();
+        assert_eq!(
+            final_runtime.state("parent"),
+            Some(EnvironmentState::Cleaned)
+        );
+        final_runtime
+            .operate("child", &["observe".into()], &CancelHandle::default())
+            .unwrap();
+    }
 }
 
 fn default_bridge() -> PathBuf {
@@ -165,13 +253,20 @@ fn error(error: impl std::fmt::Display) -> BackendError {
 
 impl Backend for NleBackend {
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        self.request(json!({"op":"save", "path":path}))?;
+        // Lifecycle belongs to each Environment, not the shared workload world.
+        // Include it in the bridge's existing atomic save publication.
+        self.request(json!({"op":"save", "path":path,
+            "environment_states": &*self.states.lock().unwrap()}))?;
         Ok(())
     }
 
     fn load_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
+        let record: Value =
+            serde_json::from_slice(&std::fs::read(path).map_err(error)?).map_err(error)?;
+        let saved_states: HashMap<String, EnvironmentState> =
+            serde_json::from_value(record["environment_states"].clone()).map_err(error)?;
         let response = self.request(json!({"op":"load", "path":path}))?;
-        let states: HashMap<String, EnvironmentState> = serde_json::from_value(response["states"].clone()).map_err(error)?;
+        let states = serde_json::from_value(response["states"].clone()).unwrap_or(saved_states);
         *self.states.lock().unwrap() = states;
         Ok(())
     }
@@ -197,8 +292,7 @@ impl Backend for NleBackend {
                     }),
                 },
             ],
-            shared_environment: true,
-            branch_environment: false,
+            branch_environment: true,
             filesystem_fast_delete: None,
             filesystem_fork_cost: None,
             filesystem_btrfs_incremental_diff: None,
@@ -324,18 +418,30 @@ impl Backend for NleBackend {
     }
 
     fn suspend(&self, environment_id: &str) -> Result<(), BackendError> {
+        if self.state(environment_id) != Some(EnvironmentState::Available) {
+            return Err(BackendError::new("NLE environment is not available"));
+        }
         self.request(json!({"op":"suspend", "environment":environment_id}))?;
         self.set_state(environment_id, EnvironmentState::Suspended);
         Ok(())
     }
 
     fn resume(&self, environment_id: &str) -> Result<(), BackendError> {
+        if self.state(environment_id) != Some(EnvironmentState::Suspended) {
+            return Err(BackendError::new("NLE environment is not suspended"));
+        }
         self.request(json!({"op":"resume", "environment":environment_id}))?;
         self.set_state(environment_id, EnvironmentState::Available);
         Ok(())
     }
 
     fn terminate(&self, environment_id: &str) -> Result<(), BackendError> {
+        if matches!(
+            self.state(environment_id),
+            Some(EnvironmentState::Terminated | EnvironmentState::Cleaned)
+        ) {
+            return Ok(());
+        }
         self.request(json!({"op":"terminate", "environment":environment_id}))?;
         self.set_state(environment_id, EnvironmentState::Terminated);
         Ok(())

@@ -1,5 +1,13 @@
 # Runtime 生命周期协议
 
+## 2026-11-16：Runtime 创建身份
+
+Gateway 提供 `establish()` 和 `branch(parent_environment_id, agent)`；协议中的 branch 不接收子环境身份，创建结果的 `environment_id` 指向新环境。Runtime 内部 `Backend::create_environment` / `create_child_environment` 分配身份，再调用内部 Backend 组合。分配器使用进程、时间与原子序号并检查当前状态，不接收 Branch 或 execution 身份。
+
+`BranchRecord.environment_id` 和待交付的启动命令使用可选绑定；协调完成事件收到 Runtime 返回值后绑定 Branch 并填入启动命令。创建失败已产生环境时，返回该身份并保留实际 Backend 参与者供清理；没有环境时不发终止或清理调用。保存恢复校验非空、唯一绑定，区分创建中、已绑定和已释放记录，恢复显式 load 后沿用原身份。
+
+无模型回归覆盖重复 establish、独立 sibling、后续操作定位、拒绝预定身份、组合 Runtime 部分失败后的身份和清理，以及控制面失败绑定的保存恢复。`cargo test --lib` 为 170/170；`cargo fmt -- --check`、`cargo check --all-targets`、`cargo build --bins` 通过。真实 Firecracker 集成调用方已对齐返回身份，本轮未运行真实 VM 或真实模型集成测试。协议版本仍为原型版本 1，升级时控制面和 Adapter 必须一起更新，不保证混用旧二进制。
+
 本文集中说明一个 Runtime 实例在运行期如何建立、操作、派生、提升、静止、恢复、终止和清理环境，以及多 Backend 组合下这些操作如何按固定顺序执行、如何暴露部分失败、如何聚合状态和如何划分清理责任。它是开发阶段的实现说明，对应代码 `src/runtime/`、`src/runtime/backend.rs`、`src/runtime/adapter/`、`src/runtime/process/` 和 `src/bin/ascout-runtime-adapter.rs` 的当前语义；正式接入契约见 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)，Branch 的树结构与裁决语义见 [Branch 语义设计](../design/branch-semantics.md)。
 
 ## 1. Runtime 的定义与三层边界
@@ -18,10 +26,10 @@
 
 一次操作请求带两套身份，不能互相冒充：
 
-- **请求身份**：`OperationRequest` 里的 `request_id`、`task_id`、`branch_id`。`request_id` 用于幂等（同一标识重复到达按重试处理，不重复执行）；`task_id` / `branch_id` 是控制面传下来的选择上下文，供 Policy 路由到 Backend，Adapter 不得伪造，不得从 `environment_id` 反推全局 Tree。
-- **环境身份**：`environment_id` 是 Backend 侧定位实际环境用的局部标识。一个逻辑 Branch 可以在不同 Runtime 环境中继续执行，所以 `branch_id` 和 `environment_id` 是分开的字段；旧控制面不发送 `task_id` / `branch_id` 时保持为空，兼容旧路径。
+- **请求身份**：`OperationRequest` 里的 `request_id`、`task_id`。`request_id` 用于幂等；Runtime 普通操作只接收 `environment_id` 与 operation，不接收 Branch 身份。
+- **环境身份**：`environment_id` 由 Runtime 创建并返回，控制面按 Branch 保存独占绑定。Runtime 不接收 Branch id，也不从环境推导 Branch；内部 Backend 使用 Runtime 交付的环境身份组织资源。
 
-`BackendContext` 把这两套身份一起传给 Backend：`task_id`、`branch_id`、`environment_id`、`parent_environment_id`。Backend 只使用 Adapter 明确传入的局部身份，不自行推断全局结构。
+`BackendContext` 传递 `task_id`、`environment_id`、`parent_environment_id` 及操作身份；Backend 只使用 Adapter 明确传入的局部身份，不自行推断全局结构。Runtime 内部以独立 `backend_id` 标识 Backend instance，并维护 Environment 与 Backend instance 的关联；控制面不传该 id。
 
 ## 3. 生命周期操作
 
@@ -65,7 +73,7 @@ Backend 接口同时提供不带上下文的旧方法和带 `BackendContext` 的
 Backend 选择完全由 `BackendPolicy`（配置注入）决定：
 
 - `default`：没有规则匹配时的有序 Backend 列表。
-- `routes`：按 `operation` / `task_id` / `environment_id` / `branch_id` 匹配的规则；未填字段表示“任意”。多条规则同时匹配时，约束字段最多的规则胜出；同等具体度出现歧义就返回明确错误，不允许靠排列顺序静默覆盖。
+- `routes`：按 `operation` / `task_id` / `environment_id` 匹配的规则；未填字段表示“任意”。多条规则同时匹配时，约束字段最多的规则胜出；同等具体度出现歧义就返回明确错误，不允许靠排列顺序静默覆盖。
 
 Runtime 只按给定规则选择、按明确顺序执行、如实汇报。它不会因为“恰好有多个连接”就广播；多 Backend 配置必须显式给出 `default` 或至少一条规则，否则装配失败。
 
@@ -80,17 +88,23 @@ Runtime 只按给定规则选择、按明确顺序执行、如实汇报。它不
 
 这些信息通过 `OperationResult` 的 `resources` / `remaining` 和 `outputs` 如实上报，控制面据此区分“已完成 / 未执行 / 需要清理”，不会静默覆盖多个输出。
 
-### 7.3 状态聚合
+### 7.3 Environment 与 Backend instance 的关联
+
+控制面独占绑定 `Branch -> Environment`，因此不同 Branch 不能共享 Environment。Runtime 对外只接受 Environment identity；内部每个 `BackendConnection.id` 标识一个独立 Backend instance，且每个 Environment 记录实际参与建立或派生的 Backend instance 集合。不同 Environment 可以选择不同组合，例如 `env1` 使用 `fs1/process1`，`env2` 使用 `fs1/process2/network1`；这种共享只表示 Backend 内部资源可以共享，不表示 Environment 生命周期共享。
+
+建立或派生成功后，操作只能使用 Policy 选出的、且属于该 Environment 参与集合的 Backend；缺少参与记录、选出未绑定 instance 或清理未参与 instance 都必须失败。Runtime 保存并恢复参与集合元数据，并由 Runtime 校验 Backend instance 与 Environment 的实际组合；控制面恢复只验证每个存活 Environment 至少存在于一个保存组件，不要求所有 Backend 都含有它。
+
+### 7.4 状态聚合
 
 多 Backend 共同提供同一个环境时，聚合状态以参与过该环境 `establish` / `branch` 的 Backend 集合为准：
 
 - 参与者全部报告了状态且一致 → 返回该状态；
 - 任一参与者没有报告状态，或状态不一致（例如一个 `Available`、一个 `Suspended`，或建立到一半失败）→ 返回 `PartiallyAvailable`。
-- 没有参与者记录（未知环境或旧路径）→ 退化为观察所有报告了状态的 Backend，规则同上。
+- 没有参与者记录（未知环境或不完整恢复）→ 返回未知，不观察或操作未绑定的 Backend。
 
 `PartiallyAvailable` 只表示聚合层无法把环境归入单一生命周期状态，它不是一个可以继续执行普通操作的状态；`can_accept_operations` 会为假，环境不会在部分失败后伪装成 `Available`。当一次成功返回的操作后环境实际为 `PartiallyAvailable` 时，结果 `status` 报告为 `PartiallyCompleted` 并给出 `reason`，而不是 `Completed`。
 
-### 7.4 清理责任
+### 7.5 清理责任
 
 - 建立 / 派生失败时，组合层回滚已经完成的 Backend（按相反顺序清理），并记录哪些回滚也失败了。
 - `cleanup` 会尽力覆盖所有选中的 Backend，不因单个失败就跳过后续；失败以 `cleanup_failures` 如实上报，`remaining` 保持为空（因为确实都尝试了）。

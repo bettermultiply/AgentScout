@@ -1,14 +1,13 @@
 //! Adapter 会话：连接控制面、收发消息。
 
 use super::*;
-use std::io;
-use std::path::Path;
-use crate::protocol::transport;
 use crate::protocol::contract::*;
+use crate::protocol::transport;
 use crate::runtime::backend::*;
+use std::io;
+use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
-
 
 pub struct Adapter {
     pub adapter_instance: String,
@@ -16,8 +15,8 @@ pub struct Adapter {
 }
 
 impl Adapter {
-    pub fn run(self, socket_path: &Path) -> io::Result<()> {
-        let stream = std::os::unix::net::UnixStream::connect(socket_path)?;
+    pub fn run(self, address: &str) -> io::Result<()> {
+        let stream = TcpStream::connect(address)?;
         let mut reader = stream.try_clone()?;
         let (out, out_rx) = mpsc::channel::<AdapterMessage>();
 
@@ -67,4 +66,3 @@ impl Adapter {
         Ok(())
     }
 }
-

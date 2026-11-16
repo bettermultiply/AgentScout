@@ -5,8 +5,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crate::protocol::contract::{
-    AdapterMessage, EnvironmentState, Event, EventPayload, Operation, OperationRequest,
-    ResultStatus,
+    AdapterMessage, Event, EventPayload, OperationRequest, ResultStatus,
 };
 use crate::runtime::backend::CancelHandle;
 
@@ -106,18 +105,10 @@ impl Queue {
             }
             shared.result_signal.notify_all();
             if let Some(state) = result.environment_state {
-                shared.set_known(&request.environment_id, state);
-                if let Operation::BranchEnvironment {
-                    child_environment_id,
-                    ..
-                } = &request.operation
-                    && result.status == ResultStatus::Completed
-                {
-                    shared.set_known(child_environment_id, EnvironmentState::Available);
-                }
+                shared.set_known(&result.environment_id, state);
             }
             if let Err(error) = shared.out.send(AdapterMessage::Event(Event {
-                environment_id: request.environment_id.clone(),
+                environment_id: result.environment_id.clone(),
                 request_id: Some(request.request_id.clone()),
                 payload: EventPayload::OperationFinished {
                     result: result.clone(),

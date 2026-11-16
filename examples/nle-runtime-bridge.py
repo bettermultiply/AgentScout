@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """A small JSON-lines NLE workload bridge.
 
-One NetHack world lives in this process.  The Runtime may name several
-environments, but every name refers to the same world: ``branch`` creates a
-view, not a copy.  Speculation is staged outside the environment -- a branch
-never acts, and the world advances only on the authority's actions.
+One NetHack world lives in this process. Environments have distinct identities
+and lifetimes, while ``branch`` retains a reference to the parent's world.
+Speculation is staged outside the workload: candidates do not act before
+promotion. Save/load reconstructs the saved world, not a world per branch.
 
 Input commands:
 
@@ -240,6 +240,7 @@ def main() -> int:
         return 2
 
     worlds: dict[str, World] = {}
+    environment_states: dict[str, str] = {}
     for line in sys.stdin:
         request = json.loads(line)
         request_id = request.get("id")
@@ -250,6 +251,7 @@ def main() -> int:
                 if name in worlds:
                     raise ValueError("environment already exists")
                 worlds[name] = new_world(gym, args.env_id, request.get("seed"))
+                environment_states[name] = "available"
                 reply(sys.stdout, request_id, ok=True, state="available", observation=worlds[name].observation)
             elif operation == "branch":
                 world = require(worlds, name)
@@ -258,10 +260,11 @@ def main() -> int:
                     raise ValueError("child environment already exists")
                 world.references += 1
                 worlds[child] = world
+                environment_states[child] = "available"
                 reply(sys.stdout, request_id, ok=True, state=world.state, child=child)
             elif operation == "operate":
                 world = require(worlds, name)
-                if world.state != "available":
+                if environment_states.get(name) != "available":
                     raise ValueError("environment is not available")
                 action = request["action"]
                 if (
@@ -289,7 +292,7 @@ def main() -> int:
                 arguments = request.get("arguments") or {}
                 if tool == "nle_action":
                     world = require(worlds, name)
-                    if world.state != "available":
+                    if environment_states.get(name) != "available":
                         raise ValueError("environment is not available")
                     action = arguments.get("action")
                     if (
@@ -332,21 +335,22 @@ def main() -> int:
                 world = require(worlds, name)
                 # NLE has one shared world, so promotion has no environment-side
                 # state change. Keep the generic lifecycle operation explicit.
-                reply(sys.stdout, request_id, ok=True, state=world.state)
+                reply(sys.stdout, request_id, ok=True, state=environment_states[name])
             elif operation == "observe":
                 world = require(worlds, name)
-                reply(sys.stdout, request_id, ok=True, state=world.state, observation=world.observation)
+                reply(sys.stdout, request_id, ok=True, state=environment_states[name], observation=world.observation)
             elif operation in {"suspend", "resume"}:
                 world = require(worlds, name)
-                if world.state not in {"available", "suspended"}:
+                if environment_states[name] not in {"available", "suspended"}:
                     raise ValueError("environment is not available for suspend/resume")
-                world.state = "suspended" if operation == "suspend" else "available"
-                reply(sys.stdout, request_id, ok=True, state=world.state)
+                environment_states[name] = "suspended" if operation == "suspend" else "available"
+                reply(sys.stdout, request_id, ok=True, state=environment_states[name])
             elif operation == "save":
                 unique = list({id(world): world for world in worlds.values()}.values())
                 records = [{"initial": world.initial, "actions": world.actions,
                             "checks": world.checks, "state": world.state} for world in unique]
                 record = {"version": 1, "worlds": records,
+                          "environment_states": environment_states,
                           "environments": {key: unique.index(world) for key, world in worlds.items()}}
                 # Verify reconstruction before replacing the previous save.
                 for saved in records:
@@ -376,18 +380,21 @@ def main() -> int:
                         if not world.references:
                             raise ValueError("unreferenced saved NLE world")
                     worlds.update(names)
+                    environment_states.update(record.get("environment_states", {}))
                 except Exception:
                     for world in restored:
                         world.environment.close()
                     raise
-                reply(sys.stdout, request_id, ok=True, states={key: world.state for key, world in worlds.items()})
+                reply(sys.stdout, request_id, ok=True, states=environment_states)
             elif operation == "terminate":
                 world = require(worlds, name)
                 release(worlds, name)
+                environment_states[name] = "terminated"
                 reply(sys.stdout, request_id, ok=True, state="terminated")
             elif operation == "cleanup":
                 if name in worlds:
                     release(worlds, name)
+                environment_states[name] = "cleaned"
                 reply(sys.stdout, request_id, ok=True, state="cleaned")
             else:
                 raise ValueError("unsupported operation")

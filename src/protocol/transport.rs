@@ -39,9 +39,7 @@ pub fn read_message<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<
     if length > MAX_MESSAGE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "message length {length} exceeds the {MAX_MESSAGE_BYTES}-byte limit"
-            ),
+            format!("message length {length} exceeds the {MAX_MESSAGE_BYTES}-byte limit"),
         ));
     }
     let mut payload = vec![0u8; length];
@@ -68,8 +66,7 @@ mod tests {
     fn read_message_round_trips_a_normal_message() {
         let mut buffer = Vec::new();
         write_message(&mut buffer, &serde_json::json!({"hello": "world"})).unwrap();
-        let value: serde_json::Value =
-            read_message(&mut Cursor::new(buffer)).unwrap().unwrap();
+        let value: serde_json::Value = read_message(&mut Cursor::new(buffer)).unwrap().unwrap();
         assert_eq!(value["hello"], "world");
     }
 

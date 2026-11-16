@@ -155,7 +155,9 @@ impl FilesystemBackend {
             updated
                 .marks
                 .insert(mark_id.to_string(), snapshot_id.clone());
-            state.environments.insert(updated.id.clone(), updated.clone());
+            state
+                .environments
+                .insert(updated.id.clone(), updated.clone());
             self.refresh_references(&mut state)
         })?;
         let durable = profile.run("persist", || {

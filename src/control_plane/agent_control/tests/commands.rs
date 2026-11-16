@@ -10,6 +10,7 @@ fn command_results_require_exact_pending_identity_and_are_consumed() {
         "parent".into(),
         BranchRecord {
             branch_id: "parent".into(),
+            environment_id: Some("environment-parent".into()),
             parent_branch_id: None,
             role: BranchRole::Authority,
             status: BranchStatus::Running,
@@ -25,6 +26,7 @@ fn command_results_require_exact_pending_identity_and_are_consumed() {
         "candidate".into(),
         BranchRecord {
             branch_id: "candidate".into(),
+            environment_id: Some("environment-candidate".into()),
             parent_branch_id: Some("parent".into()),
             role: BranchRole::Candidate,
             status: BranchStatus::Running,

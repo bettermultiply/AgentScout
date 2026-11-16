@@ -1,7 +1,7 @@
 //! guest agent 通信、API 请求与进程清理。
 
-use super::*;
 use super::network::*;
+use super::*;
 
 /// Firecracker HTTP API 的抽象，便于对生命周期错误做可注入的单元测试。
 pub(super) trait FirecrackerApi: Send + Sync {
@@ -155,7 +155,10 @@ pub(super) fn configure_guest_network(socket: &Path) -> Result<(), BackendError>
     guest_command(socket, &command, &cancel).map(|_| ())
 }
 
-pub(super) fn check_socket_paths(api_socket: &Path, vsock_socket: &Path) -> Result<(), BackendError> {
+pub(super) fn check_socket_paths(
+    api_socket: &Path,
+    vsock_socket: &Path,
+) -> Result<(), BackendError> {
     for socket in [api_socket, vsock_socket] {
         if socket.as_os_str().as_encoded_bytes().len() >= 108 {
             return Err(BackendError::new(format!(
@@ -209,9 +212,11 @@ pub(super) fn kill_environment_process(child: &mut Child) -> Result<(), BackendE
         if child.try_wait().map_err(error)?.is_some() {
             return Ok(());
         }
-        child.kill().map_err(|failure| BackendError::new(format!(
-            "failed to kill Firecracker child {process_group}: {failure}"
-        )))?;
+        child.kill().map_err(|failure| {
+            BackendError::new(format!(
+                "failed to kill Firecracker child {process_group}: {failure}"
+            ))
+        })?;
     }
     wait_for_environment_exit(child, Duration::from_secs(5))
 }
@@ -247,7 +252,12 @@ thread_local! {
 /// Firecracker API 响应体上限；API 响应很小，超限说明对端异常。
 const MAX_API_RESPONSE_BYTES: usize = 1024 * 1024;
 
-pub(super) fn api_request(method: &str, socket: &Path, path: &str, body: &Value) -> Result<(), BackendError> {
+pub(super) fn api_request(
+    method: &str,
+    socket: &Path,
+    path: &str,
+    body: &Value,
+) -> Result<(), BackendError> {
     let body = serde_json::to_vec(body).map_err(error)?;
     let mut stream = UnixStream::connect(socket).map_err(error)?;
     stream
@@ -345,12 +355,15 @@ pub(super) fn wait_for_path(path: &Path, timeout: Duration) -> Result<(), Backen
 fn debugfs_token_is_safe(value: &str) -> bool {
     !value.is_empty()
         && value.chars().all(|character| {
-            character.is_ascii_graphic()
-                && !matches!(character, '"' | '\\' | '{' | '}')
+            character.is_ascii_graphic() && !matches!(character, '"' | '\\' | '{' | '}')
         })
 }
 
-pub(super) fn debugfs_write(rootfs: &Path, source: &Path, destination: &str) -> Result<(), BackendError> {
+pub(super) fn debugfs_write(
+    rootfs: &Path,
+    source: &Path,
+    destination: &str,
+) -> Result<(), BackendError> {
     let source = source.display().to_string();
     if !debugfs_token_is_safe(&source) {
         return Err(BackendError::new(format!(
@@ -433,7 +446,10 @@ mod tests {
                         if matches!(
                             error.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) => break,
+                        ) =>
+                    {
+                        break;
+                    }
                     Err(_) => break,
                 }
             }
@@ -454,7 +470,8 @@ mod tests {
 
     #[test]
     fn api_request_rejects_non_success_status() {
-        let (path, server) = serve_once(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+        let (path, server) =
+            serve_once(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
         let error = api_request("PUT", &path, "/test", &json!({})).unwrap_err();
         assert!(error.message.contains("status 500"), "{error}");
         server.join().unwrap();
@@ -485,13 +502,18 @@ mod tests {
         assert!(!debugfs_token_is_safe(""));
 
         let rootfs = Path::new("/tmp/rootfs.ext4");
-        let error = debugfs_write(rootfs, Path::new("/tmp/source with space"), "/dest").unwrap_err();
+        let error =
+            debugfs_write(rootfs, Path::new("/tmp/source with space"), "/dest").unwrap_err();
         assert!(error.message.contains("cannot be passed safely"), "{error}");
     }
 
     #[test]
     fn process_exit_timeout_is_bounded_and_retains_a_retryable_child() {
-        let mut child = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
         let start = Instant::now();
         let result = wait_for_environment_exit(&mut child, Duration::from_millis(20));
         let still_running = child.try_wait().unwrap().is_none();

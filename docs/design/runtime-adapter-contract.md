@@ -1,12 +1,14 @@
 # Runtime Adapter 契约设计
 
-本文定义 Runtime 与 AScout 控制面之间的正式接入契约。Runtime Adapter 是这条接入边界的实现，负责呈现 Runtime 的环境语义、操作身份与顺序、能力声明、Registry 校验结果以及环境操作的结果和事件。Adapter Registry 属于 Runtime，独立承担本契约规定的校验和验证证据生成；Adapter 不自行证明其声明成立。本文不把 Adapter 视作独立于 Runtime 的另一套运行系统。
+本文定义 Runtime 与 AScout 控制面之间的正式接入契约。Runtime Adapter 是这条接入边界的实现，负责呈现 Runtime 的环境语义、操作身份与顺序、能力声明、Registry 检查结果以及环境操作的结果和事件。Adapter Registry 属于 Runtime，首期只检查控制面当前需要的 API 是否存在并可解析，不主动验证环境保证；主动验证和独立验证证据属于后续能力，不得写成首期接入前提。Adapter 不自行证明其声明成立。本文不把 Adapter 视作独立于 Runtime 的另一套运行系统。
 
 ## 1. 契约边界
 
 Runtime 的操作开始、操作结果和环境状态变化是 Runtime 自身的事实，按 request/environment identity 关联；资源、剩余资源与后续清理要求随结果报告。接收请求不等于开始，开始不等于完成，控制面等待超时也不等于 Runtime 已取消。Agent action 结果或 Agent Adapter 命令回执不能代替这些事实，Runtime 结果同样不能代替 Agent session 已释放或 Tree 已完成权威切换。
 
 Runtime Adapter 连接控制面与 Runtime。控制面经 Gateway 按 Adapter 契约发出环境操作，Adapter 将其映射到 Runtime，并把结果和事件规范化返回；Gateway 负责通信接入、消息分发和送达，不代替 Adapter 的语义映射或 Registry 的验证。契约的核心是 Runtime 提供的承载能力：环境建立、环境内操作、静止、恢复、终止和清理，以及这些操作对不同环境内容形成的隔离和效果保证；环境派生是可选能力，不是所有任务或 Runtime 的前提。
+
+控制面中的 `ControlSession` 只是 Gateway 与 Adapter 之间的网络会话和请求关联，不是 Runtime 环境身份，也不替代 Registry 的接入检查。Runtime 创建 Environment 并返回 `environment_id`；控制面保存 Branch 与返回身份的绑定，后续请求使用该身份，不向 Runtime 传 Branch identity。Agent 接入侧的 Agent session、workspace identity 与 Runtime environment identity 分别由各自拥有者管理：Agent 握手确认接入侧身份和所需 API，不等于 Runtime 已验证环境保证；workspace 路径是启动参数和工作区定位信息，不是权限或 Branch identity 的推导来源。
 
 Adapter 可以使用 Runtime 原生隔离、权限控制、代理、拦截或拒绝来兑现声明。Registry 检查的是 Adapter 在边界上呈现的最终环境保证，不检查某一种内部实现。
 
@@ -34,11 +36,11 @@ Adapter 声明支持 `branch_environment` 时，必须同时声明派生覆盖�
 
 ### 2.3 非干扰与共享环境
 
-Branch 的固定要求是**不影响权威路径和其他 Branch**。独立环境只是实现该要求的一种方式；Adapter 也可以让多个 Branch 共享同一个环境，但必须保证一个 Branch 的操作在影响环境之前被阻止、暂存或以其他方式受控。
+Branch 的固定要求是**不影响权威路径和其他 Branch**。本项目的控制面绑定规则要求每个 Branch 使用独占 Environment；Runtime 可以在一个 Environment 内组合多个 Backend instance，但不得把同一个 Environment 绑定给多个 Branch。共享 Backend instance 不等于共享 Environment。
 
 Adapter 必须按环境内容声明其非干扰机制、覆盖的入口、scope 和 limitations。声明可以描述独立环境、作用前阻止、写入暂存、写时复制或其他机制；机制名称不是固定语义，控制面只依赖声明的保证范围和验证结果。
 
-共享环境下的非干扰必须覆盖所有可能影响权威路径或其他 Branch 的入口。无法可靠识别或阻止的入口不得纳入已验证范围；控制面不得把未覆盖的内容当作已隔离，必须改用独立环境或拒绝相应投机。
+Runtime 内部的 Environment→Backend instance 关联可以是多对多，具体 Backend 的共享/独占策略不固化在控制面；控制面不传 Backend instance id。
 
 隔离贯穿以上所有操作，是接入资格的固定语义。这里要求的是非干扰保证，而不是某种特定的环境形态。
 
@@ -57,17 +59,17 @@ Runtime 可以在能力声明中登记环境工具及其参数结构。环境工
 - `tool_context`：读取工具当前可用的公开上下文，供 Policy 预测；不得读取隐藏状态；
 - `invoke_tool`：在指定环境执行一次工具调用。结果包含 `result` 和 `evidence`：`result` 进入 Agent 工具通道，`evidence` 交给 Policy 匹配。两者都只能包含 Runtime 愿意公开的事实。
 
-环境工具不创建 Branch。多个 Branch 共享同一环境时，Candidate 的工具调用必须在影响环境前被暂存或阻止；只有 Promote 后的权威 Branch 可以调用 `invoke_tool`。控制面不能因为工具名而推断 workload 语义或环境形态。
+环境工具不创建 Branch。Candidate 的工具调用必须在影响 Environment 前被暂存或阻止；只有 Promote 后的权威 Branch 可以调用 `invoke_tool`。控制面不能因为工具名而推断 workload 语义或环境形态。
 
 系统外替换模型输出的验证运行仍按以上规则真实重跑工具；模型输出回放不构成工具效果回放，不放宽候选作用前门槛。
 
 ## 3. 操作身份与顺序
 
-控制面与 Adapter 之间的每次交互都围绕两个由控制面分配的逻辑标识：环境标识标识一个环境，请求标识标识一次操作。Adapter 内部把逻辑标识映射到后端句柄，接口中不出现这些句柄。
+控制面与 Adapter 之间的交互使用 Runtime 创建的环境标识和控制面分配的请求标识。Adapter 内部把环境标识映射到 Backend 组合和资源句柄，控制面不决定这些内部关系。
 
 ### 3.1 身份与关联
 
-控制面在请求建立环境时分配环境标识，之后一直用该标识引用这个环境。控制面为每次操作分配请求标识；结果和与某次操作相关的事件都必须携带对应的环境标识和请求标识。
+建立初始 Environment 的请求不携带预定环境身份；派生请求只携带 Parent 的 `environment_id` 和启动参数。创建成功的结果中，`environment_id` 表示新建 Environment，而非 Parent。控制面收到结果后绑定 `BranchRecord.environment_id`，再启动相应 Agent Branch；创建前允许无绑定，不得填占位身份。失败后若已有需清理的环境，结果仍报告其身份，控制面保存绑定并执行失败清理。恢复使用持久化绑定和显式 Runtime load，不重新 establish 或从 Branch 名称推导身份。后续操作均引用该绑定。控制面为每次操作分配请求标识；结果和相关事件携带对应的请求标识，以及当时已确定的环境标识；建立开始时尚无环境标识。
 
 重发同一请求标识表示重试同一次操作。Adapter 必须识别重试，返回同一逻辑结果，不得因此制造第二个逻辑环境，也不得掩盖第一次操作留下的部分状态。
 
@@ -189,23 +191,22 @@ VerifiedNonInterference {
 
 ### 5.4 Registry 处理流程
 
-Registry 按以下顺序处理 Adapter 声明：
+Registry 首期按以下顺序处理 Adapter 声明：
 
 ```text
 AdapterDeclaration
     -> 结构解析
     -> 规范化与一致性检查
-    -> Registry 建立验证环境
-    -> Registry 执行验证场景并观察结果
-    -> 对照声明生成验证状态
+    -> 检查当前所需 API 是否存在且可解析
+    -> 返回 API 检查结果
     -> CapabilityView
 ```
 
-结构解析确认契约版本、内容类型、隔离属性和部署条件可以被识别。规范化与一致性检查确认声明覆盖完整、同类内容没有冲突、范围和限制能够被解释。Registry 自主建立验证环境，使用环境操作执行验证场景，并根据实际观察结果检查声明中的保证。Adapter 提供环境建立和观察验证所需的接入信息，但不提交自测结果作为验证依据。
+结构解析确认契约版本、内容类型、隔离属性和部署条件可以被识别。规范化与一致性检查确认声明覆盖完整、同类内容没有冲突、范围和限制能够被解释。首期只检查控制面要调用的 API 是否存在、签名是否可解析；它不建立验证环境、不执行验证场景，也不把 Adapter 的自测结果当作验证依据。主动验证与独立证据生成保留为后续 Registry 能力，不能据此宣称当前环境保证已验证。
 
 Registry 将最终 `CapabilityView` 提供给 Policy Engine。Policy Engine 依据它检查 Policy 的要求是否存在合法执行路径，并决定接受、拒绝或降级 Policy。配置 identity 是能力视图的一部分；配置变化必须产生新的声明并重新经过 Registry 处理。
 
-原始声明中 Registry 无法充分证明的保证进入 `unverified` 范围，主动验证证明不成立的保证进入 `verification_failed` 范围。
+首期未执行主动验证，因此声明的环境保证不因 API 检查而进入已验证范围；需要表达时保留为 `unverified`。`verification_failed` 只有未来主动验证实际证明声明不成立时才可使用。
 
 ### 5.5 比较规则
 
@@ -223,13 +224,13 @@ Registry 将最终 `CapabilityView` 提供给 Policy Engine。Policy Engine 依�
 
 每个声明项及其可验证范围都有 Registry 产生的状态：
 
-- **已验证**：主动验证证明当前实例在声明范围内兑现保证；
+- **已验证**：主动验证证明当前实例在声明范围内兑现保证；首期 Registry 不产生此状态；
 - **未验证**：无法完成充分证明，但没有证据表明保证失败；默认不能按已验证能力使用，部署方主动确认后才可限制使用；
 - **验证失败**：主动验证证明声明不成立，不能通过用户确认绕过。
 
 用户确认承担未验证能力的部署风险，不会把它变成已验证能力。能力视图必须保留状态、范围和限制，不能把未验证或验证失败的范围混入普通可用范围。
 
-接入时由 Registry 主动验证是主要证明手段，运行期验证用于发现接入验证遗漏和实际偏差。运行期验证不能替代接入验证。
+主动验证和运行期验证属于后续能力。首期 Registry 只做 API 存在性检查，不能把 API 检查、声明解析或 Adapter 自报结果写成环境保证已经验证。
 
 ## 7. 结果、事件与失败
 

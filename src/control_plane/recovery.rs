@@ -174,7 +174,19 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
         .ok_or_else(|| fail("native branches missing"))?;
     let native_ids: std::collections::BTreeSet<_> =
         branches.iter().filter_map(|b| b[0].as_str()).collect();
+    let mut bound_environments = std::collections::BTreeSet::new();
     for (id, branch) in &tree.branches {
+        if let Some(environment_id) = &branch.environment_id {
+            if environment_id.is_empty() || !bound_environments.insert(environment_id) {
+                return Err(fail("Branch Environment binding is empty or shared"));
+            }
+        } else if !matches!(branch.status, BranchStatus::Cleaned | BranchStatus::Discarded)
+            && !(branch.status == BranchStatus::Created
+                && matches!(branch.execution_state.runtime,
+                    crate::control_plane::agent_control::RuntimeExecutionState::Unknown
+                    | crate::control_plane::agent_control::RuntimeExecutionState::EnvironmentRequested)) {
+            return Err(fail("live Branch Environment binding is missing"));
+        }
         if id != &branch.branch_id {
             return Err(fail("branch key"));
         }
@@ -183,7 +195,7 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
             branch.status,
             BranchStatus::Cleaned | BranchStatus::Discarded
         );
-        if !released && !native_ids.contains(id.as_str()) {
+        if !released && branch.environment_id.is_some() && !native_ids.contains(id.as_str()) {
             return Err(fail("branch session missing"));
         }
         if let Some(parent) = &branch.parent_branch_id {
@@ -272,11 +284,6 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
     }
     let mut sets = Vec::new();
     environments(&generation.join("runtime.json"), &mut sets)?;
-    let shared = tree
-        .capability_view
-        .as_ref()
-        .and_then(|c| c["shared_environment"].as_bool())
-        .unwrap_or(false);
     for branch in tree.branches.values() {
         if matches!(
             branch.status,
@@ -284,12 +291,18 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
         ) {
             continue;
         }
-        let env = if shared {
-            "authority"
-        } else {
-            branch.branch_id.as_str()
+        let Some(env) = branch.environment_id.as_deref() else {
+            if branch.status == BranchStatus::Created {
+                continue;
+            }
+            return Err(fail("live Branch environment missing"));
         };
-        if sets.is_empty() || sets.iter().any(|s| !s.contains(env)) {
+        // A CompositeRuntime may legitimately associate an environment with
+        // only the Backend instances selected for that environment. The
+        // Runtime has already validated the concrete participant metadata;
+        // recovery only requires the environment to exist in at least one
+        // saved component, not in every component.
+        if sets.is_empty() || !sets.iter().any(|s| s.contains(env)) {
             return Err(fail("live Branch environment missing"));
         }
     }

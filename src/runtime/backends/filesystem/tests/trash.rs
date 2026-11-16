@@ -73,7 +73,11 @@ fn repeated_discards_leave_trash_empty() {
         "coalesced discard signals left entries in trash"
     );
     for path in retired {
-        assert!(!path.exists(), "retired path {} still exists", path.display());
+        assert!(
+            !path.exists(),
+            "retired path {} still exists",
+            path.display()
+        );
     }
     drop(backend);
 }

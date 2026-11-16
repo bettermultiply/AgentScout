@@ -15,16 +15,17 @@ pub fn runtime_call(
 
 fn runtime_cleanup(
     runtime: &dyn Runtime,
+    environment: &str,
     branch: &str,
     tree: &mut SpeculativeTree,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tree.record_runtime_state(branch, RuntimeExecutionState::TerminationRequested)?;
-    if let Err(error) = runtime_call(runtime, branch, Operation::TerminateEnvironment) {
+    if let Err(error) = runtime_call(runtime, environment, Operation::TerminateEnvironment) {
         tree.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
         return Err(error);
     }
     tree.record_runtime_state(branch, RuntimeExecutionState::Terminated)?;
-    if let Err(error) = runtime_call(runtime, branch, Operation::CleanupEnvironment) {
+    if let Err(error) = runtime_call(runtime, environment, Operation::CleanupEnvironment) {
         tree.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
         return Err(error);
     }
@@ -34,32 +35,13 @@ fn runtime_cleanup(
 
 pub fn cleanup(
     runtime: &dyn Runtime,
-    capabilities: &RuntimeCapabilities,
+    _capabilities: &RuntimeCapabilities,
     tree: &mut SpeculativeTree,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if tree.recovering() || tree.task_finishing() || tree.authority_branch_id.is_none() {
         return Ok(());
     }
-    if capabilities.shared_environment {
-        let record_shared = |tree: &mut SpeculativeTree, state| -> std::io::Result<()> {
-            let ids: Vec<_> = tree.branches.keys().cloned().collect();
-            for id in ids {
-                tree.record_runtime_state(&id, state)?;
-            }
-            Ok(())
-        };
-        record_shared(tree, RuntimeExecutionState::TerminationRequested)?;
-        if let Err(error) = runtime_call(runtime, "authority", Operation::TerminateEnvironment) {
-            record_shared(tree, RuntimeExecutionState::Failed)?;
-            return Err(error);
-        }
-        record_shared(tree, RuntimeExecutionState::Terminated)?;
-        if let Err(error) = runtime_call(runtime, "authority", Operation::CleanupEnvironment) {
-            record_shared(tree, RuntimeExecutionState::Failed)?;
-            return Err(error);
-        }
-        record_shared(tree, RuntimeExecutionState::Cleaned)?;
-    } else {
+    {
         let ids: Vec<_> = tree
             .branches
             .values()
@@ -68,7 +50,14 @@ pub fn cleanup(
             .collect();
         let mut failures = Vec::new();
         for id in ids {
-            if let Err(error) = runtime_cleanup(runtime, &id, tree) {
+            let Some(environment) = tree
+                .branches
+                .get(&id)
+                .and_then(|branch| branch.environment_id.clone())
+            else {
+                continue;
+            };
+            if let Err(error) = runtime_cleanup(runtime, &environment, &id, tree) {
                 failures.push(format!("{id}: {error}"));
             }
         }

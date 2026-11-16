@@ -5,8 +5,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Node {
     pub(crate) mode: u32,
@@ -79,4 +77,3 @@ pub(crate) fn equivalent(left: Option<&Node>, right: Option<&Node>) -> bool {
         _ => false,
     }
 }
-

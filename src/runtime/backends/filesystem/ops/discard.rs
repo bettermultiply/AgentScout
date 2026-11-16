@@ -53,5 +53,4 @@ impl FilesystemBackend {
         result.confirmation.gc_eligible = true;
         Ok(result)
     }
-
 }

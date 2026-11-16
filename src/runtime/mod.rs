@@ -17,10 +17,11 @@ pub mod backends;
 pub mod base;
 pub mod capabilities;
 pub mod composite;
+mod identity;
 pub mod launch_plan;
 pub mod process;
-pub mod selection;
 mod recovery;
+pub mod selection;
 
 #[cfg(test)]
 mod tests;

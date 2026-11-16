@@ -10,7 +10,7 @@ use crate::protocol::contract::{
     RuntimeCapabilities,
 };
 use crate::protocol::transport;
-use std::os::unix::net::UnixStream;
+use std::net::TcpStream;
 
 fn task() -> (SpeculativeTree, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
@@ -18,6 +18,7 @@ fn task() -> (SpeculativeTree, tempfile::TempDir) {
     tree.execution_id = String::new();
     tree.bind_local_policy("test-policy");
     tree.create_authority("authority", "").unwrap();
+    tree.branches.get_mut("authority").unwrap().environment_id = Some("runtime-authority".into());
     tree.handle_message(AgentMessage::BranchStarted {
         branch_id: "authority".into(),
     })
@@ -38,6 +39,60 @@ fn waiting() -> AgentMessage {
         checkpoint: None,
         timestamp_ms: 0,
     }
+}
+
+#[test]
+fn promoting_branch_keeps_its_inflight_model_waiting_point_live() {
+    use crate::control_plane::agent_control::{ActionKind, ActionStatus};
+    let (mut tree, _root) = task();
+    tree.speculative_admission(waiting()).unwrap();
+    let AgentCommand::StartCandidate { branch_id, .. } =
+        tree.start_candidate("chance-1", json!("guess")).unwrap()
+    else {
+        unreachable!()
+    };
+    tree.handle_message(AgentMessage::BranchStarted {
+        branch_id: branch_id.clone(),
+    })
+    .unwrap();
+    let mut model = waiting();
+    if let AgentMessage::SpeculativeAdmissionRequest {
+        branch_id: owner,
+        action_id,
+        action_kind,
+        name,
+        ..
+    } = &mut model
+    {
+        *owner = branch_id.clone();
+        *action_id = "inflight-model".into();
+        *action_kind = ActionKind::ModelInference;
+        *name = "model".into();
+    }
+    tree.speculative_admission(model).unwrap();
+    tree.change_authority_state("chance-2", AuthorityState::Fetching)
+        .unwrap();
+    tree.branches.get_mut(&branch_id).unwrap().status = BranchStatus::Promoting;
+    tree.sweep_chances().unwrap();
+    assert_eq!(
+        tree.chances.get("chance-2").map(|chance| &chance.authority),
+        Some(&AuthorityState::Fetching),
+        "promotion must not invalidate or remove the in-flight waiting point"
+    );
+    tree.handle_message(AgentMessage::ActionFinished {
+        task_id: String::new(),
+        branch_id: branch_id.clone(),
+        action_id: "inflight-model".into(),
+        action_kind: ActionKind::ModelInference,
+        status: ActionStatus::Succeeded,
+        timestamp_ms: 1,
+        result: json!({"tool_calls":[]}),
+        evidence: None,
+    })
+    .unwrap();
+    assert_eq!(tree.chances["chance-2"].authority, AuthorityState::Arrived);
+    let actions = tree.progress(&RuntimeCapabilities::default()).unwrap();
+    assert!(actions.commands.iter().any(|command| matches!(command, AgentCommand::ResolvePending { branch_id: owner, operation_id, outcome: Some(outcome), .. } if owner == &branch_id && operation_id == "inflight-model" && outcome["phase"] == "continue")));
 }
 
 #[test]
@@ -397,6 +452,50 @@ fn branch_cannot_be_archived_while_its_environment_is_still_being_created() {
 }
 
 #[test]
+fn failed_creation_preserves_runtime_identity_without_starting_candidate() {
+    let (mut tree, _root) = task();
+    let chance = tree
+        .admit_chance("authority", "op", "tool", json!({}), None, None)
+        .unwrap();
+    let command = tree.start_candidate(&chance, json!("guess")).unwrap();
+    let child = match &command {
+        AgentCommand::StartCandidate { branch_id, .. } => branch_id.clone(),
+        _ => unreachable!(),
+    };
+    let mut scheduled = ControlActions::default();
+    tree.schedule(ControlOperation::Establish(command), &mut scheduled);
+    let actions = tree
+        .complete_work(
+            scheduled.operations[0].0,
+            Ok(ControlResult::EnvironmentFailed(
+                "runtime-partial-child".into(),
+                "launch failed".into(),
+            )),
+        )
+        .unwrap();
+    assert_eq!(
+        tree.branches[&child].environment_id.as_deref(),
+        Some("runtime-partial-child")
+    );
+    assert_eq!(
+        tree.branches[&child].execution_state.runtime,
+        RuntimeExecutionState::Failed
+    );
+    assert!(
+        !actions
+            .commands
+            .iter()
+            .any(|command| matches!(command, AgentCommand::StartCandidate { .. }))
+    );
+    let restored: SpeculativeTree =
+        serde_json::from_value(serde_json::to_value(&tree).unwrap()).unwrap();
+    assert_eq!(
+        restored.branches[&child].environment_id,
+        tree.branches[&child].environment_id
+    );
+}
+
+#[test]
 fn firecracker_style_capabilities_route_establish_through_branch_environment() {
     let (mut tree, _root) = task();
     let chance = tree
@@ -420,13 +519,12 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
     }))
     .unwrap();
 
-    let directory = tempfile::tempdir().unwrap();
-    let socket = directory.path().join("control.sock");
-    let server = ControlServer::bind(&socket).unwrap();
+    let server = ControlServer::bind("127.0.0.1:0").unwrap();
+    let address = server.local_addr().unwrap();
     let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let client_recorded = recorded.clone();
     let client = std::thread::spawn(move || {
-        let mut stream = UnixStream::connect(&socket).unwrap();
+        let mut stream = TcpStream::connect(address).unwrap();
         loop {
             match transport::read_message::<_, ControlMessage>(&mut stream).unwrap() {
                 Some(ControlMessage::Request(request)) => {
@@ -436,7 +534,7 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
                         .push((request.environment_id.clone(), request.operation.clone()));
                     let result = OperationResult {
                         request_id: request.request_id.clone(),
-                        environment_id: request.environment_id.clone(),
+                        environment_id: "runtime-returned-child".into(),
                         status: ResultStatus::Completed,
                         environment_state: Some(EnvironmentState::Available),
                         can_accept_operations: true,
@@ -458,9 +556,11 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
     let session = server.accept().unwrap();
     let capabilities = RuntimeCapabilities {
         branch_environment: true,
-        shared_environment: false,
         ..RuntimeCapabilities::default()
     };
+    let mut scheduled = ControlActions::default();
+    tree.schedule(ControlOperation::Establish(command.clone()), &mut scheduled);
+    assert!(tree.branches[&child].environment_id.is_none());
     let result = AgentController
         .perform(
             &tree,
@@ -471,17 +571,24 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
             &ControlOperation::Establish(command),
         )
         .unwrap();
-    assert!(matches!(result, ControlResult::Completed));
+    assert!(matches!(&result, ControlResult::Environment(id) if id == "runtime-returned-child"));
+    let actions = tree
+        .complete_work(scheduled.operations[0].0, Ok(result))
+        .unwrap();
     assert_eq!(
-        *recorded.lock().unwrap(),
-        vec![(
-            "authority".to_string(),
-            Operation::BranchEnvironment {
-                child_environment_id: child,
-                agent: None,
-            }
-        )]
+        tree.branches[&child].environment_id.as_deref(),
+        Some("runtime-returned-child")
     );
+    assert!(
+        matches!(&actions.commands[0], AgentCommand::StartCandidate { environment_id: Some(id), .. } if id == "runtime-returned-child")
+    );
+    let calls = recorded.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        Some(calls[0].0.as_str()),
+        tree.branches["authority"].environment_id.as_deref()
+    );
+    assert_eq!(calls[0].1, Operation::BranchEnvironment { agent: None });
     session.shutdown().unwrap();
     client.join().unwrap();
 }

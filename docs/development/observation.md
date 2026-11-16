@@ -79,7 +79,7 @@ Pi 接入在每个 Branch 内保存模型 action 队列：模型推理前把 `ac
 
 当前已知限制（属于原型实现，不是目标语义）：权威路径在工具 Hook 处可能需要等待一次本地 Policy 求值；该求值在沙箱内启动 Python 子进程，所有报告共用 Pi 接入侧的一条串行发送队列，控制面读取较慢时会拖住后续报告。对话正文仍由接入事件实时带来；持久化时 transcript 保存消息引用，正文由权威 session 文件保存，继承关系由记录父链表达。文件位置与引用是内部记录，不直接加入公共观察事件。原生 compaction 可随 SessionManager 汇总保留，未持久化的扩展上下文改写不能还原，见[记录与回放](replay.md)。
 
-Tree 在 `admit` 通过时创建 Chance；`branch_created` 的 `chance_id` 与 `chance_created` 使用同一个不透明 id，初始权威 Branch 为 null。speculation_kind 在创建入口按父 action 的现有 ActionKind 填写，无法关联时为 null。没有 Runtime 嵌套身份报告，parent_environment 为 null，不能拿逻辑 Parent 冒充环境嵌套。configuration 仅公开 shared_environment 能力摘要，不公开本地配置文件路径或凭据。Failed 不足以判断独立 Instance 是否仍存在，返回 null；Cleaned 表示该 Branch 已不拥有独立 Instance。
+Tree 在 `admit` 通过时创建 Chance；`branch_created` 的 `chance_id` 与 `chance_created` 使用同一个不透明 id，初始权威 Branch 为 null。speculation_kind 在创建入口按父 action 的现有 ActionKind 填写，无法关联时为 null。没有 Runtime 嵌套身份报告，parent_environment 为 null，不能拿逻辑 Parent 冒充环境嵌套。Branch 的 Environment 绑定由控制面和 Runtime 生命周期真实维护，不能由内部资源共享推导。Failed 不足以判断独立 Instance 是否仍存在，返回 null；Cleaned 表示该 Branch 已不拥有独立 Instance。
 
 Tree 的 insert_branch、change_status、change_authority、record_runtime_state / emit_environment 是创建、生命周期、角色与环境事件入口。入口修改状态时将事实放入 Tree 的 pending_observations，控制循环通过 drain_observations 取走并交给 Ledger，不依赖 HTTP 或文件格式。状态转换入口提供原因；Discard Applied 后依次记录 Discarded、Cleaning，不遗漏同一次处理内的中间状态。对话提示、模型用量、工具完成与 run_status 保持原有来源，通过 Ledger 追加。清理成功来自 Runtime Cleaned；Runtime Failed 只发布失败状态，尚不能从现有状态区分 terminate、cleanup 或其他操作失败，不伪造 environment_cleaned 失败结果。
 

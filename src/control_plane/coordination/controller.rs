@@ -12,19 +12,17 @@ impl AgentController {
         capabilities: &RuntimeCapabilities,
         work: &ControlOperation,
     ) -> Result<ControlResult, String> {
-        let environment = if capabilities.shared_environment {
-            "authority"
-        } else {
-            work.branch().unwrap_or("authority")
+        let environment_for = |branch: &str| -> Result<&str, String> {
+            tree.branches
+                .get(branch)
+                .and_then(|record| record.environment_id.as_deref())
+                .ok_or_else(|| format!("unknown Branch {branch}"))
         };
+        let authority = tree.authority_branch_id.as_deref().unwrap_or("authority");
+        let environment = || environment_for(work.branch().unwrap_or(authority));
         let call = |environment: &str, operation| {
-            let result = runtime
-                .call(environment, operation)
-                .map_err(|error| error.to_string())?;
-            if result.status != crate::protocol::contract::ResultStatus::Completed {
-                return Err(format!("Runtime request failed: {:?}", result.reason));
-            }
-            Ok(result)
+            super::execution::runtime_call(runtime, environment, operation)
+                .map_err(|error| error.to_string())
         };
         match work {
             ControlOperation::Select(ids) => self
@@ -38,7 +36,7 @@ impl AgentController {
                     .any(|declared| declared.name == tool.tool_name)
                 {
                     call(
-                        environment,
+                        environment()?,
                         Operation::ToolContext {
                             tool_name: tool.tool_name.clone(),
                         },
@@ -101,7 +99,7 @@ impl AgentController {
             }
             ControlOperation::Invoke(tool) => {
                 let output = call(
-                    environment,
+                    environment()?,
                     Operation::InvokeTool {
                         tool_name: tool.tool_name.clone(),
                         arguments: tool.arguments.clone(),
@@ -122,7 +120,7 @@ impl AgentController {
                 Ok(ControlResult::Outcome(result, evidence))
             }
             ControlOperation::Establish(command) => {
-                if capabilities.branch_environment && !capabilities.shared_environment {
+                if capabilities.branch_environment {
                     let AgentCommand::StartCandidate {
                         parent_branch_id,
                         branch_id,
@@ -131,24 +129,62 @@ impl AgentController {
                     else {
                         unreachable!()
                     };
-                    call(
-                        parent_branch_id,
-                        Operation::BranchEnvironment {
-                            child_environment_id: branch_id.clone(),
-                            agent: tree.agent_launch_for(branch_id),
-                        },
-                    )?;
+                    let result = runtime
+                        .branch(
+                            environment_for(parent_branch_id)?,
+                            tree.agent_launch_for(branch_id),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    if result.status != crate::protocol::contract::ResultStatus::Completed {
+                        let reason = result
+                            .reason
+                            .unwrap_or_else(|| "Runtime branch failed".into());
+                        if !result.environment_id.is_empty()
+                            && result.environment_id != environment_for(parent_branch_id)?
+                        {
+                            return Ok(ControlResult::EnvironmentFailed(
+                                result.environment_id,
+                                reason,
+                            ));
+                        }
+                        return Err(reason);
+                    }
+                    if result.environment_id.is_empty()
+                        || tree.branches.values().any(|record| {
+                            record.environment_id.as_deref() == Some(result.environment_id.as_str())
+                        })
+                    {
+                        return Err(
+                            "Runtime returned an empty or already bound Environment identity"
+                                .into(),
+                        );
+                    }
+                    return Ok(ControlResult::Environment(result.environment_id));
+                } else {
+                    return Err("Runtime cannot create a Candidate Environment".into());
                 }
-                Ok(ControlResult::Completed)
             }
-            ControlOperation::Promote(_, _) => {
-                call(environment, Operation::PromoteEnvironment).map(|_| ControlResult::Completed)
-            }
+            ControlOperation::Promote(_, _) => call(environment()?, Operation::PromoteEnvironment)
+                .map(|_| ControlResult::Completed),
             ControlOperation::Terminate(_) => {
-                call(environment, Operation::TerminateEnvironment).map(|_| ControlResult::Completed)
+                if tree.branches[work.branch().unwrap()]
+                    .environment_id
+                    .is_none()
+                {
+                    return Ok(ControlResult::Completed);
+                }
+                call(environment()?, Operation::TerminateEnvironment)
+                    .map(|_| ControlResult::Completed)
             }
             ControlOperation::Cleanup(_) => {
-                call(environment, Operation::CleanupEnvironment).map(|_| ControlResult::Completed)
+                if tree.branches[work.branch().unwrap()]
+                    .environment_id
+                    .is_none()
+                {
+                    return Ok(ControlResult::Completed);
+                }
+                call(environment()?, Operation::CleanupEnvironment)
+                    .map(|_| ControlResult::Completed)
             }
         }
     }

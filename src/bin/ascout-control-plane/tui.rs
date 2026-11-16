@@ -22,7 +22,11 @@ impl Drop for Terminal {
     }
 }
 
-pub fn start(interface: Interface, connection: Connection, reader: LedgerReader) -> io::Result<JoinHandle<()>> {
+pub fn start(
+    interface: Interface,
+    connection: Connection,
+    reader: LedgerReader,
+) -> io::Result<JoinHandle<()>> {
     let mut original = std::mem::MaybeUninit::uninit();
     if unsafe { libc::tcgetattr(0, original.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());

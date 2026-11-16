@@ -10,14 +10,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::Value;
 
 use crate::protocol::contract::{
-    BackendOutput, BackendState, CommandOutput, EnvironmentState, FilesystemResult, Operation, RuntimeCapabilities,
+    BackendOutput, BackendState, CommandOutput, EnvironmentState, FilesystemResult, Operation,
+    RuntimeCapabilities,
 };
 use crate::runtime::launch_plan::LaunchFragment;
 
 /// 一次 Runtime 请求传给 Backend 的逻辑上下文。
 ///
-/// `task_id`、`branch_id` 可以为空，以兼容旧控制面。Backend 不应从
-/// `environment_id` 推断全局 Tree；它只使用 Adapter 明确传入的局部身份。
+/// Backend 只接收 Environment 和操作上下文，不接收或推导控制面的 Branch 身份。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackendContext {
     /// Stable identity for an operation. Empty for legacy environment calls.
@@ -25,7 +25,6 @@ pub struct BackendContext {
     /// Fences delayed filesystem results. Zero is the legacy value.
     pub generation: u64,
     pub task_id: Option<String>,
-    pub branch_id: Option<String>,
     pub environment_id: String,
     pub parent_environment_id: Option<String>,
     /// Filesystem-only optional access point to a target environment's merged
@@ -70,6 +69,8 @@ impl CancelHandle {
 
 #[derive(Debug, Clone)]
 pub struct BackendError {
+    /// Identity allocated by Runtime when creation failed after resources existed.
+    pub created_environment_id: Option<String>,
     pub message: String,
     pub cancelled: bool,
     /// 已经完成的有序 Backend 标识。
@@ -85,6 +86,7 @@ pub struct BackendError {
 impl BackendError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
+            created_environment_id: None,
             message: message.into(),
             cancelled: false,
             completed: Vec::new(),
@@ -180,6 +182,36 @@ impl BackendExecution {
 
 /// 机制侧的能力。Adapter 只通过这个接口触及环境。
 pub trait Backend: Send + Sync {
+    /// Runtime creates the identity before composing its internal Backend resources.
+    /// The caller supplies operation metadata only; no Branch identity is accepted.
+    fn create_environment(&self, context: &BackendContext) -> Result<String, BackendError> {
+        let environment_id = super::identity::allocate(self);
+        let context = BackendContext {
+            environment_id: environment_id.clone(),
+            ..context.clone()
+        };
+        if let Err(mut error) = self.establish_with_context(&context) {
+            if self.state(&environment_id).is_some() {
+                error.created_environment_id = Some(environment_id);
+            }
+            return Err(error);
+        }
+        Ok(environment_id)
+    }
+
+    fn create_child_environment(&self, context: &BackendContext) -> Result<String, BackendError> {
+        let environment_id = super::identity::allocate(self);
+        let parent = &context.environment_id;
+        // Existing Backend branching methods receive the parent as their context;
+        // their composition layer derives child-local contexts internally.
+        if let Err(mut error) = self.branch_with_context(context, parent, &environment_id) {
+            if self.state(&environment_id).is_some() {
+                error.created_environment_id = Some(environment_id);
+            }
+            return Err(error);
+        }
+        Ok(environment_id)
+    }
     /// Called only after task writers and candidate work have drained. Non-FS
     /// backends already own their authoritative state and need no host copy.
     fn materialize(&self, _context: &BackendContext) -> Result<FilesystemResult, BackendError> {
@@ -277,7 +309,9 @@ pub trait Backend: Send + Sync {
         _operation: &Operation,
         _cancel: &CancelHandle,
     ) -> Result<FilesystemResult, BackendError> {
-        Err(BackendError::new("filesystem operation is unsupported by this Backend"))
+        Err(BackendError::new(
+            "filesystem operation is unsupported by this Backend",
+        ))
     }
 
     fn branch(&self, parent: &str, child: &str) -> Result<(), BackendError>;
@@ -338,11 +372,15 @@ pub trait Backend: Send + Sync {
 
     /// Explicit opt-in: serializing an environment ID is not a saved execution.
     fn save_runtime(&self, _path: &std::path::Path) -> Result<(), BackendError> {
-        Err(BackendError::new("Runtime does not support restart recovery"))
+        Err(BackendError::new(
+            "Runtime does not support restart recovery",
+        ))
     }
 
     fn load_runtime(&self, _path: &std::path::Path) -> Result<(), BackendError> {
-        Err(BackendError::new("Runtime does not support restart recovery"))
+        Err(BackendError::new(
+            "Runtime does not support restart recovery",
+        ))
     }
 
     /// Adapter 退出时回收所有仍然存在的环境。

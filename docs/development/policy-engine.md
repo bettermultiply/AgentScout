@@ -8,6 +8,18 @@
 
 ## 1. 已实现的路径
 
+### 接入侧 predictor 事实与准入顺序修复（2026-11-16）
+
+依据 `docs/design/policy-decisions.md` §2.1，`has_predictor` 是粗筛之前已有的“对该结果可用的预测手段”事实，粗筛本身不做预测。当前接入侧唯一实际交付的预测入口是 `local_policy.decisions.predict`；`CompiledPolicy` 要求十个函数绑定完整，`script(Predict)` 把固定源码和绑定交付端侧，`createAgentAccess.predict` 也从同一个 `decisions.predict` 入口调用。当前没有另一个按操作类别声明 predictor 的注册表或配置。
+
+因此 `hasPredictor(branch)` 只检查该 Branch 已交付的非空 `predict` 脚本，不调用任何 Decision，不依赖 `op` 或 `admit` 的结果；模型和工具 Hook 都先由该事实填充 `op.has_predictor`，再执行既有 `beforeAction`。工具入口同时保留原本查询时已有的 `authority` 事实，传入真正的准入输入。`admit` 仍决定当前具体操作是否值得作为入口；`predict` 仍决定当前输入能否产生 Proposal，允许空集合后走权威路径。可调用入口不承诺非空预测或预测正确性，不能把当前完整 Policy 总有 predict 绑定误解为对所有操作强制投机。未来若需按操作声明更细的预测能力，应先确认设计，不能在此修复中添加配置或工具白名单。
+
+原实现通过 `admit.opportunity_pass` 计算 `has_predictor`，构成循环依赖；模型首次请求和工具首次调用都可复现。修复没有改示例 Policy、预测算法、默认配置、控制面裁决、single-winner 或 commit/discard，没有捕获并转换 Policy 异常。已交付 Policy 的继承、恢复和清理直接决定该事实，无额外缓存。
+
+回归 `tests/predictor-fact.mjs` 使用失败 session 留档 Policy 的完整 files/binding/config 和当前正式 runner 构造端侧脚本，通过真实隔离求值复现两个入口；还检查查询不求值、准入拒绝、空预测、继承/恢复/清理、缺少 predict 入口及异常继续传播。`tests/pi-access.mjs` 的手工 admission fixture 补全 predict 入口，避免把只有 admit/extent 的不完整 fixture 当成具有预测手段。默认留档路径为 `/tmp/opencode/runtime-id-real-e2e-20261116/session/policy.json`，可通过 `ASCOUT_PREDICTOR_POLICY` 指定同一证据的搬迁位置；这两项专用验收脚本依赖保留的失败证据，不是干净克隆自包含测试。
+
+先红日志 `/tmp/opencode/predictor-fact-fix-20261116/red.log`：原实现 0/3，模型与工具均 `Policy evaluation failed`；首次修复后 `green.log` 3/3。最终命令、短 E2E 和已知未通过检查见 [验证 Workload](reference-workload.md) 的同日修复记录。原真实运行失败记录保留，尚未真实模型 E2E 通过。
+
 `src/control_plane/policy/` 导出的 `PolicyEngine` 可以读取 YAML，检查九类 Decision 的十个函数入口（`admit` 有两个），固定声明的文件内容和各函数的参数，在隔离环境中检查 Python 语法、导入及函数签名，生成 `CompiledPolicy`。编译不调用 Decision 函数体，但会在隔离环境中执行模块顶层代码。
 
 `CompiledPolicy` 可用 serde JSON 序列化。`script(decision)` 返回内含固定源码、该函数参数和执行入口的 Python 脚本。内容摘要覆盖源码、参数、入口、解释器标识和生成脚本使用的 runner；摘要不是来源认证，跨侧接收方仍须验证来源。当前接收方需要同版本的 AScout runner 和相同的 Python `sys.version`。这不是对标准库全部文件或动态库内容一致性的证明。

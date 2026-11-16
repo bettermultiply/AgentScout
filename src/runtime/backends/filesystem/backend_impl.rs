@@ -73,7 +73,6 @@ impl Backend for FilesystemBackend {
 
     fn capabilities(&self) -> RuntimeCapabilities {
         RuntimeCapabilities {
-            shared_environment: false,
             branch_environment: self.usable,
             tools: Vec::new(),
             filesystem_fast_delete: Some(self.fast_delete),

@@ -10,10 +10,10 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ascout::control_plane::gateway::runtime::{ControlServer, ControlSession};
 use ascout::protocol::contract::{
     EnvironmentState, EventPayload, Operation, OperationResult, PROTOCOL_VERSION, ResultStatus,
 };
-use ascout::control_plane::gateway::runtime::{ControlServer, ControlSession};
 use serde_json::{Value, json};
 
 static FIRECRACKER_TEST: Mutex<()> = Mutex::new(());
@@ -66,9 +66,7 @@ fn kernel_path(directory: &Path) -> PathBuf {
         })
         .unwrap_or_default();
     kernels.sort();
-    kernels
-        .pop()
-        .unwrap_or_else(|| directory.join("vmlinux"))
+    kernels.pop().unwrap_or_else(|| directory.join("vmlinux"))
 }
 
 #[derive(Debug)]
@@ -120,7 +118,8 @@ impl AdapterHarness {
 
         let directory = unique_directory(test_name);
         fs::create_dir_all(&directory).unwrap();
-        let control_socket = directory.join("control.sock");
+        let server = ControlServer::bind("127.0.0.1:0").unwrap();
+        let control_address = server.local_addr().unwrap().to_string();
         let state_nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -133,7 +132,7 @@ impl AdapterHarness {
         fs::write(
             &config_path,
             serde_json::to_vec_pretty(&json!({
-                "control_socket": control_socket,
+                "control_address": control_address,
                 "adapter_instance": ADAPTER_INSTANCE,
                 "firecracker_path": assets.firecracker,
                 "kernel_path": assets.kernel,
@@ -145,7 +144,6 @@ impl AdapterHarness {
         )
         .unwrap();
 
-        let server = ControlServer::bind(&control_socket).unwrap();
         let stdout = File::create(directory.join("adapter.stdout.log")).unwrap();
         let stderr = File::create(directory.join("adapter.stderr.log")).unwrap();
         let adapter = Command::new(&adapter_binary)
@@ -273,7 +271,10 @@ fn cleanup_stale_host_rules(state_directory: &Path) {
                 continue;
             }
             let fields = line.split_whitespace().collect::<Vec<_>>();
-            if !fields.iter().any(|field| subnets.iter().any(|subnet| subnet == field)) {
+            if !fields
+                .iter()
+                .any(|field| subnets.iter().any(|subnet| subnet == field))
+            {
                 continue;
             }
             let specification = line[3..].to_string();
@@ -294,15 +295,12 @@ struct ProcessInfo {
 fn real_microvm_completes_the_full_lifecycle_over_vsock() {
     let _serial = serial_test();
     let harness = AdapterHarness::start("lifecycle");
-    let environment = "environment-1";
-
-    assert_completed_in_state(
-        &harness
-            .session
-            .call(environment, Operation::EstablishEnvironment)
-            .unwrap(),
-        EnvironmentState::Available,
-    );
+    let created = harness
+        .session
+        .call("", Operation::EstablishEnvironment)
+        .unwrap();
+    assert_completed_in_state(&created, EnvironmentState::Available);
+    let environment = created.environment_id.as_str();
     // Retain the establish smoke check before exercising guest operations.
     harness.firecracker_process(environment);
     assert_command(
@@ -359,17 +357,17 @@ fn real_microvm_completes_the_full_lifecycle_over_vsock() {
 fn retrying_an_establish_request_does_not_create_a_second_microvm() {
     let _serial = serial_test();
     let harness = AdapterHarness::start("retry");
-    let environment = "environment-1";
     let request_id = "establish-retry";
 
     let result = harness
         .session
-        .call_with_id(request_id, environment, Operation::EstablishEnvironment)
+        .call_with_id(request_id, "", Operation::EstablishEnvironment)
         .unwrap();
     assert_completed_in_state(&result, EnvironmentState::Available);
+    let environment = result.environment_id.as_str();
     harness
         .session
-        .send(request_id, environment, Operation::EstablishEnvironment)
+        .send(request_id, "", Operation::EstablishEnvironment)
         .unwrap();
     thread::sleep(Duration::from_millis(300));
 
@@ -387,11 +385,12 @@ fn retrying_an_establish_request_does_not_create_a_second_microvm() {
 fn suspend_interrupts_a_real_in_flight_guest_operation() {
     let _serial = serial_test();
     let harness = AdapterHarness::start("interrupt");
-    let environment = "environment-1";
-    harness
+    let created = harness
         .session
-        .call(environment, Operation::EstablishEnvironment)
+        .call("", Operation::EstablishEnvironment)
         .unwrap();
+    assert_completed_in_state(&created, EnvironmentState::Available);
+    let environment = created.environment_id.as_str();
 
     let interrupted = thread::scope(|scope| {
         let operation = scope.spawn(|| {
@@ -451,11 +450,12 @@ fn suspend_interrupts_a_real_in_flight_guest_operation() {
 fn killing_firecracker_emits_an_environment_state_event() {
     let _serial = serial_test();
     let harness = AdapterHarness::start("unexpected-stop");
-    let environment = "environment-1";
-    harness
+    let created = harness
         .session
-        .call(environment, Operation::EstablishEnvironment)
+        .call("", Operation::EstablishEnvironment)
         .unwrap();
+    assert_completed_in_state(&created, EnvironmentState::Available);
+    let environment = created.environment_id.as_str();
 
     kill(harness.firecracker_process(environment).pid);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -490,13 +490,13 @@ fn killing_firecracker_emits_an_environment_state_event() {
 fn branch_restores_real_siblings_with_inherited_process_and_disk_state() {
     let _serial = serial_test();
     let harness = AdapterHarness::start("branch");
-    let parent = "parent";
-    let child_a = "child-a";
-    let child_b = "child-b";
-    harness
+    let created = harness
         .session
-        .call(parent, Operation::EstablishEnvironment)
+        .call("", Operation::EstablishEnvironment)
         .unwrap();
+    assert_completed_in_state(&created, EnvironmentState::Available);
+    let parent = created.environment_id.as_str();
+    let mut children = Vec::new();
     assert_command(
         &harness.session,
         parent,
@@ -509,18 +509,16 @@ fn branch_restores_real_siblings_with_inherited_process_and_disk_state() {
         "",
     );
 
-    for child in [child_a, child_b] {
+    for _ in 0..2 {
         let branch = harness
             .session
-            .call(
-                parent,
-                Operation::BranchEnvironment {
-                    child_environment_id: child.to_string(),
-                    agent: None,
-                },
-            )
+            .call(parent, Operation::BranchEnvironment { agent: None })
             .unwrap();
         assert_eq!(branch.status, ResultStatus::Completed, "{branch:?}");
+        assert_ne!(branch.environment_id, parent);
+        assert!(!children.contains(&branch.environment_id));
+        children.push(branch.environment_id);
+        let child = children.last().unwrap().as_str();
         harness.firecracker_process(child);
         assert_command(
             &harness.session,
@@ -538,6 +536,8 @@ fn branch_restores_real_siblings_with_inherited_process_and_disk_state() {
         );
     }
 
+    let child_a = children[0].as_str();
+    let child_b = children[1].as_str();
     assert_command(
         &harness.session,
         child_a,
@@ -565,14 +565,12 @@ fn branch_restores_real_siblings_with_inherited_process_and_disk_state() {
 fn ssh_diagnostic_reaches_a_real_microvm() {
     let _serial = serial_test();
     let harness = AdapterHarness::start("ssh-diagnostic");
-    let environment = "environment-1";
-    assert_completed_in_state(
-        &harness
-            .session
-            .call(environment, Operation::EstablishEnvironment)
-            .unwrap(),
-        EnvironmentState::Available,
-    );
+    let created = harness
+        .session
+        .call("", Operation::EstablishEnvironment)
+        .unwrap();
+    assert_completed_in_state(&created, EnvironmentState::Available);
+    let environment = created.environment_id.as_str();
 
     let private_key = harness.directory.join("ubuntu-24.04.id_rsa");
     fs::copy(
@@ -600,14 +598,12 @@ fn ssh_diagnostic_reaches_a_real_microvm() {
 fn codex_starts_and_reaches_the_model_service() {
     let _serial = serial_test();
     let harness = AdapterHarness::start("codex");
-    let environment = "environment-1";
-    assert_completed_in_state(
-        &harness
-            .session
-            .call(environment, Operation::EstablishEnvironment)
-            .unwrap(),
-        EnvironmentState::Available,
-    );
+    let created = harness
+        .session
+        .call("", Operation::EstablishEnvironment)
+        .unwrap();
+    assert_completed_in_state(&created, EnvironmentState::Available);
+    let environment = created.environment_id.as_str();
 
     let request_id = "codex-hi";
     harness
@@ -676,7 +672,14 @@ fn firecracker_vm_state(process: &ProcessInfo) -> String {
     let socket = argument_after(&process.arguments, "--api-sock")
         .expect("Firecracker process has no --api-sock argument");
     let output = Command::new("curl")
-        .args(["--silent", "--show-error", "--max-time", "5", "--unix-socket", socket])
+        .args([
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "5",
+            "--unix-socket",
+            socket,
+        ])
         .arg("http://localhost/")
         .output()
         .unwrap();

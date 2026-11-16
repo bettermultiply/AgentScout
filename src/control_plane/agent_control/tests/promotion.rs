@@ -10,6 +10,7 @@ fn candidate_shares_run_workspace_and_promotes() {
         "parent".into(),
         BranchRecord {
             branch_id: "parent".into(),
+            environment_id: Some("environment-parent".into()),
             parent_branch_id: None,
             role: BranchRole::Authority,
             status: BranchStatus::Running,
@@ -25,6 +26,7 @@ fn candidate_shares_run_workspace_and_promotes() {
         "candidate".into(),
         BranchRecord {
             branch_id: "candidate".into(),
+            environment_id: Some("environment-candidate".into()),
             parent_branch_id: Some("parent".into()),
             role: BranchRole::Candidate,
             status: BranchStatus::Running,
@@ -83,6 +85,7 @@ fn mismatch_discards_and_cleans_candidate() {
         "parent".into(),
         BranchRecord {
             branch_id: "parent".into(),
+            environment_id: Some("environment-parent".into()),
             parent_branch_id: None,
             role: BranchRole::Authority,
             status: BranchStatus::Running,
@@ -98,6 +101,7 @@ fn mismatch_discards_and_cleans_candidate() {
         "candidate".into(),
         BranchRecord {
             branch_id: "candidate".into(),
+            environment_id: Some("environment-candidate".into()),
             parent_branch_id: Some("parent".into()),
             role: BranchRole::Candidate,
             status: BranchStatus::Running,
@@ -172,6 +176,7 @@ fn failed_promotion_discards_without_switching_authority() {
         "parent".into(),
         BranchRecord {
             branch_id: "parent".into(),
+            environment_id: Some("environment-parent".into()),
             parent_branch_id: None,
             role: BranchRole::Authority,
             status: BranchStatus::Running,
@@ -187,6 +192,7 @@ fn failed_promotion_discards_without_switching_authority() {
         "candidate".into(),
         BranchRecord {
             branch_id: "candidate".into(),
+            environment_id: Some("environment-candidate".into()),
             parent_branch_id: Some("parent".into()),
             role: BranchRole::Candidate,
             status: BranchStatus::Running,
@@ -236,6 +242,7 @@ fn branch_failure_during_promotion_waits_for_promote_result() {
         "parent".into(),
         BranchRecord {
             branch_id: "parent".into(),
+            environment_id: Some("environment-parent".into()),
             parent_branch_id: None,
             role: BranchRole::Authority,
             status: BranchStatus::Running,
@@ -251,6 +258,7 @@ fn branch_failure_during_promotion_waits_for_promote_result() {
         "candidate".into(),
         BranchRecord {
             branch_id: "candidate".into(),
+            environment_id: Some("environment-candidate".into()),
             parent_branch_id: Some("parent".into()),
             role: BranchRole::Candidate,
             status: BranchStatus::Running,
@@ -314,6 +322,7 @@ fn late_promote_result_after_failed_promotion_is_ignored() {
         "parent".into(),
         BranchRecord {
             branch_id: "parent".into(),
+            environment_id: Some("environment-parent".into()),
             parent_branch_id: None,
             role: BranchRole::Authority,
             status: BranchStatus::Running,
@@ -329,6 +338,7 @@ fn late_promote_result_after_failed_promotion_is_ignored() {
         "candidate".into(),
         BranchRecord {
             branch_id: "candidate".into(),
+            environment_id: Some("environment-candidate".into()),
             parent_branch_id: Some("parent".into()),
             role: BranchRole::Candidate,
             status: BranchStatus::Running,
@@ -394,6 +404,7 @@ fn candidate_completion_only_marks_readiness_and_cleanup_failure_is_not_cleaned(
         "candidate".into(),
         BranchRecord {
             branch_id: "candidate".into(),
+            environment_id: Some("environment-candidate".into()),
             parent_branch_id: None,
             role: BranchRole::Candidate,
             status: BranchStatus::Running,

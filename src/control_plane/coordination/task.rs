@@ -21,8 +21,14 @@ impl Task {
     pub fn progress(&mut self, tree: &mut SpeculativeTree) -> io::Result<Vec<AgentCommand>> {
         // A Promote receipt can select a new writer while cancellation is in
         // transit. Stop that authority before allowing publication.
-        if self.terminating && tree.authority_running() && !tree.recovery_pending_commands()
-            && tree.authority_branch_id.as_ref().is_some_and(|id| self.aborted.insert(id.clone())) {
+        if self.terminating
+            && tree.authority_running()
+            && !tree.recovery_pending_commands()
+            && tree
+                .authority_branch_id
+                .as_ref()
+                .is_some_and(|id| self.aborted.insert(id.clone()))
+        {
             tree.interrupt()
         } else {
             Ok(Vec::new())
@@ -35,7 +41,8 @@ impl Task {
     ) -> io::Result<Vec<AgentCommand>> {
         self.exit_requested |= exit;
         self.terminating = true;
-        self.aborted.extend(tree.authority_branch_id.iter().cloned());
+        self.aborted
+            .extend(tree.authority_branch_id.iter().cloned());
         tree.cancel_task()
     }
 
@@ -59,7 +66,7 @@ impl Task {
         &mut self,
         tree: &mut SpeculativeTree,
         runtime: &dyn Runtime,
-        capabilities: &RuntimeCapabilities,
+        _capabilities: &RuntimeCapabilities,
         failed: bool,
         mut record: impl FnMut(Value) -> io::Result<()>,
     ) -> io::Result<Option<(Vec<AgentCommand>, bool, Result<(), String>)>> {
@@ -72,11 +79,11 @@ impl Task {
             return Ok(None);
         }
         let authority = tree.authority_branch_id.clone().unwrap();
-        let environment = if capabilities.shared_environment {
-            "authority"
-        } else {
-            &authority
-        };
+        let environment = tree
+            .branches
+            .get(&authority)
+            .and_then(|branch| branch.environment_id.as_deref())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "authority Branch missing"))?;
         record(json!({"message":"materialization_started","branch_id":authority}))?;
         match runtime_call(runtime, environment, Operation::MaterializeAuthority) {
             Ok(result) => {

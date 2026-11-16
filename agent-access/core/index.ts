@@ -60,7 +60,8 @@ export type AgentAccess = {
     snapshot(): unknown;
     restore(record: any): void;
     predict(branch: string, data: unknown, signal?: AbortSignal): Promise<any>;
-    hasPredictor(branch: string, op: unknown, signal?: AbortSignal): Promise<boolean>;
+    /** Availability of the delivered prediction entry, before `admit` runs. */
+    hasPredictor(branch: string): Promise<boolean>;
 };
 
 type Hold = { promise: Promise<void>; release: () => void };
@@ -163,9 +164,11 @@ export function createAgentAccess({ taskId, report, evaluate, now = Date.now }: 
 
     return {
         setPolicy,
-        async hasPredictor(branch, op, signal) {
-            const artifact=policies.get(branch);
-            return !!artifact && await evaluate(artifact,'admit.opportunity_pass',{op},signal) === true;
+        async hasPredictor(branch) {
+            // `has_predictor` is an input fact for opportunity_pass, never its
+            // result. The delivered `predict` script is the available means;
+            // Policy still decides admission and may generate zero proposals.
+            return !!policies.get(branch)?.decisions.predict;
         },
         async predict(branch, data, signal) {
             const artifact=policies.get(branch);

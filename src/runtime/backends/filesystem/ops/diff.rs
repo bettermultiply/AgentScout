@@ -74,5 +74,4 @@ impl FilesystemBackend {
         result.confirmation.metadata_durable = true;
         Ok(result)
     }
-
 }

@@ -89,8 +89,7 @@ fn read_request_line(reader: &mut impl BufRead) -> io::Result<String> {
             format!("guest request exceeds {MAX_REQUEST_BYTES} bytes"),
         ));
     }
-    String::from_utf8(line)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    String::from_utf8(line).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn serve_connection(mut stream: UnixStream) -> io::Result<()> {
@@ -271,7 +270,6 @@ fn vsock_listener(port: u32) -> io::Result<RawFd> {
     }
     Ok(descriptor)
 }
-
 
 #[cfg(test)]
 mod tests {

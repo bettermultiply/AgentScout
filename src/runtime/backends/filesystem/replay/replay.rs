@@ -8,10 +8,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use super::super::layer::*;
-use super::super::util::*;
-use super::super::merge::source_content_source;
 use super::super::copy::{clone_upper, copy_file, copy_overlay_xattrs, reflink_file, set_times};
+use super::super::layer::*;
+use super::super::merge::source_content_source;
+use super::super::util::*;
 use super::safe_root::SafeRoot;
 use crate::runtime::backend::BackendError;
 
@@ -87,9 +87,8 @@ impl ReplayJournal {
             return (failures, self.copy_warnings);
         }
         for entry in self.entries.drain(..).rev() {
-            let target = safe_join(&entry.upper, &entry.relative).unwrap_or_else(|_| {
-                entry.upper.join(entry.relative.trim_start_matches('/'))
-            });
+            let target = safe_join(&entry.upper, &entry.relative)
+                .unwrap_or_else(|_| entry.upper.join(entry.relative.trim_start_matches('/')));
             if let Err(error) = remove_visible(&target) {
                 failures.push(format!("{}: {error}", entry.relative));
                 continue;
@@ -121,7 +120,11 @@ impl ReplayJournal {
     }
 }
 
-fn backup_node(source: &Path, target: &Path, copy_warnings: &mut usize) -> Result<(), BackendError> {
+fn backup_node(
+    source: &Path,
+    target: &Path,
+    copy_warnings: &mut usize,
+) -> Result<(), BackendError> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(error)?;
     }
@@ -192,7 +195,6 @@ pub(crate) enum ReplayRoot<'a> {
     Upper(&'a Path),
 }
 
-
 pub(crate) fn replay_delta(
     root: &ReplayRoot<'_>,
     delta: &View,
@@ -214,7 +216,9 @@ pub(crate) fn replay_delta(
         applied += 1;
         match result {
             Ok(_) => Ok(()),
-            Err(value) => Err(BackendError::new(format!("replay failed at {path}: {value}"))),
+            Err(value) => Err(BackendError::new(format!(
+                "replay failed at {path}: {value}"
+            ))),
         }
     };
     let run = (|| -> Result<(), BackendError> {
@@ -285,9 +289,7 @@ pub(crate) fn replay_node(
                 NodeKind::Whiteout | NodeKind::Other(_) => Ok(()),
                 NodeKind::Dir if !existed => Ok(()),
                 NodeKind::File if !existed => Ok(()),
-                NodeKind::Symlink(_) if !existed => {
-                    Ok(())
-                }
+                NodeKind::Symlink(_) if !existed => Ok(()),
                 _ => Ok(()),
             }
         }
@@ -306,11 +308,7 @@ pub(crate) fn replay_node(
                         Ok(())
                     } else {
                         root.mkdir(&target, node.mode)?;
-                        if existed {
-                            Ok(())
-                        } else {
-                            Ok(())
-                        }
+                        if existed { Ok(()) } else { Ok(()) }
                     }
                 }
                 NodeKind::File => {
@@ -321,22 +319,14 @@ pub(crate) fn replay_node(
                     }
                     .ok_or_else(|| BackendError::new(format!("no content source for {path}")))?;
                     root.write_file(&target, &source, node.mode)?;
-                    if existed {
-                        Ok(())
-                    } else {
-                        Ok(())
-                    }
+                    if existed { Ok(()) } else { Ok(()) }
                 }
                 NodeKind::Symlink(link) => {
                     if existed {
                         root.remove(&target)?;
                     }
                     root.symlink(&target, link)?;
-                    if existed {
-                        Ok(())
-                    } else {
-                        Ok(())
-                    }
+                    if existed { Ok(()) } else { Ok(()) }
                 }
                 NodeKind::Other(kind) => Err(BackendError::new(format!(
                     "cannot replay special file {path} (mode 0o{kind:o})"
@@ -397,4 +387,3 @@ pub(crate) fn stage_node(
         ))),
     }
 }
-

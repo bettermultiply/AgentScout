@@ -67,12 +67,14 @@ impl FilesystemBackend {
         let mut prepared = Vec::new();
         for mount in &mounts {
             let key = mount.target.display().to_string();
-            let target_mount = target_environment.mount_by_target(&mount.target).ok_or_else(|| {
-                BackendError::new(format!(
-                    "target environment does not manage mount {}",
-                    mount.target.display()
-                ))
-            })?;
+            let target_mount = target_environment
+                .mount_by_target(&mount.target)
+                .ok_or_else(|| {
+                    BackendError::new(format!(
+                        "target environment does not manage mount {}",
+                        mount.target.display()
+                    ))
+                })?;
             let base_layer = mount.layer_upper(&base_record.path);
             // Chain layout lists the base snapshot layer in the root lower
             // chain and its upper holds only this branch's changes, so the
@@ -82,9 +84,7 @@ impl FilesystemBackend {
             let in_lower = mount.lower.iter().any(|layer| layer == &base_record.path);
             let (delta, redirects) = if in_lower {
                 self.delta_since(&source_environment, mount, &base_record.path)?
-            } else if self.mechanism == FilesystemMechanism::Btrfs
-                && path_exists(&base_layer)
-            {
+            } else if self.mechanism == FilesystemMechanism::Btrfs && path_exists(&base_layer) {
                 let (delta, redirects, _) =
                     self.btrfs_delta(&source_environment, mount, &base_record.path)?;
                 (delta, redirects)
@@ -93,8 +93,7 @@ impl FilesystemBackend {
                 // missing layer is an empty base view.
                 self.upper_delta_from_base(mount, &base_record.path)?
             };
-            let base_layers =
-                Self::snapshot_mount_layers(&base_record, &source_environment, mount);
+            let base_layers = Self::snapshot_mount_layers(&base_record, &source_environment, mount);
             conflicts.extend(
                 merge_delta_layers(
                     &delta,
@@ -123,7 +122,13 @@ impl FilesystemBackend {
                 Vec::new()
             };
             let _ = key;
-            prepared.push((mount.clone(), target_mount.clone(), delta, redirects, source_maps));
+            prepared.push((
+                mount.clone(),
+                target_mount.clone(),
+                delta,
+                redirects,
+                source_maps,
+            ));
         }
         if !conflicts.is_empty() {
             let mut result = FilesystemResult::default();
@@ -179,7 +184,9 @@ impl FilesystemBackend {
             ) {
                 let (failures, warnings) = journal.rollback();
                 if failures.is_empty() {
-                    error.message.push_str("; rollback restored all recorded paths");
+                    error
+                        .message
+                        .push_str("; rollback restored all recorded paths");
                 } else {
                     error.message.push_str(&format!(
                         "; rollback failed for {} path(s): {}",
@@ -207,5 +214,4 @@ impl FilesystemBackend {
         result.confirmation.refs_updated = false;
         Ok(result)
     }
-
 }

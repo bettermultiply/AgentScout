@@ -351,13 +351,48 @@ impl SpeculativeTree {
 
     fn complete_establish(
         &mut self,
-        command: AgentCommand,
+        mut command: AgentCommand,
         result: Result<ControlResult, String>,
         actions: &mut ControlActions,
         branch: &str,
     ) -> io::Result<()> {
+        let result = match result {
+            Ok(ControlResult::EnvironmentFailed(environment_id, reason)) => {
+                if environment_id.is_empty()
+                    || self
+                        .branches
+                        .values()
+                        .any(|record| record.environment_id.as_deref() == Some(&environment_id))
+                {
+                    return Err(io::Error::other(
+                        "Runtime returned an invalid failed Environment identity",
+                    ));
+                }
+                self.branches.get_mut(branch).unwrap().environment_id = Some(environment_id);
+                Err(reason)
+            }
+            other => other,
+        };
         match result {
-            Ok(ControlResult::Completed) => {
+            Ok(ControlResult::Environment(environment_id)) => {
+                if environment_id.is_empty()
+                    || self
+                        .branches
+                        .values()
+                        .any(|record| record.environment_id.as_deref() == Some(&environment_id))
+                {
+                    return Err(io::Error::other(
+                        "Runtime returned an empty or already bound Environment identity",
+                    ));
+                }
+                if let AgentCommand::StartCandidate {
+                    environment_id: target,
+                    ..
+                } = &mut command
+                {
+                    *target = Some(environment_id.clone());
+                }
+                self.branches.get_mut(branch).unwrap().environment_id = Some(environment_id);
                 self.record_runtime_state(branch, RuntimeExecutionState::Ready)?;
                 if !self.stopping && self.branches[branch].status == BranchStatus::Created {
                     actions.commands.push(command);
@@ -738,7 +773,7 @@ impl SpeculativeTree {
                 actions.commands.push(command);
             }
         }
-        if capabilities.branch_environment && !capabilities.shared_environment {
+        if capabilities.branch_environment {
             let clean: Vec<_> = self
                 .branches
                 .values()

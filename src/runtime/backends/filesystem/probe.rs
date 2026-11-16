@@ -79,10 +79,7 @@ impl FilesystemBackend {
         let subvolume = root.join("sub");
         let snapshot = root.join("snap");
         let created = self.btrfs_create(&subvolume).is_ok();
-        let snapshotted = created
-            && self
-                .btrfs_snapshot(&subvolume, &snapshot, true)
-                .is_ok();
+        let snapshotted = created && self.btrfs_snapshot(&subvolume, &snapshot, true).is_ok();
         let fast_delete = snapshotted && self.btrfs_delete_strict(&snapshot).is_ok();
         self.cleanup_btrfs_probe(&root);
         (created && snapshotted, fast_delete)
@@ -119,5 +116,4 @@ impl FilesystemBackend {
         let _ = remove_path(&self.config.btrfs_path, &root.join("sub"), true);
         let _ = remove_directory_force(root);
     }
-
 }

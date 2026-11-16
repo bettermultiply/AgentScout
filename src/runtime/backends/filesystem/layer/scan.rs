@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use super::*;
 use super::super::util::*;
+use super::*;
 
 use crate::runtime::backend::BackendError;
 
@@ -44,9 +44,8 @@ pub(crate) fn apply_layer(
 
 pub(crate) fn read_layer(root: &Path) -> Result<View, BackendError> {
     let mut nodes = View::new();
-    walk_layer(root, root, &mut nodes).map_err(|value| {
-        BackendError::new(format!("read layer {}: {value}", root.display()))
-    })?;
+    walk_layer(root, root, &mut nodes)
+        .map_err(|value| BackendError::new(format!("read layer {}: {value}", root.display())))?;
     Ok(nodes)
 }
 
@@ -58,4 +57,3 @@ pub(crate) fn read_layer_if_exists(root: &Path) -> Result<View, BackendError> {
     }
     read_layer(root)
 }
-

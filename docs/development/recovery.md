@@ -1,5 +1,15 @@
 # 主动退出恢复
 
+## 2026-11-16 Environment 身份与生命周期修正
+
+本轮 Runtime 创建身份链路最终验证：`cargo fmt -- --check`、`cargo check --all-targets`、`cargo test --lib`（170/170）通过；先 `cargo build --bins`，再串行执行 `node --test --test-concurrency=1 tests/recovery-active.mjs`，五种模式全部通过，无取消或跳过。证据目录依次为 `/tmp/opencode/recovery-active-cy90lI`、`/tmp/opencode/recovery-active-3LMIAo`、`/tmp/opencode/recovery-active-R2uHDY`、`/tmp/opencode/recovery-active-QfT7ro`、`/tmp/opencode/recovery-active-tns9kK`。使用本地伪模型，保留动态端口、独立目录及原有超时和断言；本轮未单独重跑 `recovery-filesystem.mjs`，五模式脚本包含 filesystem 恢复场景。
+
+Environment id 由 Runtime 在建立或派生时创建并返回，控制面收到后持久化在 BranchRecord；恢复使用保存的绑定并显式加载 Runtime，不重新创建环境或根据恢复目录推导身份。创建中的 Branch 可以无绑定；已有绑定必须非空且不被其他 Branch 共用，存活环境必须存在于保存的 Runtime 状态中。Runtime 请求不传 Branch id，Agent 接入命令单独传递 Branch→Environment 绑定以选择对应文件工具计划。
+
+Composite 即使只有一个 Backend 也保存和校验参与记录。恢复按存活 Branch 的 Environment 重建 holder；Runtime 事件唤醒控制面，避免 sibling 结果到达后仍等待其他输入。holder socket 经打开目录的 `/proc/self/fd` 路径连接，保留完整 Environment 身份且不受 Unix socket 全路径长度限制。
+
+最终验收使用本地伪模型，没有真实模型请求：`cargo check --all-targets`、`cargo test --lib`（168/168）、Python bridge 语法检查通过；每个恢复脚本前均执行 `cargo build --bins`，串行运行 `tests/recovery-active.mjs`（5/5）及 `tests/recovery-filesystem.mjs`（1/1）。日志位于 `/tmp/opencode/agent-scout-validation/`，分别为 `check-final.log`、`lib-final.log`、`recovery-active-final.log`、`recovery-filesystem-final.log`。身份唯一性及共享世界生命周期回归均先复现失败再修正；特权项的环境条件与覆盖限制不变。
+
 ## 2026-11-14 当前契约与验证
 
 最终联合验证：`node --test --test-concurrency=1 tests/authority-filesystem.mjs tests/recovery-filesystem.mjs tests/recovery-active.mjs`
@@ -21,8 +31,8 @@ Pi 常驻会话宿主不持有 Authority overlay。Branch 内建 read/edit/write
 重试及 SIGINT。filesystem 场景的暂停、跨进程恢复、候选晋级、旧父环境清理、晋级后
 工具写入及再次保存通过。全部使用本地伪模型，未调用真实模型。
 
-组合能力按所有状态域汇总：全部可共享才允许 shared_environment；各状态域支持
-独立分支或共享引用时才允许 branch_environment。候选实际建立 Backend 环境引用，
+组合能力按所有状态域汇总：各状态域能建立独立身份与生命周期时才允许
+branch_environment；内部资源可以共享。候选实际建立 Backend 环境引用，
 不能以回退 authority 文件计划规避。清理原 Authority 数据面时不终止拥有整棵树的
 常驻 Pi，宿主进程留到 Runtime shutdown 统一退出。证据：
 `/tmp/opencode/authority-active-final5.log`，`/tmp/opencode/recovery-active-8nPRJI`；

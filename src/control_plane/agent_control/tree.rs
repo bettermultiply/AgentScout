@@ -73,12 +73,7 @@ impl SpeculativeTree {
             && self.branches.values().all(|branch| {
                 branch.role == BranchRole::Authority
                     || (branch.status == BranchStatus::Cleaned
-                        && (self
-                            .capability_view
-                            .as_ref()
-                            .and_then(|v| v["shared_environment"].as_bool())
-                            == Some(true)
-                            || branch.execution_state.runtime == RuntimeExecutionState::Cleaned))
+                        && branch.execution_state.runtime == RuntimeExecutionState::Cleaned)
             })
     }
     pub fn drain_observations(
@@ -226,6 +221,9 @@ impl SpeculativeTree {
             branch_id.to_string(),
             BranchRecord {
                 branch_id: branch_id.to_string(),
+                // Runtime assigns this identity after the establish request.
+                // An unbound Branch must not carry a control-plane placeholder.
+                environment_id: None,
                 parent_branch_id,
                 role,
                 status,

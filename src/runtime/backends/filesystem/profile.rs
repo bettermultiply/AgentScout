@@ -48,11 +48,7 @@ impl Profile {
         if !self.enabled {
             return;
         }
-        if let Some(entry) = self
-            .phases
-            .iter_mut()
-            .find(|entry| entry.0 == phase)
-        {
+        if let Some(entry) = self.phases.iter_mut().find(|entry| entry.0 == phase) {
             entry.1 += 1;
             entry.2 += elapsed;
         } else {

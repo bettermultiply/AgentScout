@@ -112,7 +112,9 @@ impl PolicyEngine {
             .ok_or_else(|| invalid("invalid YAML filename"))?;
         let text = open_source(&root, filename)
             .and_then(|file| read_limited(file, MAX_BYTES))
-            .map_err(|e| io::Error::new(e.kind(), format!("Policy YAML {}: {e}", path.display())))?;
+            .map_err(|e| {
+                io::Error::new(e.kind(), format!("Policy YAML {}: {e}", path.display()))
+            })?;
         let text = std::str::from_utf8(&text).map_err(invalid)?;
         check_yaml(text)?;
         let definition: Definition = serde_yaml::from_str(text).map_err(invalid)?;
@@ -141,7 +143,12 @@ impl PolicyEngine {
             source_path(&name)?;
             let source = open_source(&root, &name)
                 .and_then(|file| read_limited(file, MAX_BYTES - total))
-                .map_err(|e| io::Error::new(e.kind(), format!("Policy source {name} ({}): {e}", path.display())))?;
+                .map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("Policy source {name} ({}): {e}", path.display()),
+                    )
+                })?;
             total += source.len();
             let source = String::from_utf8(source).map_err(invalid)?;
             require(files.insert(name, source).is_none(), "duplicate file")?;

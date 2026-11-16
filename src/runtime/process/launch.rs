@@ -32,7 +32,6 @@ impl ProcessBackend {
         let instance_id = launch
             .instance_id
             .clone()
-            .or_else(|| context.branch_id.clone())
             .unwrap_or_else(|| context.environment_id.clone());
         {
             let processes = self

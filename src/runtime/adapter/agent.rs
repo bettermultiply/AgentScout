@@ -8,7 +8,6 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-
 impl Shared {
     /// 启动 Agent 接入侧。控制面决定用哪个产品，Runtime 负责启动。
     /// 一个 run 只有一个接入侧进程，它服务所有环境。
@@ -101,4 +100,5 @@ impl Shared {
                 }
             }
         });
-    }}
+    }
+}

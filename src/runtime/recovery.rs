@@ -1,12 +1,21 @@
 //! Component saves are private to one generation. Validate all bytes before loading any backend.
-use std::{fs, path::{Path, PathBuf}};
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use super::backend::{Backend, BackendError};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
-fn error(e: impl std::fmt::Display) -> BackendError { BackendError::new(e.to_string()) }
+fn error(e: impl std::fmt::Display) -> BackendError {
+    BackendError::new(e.to_string())
+}
 
-pub(super) fn save(path: &Path, backends: &[(&str, &dyn Backend)], metadata: Value) -> Result<(), BackendError> {
+pub(super) fn save(
+    path: &Path,
+    backends: &[(&str, &dyn Backend)],
+    metadata: Value,
+) -> Result<(), BackendError> {
     let directory = path.with_extension("components");
     fs::create_dir(&directory).map_err(error)?;
     let mut components = Vec::new();
@@ -21,23 +30,37 @@ pub(super) fn save(path: &Path, backends: &[(&str, &dyn Backend)], metadata: Val
 
 pub(super) fn load(path: &Path, backends: &[(&str, &dyn Backend)]) -> Result<Value, BackendError> {
     let record: Value = serde_json::from_slice(&fs::read(path).map_err(error)?).map_err(error)?;
-    let parts = record["components"].as_array().ok_or_else(|| error("Missing runtime components"))?;
-    if record["version"] != 1 || record["kind"] != "runtime-components" || parts.len() != backends.len() {
+    let parts = record["components"]
+        .as_array()
+        .ok_or_else(|| error("Missing runtime components"))?;
+    if record["version"] != 1
+        || record["kind"] != "runtime-components"
+        || parts.len() != backends.len()
+    {
         return Err(error("Incompatible runtime component set"));
     }
     let mut files: Vec<PathBuf> = Vec::new();
     for (index, ((id, _), part)) in backends.iter().zip(parts).enumerate() {
-        if part["id"] != *id || part["file"] != format!("{index}.json") { return Err(error("Runtime component identity mismatch")); }
-        let file = path.with_extension("components").join(format!("{index}.json"));
+        if part["id"] != *id || part["file"] != format!("{index}.json") {
+            return Err(error("Runtime component identity mismatch"));
+        }
+        let file = path
+            .with_extension("components")
+            .join(format!("{index}.json"));
         let bytes = fs::read(&file).map_err(error)?;
-        if part["sha256"] != format!("{:x}", Sha256::digest(bytes)) { return Err(error("Runtime component checksum mismatch")); }
+        if part["sha256"] != format!("{:x}", Sha256::digest(bytes)) {
+            return Err(error("Runtime component checksum mismatch"));
+        }
         files.push(file);
     }
     for ((_, backend), file) in backends.iter().zip(files) {
-        if let Err(failure)=backend.load_runtime(&file) {
+        if let Err(failure) = backend.load_runtime(&file) {
             // A failed load is not a runnable execution. Release every component,
             // including the failing one which may have created partial resources.
-            let cleanup:Vec<_>=backends.iter().filter_map(|(id,b)|b.shutdown().err().map(|e|format!("{id}: {e}"))).collect();
+            let cleanup: Vec<_> = backends
+                .iter()
+                .filter_map(|(id, b)| b.shutdown().err().map(|e| format!("{id}: {e}")))
+                .collect();
             return Err(error(format!("{failure}; load cleanup: {cleanup:?}")));
         }
     }

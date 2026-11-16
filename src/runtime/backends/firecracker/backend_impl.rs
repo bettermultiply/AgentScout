@@ -1,8 +1,8 @@
 //! FirecrackerBackend 的环境生命周期与 Backend 实现。
 
-use super::*;
 use super::guest_ops::*;
 use super::network::*;
+use super::*;
 
 /// 环境 id 会直接拼进状态目录路径，因此必须是单个普通路径分量。
 pub(super) const MAX_ENVIRONMENT_ID_BYTES: usize = 128;
@@ -144,7 +144,10 @@ impl FirecrackerBackend {
             .filter(|argument| !argument.is_empty())
             .map(|argument| String::from_utf8_lossy(argument).into_owned())
             .collect();
-        if !arguments.iter().any(|argument| argument.contains("firecracker")) {
+        if !arguments
+            .iter()
+            .any(|argument| argument.contains("firecracker"))
+        {
             return None;
         }
         let recorded_id = arguments
@@ -242,8 +245,11 @@ impl FirecrackerBackend {
             Self::write_network_metadata(&environment.directory, &environment.network)?;
             environment.network.setup()?;
             environment.child = Some(spawn_firecracker(
-                &self.config.firecracker_path, id, &environment.directory,
-                &environment.api_socket, &environment.network,
+                &self.config.firecracker_path,
+                id,
+                &environment.directory,
+                &environment.api_socket,
+                &environment.network,
             )?);
             environment.state = EnvironmentState::Available;
             Ok(())
@@ -256,7 +262,10 @@ impl FirecrackerBackend {
 
     /// Shared rollback for a started-but-not-fully-configured Environment.
     pub(super) fn rollback_environment_start(
-        &self, id: &str, mut environment: Environment, mut failure: BackendError,
+        &self,
+        id: &str,
+        mut environment: Environment,
+        mut failure: BackendError,
     ) -> BackendError {
         match Self::stop_and_teardown(&mut environment)
             .and_then(|()| Self::remove_environment_directory(&environment.directory))
@@ -264,9 +273,10 @@ impl FirecrackerBackend {
             Ok(()) => self.release_network(id),
             Err(cleanup) => {
                 failure.add_cleanup_failure("firecracker", cleanup.to_string());
-                self.environments.lock().unwrap().insert(
-                    id.to_string(), Arc::new(Mutex::new(environment)),
-                );
+                self.environments
+                    .lock()
+                    .unwrap()
+                    .insert(id.to_string(), Arc::new(Mutex::new(environment)));
             }
         }
         failure
@@ -294,16 +304,18 @@ impl FirecrackerBackend {
             Ok(()) => Ok(()),
             Err(failure) if failure.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(failure) => Err(BackendError::new(format!(
-                "failed to remove {}: {failure}", directory.display()
+                "failed to remove {}: {failure}",
+                directory.display()
             ))),
         }
     }
 
-    fn finish_environment_start(
-        &self,
-        environment: &mut Environment,
-    ) -> Result<(), BackendError> {
-        let pid = environment.child.as_ref().map(Child::id).unwrap_or_default();
+    fn finish_environment_start(&self, environment: &mut Environment) -> Result<(), BackendError> {
+        let pid = environment
+            .child
+            .as_ref()
+            .map(Child::id)
+            .unwrap_or_default();
         Self::write_runtime_metadata(&environment.directory, &environment.network, pid)
     }
 
@@ -431,7 +443,6 @@ impl Backend for FirecrackerBackend {
     fn capabilities(&self) -> RuntimeCapabilities {
         RuntimeCapabilities {
             branch_environment: true,
-            shared_environment: false,
             ..RuntimeCapabilities::default()
         }
     }
@@ -440,15 +451,19 @@ impl Backend for FirecrackerBackend {
         let operation = self.operation_lock(environment_id)?;
         let _operation = operation.lock().unwrap();
         validate_environment_id(environment_id)?;
-        if self.environments.lock().unwrap().contains_key(environment_id) {
-            return Err(BackendError::new(format!("environment {environment_id} already exists")));
+        if self
+            .environments
+            .lock()
+            .unwrap()
+            .contains_key(environment_id)
+        {
+            return Err(BackendError::new(format!(
+                "environment {environment_id} already exists"
+            )));
         }
         let directory = self.config.state_directory.join(environment_id);
         // Socket 路径长度必须在复制 rootfs 和建立网络之前检查。
-        check_socket_paths(
-            &directory.join("api.sock"),
-            &directory.join("vsock.sock"),
-        )?;
+        check_socket_paths(&directory.join("api.sock"), &directory.join("vsock.sock"))?;
         self.remove_stale_directory(&directory, environment_id)?;
         fs::create_dir_all(&directory).map_err(error)?;
         let result = (|| {
@@ -464,16 +479,18 @@ impl Backend for FirecrackerBackend {
                 Ok(())
             }
             Err(mut failure) => {
-                if self.environments.lock().unwrap().contains_key(environment_id) {
+                if self
+                    .environments
+                    .lock()
+                    .unwrap()
+                    .contains_key(environment_id)
+                {
                     return Err(failure);
                 }
                 if let Err(cleanup) = Self::remove_environment_directory(&directory) {
                     failure.add_cleanup_failure(
                         "state_directory",
-                        format!(
-                            "failed to remove {}: {cleanup}",
-                            directory.display()
-                        ),
+                        format!("failed to remove {}: {cleanup}", directory.display()),
                     );
                 }
                 Err(failure)
@@ -504,15 +521,23 @@ impl Backend for FirecrackerBackend {
         validate_environment_id(parent)?;
         validate_environment_id(child)?;
         if parent == child {
-            return Err(BackendError::new("parent and child environment must differ"));
+            return Err(BackendError::new(
+                "parent and child environment must differ",
+            ));
         }
-        let (first, second) = if parent < child { (parent, child) } else { (child, parent) };
+        let (first, second) = if parent < child {
+            (parent, child)
+        } else {
+            (child, parent)
+        };
         let first = self.operation_lock(first)?;
         let second = self.operation_lock(second)?;
         let _first = first.lock().unwrap();
         let _second = second.lock().unwrap();
         if self.environments.lock().unwrap().contains_key(child) {
-            return Err(BackendError::new(format!("environment {child} already exists")));
+            return Err(BackendError::new(format!(
+                "environment {child} already exists"
+            )));
         }
         let parent_environment = self.environment(parent)?;
         let child_directory = self.config.state_directory.join(child);
@@ -530,15 +555,17 @@ impl Backend for FirecrackerBackend {
             let parent_directory = environment.directory.clone();
             let parent_state = environment.state;
             let resume_parent = parent_state == EnvironmentState::Available;
-            if !matches!(parent_state, EnvironmentState::Available | EnvironmentState::Suspended) {
-                return Err(BackendError::new("parent environment is not available or suspended"));
+            if !matches!(
+                parent_state,
+                EnvironmentState::Available | EnvironmentState::Suspended
+            ) {
+                return Err(BackendError::new(
+                    "parent environment is not available or suspended",
+                ));
             }
             if resume_parent {
-                self.api.patch(
-                    &api_socket,
-                    "/vm",
-                    &json!({ "state": "Paused" }),
-                )?;
+                self.api
+                    .patch(&api_socket, "/vm", &json!({ "state": "Paused" }))?;
             }
             let snapshot_result = (|| {
                 self.api.put(
@@ -557,9 +584,9 @@ impl Backend for FirecrackerBackend {
                 Ok::<_, BackendError>((child_rootfs, snapshot, memory))
             })();
             if resume_parent {
-                let resume_result = self
-                    .api
-                    .patch(&api_socket, "/vm", &json!({ "state": "Resumed" }));
+                let resume_result =
+                    self.api
+                        .patch(&api_socket, "/vm", &json!({ "state": "Resumed" }));
                 match (snapshot_result, resume_result) {
                     (Ok(value), Ok(())) => {
                         environment.state = EnvironmentState::Available;
@@ -603,10 +630,7 @@ impl Backend for FirecrackerBackend {
                 if let Err(cleanup) = Self::remove_environment_directory(&child_directory) {
                     failure.add_cleanup_failure(
                         "state_directory",
-                        format!(
-                            "failed to remove {}: {cleanup}",
-                            child_directory.display()
-                        ),
+                        format!("failed to remove {}: {cleanup}", child_directory.display()),
                     );
                 }
                 Err(failure)
@@ -619,12 +643,20 @@ impl Backend for FirecrackerBackend {
         let _operation = operation.lock().unwrap();
         let environment = self.environment(environment_id)?;
         let mut environment = environment.lock().unwrap();
-        if !matches!(environment.state, EnvironmentState::Available | EnvironmentState::Suspended) {
-            return Err(BackendError::new("environment is not available or suspended"));
+        if !matches!(
+            environment.state,
+            EnvironmentState::Available | EnvironmentState::Suspended
+        ) {
+            return Err(BackendError::new(
+                "environment is not available or suspended",
+            ));
         }
         if environment.state != EnvironmentState::Suspended {
-            self.api
-                .patch(&environment.api_socket, "/vm", &json!({ "state": "Paused" }))?;
+            self.api.patch(
+                &environment.api_socket,
+                "/vm",
+                &json!({ "state": "Paused" }),
+            )?;
             environment.state = EnvironmentState::Suspended;
         }
         Ok(())
@@ -635,12 +667,20 @@ impl Backend for FirecrackerBackend {
         let _operation = operation.lock().unwrap();
         let environment = self.environment(environment_id)?;
         let mut environment = environment.lock().unwrap();
-        if !matches!(environment.state, EnvironmentState::Available | EnvironmentState::Suspended) {
-            return Err(BackendError::new("environment is not available or suspended"));
+        if !matches!(
+            environment.state,
+            EnvironmentState::Available | EnvironmentState::Suspended
+        ) {
+            return Err(BackendError::new(
+                "environment is not available or suspended",
+            ));
         }
         if environment.state != EnvironmentState::Available {
-            self.api
-                .patch(&environment.api_socket, "/vm", &json!({ "state": "Resumed" }))?;
+            self.api.patch(
+                &environment.api_socket,
+                "/vm",
+                &json!({ "state": "Resumed" }),
+            )?;
             environment.state = EnvironmentState::Available;
         }
         Ok(())

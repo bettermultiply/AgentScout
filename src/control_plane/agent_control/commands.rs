@@ -266,7 +266,7 @@ impl SpeculativeTree {
     }
 
     /// Runtime facts are independent of Agent session cleanup. In particular,
-    /// releasing a session does not clean a shared execution environment.
+    /// releasing a session does not clean its Runtime Environment.
     pub fn record_runtime_state(
         &mut self,
         branch_id: &str,
@@ -286,21 +286,14 @@ impl SpeculativeTree {
         state: RuntimeExecutionState,
     ) -> io::Result<()> {
         use crate::control_plane::observation::ObservationContent;
-        let shared = self
-            .capability_view
-            .as_ref()
-            .and_then(|v| v["shared_environment"].as_bool());
         let independent_instance = match state {
             RuntimeExecutionState::Unknown
             | RuntimeExecutionState::EnvironmentRequested
             | RuntimeExecutionState::Failed => None,
             RuntimeExecutionState::Cleaned => Some(false),
-            _ => shared.map(|s| !s),
+            _ => Some(true),
         };
-        let mut configuration = BTreeMap::new();
-        if let Some(shared) = shared {
-            configuration.insert("shared_environment".into(), Value::Bool(shared));
-        }
+        let configuration = BTreeMap::new();
         self.pending_observations
             .push(ObservationContent::EnvironmentChanged {
                 branch_id: branch_id.into(),
@@ -383,6 +376,7 @@ impl SpeculativeTree {
         self.branch_mut(&branch_id)?.execution_state.turn_active = !prompt.is_empty();
         self.mark_operation_requested(&branch_id, "start-agent", OperationKind::StartAgent)?;
         Ok(AgentCommand::StartBranch {
+            environment_id: self.branches[&branch_id].environment_id.clone(),
             role: BranchRole::Authority,
             workspace: self.workspace(),
             branch_id,

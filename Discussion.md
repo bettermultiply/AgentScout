@@ -8,6 +8,10 @@
 
 ## 未决问题清单
 
+2026-11-16 纯 FS 正常装配已修复，本地预检后唯一真实 FS 短 session 成功；覆盖 Authority 四步、候选隔离只读执行、自然 Discard、正常物化与清理。5 Candidate／5 Discard／0 Promote，晋级后续跑、候选写入发布和恢复仍未在本次覆盖，纯 FS 入口持久回归仍待补齐。旧 FS 脚本使用 NLE inner，不代替纯 FS 证据。原始记录与费用边界见 [参考负载](docs/development/reference-workload.md) 和 [测试讨论](docs/development/test-discussion.md)，不再将入口列为当前阻塞。
+
+2026-11-16 Environment 身份边界已确定并落到实现：Runtime 创建并返回身份，控制面保存 Branch 独占绑定；创建前允许无绑定，恢复沿用保存身份并显式 load。正式语义见 [Runtime Adapter 契约](docs/design/runtime-adapter-contract.md#31-身份与关联)，实现及验证范围见 [Runtime 开发讨论](docs/development/runtime-discussion.md) 和 [恢复](docs/development/recovery.md)，不再作为待决问题。
+
 2026-11-13 通用回放剩余范围：完整 Runtime 留档、初始环境自动重建、非文本用户输入、长历史同键碰撞和取消时序仍未保证。已实现范围与本轮证据见 [回放](docs/development/replay.md)，不再将正常模型切换、模型请求失败保留会话列为未实现。
 
 用户已检查并接受当前直接构造连接画面；极端参数尚未穷举，验证范围见连接状态文档。
@@ -59,6 +63,8 @@
 
 ## 已收敛内容入口
 
+2026-11-16 Promote 后等待问题已定位并最小修复：Promoting 不得让同 Branch 的在飞模型等待点失效；Rust 状态回归与真实 Pi→Runtime→NLE／本地伪模型五步回归先红后绿。唯一一次真实补验成功完成 5 个实际动作、Promote 后 3 次后续工具及完整最终回复，6 个 Branch 的独立 Runtime ID 和清理已核对；原失败证据保留，统计及边界见 [参考负载](docs/development/reference-workload.md#promote-在途模型等待点修复2026-11-16)。不扩展为通用嵌套／取消竞态已经全部验收。
+
 2026-11-14 本机构建与使用已收敛：在本机运行控制面，用本机浏览器访问；根目录 `make` 为统一构建入口，先准备前端依赖并构建，再构建 Rust，`make -j` 同样保证顺序与失败停止。前端产物继续嵌入二进制且不入库；规则与验证见 [WebUI](docs/development/web-ui.md#生产构建)。Gateway 部署与启动协调仍由第 14 项保留。
 
 2026-11-14 Gateway 共识入口：Gateway 统一承接 Agent 接入侧、UI 与 Runtime 的通信接入、消息分发和送达，并负责连接／会话管理及入口格式、身份、上下文与权限检查；消息对投机执行的变化由相应控制逻辑决定。Gateway 不拥有 Tree、Policy 或投机编排；启动实际由 Runtime 负责，启动协调归属未决。Registry 属于 Runtime，保留主动验证与独立证据职责。第 14 项仅保留 transport、UI 部署和启动协调问题。依据见[控制面 §2.1](docs/design/control-plane.md#21-gateway)、[Runtime Registry 职责](docs/design/runtime.md#adapter-registry)。
@@ -66,6 +72,8 @@
 Gateway 实现补记：三侧通信入口已归入 `src/control_plane/gateway/`，保持 Unix socket、HTTP/SSE、现有进程部署和投机语义。类型化分发不拥有 Tree／Policy／Runtime 执行状态。既有 Rust、Pi 通信和恢复测试通过；完整 NLE 回放尝试仍失败，未声称整链验收完成。通用认证授权、Runtime 断线立即唤醒及启动阶段资源清理的剩余范围见 [Gateway 实现核查](docs/development/gateway.md)，部署与启动协调继续由第 14 项保留。
 
 2026-11-14 候选环境及终止／暂停已收敛：接受后由候选环境承接后续执行，嵌套接受不越过祖先约束；Agent 常用 Ctrl-C／退出终止任务，AScout 以独立于原 Agent 的 `/pause` 入口暂停并保留树、候选和环境，暂停不意味着退出程序。目标见 [Runtime](docs/design/runtime.md)、[Agent 接入](docs/design/agent-integration.md)；现有退出保存入口调整及物化仍为实现缺口，保存恢复能力保留，见 [恢复](docs/development/recovery.md)。选择理由与废弃表述归[开发决策](docs/development/decisions.md)。
+
+2026-11-16 Environment 归属已收敛：控制面独占 `Branch -> Environment`；Runtime 不接收 `branch_id`，内部用独立 Backend instance ID 维护 Environment 与 Backend 的多对多关联。实现与验证见 [Runtime 生命周期协议](docs/development/runtime-discussion.md)；不在本清单重复作为待讨论选型。
 
 session／task 与物化职责已收敛：task 是 Agent 完成本轮工作并开始等待用户输入时结束的一轮工作；一个 session 对应一个 AScoutAgent 和一棵树。Runtime 报告物化完成／失败，控制面等待物化成功后宣告任务成功。目标见 [心智模型](docs/mental-model.md) 与 [物化提案](docs/fs-backend/materialize-proposal.md)；代码待核查，物化剩余事项归第 18 项。
 

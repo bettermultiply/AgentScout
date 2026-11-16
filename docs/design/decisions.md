@@ -342,15 +342,15 @@ Semantic effect footprint 包括当前窗口内可直接观察的响应、受管
 
 **原因**：前提变化后，既有投机进展不再对应当前 Proposal。现阶段缺少足以证明安全复用的兼容与修复语义，保守剪枝可以保持信息流和提交正确性。
 
-## D-047：Branch 非干扰优先于环境形态
+## D-047：Branch 独占 Environment，Runtime 内部组合 Backend instance
 
-**选择**：Branch 的固定要求是**不影响权威路径和其他 Branch**。独立执行环境只是满足该要求的一种方式，不是 Branch 的定义，也不是所有 Runtime 的前提。Branch 可以在共享执行视图中推进，只要其可能改变环境或影响其他 Branch 的操作在作用前被阻止、暂存或以其他方式受控。
+**选择**：控制面维护 Branch→Environment 绑定，每个 Branch 必须拥有独占的 Environment；Candidate 创建必须创建自己的 Environment，不能复用 parent Environment。Runtime 对控制面使用统一身份和入口，Runtime 内部可以由多个 Backend instance 组成，并以 `backend_id` 区分实例；Environment 与 Backend instance 可以多对多关联，控制面不传 `backend_id`。
 
-`branch_environment` 只表示从父环境派生独立子环境，是可选能力。不能派生独立环境的后端必须返回 `Unsupported`，不得用共享别名伪装成功。共享环境下的非干扰机制、覆盖入口、scope 和 limitations 由 Runtime／Adapter 及 Agent 接入侧声明，并由 Registry 验证；控制面不得把未声明或未覆盖的共享执行当作已隔离。
+Runtime 普通操作只接收 `environment_id` 与 operation，不接收 `branch_id`，也不能由 `environment_id` 推导 Branch。`branch_environment` 是 Candidate 创建独立 Environment 的 Runtime 能力；不能提供该能力的 Runtime 不能满足 Candidate 创建要求。
 
-**原因**：把“独立环境”写成 Branch 的定义会把某一种 Runtime 实现固化成目标语义，排除只能通过作用前阻止实现非干扰的后端。把固定要求放在非干扰上，既保留正确性，又允许不同 Runtime 选择合适的环境形态。
+**原因**：控制面必须能明确审计 Branch 的资源归属并避免多个 Branch 互相污染；同时 Backend instance 的共享/独占策略属于 Runtime 内部，不应泄漏成控制面资源选择。
 
-**范围**：本决策不放宽非干扰要求。任何共享环境投机都必须在声明的覆盖范围内得到验证；无法覆盖的内容必须改用独立环境或拒绝该投机。
+**范围**：本决策不实现多 Runtime 入口路由、节点调度、分布式部署、Runtime 嵌套或更复杂的资源身份设计。
 
 ## 相关文档
 

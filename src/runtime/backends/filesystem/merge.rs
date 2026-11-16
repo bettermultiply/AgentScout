@@ -4,9 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::layer::*;
+use super::state::MountUnit;
 use crate::protocol::contract::FilesystemConflict;
 use crate::runtime::backend::BackendError;
-use super::state::MountUnit;
 
 pub(crate) fn conflict(
     path: &str,
@@ -82,7 +82,8 @@ pub(crate) fn merge_delta(
                 Some(node),
             ));
         }
-        if matches!(node.kind, NodeKind::Dir) && node.opaque
+        if matches!(node.kind, NodeKind::Dir)
+            && node.opaque
             && target_upper_has_changes_under(target_upper, path)
             && !conflicts.iter().any(|value| value.path == *path)
         {
@@ -157,7 +158,8 @@ pub(crate) fn merge_delta_layers(
                 Some(node),
             ));
         }
-        if matches!(node.kind, NodeKind::Dir) && node.opaque
+        if matches!(node.kind, NodeKind::Dir)
+            && node.opaque
             && target_upper_path_has_changes(target_upper, path)
             && !conflicts.iter().any(|value| value.path == *path)
         {
@@ -206,4 +208,3 @@ pub(crate) fn source_content_source(maps: &[View], path: &str) -> Option<PathBuf
     }
     None
 }
-

@@ -4,7 +4,10 @@ use crate::protocol::contract::{
     EnvironmentState, FilesystemResult, Operation, OperationRequest, OperationResult, ResultStatus,
 };
 
-pub(super) fn filesystem_failure_reason(operation: &Operation, result: &FilesystemResult) -> Option<String> {
+pub(super) fn filesystem_failure_reason(
+    operation: &Operation,
+    result: &FilesystemResult,
+) -> Option<String> {
     if !result.conflicts.is_empty() {
         return Some(format!(
             "filesystem operation has {} conflict(s); publication was not accepted",
@@ -15,10 +18,12 @@ pub(super) fn filesystem_failure_reason(operation: &Operation, result: &Filesyst
         Operation::FilesystemFork { .. } => (!result.confirmation.snapshot_created)
             .then_some("snapshot_created")
             .or_else(|| (!result.confirmation.metadata_durable).then_some("metadata_durable")),
-        Operation::FilesystemMark { .. } => (!result.confirmation.metadata_durable)
-            .then_some("metadata_durable"),
-        Operation::FilesystemAccept { .. } => (!result.confirmation.published)
-            .then_some("published"),
+        Operation::FilesystemMark { .. } => {
+            (!result.confirmation.metadata_durable).then_some("metadata_durable")
+        }
+        Operation::FilesystemAccept { .. } => {
+            (!result.confirmation.published).then_some("published")
+        }
         _ => None,
     };
     missing.map(|field| format!("filesystem operation is not confirmed: missing {field}"))
@@ -53,4 +58,3 @@ pub(super) fn can_accept(state: Option<EnvironmentState>) -> bool {
         Some(EnvironmentState::Available | EnvironmentState::Suspended)
     )
 }
-

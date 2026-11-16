@@ -152,7 +152,9 @@ impl Drop for BaseRuntime {
 
 impl Backend for BaseRuntime {
     fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
-        if self.data_plane.is_some() && self.process.writer_active(&context.environment_id)? {
+        if (self.data_plane.is_some() || self.requires_holder(&context.environment_id))
+            && self.process.writer_active(&context.environment_id)?
+        {
             return Err(BackendError::new(
                 "cannot materialize while Runtime-managed execution is active; task writers have not been confirmed drained",
             ));
@@ -252,13 +254,10 @@ impl Backend for BaseRuntime {
         let mut capabilities = self.inner.capabilities();
         if let Some(data_plane) = &self.data_plane {
             let data_plane_capabilities = data_plane.capabilities();
-            capabilities.branch_environment = (capabilities.branch_environment
-                || capabilities.shared_environment)
-                && (data_plane_capabilities.branch_environment
-                    || data_plane_capabilities.shared_environment);
-            // A composed environment is shareable only when every state domain
-            // can be shared. NLE sharing cannot bypass the FS branch fork.
-            capabilities.shared_environment &= data_plane_capabilities.shared_environment;
+            // Every state domain must support a child's independent identity
+            // and lifecycle. Internal resources need not be copied.
+            capabilities.branch_environment =
+                capabilities.branch_environment && data_plane_capabilities.branch_environment;
             capabilities.filesystem_fast_delete = data_plane_capabilities.filesystem_fast_delete;
             capabilities.filesystem_fork_cost = data_plane_capabilities.filesystem_fork_cost;
             capabilities.filesystem_btrfs_incremental_diff =

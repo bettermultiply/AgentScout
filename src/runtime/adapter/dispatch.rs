@@ -13,10 +13,6 @@ fn operation_context(environment_id: &str, request: &OperationRequest) -> Backen
         operation_id: request.request_id.clone(),
         generation: request.generation,
         task_id: request.task_id.clone(),
-        branch_id: request
-            .branch_id
-            .clone()
-            .or_else(|| Some(request.environment_id.clone())),
         environment_id: environment_id.to_string(),
         parent_environment_id: None,
         target_mount_pid: None,
@@ -91,14 +87,12 @@ impl Shared {
                 Err(error) => self.backend_error(request, environment_id, error),
             },
             Operation::SaveRuntime { path } | Operation::LoadRuntime { path } => {
+                // Even a failed save/load must not fall through to destructive EOF cleanup.
+                self.preserving
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 let result = if matches!(request.operation, Operation::SaveRuntime { .. }) {
-                    // Even a failed save must not fall through to destructive EOF cleanup.
-                    self.preserving
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     self.runtime.save_runtime(path)
                 } else {
-                    self.preserving
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
                     let result = self.runtime.load_runtime(path);
                     if result.is_err() {
                         let _ = self.runtime.shutdown();
@@ -127,17 +121,9 @@ impl Shared {
                 agent.as_ref(),
                 cancel,
             ),
-            Operation::BranchEnvironment {
-                child_environment_id,
-                agent,
-            } => self.execute_branch(
-                environment_id,
-                request,
-                state,
-                &context,
-                child_environment_id,
-                agent.as_ref(),
-            ),
+            Operation::BranchEnvironment { agent } => {
+                self.execute_branch(environment_id, request, state, &context, agent.as_ref())
+            }
             Operation::PromoteEnvironment => {
                 self.execute_promote(environment_id, request, state, &context)
             }
@@ -190,13 +176,22 @@ impl Shared {
         state: Option<EnvironmentState>,
         context: &BackendContext,
     ) -> OperationResult {
-        if state.is_some() {
-            return self.reasoned_failure(request, state, "environment already exists");
+        if !request.environment_id.is_empty() {
+            return self.reasoned_failure(
+                request,
+                state,
+                "establish must not supply an Environment identity",
+            );
         }
-        match self.runtime.establish_with_context(context) {
-            Ok(()) => {
-                let actual = self.runtime.state(environment_id);
-                let mut result = self.success(request, actual, can_accept(actual));
+        match self.runtime.create_environment(context) {
+            Ok(new_environment_id) => {
+                let actual = self.runtime.state(&new_environment_id);
+                let mut result = self.success_for_environment(
+                    request,
+                    &new_environment_id,
+                    actual,
+                    can_accept(actual),
+                );
                 result.resources = vec![
                     ResourceNote {
                         content: Content::Process,
@@ -264,7 +259,6 @@ impl Shared {
         request: &OperationRequest,
         state: Option<EnvironmentState>,
         context: &BackendContext,
-        child_environment_id: &str,
         agent: Option<&AgentLaunch>,
     ) -> OperationResult {
         match state {
@@ -274,39 +268,36 @@ impl Shared {
             }
             None => return self.unknown_environment(request),
         }
-        if self.runtime.state(child_environment_id).is_some() {
-            return self.reasoned_failure(
-                request,
-                state,
-                "child environment already exists".to_string(),
-            );
-        }
-        match self.runtime.branch_with_context(
-            &BackendContext {
-                operation_id: request.request_id.clone(),
-                generation: 0,
-                environment_id: environment_id.to_string(),
-                parent_environment_id: Some(environment_id.to_string()),
-                ..context.clone()
-            },
-            environment_id,
-            child_environment_id,
-        ) {
-            Ok(()) => {
+        match self.runtime.create_child_environment(context) {
+            Ok(child_environment_id) => {
                 if let Some(agent) = agent {
-                    if let Err(error) = self.runtime.launch_agent(
-                        &BackendContext {
-                            environment_id: child_environment_id.to_string(),
-                            parent_environment_id: Some(environment_id.to_string()),
-                            ..context.clone()
-                        },
-                        agent,
-                    ) {
-                        return self.backend_error(request, child_environment_id, error);
+                    let child_context = BackendContext {
+                        operation_id: request.request_id.clone(),
+                        generation: request.generation,
+                        task_id: request.task_id.clone(),
+                        environment_id: child_environment_id.to_string(),
+                        parent_environment_id: Some(environment_id.to_string()),
+                        ..context.clone()
+                    };
+                    let launch = if self.runtime.manages_agent_process() {
+                        self.runtime.launch_agent(&child_context, agent)
+                    } else {
+                        self.launch_agent(agent)
+                            .map_err(|error| BackendError::new(error.to_string()))
+                    };
+                    if let Err(error) = launch {
+                        let mut error = error;
+                        error.created_environment_id = Some(child_environment_id);
+                        return self.backend_error(request, environment_id, error);
                     }
                 }
-                let actual = self.runtime.state(environment_id);
-                let mut result = self.success(request, actual, can_accept(actual));
+                let actual = self.runtime.state(&child_environment_id);
+                let mut result = self.success_for_environment(
+                    request,
+                    &child_environment_id,
+                    actual,
+                    can_accept(actual),
+                );
                 result.resources = vec![ResourceNote {
                     content: Content::Process,
                     note: format!("environment {child_environment_id} created"),
@@ -541,6 +532,26 @@ impl Shared {
         result
     }
 
+    pub(super) fn success_for_environment(
+        &self,
+        request: &OperationRequest,
+        environment_id: &str,
+        state: Option<EnvironmentState>,
+        can_accept_operations: bool,
+    ) -> OperationResult {
+        let mut result = self.success(request, state, can_accept_operations);
+        result.environment_id = environment_id.to_string();
+        result.backend_states = self.runtime.backend_states(environment_id);
+        if state.is_none() {
+            result.status = ResultStatus::Failed;
+            result.can_accept_operations = false;
+            result.reason = Some(
+                "Runtime creation returned an identity without a registered Environment".into(),
+            );
+        }
+        result
+    }
+
     pub(super) fn execution_result(
         &self,
         request: &OperationRequest,
@@ -568,6 +579,10 @@ impl Shared {
         environment_id: &str,
         error: BackendError,
     ) -> OperationResult {
+        let environment_id = error
+            .created_environment_id
+            .as_deref()
+            .unwrap_or(environment_id);
         let state = self.runtime.state(environment_id);
         let status = if error.is_partial() {
             ResultStatus::PartiallyCompleted
@@ -575,6 +590,7 @@ impl Shared {
             ResultStatus::Failed
         };
         let mut result = make_result(request, status, state, can_accept(state));
+        result.environment_id = environment_id.to_string();
         result.reason = Some(error.to_string());
         result.backend_states = self.runtime.backend_states(environment_id);
         result.outputs = error.outputs;

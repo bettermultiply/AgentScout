@@ -284,7 +284,14 @@ impl ProcessBackend {
         };
         self.launch_with_role(context, &launch, fragment, ProcessRole::NamespaceHolder)?;
         if let Some((directory, _)) = &fragment.holder_bind {
-            let socket = directory.join("cmd.sock");
+            // sockaddr_un limits the whole pathname, not the Environment id.
+            // Resolve through an open directory without truncating identity.
+            use std::os::fd::AsRawFd;
+            let directory_fd = std::fs::File::open(directory).map_err(error)?;
+            let socket = PathBuf::from(format!(
+                "/proc/self/fd/{}/cmd.sock",
+                directory_fd.as_raw_fd()
+            ));
             for _ in 0..200 {
                 if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
                     return Ok(());

@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 
 pub mod guest_access;
 
-use crate::runtime::backend::{Backend, BackendError, CancelHandle};
 use crate::protocol::contract::{CommandOutput, EnvironmentState, RuntimeCapabilities};
+use crate::runtime::backend::{Backend, BackendError, CancelHandle};
 use crate::runtime::backends::firecracker::guest_access::{GuestRequest, GuestResponse, PORT};
 
 #[derive(Debug, Deserialize)]
@@ -58,8 +58,8 @@ struct Environment {
 
 mod guest_ops;
 mod network;
-use network::{EnvironmentNetwork, NetworkRegistry};
 use guest_ops::FirecrackerApi;
+use network::{EnvironmentNetwork, NetworkRegistry};
 
 #[cfg(test)]
 mod tests;

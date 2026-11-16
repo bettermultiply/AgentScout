@@ -28,12 +28,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = fs::read(path)?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
 
-    let control_socket = PathBuf::from(
-        value
-            .get("control_socket")
-            .and_then(|value| value.as_str())
-            .ok_or("runtime config missing control_socket")?,
-    );
+    let control_address = value
+        .get("control_address")
+        .and_then(|value| value.as_str())
+        .ok_or("runtime config missing control_address")?;
     let adapter_instance = value
         .get("adapter_instance")
         .and_then(|value| value.as_str())
@@ -120,7 +118,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         adapter_instance,
         runtime,
     }
-    .run(&control_socket)?;
+    .run(control_address)?;
     Ok(())
 }
 
@@ -196,6 +194,14 @@ fn assemble_single_backend(
     value: &serde_json::Value,
     filesystem: Option<Arc<FilesystemBackend>>,
 ) -> Result<Arc<dyn Backend>, Box<dyn std::error::Error>> {
+    if value.get("backend").and_then(|value| value.as_str()) == Some("filesystem") {
+        let filesystem =
+            filesystem.ok_or("filesystem backend requires filesystem configuration")?;
+        let bwrap = filesystem.bubblewrap_path().to_path_buf();
+        return Ok(Arc::new(
+            BaseRuntime::new("runtime", filesystem).with_bubblewrap(bwrap),
+        ));
+    }
     let is_nle = value.get("backend").and_then(|value| value.as_str()) == Some("nle");
     let (id, backend): (&str, Arc<dyn Backend>) = if is_nle {
         (

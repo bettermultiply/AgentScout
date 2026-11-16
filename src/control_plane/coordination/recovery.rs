@@ -119,7 +119,13 @@ impl Recovery {
             let generation = self.path.parent().unwrap();
             runtime_call(
                 runtime,
-                "authority",
+                tree.branches[tree
+                    .authority_branch_id
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("Recovery authority missing"))?]
+                .environment_id
+                .as_deref()
+                .ok_or_else(|| io::Error::other("Recovery authority Environment missing"))?,
                 Operation::SaveRuntime {
                     path: generation.join("runtime.json"),
                 },

@@ -206,7 +206,10 @@ impl StateEventSet {
                     branch_ids: Vec::new(),
                 }),
                 ObservationContent::ChanceStageChanged {
-                    chance_id, stage, validation_id, ..
+                    chance_id,
+                    stage,
+                    validation_id,
+                    ..
                 } => {
                     if let Some(chance) = chances.iter_mut().find(|c| &c.chance_id == chance_id) {
                         chance.stage = stage.clone();

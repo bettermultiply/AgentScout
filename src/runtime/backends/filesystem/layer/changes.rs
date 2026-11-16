@@ -25,7 +25,10 @@ pub(crate) fn prefix_change(target: &Path, mut change: FilesystemChange) -> File
     change
 }
 
-pub(crate) fn prefix_conflict(target: &Path, mut conflict: FilesystemConflict) -> FilesystemConflict {
+pub(crate) fn prefix_conflict(
+    target: &Path,
+    mut conflict: FilesystemConflict,
+) -> FilesystemConflict {
     conflict.path = mount_relative_path(target, &conflict.path);
     conflict
 }
@@ -44,4 +47,3 @@ pub(crate) fn whiteout_node() -> Node {
         metacopy: false,
     }
 }
-

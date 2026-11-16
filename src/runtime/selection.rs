@@ -81,8 +81,6 @@ pub struct BackendRoute {
     pub task_id: Option<String>,
     #[serde(default)]
     pub environment_id: Option<String>,
-    #[serde(default)]
-    pub branch_id: Option<String>,
     pub backends: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_backend: Option<String>,
@@ -99,17 +97,12 @@ impl BackendRoute {
                 .environment_id
                 .as_deref()
                 .is_none_or(|value| value == context.environment_id)
-            && self
-                .branch_id
-                .as_deref()
-                .is_none_or(|value| context.branch_id.as_deref() == Some(value))
     }
 
     fn specificity(&self) -> usize {
         usize::from(self.operation.is_some())
             + usize::from(self.task_id.is_some())
             + usize::from(self.environment_id.is_some())
-            + usize::from(self.branch_id.is_some())
     }
 }
 
@@ -236,6 +229,9 @@ impl BackendConnection {
         let id = id.into();
         if id.trim().is_empty() {
             return Err(BackendError::new("Backend id must not be empty"));
+        }
+        if backend.backend_id().trim().is_empty() {
+            return Err(BackendError::new("Backend instance id must not be empty"));
         }
         Ok(Self { id, backend })
     }

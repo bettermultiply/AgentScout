@@ -146,7 +146,12 @@ impl SpeculativeTree {
                 .branches
                 .get(&chance.parent_branch_id)
                 .is_some_and(|branch| {
-                    branch.status.is_live_authority() || branch.status.is_live_candidate()
+                    // Promotion changes authority, not this Branch's execution
+                    // or its in-flight operations. Keep their waiting points
+                    // alive until the Promote receipt (or actual disposal).
+                    branch.status.is_live_authority()
+                        || branch.status.is_live_candidate()
+                        || branch.status == BranchStatus::Promoting
                 })
             && self.branches[&chance.parent_branch_id]
                 .pending_operations

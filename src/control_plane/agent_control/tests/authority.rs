@@ -5,6 +5,26 @@ use super::support::*;
 use serde_json::json;
 
 #[test]
+fn branches_remain_unbound_until_runtime_creation_and_preserve_binding_on_restore() {
+    let mut first = tree();
+    first.execution_id = "/first/run".into();
+    first.create_authority("authority", "").unwrap();
+    let mut second = tree();
+    second.execution_id = "/second/run".into();
+    second.create_authority("authority", "").unwrap();
+    assert!(first.branches["authority"].environment_id.is_none());
+    assert!(second.branches["authority"].environment_id.is_none());
+    first.branches.get_mut("authority").unwrap().environment_id =
+        Some("runtime-issued-identity".into());
+    let restored: SpeculativeTree =
+        serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+    assert_eq!(
+        Some("runtime-issued-identity"),
+        restored.branches["authority"].environment_id.as_deref()
+    );
+}
+
+#[test]
 fn authority_continuation_waits_for_promotion_and_prunes_only_after_confirmation() {
     let mut tree = tree();
     tree.workspace_root =
@@ -90,6 +110,7 @@ fn authority_branch_failure_fails_the_run_without_discard() {
         "authority".into(),
         BranchRecord {
             branch_id: "authority".into(),
+            environment_id: Some("environment-authority".into()),
             parent_branch_id: None,
             role: BranchRole::Authority,
             status: BranchStatus::Running,
@@ -129,6 +150,7 @@ fn late_or_duplicate_branch_started_is_ignored() {
             "candidate".into(),
             BranchRecord {
                 branch_id: "candidate".into(),
+                environment_id: Some("environment-candidate".into()),
                 parent_branch_id: None,
                 role: BranchRole::Candidate,
                 status,

@@ -3,9 +3,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::os::unix::fs::FileTypeExt;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -25,12 +24,41 @@ const EVENT_WINDOW: usize = 4096;
 /// Typed Runtime operation delivery used by coordination, independent of transport.
 pub trait Runtime: Sync {
     fn call(&self, environment_id: &str, operation: Operation) -> io::Result<OperationResult>;
+    fn establish(&self) -> io::Result<OperationResult> {
+        self.call("", Operation::EstablishEnvironment)
+    }
+    fn branch(
+        &self,
+        parent_environment_id: &str,
+        agent: Option<crate::protocol::contract::AgentLaunch>,
+    ) -> io::Result<OperationResult> {
+        self.call(
+            parent_environment_id,
+            Operation::BranchEnvironment { agent },
+        )
+    }
     fn drain_events(&self) -> Vec<Event>;
 }
 
 impl Runtime for ControlSession {
     fn call(&self, environment_id: &str, operation: Operation) -> io::Result<OperationResult> {
         ControlSession::call(self, environment_id, operation)
+    }
+
+    fn establish(&self) -> io::Result<OperationResult> {
+        ControlSession::call(self, "", Operation::EstablishEnvironment)
+    }
+
+    fn branch(
+        &self,
+        parent_environment_id: &str,
+        agent: Option<crate::protocol::contract::AgentLaunch>,
+    ) -> io::Result<OperationResult> {
+        ControlSession::call(
+            self,
+            parent_environment_id,
+            Operation::BranchEnvironment { agent },
+        )
     }
 
     fn drain_events(&self) -> Vec<Event> {
@@ -69,32 +97,29 @@ impl ResultStore {
 
 /// 监听 Adapter 连入的控制面入口。
 pub struct ControlServer {
-    listener: UnixListener,
+    listener: TcpListener,
 }
 
 impl ControlServer {
-    pub fn bind(path: &Path) -> io::Result<Self> {
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_socket() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!("refusing to remove non-socket path {}", path.display()),
-                    ));
-                }
-                std::fs::remove_file(path)?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+    pub fn bind(address: &str) -> io::Result<Self> {
+        let address: SocketAddr = address.parse().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid control address {address:?}: {error}"),
+            )
+        })?;
         Ok(Self {
-            listener: UnixListener::bind(path)?,
+            listener: TcpListener::bind(address)?,
         })
     }
 
     pub fn accept(&self) -> io::Result<ControlSession> {
         let (stream, _) = self.listener.accept()?;
         ControlSession::start(stream)
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.listener.local_addr()
     }
 
     /// 允许启动阶段轮询 Adapter 是否已经退出，而不是无限等待连接。
@@ -113,15 +138,23 @@ pub struct HelloInfo {
 
 /// 一条 Adapter 会话。
 pub struct ControlSession {
-    writer: Mutex<UnixStream>,
+    writer: Mutex<TcpStream>,
     next_request: AtomicU64,
     #[allow(clippy::type_complexity)]
     hello: Arc<(Mutex<Option<HelloInfo>>, Condvar)>,
     results: Arc<(Mutex<ResultStore>, Condvar)>,
     events: Arc<(Mutex<VecDeque<Event>>, Condvar)>,
+    /// Set when the Adapter socket reaches EOF or its reader fails.  Waiting
+    /// callers must not sleep until their full request timeout after the
+    /// Runtime has already gone away.
+    disconnected: Arc<AtomicBool>,
+    event_waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
 }
 
 impl ControlSession {
+    pub fn set_event_waker(&self, wake: impl Fn() + Send + Sync + 'static) {
+        *self.event_waker.lock().unwrap() = Some(Box::new(wake));
+    }
     /// Close both socket halves, including the reader thread's cloned handle.
     pub fn shutdown(&self) -> io::Result<()> {
         self.writer
@@ -129,7 +162,7 @@ impl ControlSession {
             .unwrap()
             .shutdown(std::net::Shutdown::Both)
     }
-    fn start(stream: UnixStream) -> io::Result<Self> {
+    fn start(stream: TcpStream) -> io::Result<Self> {
         let mut reader = stream.try_clone()?;
         let session = Self {
             writer: Mutex::new(stream),
@@ -137,17 +170,22 @@ impl ControlSession {
             hello: Arc::new((Mutex::new(None), Condvar::new())),
             results: Arc::new((Mutex::new(ResultStore::default()), Condvar::new())),
             events: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
+            disconnected: Arc::new(AtomicBool::new(false)),
+            event_waker: Arc::new(Mutex::new(None)),
         };
 
         let hello = session.hello.clone();
         let results = session.results.clone();
         let events = session.events.clone();
+        let disconnected = session.disconnected.clone();
+        let event_waker = session.event_waker.clone();
         thread::spawn(move || {
             loop {
                 let message = match transport::read_message::<_, AdapterMessage>(&mut reader) {
                     Ok(message) => message,
                     Err(error) => {
                         eprintln!("control plane: failed to read Adapter message: {error}");
+                        disconnected.store(true, Ordering::SeqCst);
                         break;
                     }
                 };
@@ -182,10 +220,22 @@ impl ControlSession {
                         }
                         drop(queue);
                         events.1.notify_all();
+                        if let Some(wake) = event_waker.lock().unwrap().as_ref() {
+                            wake();
+                        }
                     }
-                    None => break,
+                    None => {
+                        disconnected.store(true, Ordering::SeqCst);
+                        break;
+                    }
                 }
             }
+            // Wake every wait class.  The predicates below re-check the
+            // disconnect flag and return promptly with the appropriate
+            // absence/error instead of waiting for a 30-second request timer.
+            hello.1.notify_all();
+            results.1.notify_all();
+            events.1.notify_all();
         });
 
         Ok(session)
@@ -198,6 +248,9 @@ impl ControlSession {
         loop {
             if let Some(value) = hello.clone() {
                 return Some(value);
+            }
+            if self.disconnected.load(Ordering::SeqCst) {
+                return None;
             }
             let now = Instant::now();
             if now >= deadline {
@@ -221,7 +274,6 @@ impl ControlSession {
             environment_id: environment_id.to_string(),
             operation,
             task_id: None,
-            branch_id: Some(environment_id.to_string()),
         });
         let mut writer = self.writer.lock().unwrap();
         transport::write_message(&mut *writer, &message)
@@ -257,6 +309,9 @@ impl ControlSession {
             if let Some(result) = results.get(request_id) {
                 return Some(result);
             }
+            if self.disconnected.load(Ordering::SeqCst) {
+                return None;
+            }
             let now = Instant::now();
             if now >= deadline {
                 return None;
@@ -284,6 +339,9 @@ impl ControlSession {
             if let Some(event) = events.pop_front() {
                 return Some(event);
             }
+            if self.disconnected.load(Ordering::SeqCst) {
+                return None;
+            }
             let now = Instant::now();
             if now >= deadline {
                 return None;
@@ -300,13 +358,12 @@ mod tests {
     use crate::protocol::contract::{
         AdapterMessage, EnvironmentState, EventPayload, Operation, OperationResult, ResultStatus,
     };
-    use std::os::unix::net::UnixStream;
+    use std::net::TcpStream;
 
-    fn session_pair() -> (ControlSession, UnixStream) {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("control.sock");
-        let server = ControlServer::bind(&path).unwrap();
-        let client = UnixStream::connect(&path).unwrap();
+    fn session_pair() -> (ControlSession, TcpStream) {
+        let server = ControlServer::bind("127.0.0.1:0").unwrap();
+        let address = server.listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).unwrap();
         let session = server.accept().unwrap();
         (session, client)
     }
@@ -327,28 +384,6 @@ mod tests {
             output: None,
             filesystem: None,
         }
-    }
-
-    #[test]
-    fn bind_refuses_to_remove_a_regular_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("control.sock");
-        std::fs::write(&path, b"do not remove").unwrap();
-        let error = match ControlServer::bind(&path) {
-            Ok(_) => panic!("bind accepted a regular file"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(std::fs::read(&path).unwrap(), b"do not remove");
-    }
-
-    #[test]
-    fn bind_replaces_a_stale_socket() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("control.sock");
-        drop(UnixListener::bind(&path).unwrap());
-        assert!(path.exists());
-        ControlServer::bind(&path).unwrap();
     }
 
     #[test]

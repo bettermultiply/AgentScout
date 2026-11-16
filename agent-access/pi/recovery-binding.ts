@@ -1,7 +1,6 @@
 // @ts-nocheck
 import {existsSync,readFileSync,readdirSync,lstatSync,realpathSync} from 'node:fs';
 import {resolve,dirname,join} from 'node:path';
-import {homedir} from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {checksum} from './recovery.ts';
 import {createRequire} from 'node:module';
@@ -28,9 +27,11 @@ export async function recoveryBinding(piRoot,workspaces) {
         JSON.parse(readFileSync(path,'utf8'));
         // Declaration syntax and package filters belong to Pi's resolver.
     }
-    const agentDir=resolve(process.env.PI_CODING_AGENT_DIR??join(homedir(),'.pi/agent'));
     const require=createRequire(resolve(piRoot,'package.json'));
-    const {DefaultPackageManager,SettingsManager}=require(resolve(piRoot,'packages/coding-agent/src/index.ts'));
+    const {getAgentDir,DefaultPackageManager,SettingsManager}=require(resolve(piRoot,'packages/coding-agent/src/index.ts'));
+    // Let Pi resolve its configured directory, including an explicit
+    // PI_CODING_AGENT_DIR, rather than maintaining a second copy of that rule.
+    const agentDir=resolve(getAgentDir());
     const resolved=[];
     for(const cwd of [...new Set(workspaces)].sort()) {
         const manager=new DefaultPackageManager({cwd,agentDir,settingsManager:SettingsManager.create(cwd,agentDir)});

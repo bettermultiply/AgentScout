@@ -80,7 +80,11 @@ pub(crate) fn changes_from_upper_copy(current: &View, mark: &View) -> Vec<Filesy
             old_path: Some(old),
         });
     }
-    changes.sort_by(|left, right| left.path.cmp(&right.path).then_with(|| left.kind.cmp(&right.kind)));
+    changes.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
     changes.dedup_by(|left, right| left.path == right.path && left.kind == right.kind);
     changes
 }
@@ -91,10 +95,12 @@ pub(crate) fn node_summary(node: Option<&Node>) -> String {
         Some(node) => match &node.kind {
             NodeKind::Whiteout => "whiteout".to_string(),
             NodeKind::Dir => "dir".to_string(),
-            NodeKind::File => format!("file size={} mtime={}.{}", node.size, node.mtime_sec, node.mtime_nsec),
+            NodeKind::File => format!(
+                "file size={} mtime={}.{}",
+                node.size, node.mtime_sec, node.mtime_nsec
+            ),
             NodeKind::Symlink(target) => format!("symlink:{}", target.display()),
             NodeKind::Other(kind) => format!("special:0o{kind:o}"),
         },
     }
 }
-

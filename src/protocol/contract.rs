@@ -104,15 +104,12 @@ pub struct RuntimeTool {
     pub parameters: Value,
 }
 
-/// Runtime 在握手中声明的能力。工具调用和共享环境由 Runtime 自己承担。
+/// Runtime 在握手中声明的能力。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCapabilities {
     #[serde(default)]
     pub tools: Vec<RuntimeTool>,
-    /// 所有 Branch 共用同一个底层环境。
-    #[serde(default)]
-    pub shared_environment: bool,
-    /// 能从父环境派生出独立子环境。
+    /// 能从父环境派生出具有独立身份和生命周期的子环境；不承诺复制内部资源。
     #[serde(default)]
     pub branch_environment: bool,
     /// 文件系统 Backend 是否能用严格子卷删除 ioctl 快速回收。`Some(false)`
@@ -156,7 +153,6 @@ pub enum Operation {
         agent: Option<AgentLaunch>,
     },
     BranchEnvironment {
-        child_environment_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<AgentLaunch>,
     },
@@ -266,15 +262,13 @@ pub struct OperationRequest {
     /// Fences delayed filesystem results; legacy callers default to zero.
     #[serde(default)]
     pub generation: u64,
+    /// Absent for establish and Runtime-wide save/load. Never a proposed identity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub environment_id: String,
     pub operation: Operation,
     /// Policy 用于选择 Runtime 的任务上下文。旧控制面不发送时保持为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    /// 逻辑 Branch 标识。它和 environment_id 分开，允许一个逻辑 Branch
-    /// 在不同 Runtime 环境中继续执行。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch_id: Option<String>,
 }
 
 /// 一个 Backend 对一次操作产生的输出。
@@ -300,6 +294,9 @@ pub struct BackendState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResult {
     pub request_id: String,
+    /// Created Environment on successful establish/branch, target otherwise.
+    /// Establish failures without a created Environment omit this field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub environment_id: String,
     pub status: ResultStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]

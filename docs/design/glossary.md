@@ -20,7 +20,7 @@
 | Equivalence `≈` | Proposal compatibility 条件 | 层间映射 |
 | Branch | Speculative Tree 中的子树 | 同一结构实体 |
 | Branch Root | Branch 的根节点 | 同一结构实体 |
-| Instance | Runtime 中承载 Branch Root 执行活动的执行单元；可位于共享或独立环境 | 逻辑 Branch 可先于 Instance 存在 |
+| Backend instance | Runtime 内部具有独立 `backend_id` 的 Backend 执行实例；由 Runtime 维护与 Environment 的关联，不是控制面资源 | 控制面不传 `backend_id` |
 | OutcomeSlot | 同名同义 | 共享语义 |
 | Predictor | 无直接对应 | 底座独有 |
 | Salvage | 无直接对应 | 底座独有 |
@@ -51,7 +51,7 @@
 - **AssumptionSet**：Instance/SpecTask 携带的未决 Proposal 引用集合（`frozenset[(chance_id, proposal_id)]`）。`AssumptionSet == ∅ ⟺` 该工作为权威工作。（`../design-model.md` §3.1；`policy-decisions.md` §4.2）
 - **Edge**：描述投机如何进行的通用过程形状的抽象模型（`u --i--> v`，以 Proposal 替代 `i` 提前启动 `v^n`），九类 Policy Decision 的语义定义在它之上。Edge 不是运行时对象，没有 id；它的具体实例是 Chance。（`../design-model.md` §3.1；`policy-decisions.md`）
 - **Chance**：Edge 模型的一个具体实例，即被 `admit` 接纳的投机机会。从 `admit` 通过起拥有 id，直到被验证后接受或抛弃、整个过程收敛为止；其下可有多个 Proposal 和多个 Branch，但每个 Proposal/Branch 只对应一个 Chance。`select` 的待选集合、AssumptionSet 中的引用以及运行时 Decision 的作用对象都是 Chance。`admit` 之前的机会发现阶段没有 id，不属于 Chance。Branch 仍是具体执行，Proposal 仍是不可变候选输入，Candidate 仍只是 Branch 的角色。（`../design-model.md` §3.1；`policy-decisions.md`）
-- **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；控制面在此从共同 execution base 登记多个逻辑 Branch，Runtime 按需建立其执行承载（共享或独立环境）。（`branch-semantics.md`；`decisions.md` D-024；术语收敛）
+- **pending-result boundary**：真实 operation 结果未到的执行边界（时机语义）；控制面在此登记多个逻辑 Branch，并为每个 Branch 绑定独占 Environment。（`branch-semantics.md`；术语收敛）
 - **SpecTask**：基于 Proposal 启动的投机工作单元，运行在隔离域中，携带 AssumptionSet。对应 candidate Branch。（`../design-model.md` §3.1；`policy-decisions.md` §4）
 - **Authority** `A_u`：提供真实输入、结果或外部权威判断的可选来源（主生成流、真实环境、用户/人或远程服务）；`Authority` 可以为空。它对应 parent（producer lane）与真实 operation，不等同于 validator。权威值来自谁是 Chance 的固有事实，不是可替换的决策槽；是否取得、何时取得由 `launch(input) -> bool` 决定，Eager、Absent 和 Lazy 只是系统提供的快捷定义。（`../design-model.md` §3.1；`policy-decisions.md` §2.4）
 - **validator**：独立的验证器；在有 Authority 时可辅助判断 Proposal 是否兼容，在 Authority 为空时可依据结果或约束直接作可接受性判断。validator 不是 Authority 的一种。（`spec-exec-abstraction.md` §2 轴 4、轴 5）
