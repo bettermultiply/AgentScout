@@ -30,7 +30,7 @@ Runtime 为 Branch 的 Instance 提供执行承载。承载可以从 Branch barr
 以下语义可以由特定 Runtime 或 Adapter 提供，但不作为所有 Runtime 必须具备的 Branch 前提：
 
 - sibling environment 的不可见与不可修改；
-- 共享执行环境下，在操作作用前阻止或暂存对权威路径和其他 Branch 的影响；
+- 多个 Branch 共用 Backend 内部资源时，在操作作用前阻止或暂存对权威路径和其他 Branch 的影响；
 - 完整进程树的 checkpoint、restore 或廉价 fork；
 - memory、workspace 和 I/O 的强隔离；
 - 环境间资源干扰限制；

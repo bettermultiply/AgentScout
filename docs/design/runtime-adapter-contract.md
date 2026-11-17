@@ -8,6 +8,12 @@ Runtime 的操作开始、操作结果和环境状态变化是 Runtime 自身的
 
 Runtime Adapter 连接控制面与 Runtime。控制面经 Gateway 按 Adapter 契约发出环境操作，Adapter 将其映射到 Runtime，并把结果和事件规范化返回；Gateway 负责通信接入、消息分发和送达，不代替 Adapter 的语义映射或 Registry 的验证。契约的核心是 Runtime 提供的承载能力：环境建立、环境内操作、静止、恢复、终止和清理，以及这些操作对不同环境内容形成的隔离和效果保证；环境派生是可选能力，不是所有任务或 Runtime 的前提。
 
+Adapter 只负责接入所需的配置；环境及其网络配置归 Runtime，实际分配结果属于运行状态。此责任边界不要求 Adapter 使用独立二进制，也不规定配置文件的组织方式。
+
+控制面不得直接修改 Runtime mutable state；Runtime 不解释 Agent prompt、模型格式、candidate 质量或整棵 Speculative Tree 视图。
+
+Adapter 自行决定与 Runtime 之间的 transport、wire format 或 IPC；transport 不得改变 operation 的原子性、identity／capability 校验、role-specific response、failure semantics 或 Runtime 状态所有权。
+
 控制面中的 `ControlSession` 只是 Gateway 与 Adapter 之间的网络会话和请求关联，不是 Runtime 环境身份，也不替代 Registry 的接入检查。Runtime 创建 Environment 并返回 `environment_id`；控制面保存 Branch 与返回身份的绑定，后续请求使用该身份，不向 Runtime 传 Branch identity。Agent 接入侧的 Agent session、workspace identity 与 Runtime environment identity 分别由各自拥有者管理：Agent 握手确认接入侧身份和所需 API，不等于 Runtime 已验证环境保证；workspace 路径是启动参数和工作区定位信息，不是权限或 Branch identity 的推导来源。
 
 Adapter 可以使用 Runtime 原生隔离、权限控制、代理、拦截或拒绝来兑现声明。Registry 检查的是 Adapter 在边界上呈现的最终环境保证，不检查某一种内部实现。

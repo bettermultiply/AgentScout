@@ -40,6 +40,8 @@ AScout 不追踪无限递归的理论因果链。Service Adapter 声明 `observa
 
 在声明的范围内，sibling 的私有变化不能改变其他 Branch 的观察或约束；被淘汰 Branch 的共享语义变化不能进入最终执行状态；winner 需要继续使用的已提交效果不能因为 Branch 切换而丢失。Contract 和 guarantee horizon 之外的 provider 内部状态或 operational footprint 只按已声明能力记录和计量，AScout 不对其声称隔离保证。
 
+在上述声明边界内，最终 semantic state 等价于 committed parent operations 与 winner continuation。
+
 因此，Policy 可以要求对 Outcome 或 operational footprint 进行额外纳管，但不能移除 AScout 为保证正确性而规定的最低纳管范围。只有超出默认资源计量、并且实际改变保证范围内可观察业务行为的资源或结果变化，才需要作为效果进入下面的处理流程。
 
 ## 2. 效果管理过程

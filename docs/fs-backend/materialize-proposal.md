@@ -13,8 +13,10 @@ upper 中，宿主真实 workspace 不会自动收到这些写入。
 正常完成时，仅在任务完成、没有存活候选且任务相关写入完成后物化，并重置
 Authority 的基准；不为了物化暂停执行。取消、失败或终止任务时立即进入物化
 处理，先结束候选并等待任务相关写入完成，再实际写回。
-Agent 常用的 Ctrl-C 或退出均终止任务，不据此规定 Ctrl-C 是否关闭整个程序。
-暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，保留有效树、候选和环境等待继续；
+Agent 常用的 Ctrl-C 或退出均终止任务；Ctrl-C 保留程序和 session，留在对话中，
+待候选结束、相关写入及物化处理完成后可接下一轮。物化失败须显示失败，不能宣告成功。
+暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，明确继续命令为 `/continue`，
+恢复原任务执行，保留原树、候选和环境关系；普通消息是否也解除暂停未定。
 它与原 Agent 的 Ctrl-C／退出终止语义分开，不意味着退出程序。
 任务（task）是 session 中 Agent 的一轮工作；Agent 完成本轮工作、开始等待用户
 输入时，task 完成。一个 session 对应一个 AScoutAgent 和一棵投机树，task 完成
@@ -64,8 +66,10 @@ rename、目录删除等会影响多个路径，必须落实完整受影响路�
 
 - 当前已接入任务完成、写者结束等待、失败重试及新 upper 基准替换。
   Pi 会话宿主不持有 Authority overlay；各 Branch 的内建文件工具读取对应运行计划。
-- `/pause` 保存树和执行状态，现有输入入口继续；终止与暂停分开。
+- `/pause` 保存树和执行状态，`/continue` 已接入专用控制命令；普通输入继续兼容现状，普通消息是否也解除暂停的目标语义未定。终止与暂停分开。
   恢复使用恢复时宿主普通 bottom lower，不承诺宿主历史内容；受管增量独立保存。
+- Ctrl-C/SIGINT 已走保留 session 的 Interrupt；SIGTERM 仍走 Shutdown。
+  独立暂停入口的更多 UI 形式未定，实际覆盖见[恢复](../development/recovery.md)。
 - 各项实际验证和剩余缺口见 [当前实现状态](current-state.md) 与 [恢复](../development/recovery.md)。
   组合 Runtime 候选环境、扩展工具写者、候选嵌套及存储机制须按实际记录验收，
   局部通过不代表整体完成。

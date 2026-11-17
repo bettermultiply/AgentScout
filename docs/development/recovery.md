@@ -1,5 +1,76 @@
 # 主动退出恢复
 
+## 当前范围
+
+2026-11-16 审查补验：Authority 的首个后台写者现为持续写 heartbeat 的无限循环，
+不存在外部 release；测试先确认写者仍活着且未发布，SIGINT 后要求 task 为 cancelled，
+并确认完成后 heartbeat 不再增长。加强后的测试在本轮修改实现之前已经通过
+（`/tmp/opencode/sigint-review-before.log`，证据 `authority-filesystem-cUpUV1`）；
+因此本轮不把它描述为新复现的实现失败，也不再用旧夹具中 SIGINT 后写 release
+的通过结果证明主动停止。既有 Abort → holder cancel drain 路径保留。
+
+信号补验先确定性消费唤醒字节，再设置 pending 标志，不再补写字节；旧信号线程
+在 500ms 门槛内失败（`sigint-review-signal-before.log`）。当前信号线程以 20ms
+读取超时重新检查标志，标志使用 release/acquire 同步；pipe 仅为唤醒提示。
+三个相继的晚到 SIGINT 与随后 SIGTERM 均能转发，不依赖后续 UI/Runtime 输入；
+退出用 socket 写半部关闭，避免结束字节因非阻塞缓冲区满而丢失。
+标准信号及布尔 pending 标志允许同类信号合并，不保证逐次计数；取消保持幂等。
+
+缺失 authority、Branch 或 Environment 时不再 unwrap／直接传播启动错误，
+而是记录 `materialization_failed` 并显示可重试失败，禁止报告 task 成功及放行下一任务。
+测试先失败于缺失 Environment（`sigint-review-authority-before.log`），修复后覆盖三种缺失。
+缺失绑定不会自动重建；状态未修复时重试仍失败，保留 task_finishing 是明确失败门槛，
+不是等待一个永不到达的 Runtime 回执。此处不承诺损坏状态下 SIGTERM 一定正常退出。
+
+本轮最终联合回归 `sigint-review-joint-final.log` 7/7，无跳过或取消，Authority 证据
+`/tmp/opencode/authority-filesystem-dh4Lnm`。全库默认并发首次 175 通过、1 项
+`extra_mount_fork_diff_accept_discard_round_trip` 失败；该项单独复跑通过
+（`sigint-review-fs-recheck.log`），降低并发复跑 176/176（`sigint-review-lib-final.log`）。
+本轮未修复或确定该挂载用例的偶发失败原因，不能称默认并发全库首次通过。
+`cargo fmt -- --check`、`git diff --check`、`cargo check --all-targets`、
+`cargo build --bins` 和 bin 测试（3/3）通过，最终日志为
+`sigint-review-{check-final,build-final,signal-final}.log`，日志前缀均为
+`/tmp/opencode/sigint-review-`；全程本地伪模型，未调用真实模型。
+
+2026-11-16 物化等待中断补验：物化请求从控制事件循环移到工作线程，结果回到
+同一循环处理；task 收尾期间只允许一个物化请求在飞。SIGINT 可在 holder 后台
+写者等待期间发出 Abort；Abort 使用命令编号、代数与终态回执，不把普通
+`turn_completed` 当作取消完成。物化结果与全部命令／操作回执收齐后才完成 task，
+随后才放行已排队输入；Shutdown 等同样收齐后退出，Pause 不抢占收尾。
+holder 的被动 drain 与取消 drain 串行确认，取消停止其拥有的后代并确认停止后
+回复，避免被动物化先关闭 holder 而丢失取消回执。不使用任意超时宣称活写者结束。
+
+失败→成功证据：`/tmp/opencode/materialize-interrupt-before.log` 在保持门控关闭时
+稳定失败于 `SIGINT must terminate a resident background writer during materialization`，
+目录 `/tmp/opencode/authority-filesystem-4x4TSg`；当时同一断言修复后通过，但旧夹具仍写
+release，主动停止证据以后续无 release 补验为准。最终联合回归
+最终复跑 `/tmp/opencode/materialize-interrupt-joint-final.log` 7/7、无跳过／取消，Authority
+证据 `/tmp/opencode/authority-filesystem-0pPXAy`，含等待中 SIGINT 留会话、下一轮、
+自然结束的后台写者、延后输入、Pause 交错、物化失败重试及等待中 SIGTERM。
+库测试 175/175（`materialize-interrupt-lib-final.log`），Pi 接入等 16/16
+（`materialize-interrupt-pi.log`），`cargo check --all-targets` 与 `cargo build --bins`
+通过，日志均在 `/tmp/opencode/`。恢复 continue 夹具最后的 Pause 改为等待新 task
+物化完成，避免将收尾期间按既定语义忽略 Pause 当作保存失败；保留活动任务暂停断言。
+全部使用本地伪模型，无真实模型调用。任意不受管扩展写者、深层候选组合和原生
+btrfs incremental 未由本次补验覆盖；不可终止的内核等待仍不得冒充写者已结束。
+
+2026-11-16 入口增量：库测试 174/174、`cargo check --all-targets`、
+`cargo fmt -- --check`、`cargo build --bins`、`git diff --check` 通过；Pi 接入、
+交互和 notification 回归 16/16。日志 `/tmp/opencode/task-entry-{lib-final,check-final,build,pi}.log`。
+Authority/恢复联合验证 7/7（无跳过、取消）通过，日志
+`/tmp/opencode/task-entry-node-final3.log`。Authority 证据 `/tmp/opencode/authority-filesystem-fqtxBD`，
+恢复五模式及 FS 主入口目录见该日志。覆盖 SIGINT 后同 session 下一轮、空闲控制、
+暂停后中断、失败重试、后台写者等待、候选继续、晋级后写入及保存源不变。
+补充“物化失败在 UI 状态可见”断言后单独重跑 Authority 1/1 通过，
+日志 `/tmp/opencode/task-entry-authority-final.log`，证据 `/tmp/opencode/authority-filesystem-Bul8Vn`。
+WebUI `npm run build` 通过（`/tmp/opencode/task-entry-web-build.log`）；未进行屏幕交互验收。
+先用库测试复现 idle `/continue` 被算作用户输入（`task-entry-lib-before.log`），
+再修复；Authority 门控回归复现物化早于后台写者结束（`task-entry-sigint-before.log`、
+`task-entry-node.log` 中 `background writer prevents publication`），最终通过。不据局部通过宣称全部 Authority 完成。
+环境后台写者需先结束再物化；等待期间的 Ctrl-C 验收与其余范围限制见本节顶部补验。
+
+2026-11-16 确定：暂不要求程序异常退出后重新启动并继续原任务。已有主动保存、加载和恢复能力保留；本文件中的验证不因此扩大为崩溃恢复保证。异常退出后的受管进程停止及残留资源清理仍需处理，与任务是否能恢复分开，见 [Runtime 生命周期](runtime-lifecycle.md#当前范围执行承载资源清理与恢复)；本轮未选择或实现新的异常清理机制。
+
 ## 2026-11-16 Environment 身份与生命周期修正
 
 本轮 Runtime 创建身份链路最终验证：`cargo fmt -- --check`、`cargo check --all-targets`、`cargo test --lib`（170/170）通过；先 `cargo build --bins`，再串行执行 `node --test --test-concurrency=1 tests/recovery-active.mjs`，五种模式全部通过，无取消或跳过。证据目录依次为 `/tmp/opencode/recovery-active-cy90lI`、`/tmp/opencode/recovery-active-3LMIAo`、`/tmp/opencode/recovery-active-R2uHDY`、`/tmp/opencode/recovery-active-QfT7ro`、`/tmp/opencode/recovery-active-tns9kK`。使用本地伪模型，保留动态端口、独立目录及原有超时和断言；本轮未单独重跑 `recovery-filesystem.mjs`，五模式脚本包含 filesystem 恢复场景。
@@ -41,16 +112,20 @@ branch_environment；内部资源可以共享。候选实际建立 Backend 环�
 尚未覆盖任意扩展工具的写者约束、深层候选组合和全部存储机制。不能据此宣称
 所有接入与所有存储机制已完成；原生 btrfs incremental 未在本机验收。
 
-2026-11-14 目标与实现差距：Agent 常用的 Ctrl-C 或退出均终止任务，须结束候选并
-等待任务相关写入完成后物化；Runtime 报告失败时，控制面不能宣告任务成功。
-暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，保留树、候选和环境等待继续；
-它与原 Agent 的 Ctrl-C／退出终止语义分开，暂停不意味着退出程序。具体 UI、继续入口的
-命令名称及 Ctrl-C 是否同时关闭整个程序尚未确定。task 是 Agent 的一轮
+2026-11-16 目标与实现差距：Agent 常用的 Ctrl-C 或退出均终止任务，须结束候选并
+等待任务相关写入完成后物化。Ctrl-C 保留程序和 session，留在对话中，待上述处理
+完成后可接下一轮；Runtime 报告物化失败时须显示失败，控制面不能宣告任务成功。
+暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，明确继续命令为 `/continue`，
+恢复原任务执行，保留原树、候选和环境关系；普通消息是否也解除暂停未定。
+它与原 Agent 的 Ctrl-C／退出终止语义分开，暂停不意味着退出程序。独立暂停入口的
+具体 UI 未定。task 是 Agent 的一轮
 工作，Agent 完成本轮工作并开始等待用户输入时完成。
 
-当前 `ascout-control-plane.rs` 将 SIGINT／SIGTERM 转为 Shutdown 请求；TUI
-捕获的 Ctrl-C 走 `Interrupt`。工作区已接通 Pause／`/pause` 的保存入口，
-Shutdown／Interrupt 则走终止、等待写入及物化路径，Shutdown 随后关闭程序。
+当前 SIGINT 与 TUI Ctrl-C 走 `Interrupt`，终止当前 task 后保留控制面和 session；
+SIGTERM 与显式 Shutdown 仍退出。Pause／`/pause` 保存整树；`/continue` 经专用
+控制命令恢复原任务而不新增模型用户消息。普通输入解除暂停兼容现状，不将其提升为
+新的设计决定。保存尚未完成时 `/continue` 不启动工作；终止期间不再允许 Pause
+阻塞物化，重复取消不重复发出中断。物化失败保留重试状态且不报告 task 成功。
 已有保存不构成物化完成，候选被接受后继续使用候选环境的关联与交接仍需核查，
 不能以能恢复环境证明接受路径已对齐。见
 [物化提案](../fs-backend/materialize-proposal.md)。

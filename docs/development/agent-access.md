@@ -51,6 +51,22 @@
 - `rebalance` 的 pause/resume 与 extent/effect hold 都由通用层保存和释放；`branch_suspended` / `branch_resumed` 由通用层上报。
 - 控制面命令的 hold 生命周：`start_candidate` 建立 effect hold，`promote` 释放 effect/extent，`discard`、`cleanup` 释放全部 hold 并清理本地状态，`resolve_pending` 释放 extent。
 
+### 3.1 交互接口（2026-11-16）
+
+目标语义见 [Agent 接入设计](../design/agent-integration.md) §3.1。2026-11-16 已实现：`agent-access/pi/main.ts` 四处创建 session 后通过共同的 `bindInteraction` 调用 `session.bindExtensions({ uiContext })`，上下文由 `interaction.ts` 提供。`confirm/select/input/editor` 生成 `prompt_id` 并等待控制面的回答；AbortSignal、取消、Branch discard/cleanup/abort、恢复暂停及连接退出都结束等待。结束等待一律 resolve 而不 reject：取消、中止、断开都按 Pi RPC 宿主同样的默认答案收尾（`confirm` 为 `false`，其余为 `undefined`），只有不支持的 `custom` 直接 reject。这样扩展拿到的是“未确认／未作答”而非异常，避免未捕获 rejection 终止 Pi 进程；取消之后的结果如何处理仍归 Agent。绑定本身可能触发 `session_start` 提示，因此不占住命令队列；执行等待绑定完成，回答和取消能够独立送达。提示只传文字，答案原样交回 Pi，不增加 Policy Decision 或修改 extent/effect。
+
+命令清单在初始权威 session 的 `bindExtensions` 完成后读取一次：这包括 `session_start` 和随后的 `resources_discover` 资源加载。启动提示先独立发布、可立即回答，不等待清单；执行等待绑定完成，但命令队列不等待提示。清单保存在 Pi 接入进程的 `commandCatalog`，控制面 `command_catalog` 保存已发布清单，Ledger 保存 `commands_listed` 供 WebUI/TUI 重连折叠；权威切换不清空、不重取，输入 `/` 只筛选缓存。旧 `get_commands` 入口仅返回缓存，不触发 Pi 资源读取；不引入自动过期或轮询。项保留 `name/description/source/sourceInfo`；接入优先使用公开 `session.getCommands()`，当前相邻 Pi 使用其 RPC 同样采用的公开来源 `extensionRunner.getRegisteredCommands()`、`promptTemplates`、`resourceLoader.getSkills()`。没有硬编码命令表或修改 Pi。选中命令原文交给 session.prompt；Pi 原生终端内建命令不另行复制。
+
+协议：Agent 消息 `ui_prompt_requested(branch_id,prompt_id,kind,title,message_text,options,placeholder,prefill)`、`ui_prompt_cancelled(branch_id,prompt_id)`、`ui_notification(branch_id,text,level)`、`commands_listed(branch_id,request_id,commands)`；命令 `ui_prompt_answer(branch_id,prompt_id,answer,cancelled,reason)`、`get_commands(branch_id,request_id)`。HTTP action 为 `ui_prompt_answer(prompt_id,answer,cancelled?)` 和 `get_commands(request_id)`。回答在控制面事件循环同步校验当前权威与未回答状态，未知、重复、迟到回答返回明确错误（HTTP 409）；不为提示增加超时或默认答案。
+
+`SpeculativeTree.ui_prompts` 按 Branch 保存提示，候选内容不进入观察事件。`change_authority` 在确认 Promote 后发布该 Branch 的挂起提示，同时取消换出权威的未答提示：提示已经展示过，但换出后任何回答都会被拒绝，继续显示只会留下无法操作的控件。`change_status` 进入丢弃／清理、interrupt、shutdown、失败及释放时关闭提示并排队取消命令。未知 Branch 或重复 `prompt_id` 也回一条取消命令，不把 Agent 的提示错误升级为连接失败。执行循环先发送这些取消，再发送原有生命周期命令。WebUI 仍通过原有 SSE 读取 `ui_prompt_requested/ui_prompt_resolved/ui_notification/commands_listed`，无第二条推送通道。
+
+本轮验证：先用 `tests/pi-interaction.mjs` 稳定复现回答后 Promise 不完成，再移除外层提前 `pending.delete`，由内部 finish 统一删除并 resolve；回答、明确取消、分支取消、AbortSignal 与无人回答保持等待均通过。实际 TUI 输入循环的手工字节回归覆盖 confirm/select/input/editor、中文退格、多行提交及 Esc 取消，不把答案当聊天。控制树 13 项相关测试通过，含候选提示挂起→换权威发布→回答、迟到／错类型拒绝、换权威取消与缓存查询。`tests/pi*.mjs` 全部 32 项通过；SDK double 的 session_start 先等待回答，再完成资源加载，断言清单读取一次、重复请求只回缓存。WebUI 手工事件核对换权威保留清单、关闭旧提示、重连折叠恢复缓存。`cargo check --all-targets`、WebUI typecheck/build、`git diff --check` 通过；构建保留现有大包体提示。未调用真实模型、未执行特权环境测试，也未完成真实终端／浏览器／真实扩展的人工全链路验收。
+
+中断方面，整轮中断已有基础：中止权威执行、丢弃候选，并把仍在请求阶段的工具操作标记为失败。Runtime 中已经开始执行的工具没有取消通道，仍属实现缺口，归后续取消相关项。
+
+本轮补充验证：`cargo test --lib control_plane::` 27 项通过；`interaction.ts` 独立 TypeScript 检查通过，手工构造事件核对 confirm 的 false 原样返回、AbortSignal、取消及 custom reject 均通过。以上不等于真实扩展与浏览器全链路验收。
+
 ## 4. session 持久化与状态交接：已定方向及实现差距
 
 2026-11-13 确认：运行分支采用 Pi 原生完整持久化，允许多 session 作为过渡，由接入侧汇总为单一最终权威 session。源分支停止写入且成功汇总后，才可删除对应临时文件；Promote 后仍活跃的 winner 不能删除。compaction、custom 等记录必须保存，不只保存 `message_end`。这些是已定实现方向，不表示当前适配器已经完成。
@@ -61,10 +77,10 @@
 
 尚未解决的实现差距：
 
-- 完整持久化及汇总已保留原生身份、预测与原主／丢弃历史；剩余为并发配对、冲突与失败的完整验收。未额外要求另存完整投机后续路径。
+- 完整持久化及汇总已保留原生身份、预测与原主／丢弃历史，未额外要求另存完整投机后续路径。并行工具处理沿用当前规则（2026-11-16 确认）：候选预测目标调用，等待父分支同批其他调用的真实结果齐全后再继续；规则确认不代表冲突、失败及全部并发场景已验收。
 - compaction/custom 记录必须保存；原生父引用与已知 `targetId`／`firstKeptEntryId`／`fromId` 已有校验，任意 custom payload 的外部引用仍不能通用解释。compaction 摘要保留原文已确定，不阻塞汇总或满足其他条件后的源清理，不再列作待议事项。
-- 在飞推理如何与历史整理、状态交接协调仍未定；不擅定重启、强制取消或替换运行中上下文。
-- rollback 与外部资源状态如何关联仍未定；最终 session 能恢复对话历史不等于已证明工具、环境和外部资源可完整继续。
+- 在飞推理与历史整理的顺序已定（2026-11-16）：被接受的那一支自己的在飞推理和它的后代继续；同一 Chance 下其他候选及其子树失效，先停止写入、再清理；每一支的历史在它自己停笔后才整理。取消确实发生在清理之前尚未专门验证。
+- rollback 的跨仓库 Git ref／object 与 NLE 外部运行资源迁移暂不在当前范围，同仓库快照关联与恢复已验证；最终 session 能恢复对话历史不等于已证明工具、环境和外部资源可完整继续。
 - 历史重挂后，系统外导出按原生 session/events 还原请求关系；正常运行不计算或保存回放专用键，还原算法与验证边界见 [回放](replay.md)。
 
 原始运行上下文与整理后恢复上下文可能不同，是用户接受的历史含义变化，不把二者相同列为验收承诺。是否向 winner 追加真实结果通知交由 Policy，默认完全不追加，不发送空消息；既有 dispose／Promote 承载可选 `notification`，不新增 Policy 名称或类别。
@@ -73,7 +89,7 @@
 
 验证：`node --test tests/pi-access.mjs tests/pi-session-history.mjs` 共 7 项通过，覆盖 checkpoint 原生记录、原生 ID、真实结果重挂、运行 manager 不变、活跃源保留、停止后清理、失败保留和已安装 `pi-code-rollback` 的同仓库快照关联。快照在 `/tmp/opencode` 临时 Git 仓库生成，核对 `targetId`、`repoRoot`、`ref^{tree}`、Git blob 可读及重开后的启动 GC；没有执行用户仓库恢复。`node tools/replay/verify/b1-pi.ts` 通过，使用本地回放服务，产物 `/tmp/opencode/ascout-replay-b1-pi-ENK910`。
 
-后续审查已补上同仓库独立真实 Pi 文件任务继续及临时 Git 实际 rollback 恢复，并修复结果误选、候选重挂路径、独立重开位置和异步 shutdown 记录遗漏；完整命令、范围和剩余项见 [Pi session 审查修复](pi-session-review-2026-11-13.md)。跨仓库 Git ref/object、NLE 外部资源迁移仍未验收，不能把复制 session 文件当作完整 `pi-code-rollback` 支持。compaction 摘要已确认保留原文，不阻塞汇总或满足其他条件后的源清理，不重新生成摘要。
+后续审查已补上同仓库独立真实 Pi 文件任务继续及临时 Git 实际 rollback 恢复，并修复结果误选、候选重挂路径、独立重开位置和异步 shutdown 记录遗漏；完整命令、范围和剩余项见 [Pi session 审查修复](pi-session-review-2026-11-13.md)。跨仓库 Git ref/object、NLE 外部资源迁移不在当前范围（暂缓），不能把复制 session 文件当作完整 `pi-code-rollback` 支持。compaction 摘要已确认保留原文，不阻塞汇总或满足其他条件后的源清理，不重新生成摘要。
 
 ### 4.1 Promote notification
 
@@ -89,6 +105,7 @@
 
 ## 5. 限制
 
+- 2026-11-16：Pi `custom` 提示立即 reject 并说明不支持；终端组件、主题、状态与编辑器装饰接口仅最小空实现，`notify` 为文字观察事件。AScout TUI 提供 confirm/select/input/editor 回答与取消入口，多行 editor 可用，操作见 [TUI 使用说明](reference-workload.md)。无人回答保持等待，不补默认答案或超时；明确取消才按 Pi 的取消值结束。挂起提示不提供跨崩溃恢复，主动恢复暂停会取消提示。Runtime 中已开始的工具仍无取消通道。
 - 只有 Pi 一个 Product Integration；sub-agent 启动前仍无统一 Hook。
 - effect 只实现 `block` / `deny` 两种最小计划，没有 Reuse、Salvage 或更多效果模式。
 - extent 计数的是工具执行点的 action 次数，不是模型语义上已完成步骤数；子 Chance 的计数独立于父 Chance。

@@ -32,9 +32,9 @@
 
 ### 2.1 Gateway
 
-Gateway 是控制面面向 Agent 接入侧、UI 与 Runtime 的统一受管通信边界，负责通信如何接入、消息交给谁以及如何送达。消息对投机执行的变化由相应控制逻辑决定；Runtime 的消息仍遵守 Runtime Adapter 契约，不因通信统一而绕过 Adapter 或 Registry。
+Gateway 属于控制面，不独立部署，由控制面统一启动和停止。它是控制面面向 Agent 接入侧、UI 与 Runtime 的统一受管通信边界，负责通信如何接入、消息交给谁以及如何送达。统一生命周期不规定必须同进程，也不要求自动打开浏览器。消息对投机执行的变化由相应控制逻辑决定；Runtime 的消息仍遵守 Runtime Adapter 契约，不因通信统一而绕过 Adapter 或 Registry。
 
-Gateway 的通信职责包括：管理连接、会话、握手与断线；进行入口格式、身份、上下文与权限检查；接收请求、执行事实与命令回执并转交相应处理方；交付命令、已编译的本地 Decision、结果及观察事件。Gateway 与 Runtime 采用网络通信；UI 可以与控制面一起部署，也不因此取得 Tree 或生命周期权威。消息覆盖 Agent、UI 和 Runtime 三侧，各侧既有协议和权限边界继续有效。除通信所需的暂时状态外，Gateway 不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态，也不承担投机编排。控制面负责启动协调；Runtime 负责实际启动 Agent 与接入进程，Adapter 长期作为独立部署的接入边界存在。
+Gateway 的通信职责包括：管理连接、会话、握手与断线；进行入口格式、身份、上下文与权限检查；接收请求、执行事实与命令回执并转交相应处理方；交付命令、已编译的本地 Decision、结果及观察事件。Gateway 与 Runtime 采用网络通信；UI 不独立部署，由控制面启动和停止，也不因此取得 Tree 或生命周期权威。消息覆盖 Agent、UI 和 Runtime 三侧，各侧既有协议和权限边界继续有效。除通信所需的暂时状态外，Gateway 不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态，也不承担投机编排。控制面负责启动协调；Runtime 负责实际启动、监视和回收 Agent 与接入进程。Adapter 是 Runtime 的接入边界，其部署与配置组织不由 Gateway 的生命周期规定。
 
 ### 2.2 Policy Engine
 
@@ -77,6 +77,8 @@ Coordinator 不使用固定价值公式替代 Policy 的跨 Chance 权衡，也�
 控制面将 Policy 的效果处理意图和合法裁决交给 Runtime，并依据实际返回的结果更新控制状态。Effect Coordinator 属于 Runtime 的整体效果管理责任；其内部组件和部署不在这里固定。模拟结果仍必须标记来源并遵守假设与验证语义，不能以控制面记录已更新代替实际效果处理完成。具体纪律见 [效果管理](effect-management.md)。
 
 ### 2.6 Ledger
+
+Ledger 记录运行事实，不承担合规或安全取证 audit；持久、tamper-evident audit 由具体 Runtime 按部署需求提供，控制面正确性不依赖它。
 
 Ledger 以异步旁路记录控制面需要保留的运行事实，包括 Policy 决策、Branch 与 Proposal 状态变化、验证依据、效果与 obligation 处理结果、资源使用、取消与清理结果、Adapter 映射结果与 Runtime 失败。它用于状态对齐、问题定位、shadow/replay 和契约校验；它不从记录中重新决定生命周期，也不代替 Runtime 持有执行状态。
 

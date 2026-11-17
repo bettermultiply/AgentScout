@@ -322,9 +322,9 @@ W&D、AsyncFC、Execution Edits 和 Tracking State Footprints 仍按 survey 作�
 
 | # | 具体场景 | 现在哪里对不上 | 性质 | 建议／状态 | 修正后的影响 |
 |---|---|---|---|---|---|
-| 1 | 主 Agent 保留自己的推理，只采用候选提前跑出的工具结果 | `dispose` 已把 Reuse／Promote 分开，接入侧已有跳过原调用并返回结果的路径，D-031 已有 command reuse 条件；但 `glossary.md` 把两者都映射为 `accept`，`branch-semantics.md` §4.5 只描述整 Branch 替换 | 正式条款互相矛盾 | 把 `accept` 定义为 resolution 结果；Reuse 只移交已验证结果和按声明需要移交的受管状态，然后清理候选；Promote 才替换主延续。带状态变更的复用继续受 D-031／Effect Management 约束 | 不新增实体、Decision 或接口；改 `branch-semantics.md`、`glossary.md`、`policy-decisions.md` §2.7、`agent-integration.md` §2.1／§2.3、`effect-management.md` §1.3 的文字和交接规则。树、single-winner、效果屏障不变 |
+| 1 | 主 Agent 保留自己的推理，只采用候选提前跑出的工具结果 | `dispose` 已把 Reuse／Promote 分开，接入侧已有跳过原调用并返回结果的路径，`branch-semantics.md` §5.1 已有 command reuse 条件；但 `glossary.md` 把两者都映射为 `accept`，`branch-semantics.md` §4.5 只描述整 Branch 替换 | 正式条款互相矛盾 | 把 `accept` 定义为 resolution 结果；Reuse 只移交已验证结果和按声明需要移交的受管状态，然后清理候选；Promote 才替换主延续。带状态变更的复用继续受 `branch-semantics.md` §5.1／Effect Management 约束 | 不新增实体、Decision 或接口；改 `branch-semantics.md`、`glossary.md`、`policy-decisions.md` §2.7、`agent-integration.md` §2.1／§2.3、`effect-management.md` §1.3 的文字和交接规则。树、single-winner、效果屏障不变 |
 | 2 | `j` 时刻提前算 `j+3` 的动作；`j+1` 接受了另一个候选，而 `j+3` 的结果并不依赖被拒 Proposal | §4.5 规定 Accept 后旧 parent 和 candidate 的 sibling subtrees 失效；AOSpec／DynBranch 要让独立提前结果活到自己的 Edge | 正式条款与论文行为冲突，是真正的模型问题 | **暂按 A（不覆盖 independent offer）**：保守，只支持落在被接受路径上的前缀。备选 B：扩展，允许不依赖被拒 Proposal、执行前状态版本仍匹配的候选继续存活，并在自己的 Edge 上重新参与 `match`／`dispose` | A 只改范围和 survey 表述，不改模型。B 会动 Branch 生命周期、sibling 清理、single-winner、AssumptionSet、状态版本和资源所有权，必须单独设计、实现和测试 |
-| 3 | AOSpec 的动作加执行前环境版本；DynBranch 的读集合新鲜度；TomasuLLM 的实际读依赖 | Runtime Adapter 只声明隔离属性，不提供状态版本、读集合或新鲜度；D-031 只有 command reuse 的 workspace revision，不是通用状态版本 | 能力契约缺口 | 把状态版本和读集合做成可选能力；Policy 需要时由 Contract 校验，后端没有就拒绝或明确降级；`match` 的 evidence 携带这些事实及其来源 | 改 Runtime Adapter Contract、Capability View 和 `match` 输入；Branch 语义不变。实现需要后端配合，不能只靠控制面推断 |
+| 3 | AOSpec 的动作加执行前环境版本；DynBranch 的读集合新鲜度；TomasuLLM 的实际读依赖 | Runtime Adapter 只声明隔离属性，不提供状态版本、读集合或新鲜度；现有 command 粒度语义只有 workspace revision，不是通用状态版本 | 能力契约缺口 | 把状态版本和读集合做成可选能力；Policy 需要时由 Contract 校验，后端没有就拒绝或明确降级；`match` 的 evidence 携带这些事实及其来源 | 改 Runtime Adapter Contract、Capability View 和 `match` 输入；Branch 语义不变。实现需要后端配合，不能只靠控制面推断 |
 | 4 | LEAP 一次验证 `k+1` 个上下文；SpecAgent 返回 `(j, reason, replacement)`；SMC 一次接受宏 | `MatchResult` 是开放的，但没有规定一次批量结果如何拆成每条 Edge 的确认／拒绝，也没有规定验证证据自身携带哪些未决 Proposal 依赖 | 规则缺口，不是结构不支持 | **方向：不新增批量原语**：`match`／`dispose` 保持逐 Edge，由 Policy 在一次审核后把结果分发；机制按前缀顺序逐条确认／拒绝，再采用对应状态。需补修正动作入口和证据依赖；确有必要时再给 evidence 增加结构化前缀字段 | 主要改 `policy-decisions.md` §2.6／§4.2 的说明；可能扩展 `MatchResult`／validator 契约。不改树，不新增 Decision |
 | 5 | SpecAgent／LEAP 的 weak–strong；Skim 的快路径执行器 | `predict` 可以用小模型，但候选 Branch 的执行配置没有声明位置；文档没有说明候选能否使用不同的模型、prompt、工具集或执行器 | 能力契约缺口 | 在 candidate／Instance 上声明执行配置，由 Contract 和 Fidelity 校验；`predict` 仍只负责生成 Proposal | 改 Agent 接入侧、Contract、Instance metadata 和 Fidelity 校验；Edge／Branch／九类 Decision 不变 |
 | 6 | DynBranch 跨 task 缓存已确认结果 | Branch identity、handle、capability 和 resolution 限定在一棵 Tree 内，同 session 的多轮 task 共用树；Outcome 跨 task 消费的授权、寿命和失效规则仍待核查 | 结果复用契约缺口 | 核查后续 task 消费已确认结果的依据、授权与有效性，不以共用树代替结果复用保证 | 若要在 AScout 内置，仍需明确结果存储、授权和寿命契约 |
@@ -333,7 +333,7 @@ W&D、AsyncFC、Execution Edits 和 Tracking State Footprints 仍按 survey 作�
 
 #### 对首轮判断的更正
 
-- 不能说“Reuse 没有入口”：`policy-decisions.md` §2.7、`agent-integration.md` §2.1／§2.3、D-031 都已经给了入口；问题是 `accept` 的映射没有统一。
+- 不能说“Reuse 没有入口”：`policy-decisions.md` §2.7、`agent-integration.md` §2.1／§2.3、`branch-semantics.md` §5.1 都已经给了入口；问题是 `accept` 的映射没有统一。
 - 不能说“树不支持前缀”：逐步 Edge 加嵌套 Branch，再配合 §4.7 的后代重挂，可以表达“接受前两步、丢掉第三步以后”；问题是批量证据拆分和每步状态保留，不是树结构本身。
 - 不能说“SpecAgent 需要任意写后回滚”：它的真实读是 PURE，首个写是 held；可以建模为共享环境中的 candidate 读，加 `effect=block` 的首个写。问题是 weak／strong 执行配置和 `(j, reason, replacement)` 的归属。
 - 不能说“LEAP 需要另一套轨迹树”：每步一个 Edge、target 作为 Authority、按前缀 Accept 就能表达；问题是并发 target 调用、每步环境状态和批量结果拆分。

@@ -1,5 +1,13 @@
 # Runtime 生命周期协议
 
+## 当前范围：执行承载、资源清理与恢复
+
+2026-11-16 确定：暂不要求程序异常退出后重新启动并继续原任务；已有主动保存、加载和恢复功能保留，范围见[主动退出恢复](recovery.md)。异常退出后的受管进程停止、残留资源归属确认和清理仍需处理，不因暂不要求任务恢复而取消，也不据此要求持久化全部运行状态。
+
+正常运行中的执行承载与派生以 [Branch 语义](../design/branch-semantics.md) 和 [Runtime 契约](../design/runtime-adapter-contract.md) 为准，不重新讨论是否要求保留原进程。能力声明的充分性归 Discussion 第 17 项，Branch 与 Runtime 执行上下文对齐归第 23 项，跨步骤与嵌套的整体验证归第 8、33 项；不能把已有基本执行闭环笼统列为尚未实现。
+
+服务效果插件的目标语义见[效果管理](../design/effect-management.md)，实现范围见 [Runtime 接入](runtime-adapter.md)，相关 Policy 差距归第 28 项。输入传播与输入消费边界分别归第 24、26 项，Agent 输入接入范围见[接入实现](agent-access.md)；历史持久化与主动恢复归第 31 项。未说明具体能力缺口的“完整资源租约”不作为独立交付要求；资源归属与清理责任随第 30 项处理。是否采用 pidfd 等机制留到具体清理方案选型时决定，本轮不作选择。
+
 ## 2026-11-16：Runtime 创建身份
 
 Gateway 提供 `establish()` 和 `branch(parent_environment_id, agent)`；协议中的 branch 不接收子环境身份，创建结果的 `environment_id` 指向新环境。Runtime 内部 `Backend::create_environment` / `create_child_environment` 分配身份，再调用内部 Backend 组合。分配器使用进程、时间与原子序号并检查当前状态，不接收 Branch 或 execution 身份。

@@ -32,7 +32,7 @@ Gateway 统一承接 Agent 接入侧、UI 与 Runtime 的通信，负责接入�
 
 一个 session 对应一个 AScoutAgent 和一棵 Speculative Tree。task 是 Agent 的一轮工作；Agent 完成本轮工作并开始等待用户输入时，task 完成，多轮 task 在同一控制域中继续。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。Runtime 向控制面报告物化完成或失败，物化失败等同操作失败；控制面必须等物化成功后才能宣告任务成功，物化前提见 [Runtime 设计](design/runtime.md)。
 
-候选被接受并承接后续执行时继续使用候选环境，仍受祖先依赖与效果约束。Agent 常用 Ctrl-C 或退出终止任务，结束候选及相关写入后物化；暂停由 AScout 独立接口提供，保留树、候选和环境等待继续。
+候选被接受并承接后续执行时继续使用候选环境，仍受祖先依赖与效果约束。Agent 常用 Ctrl-C 或退出终止任务，结束候选及相关写入后物化；Ctrl-C 保留程序和 session，待处理完成后在同一对话中接下一轮，物化失败须显示失败，不能宣告成功。暂停由 AScout 独立接口提供，保留树、候选和环境等待继续。
 
 ### 2.1 投机执行过程
 

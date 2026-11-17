@@ -1,5 +1,45 @@
 # 开发决策
 
+## 2026-11-16：信号唤醒与物化错误补验
+
+信号 socket 只承担唤醒提示，线程每 20ms 重新检查 release/acquire pending 标志，避免字节已消费或非阻塞写入失败后标志无人处理；退出关闭写半部，不依赖可能丢失的结束字节。同类标准信号可以合并，不引入信号次数语义，SIGINT 仍终止 task 并留 session，SIGTERM 仍请求 Shutdown。Authority 验收不再通过外部 release 结束待取消写者，改用无限 heartbeat 写者并检查停止。加强测试在已有停止路径上即通过，本轮不冒认该路径为新修复。缺失 authority／Branch／Environment 进入已有可见、可重试的物化失败状态，不伪造成功，不自动重建损坏状态。实际失败→通过证据、并发挂载用例的未定位失败与剩余限制见[恢复](recovery.md)。
+
+## 2026-11-16：物化等待不占用控制事件循环
+
+按既定 Ctrl-C 终止 task 并保留 session 的验收要求，物化及其后台写者等待改为工作线程执行，控制循环继续接收 Interrupt。只维护一个在飞物化，结果与 Abort 等命令的终态回执全部收齐后完成 task；失败保留收尾与重试门槛，不能提前启动下一 task。Abort 复用已有命令编号、代数及 command_result，不以普通 turn_completed 代替取消回执；控制面不查看或操作 Runtime 内部 PID。holder 被动 drain 与取消 drain 串行确认，避免关闭 holder 抢在取消回复之前。具体证据及限制见 [恢复](recovery.md)。此前同步物化导致无限后台写者无法响应 Ctrl-C 的限制已修复，不再作为当前免责边界。
+
+## 2026-11-16：终止、暂停与明确继续入口实现
+
+SIGINT 与 SIGTERM 分离：SIGINT、TUI Ctrl-C、Web Interrupt 共用 task 终止路径，SIGTERM 与显式 Shutdown 保留退出语义。`/continue` 走独立控制命令，不生成模型用户消息；普通消息继续解除暂停的兼容行为不扩展为新决定。重复终止不重复发出 Abort，终止期间 Pause 不阻塞收尾；保存晚到回执不重新发布终止中的运行。
+
+核查发现持久环境允许工具返回后保留后台进程，而原物化直接结束环境持有进程，后台写者可能被提前终止。环境持有进程通过 Linux subreaper 接管脱离 shell 的后代；物化前确认其拥有的写者结束，取消通过同一环境停止这些写者，不把宿主无关进程视为任务写者。相关实际验证与剩余限制见 [恢复](recovery.md)。此前“SIGINT 仍映射 Shutdown”和“/continue 仅定名未接入”的阶段记录保留为历史，不再代表当前实现。
+
+本文件按日期倒序记录已经接受的实现架构选择、当前实现差距与废弃记录。目标语义以 `docs/design/` 与 `docs/architecture.md` 为准，本文不替代正式设计文档。日期表示记录时间，不重排历史编号；同一天的多条记录保持原有先后。早期 `D-0xx-I` 条目保留为历史，集中在本文件末尾。
+
+## 2026-11-16：Gateway 随控制面统一启停
+
+用户批准 Gateway 属于控制面、不独立部署、由控制面统一启动和停止；目标以[控制面 §2.1](../design/control-plane.md#21-gateway)为准。废弃将 Gateway 部署与启动继续列为未决问题的记录，关闭 Discussion 第 14 项；此前“Adapter 长期必须独立部署”的表述不再成立，Adapter 部署及配置组织继续由第 15 项承接。统一生命周期不推导必须同进程或自动打开浏览器。实现及验证见 [Gateway 核查](gateway.md)。
+
+## 2026-11-16：暂停后的明确继续命令定为 /continue
+
+用户确认 AScout `/pause` 暂停后的明确继续命令为 `/continue`，用于恢复原任务执行，保留原树、候选和环境关系。普通消息是否也解除暂停未定，本次不增加限制或行为；Ctrl-C 终止当前 task 后保留程序和 session、留在对话中的已定语义保持不变。
+
+此决定取代下文“暂停后的继续命令名称未定”的阶段记录，独立暂停入口的具体 UI 仍未定。目标同步至 [Runtime](../design/runtime.md)、[Agent 接入](../design/agent-integration.md)及上层文档；现有普通输入继续仅属实现现状，`/continue` 命令接入待核查／实现，见[恢复](recovery.md)。本轮仅同步文档，不编码、不测试、不提交。
+
+## 2026-11-16：Ctrl-C 终止 task 后留在对话
+
+用户确认 Ctrl-C 仅终止当前 task，保留程序和 session，在同一对话中等候下一轮；须先结束候选，等待相关写入及物化处理完成。物化失败显示失败，不能宣告成功。这样将结束本轮工作与关闭程序分开；不修改退出命令语义。独立 `/pause` 仍保留树、候选和环境，具体 UI 与暂停后的继续命令名称未定。
+
+此决定取代下文“Ctrl-C 是否同时关闭整个程序未定”的阶段记录。目标见 [Runtime](../design/runtime.md) 与 [Agent 接入](../design/agent-integration.md)；现有 SIGINT／SIGTERM → Shutdown 仍关闭程序，与目标的差距及 TUI 路径待核查范围见[恢复](recovery.md)。本轮仅同步文档，不编码、不测试、不提交，不把现有信号处理认作已修复。
+
+## 2026-11-16：Runtime 生命周期文档改名
+
+`docs/development/runtime-discussion.md` 改为 `docs/development/runtime-lifecycle.md`。该文件的 H1 与内容一直是「Runtime 生命周期协议」的开发阶段实现说明，不以讨论记录为职责；正式接入契约仍归 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)。同步更新索引与两处引用，章节锚点不变。
+
+## 2026-11-16：拆除执行承载与资源身份混合待议项
+
+删除 Discussion 原第 36 项：它混合了已有执行语义、实现缺口与未选定机制，不能作为单一设计问题；各项归属见 [Runtime 生命周期](runtime-lifecycle.md#当前范围执行承载资源清理与恢复)。暂不要求异常退出后重新启动并继续原任务，不取消异常清理责任，也不删除已有主动保存恢复功能。
+
 ## 2026-11-16：Environment 身份归 Runtime
 
 废弃控制面根据 execution_id、Branch generation 或 Branch 名称生成 Environment id 的实现。Runtime 建立或派生后返回环境身份，控制面只保存 Branch 绑定；创建前用无绑定状态，不保留占位身份。内部 Backend 组合仍属于 Runtime，单世界 workload 共享不等于 Environment 生命周期共享。
@@ -75,7 +115,7 @@ Authority 环境不结束整棵树共用的 Pi 宿主；Runtime shutdown 统一�
 
 ## 2026-11-14：本机使用与统一构建入口
 
-用户确定当前在本机运行控制面、用本机浏览器访问，批准根目录 Makefile 作为统一构建入口。默认 `make` 依次准备前端依赖、`npm run build`、`cargo build`；依赖关系保证 `make -j` 也先前端后 Rust，失败即停止。依赖安装按 `node_modules` 内安装时间戳缺失或 package 文件更新触发，每次重新构建前端，不承诺前端增量。产物仍本地生成、嵌入 Rust 且不入库，Gateway 部署与启动协调继续未决。
+用户确定当前在本机运行控制面、用本机浏览器访问，批准根目录 Makefile 作为统一构建入口。默认 `make` 依次准备前端依赖、`npm run build`、`cargo build`；依赖关系保证 `make -j` 也先前端后 Rust，失败即停止。依赖安装按 `node_modules` 内安装时间戳缺失或 package 文件更新触发，每次重新构建前端，不承诺前端增量。产物仍本地生成、嵌入 Rust 且不入库；Gateway 与 UI 的部署和统一启停见[控制面 §2.1](../design/control-plane.md#21-gateway)。
 
 废弃“是否自动准备前端仍未定”及必须手工分步构建的当前使用要求；不采用 `build.rs` 或额外脚本。直接 `cargo build` 的行为不变，完整构建入口与验证见 [WebUI](web-ui.md#生产构建)。
 
@@ -155,6 +195,64 @@ Policy 切换时机、活动 Chance 使用旧／新 Policy、同 session 各 tas
 用户批准每份策略独立拥有声明与算法：`assets/policy/policy/`、`assets/policy/nle/`、`assets/policy/pi-tool/` 各含 `policy.yaml` 与 `decisions.py`，`extent-input.json` 归默认 `policy/`。沿用原声明 stem，目录可容纳示例及未来正式内置策略；当前三份均不成熟，暂不 Git 跟踪。单文件算法仅为简单组织方式，不限制 Engine 的多文件、包和相对导入。
 
 废弃平铺的 `assets/policy/policy.yaml`、`assets/policy/nle.yaml`、`assets/policy/pi-tool.yaml`、`assets/policy/decisions.py` 与 `assets/policy/extent-input.json` 路径；取消原已跟踪 `decisions.py`、`pi-tool.yaml` 的索引条目，内容拆分／迁至本地策略目录，配置逐字保留。CLI、测试及文档使用新路径，克隆后需另行准备这些被忽略的本地文件。默认禁用选择和原有不完整预测／验证配置保持；Runtime 引用仍按启动 cwd 解析。实现与限制见 [Policy 实现](policy-engine.md)。
+
+## 2026-11-14：物化完成条件、写回及恢复边界（文档确认、未实现）
+
+以下为本日早先阶段记录；其中 task 单位、完成判定及物化报告职责的待议状态已由本页“session 控制域、task 完成与物化报告”取代，仅暂停／退出映射等未决项继续保留。
+
+用户最新确认：正常完成仅在任务完成、无存活候选、任务相关写入完成后物化并重置
+基准，不为物化暂停执行。取消／失败／主动退出立即进入物化处理，实际写回同样须
+满足无候选及相关写入完成；只有暂停任务保留环境等待继续，此时仍有候选。
+task 单位、完成判定、控制面是否需要接收最终交付完成／失败事实及如何承接，以及暂停与既有主动退出恢复入口
+的映射仍待明确，不废弃整树与候选恢复能力，不新增接口。
+
+写回工作目录及任务允许修改的其他挂载，仅落实 Authority 相对基准的改动，包含
+文件属性（具体支持范围待细定）。冲突 Authority 覆盖，检测用于确定改动、异常
+诊断与冲突报告；运行期间不编辑宿主仅是使用约定，只需确认任务相关写入完成。
+暂允许中间态；部分失败保留已写部分、重试剩余，不承诺回滚；失败阻止任务成功
+报告。写入完成后正常退出可见，不新增掉电保证。旧环境及基准无人引用时释放。
+
+撤回上一轮“候选被接受只写入父分支”的固定规则：接受目标须按实际情况考虑，
+本轮未重新确定目标。废弃上一轮“具体物化时机、取消／退出、整体原子性与后台
+写者处理均未确定”的笼统状态，以及正式文档中“控制面不知道物化专用语义”
+对最终交付通知问题的预先裁定；Runtime 内部整理责任保留，控制面是否需要接收最终交付完成／失败事实、如何承接仍待讨论。
+现行要求与缺口见 `../fs-backend/materialize-proposal.md`，物化仍未实现。
+
+## 2026-11-14：物化必须最终落地与冲突覆盖（阶段记录，父分支规则已撤回）
+
+用户确认系统最终必须把 Authority 的结果物化到现实；候选被接受只写入父分支，
+不意味着每次接受都立即物化。物化冲突由 Authority 覆盖，运行期间不将用户正常
+编辑宿主目录作为预期使用方式。具体物化时机、结束时机、取消／退出、锁、整体
+原子性与后台写者处理仍未确定。
+
+废弃此前“物化是可选能力、不在关键路径上”及“冲突覆盖尚未最终确认”的表述；
+旧“任务结束即结束 authority 使命”不再作为物化与结束时机的规则。早期“冲突默认
+不覆盖”及 journal 逆序恢复提案仅作历史记录，不作为现行要求。
+现行边界见 `../fs-backend/materialize-proposal.md`；本轮只同步文档，物化仍未实现。
+
+## 2026-11-14：外部回放职责收敛
+
+废弃控制面 `--replay` / `ASCOUT_REPLAY` 编排、Pi 专用 `ascout-replay` provider、运行侧共享 `agent-access/replay/` 和人工输入／模型切换自动停回放逻辑。回放读取和父链还原移入 `tools/replay/`；外部工具启动普通 AScout，以本地 OpenAI SSE 服务供给响应，通过正常接口顺序提交历史输入。用户先手动 `pause` 再交互。结束静默停自动输入，失败明确报错但保留系统；双方主动退出协调走正常 Shutdown/save。普通保存恢复能力保留，不引入确定性调度。新增通用追加模型配置、策略 artifact 加载和可输入状态接口，不覆盖 Pi 用户配置。
+
+## 2026-11-14：回放取消项修复
+
+废弃将明确 aborted assistant 从回放队列过滤的做法：该做法使源实际存在、被 AScout 取消的请求变成缺键。取消项现在按源顺序保留，命中后等待客户端取消，超时明确失败；成功输出统一等待一次 500ms。其他 error 不扩展为取消。验证中同时修正 HTTP Buffer 分块导致的 UTF-8 损坏，未改变匹配材料或放宽缺键断言。实施与证据见 `docs/development/replay.md`。
+
+## 2026-11-14：Gateway 三侧通信与 Registry 归属
+
+用户确认：名称采用 Gateway，统一 Agent 接入侧、UI 与 Runtime 三侧的通信接入、消息分发和送达；管理连接／会话、握手与断线，进行入口格式、身份、上下文和权限检查，转交请求／事实／回执，交付命令／已编译本地 Decision／结果／事件。消息对投机执行的变化由相应控制逻辑决定，Gateway 不拥有 Tree、Policy 或投机编排。Agent 与接入进程的实际启动由 Runtime 负责；Gateway 与 UI 的部署和统一启停见[控制面 §2.1](../design/control-plane.md#21-gateway)。
+
+Registry 已属于 Runtime，保留登记、契约兼容性、能力声明校验、主动验证和独立证据职责；Adapter 不得自填验证状态或以自测结果代替证明。控制面使用带验证状态的能力视图匹配 Policy、协调生命周期。当时 Agent、UI、Runtime 三条通信入口尚未统一实现；同日审查收尾已将三侧入口归入 `src/control_plane/gateway/`，见上文“Gateway 审查收尾”。
+
+废弃正式名称 Agent Control Gateway／ACGateway、将 Registry 列为控制面组件以及 Gateway 实际启动 Agent 的表述；此前“Gateway 是否覆盖 UI／Runtime 未定”仅为历史。本轮只同步文档，不修改代码、不提交、不运行模型或代码测试。
+
+## 2026-11-14：取消物化冲突检测与全量基准副本
+
+用户确认“直接写入”：废弃物化阶段宿主/共同祖先比较、冲突检测与报告及其全量
+publication/execution base 副本方案。直接按 Authority 增量最终视图覆盖受影响路径，
+保留未涉及路径，不做 Git diff/merge 或新增全量哈希，禁止复制整个挂载。
+不能用复制宿主挂载模拟运行中执行基准重置；该协调尚未完成。既有 recovery 的
+独立 lower 全量复制也不视为满足新约束，能力差距见 recovery/current-state 文档。
 
 ## 2026-11-13：前端构建产物不入库
 
@@ -252,6 +350,21 @@ Policy 切换时机、活动 Chance 使用旧／新 Policy、同 session 各 tas
 
 保留此前共用轮廓法线的叶茎锚点、同时间零长采样及单位置截面、逐点累计 bounds 的栈溢出修复、全部调参、共享几何和 NLE 等混合工作。本轮先备份文件及 diff 后做精确反向补丁，不整体恢复文件、不删除 tree 目录、不一揽子提交。
 
+## 2026-11-13：NLE 初始化回归修正
+
+e89533d 保存／恢复逻辑曾为每次新世界增加独立随机 lgen 种子，废弃该初始化选择；它改变既有 core seed 的地图生成行为。新世界保持 lgen=None（地图生成沿用 core RNG），保存记录仍按自身完整 initial 重建。不撤销保存／恢复及指纹验证，不改变候选共享世界语义。旧日期消息及旧权威历史差异尚未解决，不通过重新录制、伪造工具结果或放宽匹配／验收绕过。证据见 replay.md 的 2026-11-13 核实。
+
+## 2026-11-13：叶茎完成位置与填充连接
+
+废弃按调用开始位置放置叶茎，因为叶茎表示已完成的模型调用。
+废弃 `stemAnchor` 及外沿偏移锚点，因为连接必须从完成位置中心线与最终可见轮廓求交。
+废弃叶茎描边与线帽，因为显式等宽填充轮廓才能复用两侧平滑连接并限制局部宽度。
+废弃只凭稳定随机偏好放侧，因为附近同侧子枝和叶茎需要参与角度间隔比较；稳定偏好仅用于同分。
+
+## 2026-11-13：通用回放持久化范围纠正
+
+废弃“回放与后续输入的 session/events 必须只在内存，因而改造 Ledger、SessionTree 和运行目录”的要求。用户明确允许正常新 run 的原生记录、日志和恢复资料照常落盘；不需要的是额外导出缓存、recording 副本。实现移除该过渡改造，直接复用正常运行路径；源 run 只读、每次重新读取，在内存准备回复队列。通用回放入口不包装 B3，也不推断其父目录配置布局。
+
 ## 2026-11-12：轮廓锚点修复与父枝验证截止的观测阻碍
 
 废弃叶茎锚点使用调用点前一段航向、而枝干轮廓使用相邻采样中心差法线的两套截面计算；两者必须复用同一法线与宽度。同时间调用不添加零长采样；单位置枝保留真实宽度横截面，不添加纵向尾段。
@@ -348,6 +461,19 @@ Chance、芽、叶茎、叶片进入同一随React Flow变换的SVG组，尺寸�
 
 验证结果：`npm run typecheck`、`npm run build`、`cargo build` 和 `git diff --check` 均通过；`/tmp/opencode/assert-tree3.mjs` 的 fixture 数值断言全部通过。针对 rich fixture 的 129 个事件实测 `foldEvents → layoutTree` 约 9.1ms，生成 473 个采样点、468 个树干段；方向 hash 使用 `task/branch/tick`，14px 仅是渲染细分。root 的 72 calls 首段宽 9px，8-call child 首段约 2.944px，28-call child 首段约 4.641px，均向 1.5px 尾部收窄。57 个工具叶片的 DOM rectangle 无重叠；Chance 圆心误差约 0.0052px；light/dark 有效前景-背景对比度实测分别约 16.30:1 / 14.51:1，composer textarea 宽度 1016px。未添加仓库测试，未调用真实模型。
 
+## 2026-11-12：Transcript 引用与持久化 session 树迁移
+
+以下两项是已确定目标方案下的旧实现废弃记录；实现仍在迁移中，不表示目标能力已完整实现。
+
+- 废弃 Ledger 的 Transcript 原样保存 Pi 完整消息对象或正文的旧实现。目标方案由 Pi 格式的 `session.jsonl` 保存正文，Ledger 仅保存 Branch id、树文件记录 id、role 等引用事实。
+- 废弃 Candidate 使用仅存在内存的 Pi session，以及 Promote 只设置 `authority=branch` 的旧实现。目标方案中，Candidate 和 Promote 依赖持久化 session 树文件与权威路径标记；相关实现仍在迁移中。
+
+## 2026-11-12：投机树长度、方向、宽度与配对规则重写
+
+废弃以下旧实现与文档表述：把整枝长度写成“从 Branch 创建到当前的累计时间”的一次对数映射；把没有开始时间的调用跳过或用事件序号补时间；由“创建到最后事件（丢弃或清理更晚则取它）”决定枝长并追加固定短尾、最短长度和空枝固定长度；用指数回正加两根低频正弦决定航向；用 0.72 次幂、跨度 2.4%、4–90 的上限、26–56° 初始角、同侧 40 单位至少差 15° 等经验常数决定宽度和分叉角度。
+
+现在的规则：布局前先把工具调用配对到它之前最近的模型调用；所有调用必须带开始时间，缺失显式报错。纵向长度逐截计算，每截等于相邻两次调用开始时间间隔的对数，位置逐截累加；Chance 不切段，只在相邻两截之间插值；枝长止于最后一次调用。方向改为逐截随机行走：横向位置决定回中概率，每截相对上一截转固定小角度，方向限制在 ±60°。宽度按该点之后剩余调用数占本枝总数的平方根缩放；根宽是独立的树内参数（默认 45 单位），不随段长映射变化；子枝根宽按剩余份额从父枝宽度推导；删除全局上限与 0.9 封顶。Chance 半径取子枝根宽的一半，叶片与空枝芽改为无尖端的椭圆。前端仍以事件折叠结果作布局输入，观察事件格式不变。
+
 ## 2026-11-11：投机树按逻辑时间生成自身路径
 
 废弃 lane、固定横向轨道、子树重量排版、`FORK_DROP`、`FORK_ROOT_HEIGHT`、`STUB_FORK`、人为根部弯曲和父子独立连接线。WebUI 只根据 Branch 自身事件生成路径：Branch 起止使用已有 `timestamp_ms`（未结束到任务逻辑时间），模型/工具使用各自的开始、结束和持续时间字段；缺少逻辑时间时仅隔离地按事件顺序降级并记录，不以浏览器时间或 sequence 冒充时间。模型叶茎左右交替，工具均在该模型叶茎末端成簇。
@@ -369,6 +495,27 @@ Chance、芽、叶茎、叶片进入同一随React Flow变换的SVG组，尺寸�
 - 长逻辑时间使用单调有上限的压缩映射；本轮丰富 fixture 包含 3 层 Branch、3 个同父 Chance、已接受 Branch、空 Branch 子树、30 分钟调用和几十次权威调用。headless Chromium 测得 5 个 Branch 的节点包围盒约 `193px × 920px`；深色和浅色主题截图均已生成。
 
 废弃本轮之前的“子 Branch 侧向连接曲线”实现；它虽然恢复了视觉上的侧向生长，但根部不再是 Chance 点的直接分叉。
+
+## 2026-11-11：投机树以 Branch 树为唯一几何依据
+
+废弃“以当前权威路径为居中主干、按子树宽度在权威两侧平衡、同一父节点的子枝头部统一排到父枝底部”的投机树布局。该布局让 Promote 改变几何：权威路径一变，主干、左右分配和分叉位置都会重排，已经长出的树形随之移动，分叉也被搬到新权威下方。
+
+现在的目标语义是：根 Branch 的枝顶固定在原点，子枝的横纵位置只由 `parentBranchId` 与 `createdAtSequence` 决定；子枝从父枝上“创建它时的调用槽位”（最后一个 `firstSequence <= createdAtSequence` 的调用）分叉，之后新增调用只向下延长枝干，不改已有槽位与分叉。只有新增兄弟分支时才允许重新分配左右并整体重排，且兄弟子树的横向范围不得相交。权威路径只进入样式：权威枝干实色更粗，候选细描边；权威祖先在通往当前权威的分叉之后的调用变暗。调用语义固定为“一次模型调用一根小枝条，其后的工具调用是这根枝条上的叶子，第一次模型调用之前的工具调用长在枝干上”；连续同签名调用可在同一根小枝条内合并。
+
+实现上每个 Branch 是一个 React Flow 节点，节点内部用一张 SVG 连续绘制枝干、小枝条、叶子、枝头标记和分叉起点；分叉本身用平滑曲线连接到子枝枝头。旧的独立枝干/小枝条/叶子节点类型与相关常量已删除。图例、悬停文案和详情点击行为随之改为新语义。
+
+## 2026-11-11：WebUI 树形与权威窗口
+
+### 已确定
+
+- 用户视图保留独立的权威窗口；它沿 `authorityHistory` 连续展示已成为权威路径的对话，候选内容只有 Promote 后才进入该时间线。按 Branch 查看仍是独立的只读窗口。
+- 投机树使用观察事件的逻辑时间和稳定哈希：Branch 是连续树干，模型调用是短叶茎，工具调用是末端叶片；长逻辑时间用单调平方根压缩并设单 Branch 上限，Chance 根部从父树干的对应时间点向侧面连接。
+- 权威切换只改变样式，不移动既有几何；候选未采纳使用中性文字。
+- 权威窗口的消息组件使用稳定身份和 memo；事件更新只刷新末尾内容，滚动只在用户贴近底部时跟随。
+
+### 废弃
+
+- 废弃把 Branch 作为垂直绝对槽位、把模型调用画成独立分支、以及按真实毫秒线性展开整棵树的做法；这些方案会破坏树干语义或使长任务不可读。
 
 ## 2026-11-10：嵌套 Chance 接通与提交资格
 
@@ -400,6 +547,216 @@ Chance 现在是 Tree 中 `admit` 通过时创建、拥有不透明 id 并持有
 ## 2026-11-10：对话观察移除 unverified 字段
 
 废弃 `GET /api/branches/{branch_id}/conversation` 响应与 `conversation_updated` 事件中的 `unverified` 字段，以及“候选内容必须明确标记为未验证”的旧表述。候选是否属于投机由 Branch 的角色（Authority/Candidate）与状态完整表达；对话接口改为返回该 Branch 当前的 `role` 与 `status`，前端据此显示投机身份。旧字段名仅保留在本记录。Agent Adapter 能力验证语境中的“未验证”是另一件事，含义不变。
+
+## 2026-11-10：状态目录重叠默认拒绝启动
+
+决定：Filesystem Backend 的状态目录必须位于本次要 overlay 的挂载点之外。
+`establish` 和 `launch_fragment` 在创建环境根、upper 目录或环境元数据之前检查
+状态目录是否落在被隔离挂载点内；重叠时返回明确错误，错误包含状态目录路径、
+冲突挂载点路径，以及修复建议“把状态目录放到被隔离挂载点之外，例如独立挂载的
+文件系统”。
+
+理由：此前的 flatten 降级会掩盖部署错误，并让 fork/diff/accept 退化为
+O(upper)。flatten 路径保留，但只允许通过内部开关
+`allow_overlapping_state_directory` 启用；该开关仅用于测试与诊断，默认 false，
+不属于外部配置文件。
+
+**废弃记录**：不再把“检测到重叠后自动 flatten”作为默认策略。能力字段
+`state_directory_overlaps_mount` 与启动日志保留上报，日志措辞改为说明默认拒绝
+启动、除非内部开关开启。
+
+## 2026-11-10：fork 的逐挂载 Chain / Flatten 布局与链深度上限
+
+决定：fork 时每个有产出的挂载（upper 非空）单独选择一次布局，不再用
+“状态目录是否在该挂载内”这种对挂载恒定的判断。
+
+- **Chain**：对父 upper 做只读快照/复制得到 S，S 加入子 lower（子 lower =
+  父 lower + S），子 upper 为空。fork 便宜；子 upper 只含子自己的改动，
+  diff/accept 成本随改动量增长；代价是每次 fork 让链加深一层。
+- **Flatten**：父 upper 整个复制（或可写快照）成子 upper，子 lower = 父 lower，
+  不加入 S。链不增长；代价是 fork 复制父 upper，diff/accept 随 upper 条目数增长。
+
+选择规则：状态目录位于该挂载内（只可能由内部测试开关
+`allow_overlapping_state_directory` 制造）时强制 Flatten；否则用
+`upper_entry_count` 封顶计数，条目数 < `DEFAULT_FORK_FLATTEN_ENTRY_LIMIT` 用
+Flatten，否则用 Chain。新配置字段 `FilesystemConfig::fork_flatten_entry_limit`
+供测试与基准覆盖（`0` = 总是 Chain，`usize::MAX` = 总是 Flatten），默认取常量。
+它与 `SNAPSHOT_CLONE_ENTRY_LIMIT` 是两件事：后者决定 S 用复制还是 btrfs 快照，
+前者决定 S/父 upper 放在子 lower 还是子 upper。
+
+快照基准：`SnapshotRecord.lower` 无论布局都显式记录“父 lower + S”（该挂载有
+产出时），作为 diff/accept 三方合并的基准视图。Flatten 下不能直接取子挂载
+lower，否则基准会缺 S。
+
+diff/accept：`in_lower` 只判断 mount.lower 是否包含 base 路径（Chain 为真，
+Flatten 为假）。Flatten 走现有的 upper 副本比较（overlay：
+`changes_from_upper_copy` / `upper_delta_from_base`；btrfs：`btrfs_delta`）。
+accept 中 Chain 的 `delta_since` 必须排在 btrfs 分支之前；否则用 S 全量与只含
+本分支改动的子 upper 比较，会把父内容全部误判为删除。`needs_source_maps`
+不再按 btrfs/flatten 只读子 upper，而是 lower 为空时只读 upper，否则读取
+`read_chain(lower)` + upper。
+
+链深度保护：新增 `MAX_LOWER_DEPTH = 96`。本机无特权实测 `bwrap --overlay-src`
+叠层：231 个 lower 源成功，232 个 `Invalid argument`；bwrap 把源转成
+`/proc/self/fd/N`，限制与底层路径长度无关。取低于实测上限一半并留余量的 96。
+超过时 fork 在创建任何目录或元数据之前返回 `BackendError`，说明当前深度、上限
+和原因；不静默降级为 Flatten，也不实现整链合并。
+
+阈值标定：在同一非重叠布局下强制 Chain/Flatten，用 `examples/fs_bench.rs`
+（ITERS=5，N=16/64/256/1024/4096）。Flatten 的 diff+accept p50 在 N=256 首次
+比 Chain 高约 12.3ms（此前 N=16/64 分别约 5.5/2.2ms），向下取 2 的幂得到
+`DEFAULT_FORK_FLATTEN_ENTRY_LIMIT = 256`。数据与命令写入
+`docs/fs-backend/current-state.md`；这是本机测量，换环境需重测。
+
+用户已批准 `ForkLayout`、`fork_flatten_entry_limit`、`MAX_LOWER_DEPTH`、
+`allow_overlapping_state_directory` 命名；对应含义分别为逐次布局、Flatten 阈值、
+lower 深度上限、内部允许状态目录重叠开关。父目录变化保留，不通过生产过滤修改
+diff；测试必须精确计入对应数据面会报告的目录。
+
+**验证边界**：用户第三轮 `log-3.txt` 已进入真实 btrfs Chain/Flatten/mixed，但
+Chain/mixed 因 EXDEV、Flatten 因缺父目录预期失败；第四轮 `log-4.txt` 已验证修复后
+三项成功路径，详见下方第四轮记录。
+
+**废弃记录**：`FilesystemBackend::mount_uses_flattening` 及“flatten 只由状态目录
+重叠决定”的规则被删除；`launch_lowers` 不再因该判断忽略 lower 层，始终使用
+`[挂载点] + mount.lower` 的真实链。重叠场景仍强制 Flatten，但由逐次布局逻辑
+显式判断，不再有对挂载恒定的辅助函数。
+
+## 2026-11-10：第三轮特权失败修复与证据
+
+此前 send dump 修复历史：基线 `a37e75c` 的 `log.txt` 中宿主原始能力检查通过，
+Rust btrfs 测试却在 diff 断言失败、未到 accept。解析器未去掉 stream snapshot
+根（实际 `./upper/`）、只接受箭头 rename 而非真实 `dest=`、输出 `modify` 而非
+契约 `change`。修复按 snapshot 根和 inode 路径生成最终增量，临时创建/rename
+不产生伪删除；真实目录 rename 只扫描目标子树补足未修改子项。真实 dump 格式
+回归先失败后通过，accept 共用增量视图同步修复。随后 `log-2.txt` 319–324 行的
+两个旧特权测试通过，仅覆盖当时 Flatten 与 direct-root，不外推其它布局。
+
+- btrfs 挂载存储使用父 volume 子卷，内部含 upper/work。OverlayFS copy-up 的
+  work→upper rename 必须位于同一子卷；普通用户真实回归已复现旧布局 errno 18，
+  修复后覆盖建立、新挂载、空子挂载、Chain、Flatten、mark 与恢复。fork/mark/diff
+  快照父 volume，send dump 只解释 upper 子树；其中父目录变化仍保留。
+- 旧的 upper-as-subvolume 布局恢复时明确拒绝并保留原数据、元数据和 work，不做
+  自动搬迁；upper/work 的同设备检查也在创建/启动前执行，防止再次延迟到 copy-up
+  才暴露 EXDEV。
+- 特权脚本使用 `--show-output --format=pretty --color=never`，避免 nocapture
+  打断 libtest 结果行。`check-test-output.py` 分别验证精确名单、命令退出码、结果
+  行、running 数和最终摘要；执行数=通过+失败，ignored 不算执行，任何 SKIP 失败。
+  真实 libtest 交错回归先 red 后 green，保留原假命令场景，共 24 场景。
+- launch 的挂载就绪要求每个 overlay 目标都存在（解码 mountinfo 路径），不再
+  接受任意一个。目标未齐时每轮检查 owned child 的退出状态；只有确认它已退出才
+  接受短命令完成，覆盖 mountinfo 可读但不完整、ENOENT 和退出未回收时的 EINVAL。
+  其他读取错误上报，活进程仍须满足全部目标，保留 400 × 5ms 期限和真实退出码。
+  两项退出回归先 red 后 green；完整测试最终库 140 项、bin 1 项通过、0 失败，
+  其中无权限自行 SKIP 的 btrfs/特权项不作特权成功证据。
+  live-target 增加初始观察标记与分阶段计时，共用原 30 秒期限；无证据将偶发超时
+  归因为高负载。status pipe 首行仍阻塞，作为已知边界记录。
+
+**废弃记录**：btrfs upper 本身为独立子卷、work 位于其外部的布局被父 volume
+布局取代；从 `--nocapture` 日志精确 grep `test NAME ... ok` 的检查被捕获输出和
+摘要交叉核对取代。`log-3.txt` 中 4 执行/1 通过与 0/7 误判不是实际只执行了
+1 个或没有执行进程测试。
+
+## 2026-11-10：第四轮特权验证通过与范围
+
+用户 2026-11-10 第四轮验证中 Chain、Flatten、mixed、direct-root 四测试逐项 ok，
+4 passed、0 failed、0 ignored；三项 btrfs 场景均选中真实 btrfs，
+`incremental_diff=true fast_delete=true`。状态目录位于根 btrfs 挂载，workspace 在
+独立 `/tmp` tmpfs，默认非重叠布局成立。7 项进程测试全通过、0 failed、0 ignored，
+自动机制为 cgroup，强制 process_group fallback 也通过。原始子卷创建、只读快照、
+增量 send dump、严格删除及初始 userns 直接 lower=/ 均通过；脚本退出 0，
+全部 PASS，最终 `ALL PRIVILEGED CHECKS PASSED`。
+
+亲读 `tests/privileged.rs` 与 `tests/support.rs` 确认：Chain/Flatten 检查实际布局、
+真实进程修改/删除/新建、含父目录的精确 diff、accept 发布及后续真实视图与清理；
+mixed 检查两代 Chain→Flatten、accept 回 child1 且 root 不变及清理。accept 传入
+`target_mount_pid=None`，不是运行中 live-target 重放验收；不外推全部内核生成的
+overlay 元数据、特殊文件/ACL/ownership、偶发超时根因或物化完成。
+
+废弃的 `priv_btrfs_fork_diff_accept_discard` 已由 Chain/Flatten/mixed 三项替代，
+不再作为当前测试名单；先前失败与修复过程留在本文件，正式状态以第四轮证据为准。
+
+## 2026-11-10：删除用户日志与 FS 状态文档复查
+
+用户明确授权删除根目录 `log.txt`、`log-2.txt`、`log-3.txt`、`log-4.txt`。
+删除前已读取第四轮结果并与当前特权测试及 `652f60c`、`8c54403` 核对；当前文档
+保留准确测试名、通过数、能力值和边界，不再依赖已删除日志的行号。上文旧日志名与
+行号只作为失败/修复历史标识，原文件已按用户要求删除。
+
+复查修正：状态目录重叠默认拒绝，只有内部测试/诊断开关允许 Flatten；小 upper
+Flatten 只避免追加当前层，不会压平全部继承层，搬移状态目录也不会缩短既有链。
+ProcessBackend 已承担启动、冻结、终止及 namespace 记录，不再将这些现成功能
+列在未实现清单；跨 Backend 编排进一步统一与逃出进程组的后代仍保留为真实边界。
+信号驱动 trash、元数据隔离失败关闭、diff 比较目标移除的既有决定保持不变。
+
+## 2026-11-10：观察事件与增量读取
+
+按已确认设计，弃用 `GET /api/run-view` 整体轮询及 `ui.rs` 每次 `state.tree = tree.clone()` 的整体替换。内部 SpeculativeTree 不再作为外部序列化模型；原始 Agent/Runtime/Ledger 消息不进入公共观察流。AScoutRunView 仅为从公共事件折叠的本地 TUI 视图；对话通过独立读取接口取得。现有简易页面改为首次事件快照 + SSE，后续 React + React Flow 前端尚未实现。具体接口与差距见 observation.md。
+
+## 2026-11-10：状态事件集、Ledger 观察日志与 Tree 转换入口
+
+废弃观察接口的 snapshot / “快照”命名、`GET /api/observation/snapshot` 和 `ObservationSnapshot`：它们读取的是完整有序事件，不是被保存的状态。当前统一称状态事件集，英文直译为 `StateEventSet`，路径为 `/api/observation/state-event-set`。
+
+废弃 ui.rs 独立保存观察日志及通过 Tree 前后差异推断事件的做法。Ledger 在 events.jsonl 中以 `message: observation` 区分观察记录，直接提供只读句柄；Tree 在创建、生命周期、Authority 和环境转换入口产生待发事实，控制循环交给 Ledger 追加。保留同一次处理内的中间状态与入口明确给出的原因。观察日志不承担崩溃恢复整棵树的要求，不逐次保存完整树，也不实现折叠缓存。
+
+## 2026-11-10：投机起点与工具开始分离
+
+废弃“用 `SpeculativeAdmissionRequest.timestamp_ms` 合成 `ActionStarted` 作为工具开始时间”的做法：准入请求只登记 action 身份并表达投机起点，工具开始时间只来自接入侧真实的 `ActionStarted`。某 action 只有准入请求而尚无 `ActionStarted` 时，`tool_finished.started_at_ms` 为 null，耗时在起点和终点都可得时才计算。被准入投机的起点由 `branch_created.speculation_started_at_ms` 表达，取自对应准入请求的接入侧时刻；事件公共 `timestamp_ms` 仍是控制面记录时刻。`model_usage` 与 `tool_finished` 增加源侧 `started_at_ms` / `finished_at_ms`；`model_usage.action_id` 由可空改为必填字符串。
+
+## 2026-11-10：结算的实测/估计分离与未命中时间语义
+
+废弃 `settlement` 每个维度的 `{value, measured}` 形状（一个带符号数字加一个布尔标记），以及“未命中时间 = −(候选从投机起点到被丢弃的存活时长)”的语义。当前 `time_ms`、`money` 都是 `{measured, estimated}`：实测与估计各自独立，永远不相加，也不用其中一部分填充另一部分；未命中只记投机给整场运行（权威路径）造成的额外延迟的负值，不记候选存活时长或快速模型自身的“白耗”，没有可靠测量时对应部分为空。目标语义见 `docs/design/control-plane.md` §5，实现与数据缺口见 `docs/development/observation.md`。
+
+## 2026-11-10：控制面 WebUI 的构建与嵌入
+
+废弃 `src/bin/ascout-control-plane/web/index.html` 手写单页。浏览器界面改由仓库根目录 `webui/` 的 React + React Flow 应用实现，Vite 构建产物提交在 `webui/dist/`，由 `web.rs` 用 `include_bytes!` 嵌入二进制；`cargo build` 不依赖 Node，前端源码变化时重新构建并提交 `dist/`。控制面静态资源路由固定为 `/`、`/assets/app.js`、`/assets/app.css` 和 `/favicon.svg`；CSP 的脚本来源改为 `'self'`，不再需要内联脚本。界面只展示权威窗口对话，投机面板只读，结算的实测与估计分别显示；连续 `conversation_updated` 流式块在投机树中合并为一个就地更新的节点。实现说明见 `docs/development/web-ui.md`。
+
+## 2026-11-10：Edge 改为抽象模型，由 Chance 取代“有 id 的机会对象”
+
+废弃“Edge 是有 id、可枚举、被 `select` 选择、出现在 AssumptionSet（`Assumption=(edge_id, proposal_id)`）里的对象”以及“Edge 即投机机会”“嵌套 Edge 有自己的 Proposal、Branch 和过程状态”等表述。Edge 现在只是描述投机如何进行的抽象模型，不是运行时对象；其具体实例称为 Chance（被 `admit` 接纳的投机机会），从 `admit` 通过起拥有 id，直到被验证后接受或抛弃为止。待选集合、AssumptionSet 引用和运行时 Decision 作用对象均为 Chance。
+
+## 2026-11-09：物化责任边界与 Firecracker 清理
+
+控制面只报告操作间隙，Runtime 自行决定内部整理；控制面不持有物化专用语义。
+撤回 materialize 提案中控制面触发 `FilesystemMaterialize`、新增物化状态/确认
+字段、由控制面选择物化冲突策略的建议。本轮只同步文档，不实现新接口；宿主锁、
+冲突处理及环境保留仍待后续明确。
+
+Firecracker 停止未确认不标记 Terminated、不丢 Child、不拆资源；清理失败保留环境
+和网络所有权供重试，全部清理成功才释放。启动失败回滚适用同一规则。生命周期
+操作暂串行化，环境锁覆盖同环境操作，避免清理、重建与旧状态更新竞态。
+
+## 2026-11-09：物化可选、宿主写回要求与后台回收（物化可选及冲突未定已废弃）
+
+用户确认以下实现边界：
+
+- 物化是可选能力，不在关键路径上。运行阶段物化后重置 authority 的基准；任务
+  结束即结束 authority 的使命。
+- 冲突处理倾向让 authority 覆盖，但尚未最终确认。当前暂不为被覆盖的宿主版本
+  保留可恢复副本；此前 materialize 提案中的 journal/备份恢复方案不作为现行
+  要求。
+- 写宿主文件的要求是：写前逐文件与基准比对，再原子替换。实现时必须检查性能，
+  先比较文件大小和修改时间，仅在不一致时再计算哈希。这是待实现的要求。
+- 嵌套挂载当前未实现，可以另找实现手段；当前 bwrap 参数层做不到不等于实际做
+  不到，不把该能力写成不可能。
+
+后台删除改为信号驱动：首次 discard 需要物理删除时向工作者发信号；工作者持续
+扫描 trash 并删除，直到为空后静默阻塞等待下一次信号，多次信号合并。启动时若
+trash 非空发一次信号回收崩溃遗留。删除失败不得静默丢弃：记录日志并保留条目，
+在下一次信号或有界延迟后重试，不忙等。工作者不持有 FilesystemBackend 强引用；
+backend 被 drop 时工作者退出，未删完的目录留在 trash 供下次启动回收。btrfs
+递归删除、只读属性处理、`BACKGROUND_DELETE_LOCK` 与 `fast_delete` 语义保持不变。
+
+损坏的 `operations.json` 改为失败关闭：改名隔离成功时以空记录继续并大声告警；
+改名失败时加载返回包含路径与底层错误的明确错误，不以空记录继续，也不覆盖或
+删除坏文件。元数据写入是 temp + `sync_all` + rename 原子写，因此“写到一半
+崩溃”不是 `operations.json` 的损坏原因；损坏来源包括磁盘错误、人为编辑和版本
+不一致。环境/快照元数据读不出来仍跳过并记录日志。
+
+**废弃记录**：移除 filesystem diff 的“比较另一个环境”参数及其未实现分支。
+diff 现在只表示该环境相对其 fork 基准的变化，行为不变；accept 的 target（目标
+环境）是另一个概念，不受影响。移除前检查了 protocol contract、Filesystem
+Backend 实现与分发、测试和文档，没有调用者传入该参数。
 
 ## 2026-11-07：首版通用文件系统 Backend
 
@@ -452,6 +809,12 @@ FilesystemBackend 和配置了 filesystem 的 BaseRuntime 中执行。
 
 本原型现已把 Proposal 独立保存在 `SpeculativeTree.proposals` 中；Branch 只保存 `proposal_id` 和 `assumption_set`。当前实现为每个候选建立一个直接 Proposal，AssumptionSet 仍按 Proposal ID 表达，但尚未实现任意多 Proposal 依赖的传播、确认和重挂载。控制面下发编译后的本地 Decision artifact，Pi 在真实工具 Hook 中求值；`extent` 由接入侧按 Branch 隔离的 Hook 次数求值，Hook 次数不是 `steps_completed` 的完成步骤数。`launch=false` 会保留 Proposal 并记录 validator/evidence-only unsupported，不启动 Authority Invoke。控制面 `BranchPhase` 只记录控制面实际推进的阶段：显式准入请求进入 `select`，随后按实际路径更新 `predict`、`launch`、`effect`、`match`、`dispose`；本地 `admit` 不单独占用控制面阶段。完整全局 `rebalance` 仍未实现；本地 extent stop 已可在 Hook 边界暂停，并支持取消、discard、cleanup 和合法恢复。
 
+## 2026-11-05：控制状态归树与消息触发
+
+用户确认：task 创建时建立树，具体投机状态归树；Controller 不持有 task 状态，可协调多棵树。Policy 为决策函数，树的方法负责合法转换和后续操作要求。消息／定时器触发同一 task 顺序处理，耗时操作异步返回。Gateway 的统一范围暂未决定。
+
+废弃实现：AgentController 持有 ControlState 和编号，及主循环每 100 毫秒扫描、同步调用 Policy／Runtime 的组织方式。此前 start_candidates、advance_candidates 与同步回调包装由树的事件处理和无状态协调替代。未经用户同意不提交。
+
 ## 2026-11-04：Runtime 整体边界与首阶段范围
 
 已收敛：AScout 自身支持一套完整 Runtime，承载 Agent 一步动作，使其正常、正确运行，并把对真实世界或 Authority 的影响限制在容忍范围内。Runtime Adapter 与 Effect Coordinator 是这个整体中的接入和效果管理职责，不是平级的独立运行系统。Agent Session 内部管理仍归接入侧，Runtime 负责动作承载和外部效果边界；状态可以复制、共享、写时复制、重建或恢复，优先低成本方式。
@@ -461,6 +824,14 @@ FilesystemBackend 和配置了 filesystem 的 BaseRuntime 中执行。
 **废弃记录**：不再采用“Runtime 仅是 AScout 不拥有的外部后端”“Runtime Adapter 是独立一级侧面”“外部效果执行只属于控制面而不属于 Runtime”的架构定义。此前四侧路径中的 Adapter 现在作为 Runtime 的接入边界；效果协调归入 Runtime 整体责任。这里改变的是职责定义，不预定 crate、进程、transport 或部署方式。既有 Branch、状态可见性、commit/discard 和 single-winner 规则保持不变。
 
 目标说明见 `docs/design/runtime.md`；首阶段与未实现能力见 `docs/development/runtime-adapter.md`。本节取代本文其他历史记录中关于上述架构边界的表述。
+
+## 2026-11-03：Ledger 接管后的归档失败所有权
+
+废弃此前“不新增 Ledger 失败语义、错误直接返回调用方”的表述：它只说明了错误如何传出，没有说明已经移出活动 Tree 的 Branch 由谁保存。按值移交后若追加失败，Branch 会随调用返回被释放，历史在任何组件都不负责的情况下消失。
+
+现行规则：Branch 只有在 `Cleaned`、非当前 Authority、无未完成控制命令且无子 Branch 引用时才从活动 Tree 移交给 Ledger。Ledger 接管后，写入成功才按约定释放记录；写入失败时继续持有该 Branch，并由控制面报告这次运行的历史不完整。写入成功仍不包含强制 `flush`，失败后也不对已写入的部分内容作回滚或去重承诺，不引入自动重试或恢复队列，不把 Branch 放回活动 Tree。
+
+实现：`Ledger` 保留未写入的 Branch，`archive_branch` 失败时不再丢弃记录；控制面退出时列出未能归档的 Branch 并返回错误。
 
 ## 2026-11-02：Candidate 最终失败不再等同于立即丢弃
 
@@ -491,21 +862,6 @@ AScout 启动的是 Pi 的 `agent-access` 接入入口，不是 Pi 交互式 CLI
 - 控制面只解析通用的 `{result, evidence}` 外层；Pi 只把 `result` 文本交给 Agent；只有 Policy 读取结构化 evidence 做游戏语义判断。
 - 完整 NetHack 3.6 Guidebook 来自 NLE 1.3.0 源码包，放在 `examples/nle/Guidebook.txt`；Runtime 通过 `nethack_guide` 工具按章节提供，不再把手工摘要当作完整规则。
 
-## 手动试用后的展示修正
-
-历史方案：曾讨论以独立 PTY 与终端模拟器嵌入 Pi 原生渲染，但该方案已被放弃，不是当前目标。当前只通过 Pi 公开 SDK 获取 AgentSession 的消息、思考、工具调用、结果和事件，由 AScout UI 自行排版；不修改 Pi 源码、不调用 Pi 内部展示组件，也不捕获 Pi 原生终端画面。
-
-当前限制：不接管 Pi 完整 InteractiveMode、原生编辑器或命令菜单；输入使用 AScout 的 Prompt/Abort 路径。图片和其他尚未映射的消息内容会明确标记为未展示，不伪造为普通文本。
-
-验证：零模型调用的真实 PTY 检查覆盖原生 Markdown、中文、工具结果、分支内容分隔、窗口 resize、socket 断开退出；控制面检查覆盖 Tree、非法编号、Branch 查看、Tab 运行事实、Esc 返回及 Ctrl-D。Pi 完整 `PATH=/usr/bin:$PATH npm run check` 通过。Promote 后连续流式展示未做真实模型验收。清理确认后释放 PTY 文件描述符，只保留模拟器的最后画面；未变化画面不重复刷屏。
-
-- Runtime Adapter 部署形式暂不变更；先修正 `/ascout` 无效编号、Branch 上下文和工具展示。
-- 展示代码放在 `src/bin/ascout-control-plane/view.rs`，只格式化已有事实，不改变 Branch 生命周期或输入路由。
-- 分支详情使用结构化文本，分别显示运行事实、创建时继承的展示上下文、分支自身输出；候选创建后不再跟随 Parent 的后续输出。
-- Pi 接入侧不再把工具事件拼接成 Output 文本；控制面根据已有 Transcript 显示工具调用和返回。Output 只承载实时模型正文和明确错误，Ledger 的原始事实记录保持不变。
-- NLE 任务知识放在外部示例 `examples/nle-task.md`，由用户提供给 Agent；动作表基于实际 `NetHackScore-v0` 环境核对，不把游戏规则写入核心。
-- 当前只做基础配色与内容层次，完整 Pi 风格 Markdown、工具折叠、多行输入及宽字符排版仍未完成。
-
 ## 2026-11-02：Runtime 启动 Agent 接入侧，运行目录与 Ledger 归位
 
 已确认三项归属，并按此修改了控制面：
@@ -527,6 +883,26 @@ Agent 接入侧仍然是唯一控制 Agent 会话的地方：创建会话、克�
 - **真实结果的判定属于 Policy**。Runtime 只交回动作前后的两份公开观测；`predict` 从观测产生预测，`match_proposal` 从 `blstats` 读出实际是 `moved` 还是 `blocked` 再与预测比较。控制面不再出现坐标、格子或移动这类词。
 
 工具通道现在由 Runtime 生成 `result` 文本（可读摘要）和 `evidence` 结构化事实；控制面只转发，不解释游戏字段。早期 `{"is_error", "observation"}` 的结果形态不再使用。
+
+## 2026-11-02：独立 Agent 接入核心的第一步
+
+已确认并开始落实四层边界：控制面继续拥有 Speculative Tree、全局 Policy 和 Branch 生命周期；TypeScript 接入包承载 Agent 无关的协议类型、命令传输、命令去重、能力声明和局部执行 Policy；具体 Agent 通过 Adapter 提供会话与工具切点能力；Runtime 继续负责任务环境和工具效果约束。
+
+第一步已加入 `pi/packages/ascout-agent-access`。公共协议只使用 `branch_id`、`operation_id`、`tool_call_id` 和不透明的 `CheckpointHandle`，不暴露 Pi transcript 或 session 类型。`CheckpointHandle` 只能由产生它的 Adapter 解释，公共层只保存和转发。
+
+## 2026-11-02：Pi Adapter 与 Runtime 工具声明
+
+已完成第二步：
+
+- `AgentAccessCore` 真正驱动 Agent 连接和命令分发，并缓存重复命令的结果；同一 `command_id` 携带不同命令时返回 `rejected` 命令结果，而不是把协议冲突误报成 Branch 失败。
+- `agent-access.ts` 只保留入口连接与生命周期，Pi 的 session、transcript、checkpoint、工具拦截和候选续跑全部移入 `PiAdapter`。
+- Runtime Adapter 在 `Hello` 中声明 `RuntimeCapabilities`：可执行的 `RuntimeTool` 列表、是否共享底层环境、是否支持独立 `branch_environment`。
+- 控制面不再识别 `nle_action`。它按 Runtime 声明的工具名调用 `tool_context` 和 `invoke_tool`，用 Runtime 返回的 `result` 更新 Agent 工具通道，用 `evidence` 交给 Policy 匹配。
+- NLE Runtime 声明 `nle_action` 工具；Candidate 仍使用控制面分配的独占 Environment，具体 workload 内部世界行为不暴露给控制面。
+- Pi Adapter 从 `ASCOUT_RUNTIME_TOOLS` 读取 Runtime 工具描述并动态注册；它不知道 NetHack、动作编号或 NLE 语义。
+- 控制面在 ToolPending 后立即发送一次 `resolve_pending`；候选处置阶段只决定 Candidate 生命周期，不再重复发送同一 `command_id` 的 resolve 命令。
+
+验证：`npm run check`、`cargo check`、`cargo test --lib --bins` 通过。本地脚本模型加真实 Pi 工具完成一次 Promote 和旧 Parent 清理，并在 Promote 后继续下一轮。真实模型 DeepSeek V4.1 Flash 加真实 NLE 完成 10 次动作：9 次 Promote、1 次 Discard、10 次 Discard／Cleanup 命令 applied、0 次 `branch_failed`，总花费约 $0.0060；候选 Promote 后继续执行，旧 Parent 被清理。
 
 ## 2026-11-01：一次 run 只提供一个工作目录，不再按 Branch 复制目录
 
@@ -587,31 +963,50 @@ CRIU 一类进程快照同样不采用：需要特权、镜像 I/O 和 FD 重绑
 
 废弃 D-031-I 中“用户不可直接观察候选”的限制；保留主对话只属于权威路径、候选不建立用户对话、用户不直接裁决 Branch 的边界。只读观察明确标记候选内容未验证，不向其他 Branch 反馈这些内容。
 
-## D-029-I：废弃单 Edge 即时启动与固定 frontier 策略
+## 手动试用后的展示修正
+
+历史方案：曾讨论以独立 PTY 与终端模拟器嵌入 Pi 原生渲染，但该方案已被放弃，不是当前目标。当前只通过 Pi 公开 SDK 获取 AgentSession 的消息、思考、工具调用、结果和事件，由 AScout UI 自行排版；不修改 Pi 源码、不调用 Pi 内部展示组件，也不捕获 Pi 原生终端画面。
+
+当前限制：不接管 Pi 完整 InteractiveMode、原生编辑器或命令菜单；输入使用 AScout 的 Prompt/Abort 路径。图片和其他尚未映射的消息内容会明确标记为未展示，不伪造为普通文本。
+
+验证：零模型调用的真实 PTY 检查覆盖原生 Markdown、中文、工具结果、分支内容分隔、窗口 resize、socket 断开退出；控制面检查覆盖 Tree、非法编号、Branch 查看、Tab 运行事实、Esc 返回及 Ctrl-D。Pi 完整 `PATH=/usr/bin:$PATH npm run check` 通过。Promote 后连续流式展示未做真实模型验收。清理确认后释放 PTY 文件描述符，只保留模拟器的最后画面；未变化画面不重复刷屏。
+
+- Runtime Adapter 部署形式暂不变更；先修正 `/ascout` 无效编号、Branch 上下文和工具展示。
+- 展示代码放在 `src/bin/ascout-control-plane/view.rs`，只格式化已有事实，不改变 Branch 生命周期或输入路由。
+- 分支详情使用结构化文本，分别显示运行事实、创建时继承的展示上下文、分支自身输出；候选创建后不再跟随 Parent 的后续输出。
+- Pi 接入侧不再把工具事件拼接成 Output 文本；控制面根据已有 Transcript 显示工具调用和返回。Output 只承载实时模型正文和明确错误，Ledger 的原始事实记录保持不变。
+- NLE 任务知识放在外部示例 `examples/nle-task.md`，由用户提供给 Agent；动作表基于实际 `NetHackScore-v0` 环境核对，不把游戏规则写入核心。
+- 当前只做基础配色与内容层次，完整 Pi 风格 Markdown、工具折叠、多行输入及宽字符排版仍未完成。
+
+## 历史：早期实现决策（D-0xx-I）
+
+以下条目保留早期实现阶段的决策与废弃记录，编号沿用当时的 `D-0xx-I`。当前语义以正式设计文档为准。
+
+### D-029-I：废弃单 Edge 即时启动与固定 frontier 策略
 
 2026-09-04 决定：废弃由 `admit` 精判直接决定投机是否立即启动的七槽决策面，现由 `admit` 决定机会是否进入待选集合，独立的 `select` 在同一 task / AScoutAgent 的全部待选 Edge 间选择当前启动项。也废弃将 best-first、固定的 `P(存活) × 期望延迟节省 / 资源成本` 排序、浅层分叉/深层单链或强制 `survival` 字段写成 AScout 机制规则的表述；这些机制作为 Policy 可选策略继续受支持。当前语义见 `docs/design/policy-decisions.md`、`docs/design/control-plane.md` 与 `docs/design/decisions.md` D-043。
 
-## D-030-I：废弃 Scheduler 固定暂停与抢占策略
+### D-030-I：废弃 Scheduler 固定暂停与抢占策略
 
 2026-09-04 决定：废弃“所有投机工作固定低优先级”以及 Scheduler 根据内置价值排序自行暂停或抢占投机工作的表述。Scheduler 继续拥有运行队列、资源和硬约束，但暂停、恢复和价值驱动的抢占由独立 `rebalance` Policy Decision 选择；抢占后的处置由 `dispose` 决定。当前语义见 `docs/design/policy-decisions.md` §2.9 与 `docs/design/decisions.md` D-044。
 
-## D-033-I：Speculation Coordinator 吸收 Scheduler 的控制面职责
+### D-033-I：Speculation Coordinator 吸收 Scheduler 的控制面职责
 
 2026-09-04 决定：在控制面组件模型中，不再将 Scheduler 作为独立组件。其待选机会、运行调整、预算和硬约束执行职责并入 Speculation Coordinator；`select` 与 `rebalance` 仍由 Policy Decision 决定，Speculation Coordinator 在统一的全局投机视图上负责激活、复核和执行这些意图。D-030-I 中关于 Scheduler 的描述保留为历史决策记录，当前组件结构以本条和 `docs/design/control-plane.md` 为准。
 
-## D-031-I：废弃端用户直接参与投机 Branch 裁决
+### D-031-I：废弃端用户直接参与投机 Branch 裁决
 
 2026-09-04 决定：废弃通过专门投机 UI 让端用户直接观察、选择或裁决内部 Branch 的表述。端用户只通过 AScoutAgent 视图操作当前有效的权威执行主线，并只能看到该路径的内容、状态与交互；人作为 Authority 提供输入或中断时，也通过该主线进入系统。Branch 接受、丢弃、重新挂载与清理在内部完成，不要求用户选择或重绑定 Branch。当前语义见 `docs/design/agent-integration.md`、`docs/design/branch-semantics.md` 与 `docs/design/decisions.md` D-045。
 
-## D-032-I：前提变更暂不兼容或修复 Branch
+### D-032-I：前提变更暂不兼容或修复 Branch
 
 2026-09-04 决定：废弃在用户操作改变 Proposal 前提后继续保留、挂起、兼容判断、修复或重新对齐受影响 Branch 的候选方向。现阶段所有依赖已变更前提的 Branch 及其 subtree 一律剪枝；未依赖该前提的 Branch 不受无关输入影响。当前语义见 `docs/design/branch-semantics.md` §6、`docs/design/policy-decisions.md` §4 与 `docs/design/decisions.md` D-046。
 
-## D-034-I：抽象札记收敛为论文证据
+### D-034-I：抽象札记收敛为论文证据
 
 2026-09-14 决定：`spec-exec-abstraction.md` 只保留论文覆盖、实验结果、负结果、效果处理现状、shadow/replay 方法学、接入与隔离事实、嵌套投机事实及待验证问题。已经在 `docs/design/` 正式呈现的生命周期、Policy Decision、Effect、架构、组件职责、契约和指标方案从该文删除；该文不再作为目标语义或实现结构的来源。
 
-## D-015-I：首个真实 Workload 使用 Delayed-Choice Coding
+### D-015-I：首个真实 Workload 使用 Delayed-Choice Coding
 
 首个真实端到端 workload 通过 Product Integration 的观察和拦截接缝接入 Agent，使用真实仓库。不要求 Agent 主动调用 AScout，也不开放显式生命周期协作。具体产品和接入方式尚未选择。Sequential 与 speculative run 使用相同 Agent、任务、outcome 和预算。
 
@@ -619,7 +1014,7 @@ CRIU 一类进程快照同样不采用：需要特权、镜像 I/O 和 FD 重绑
 
 Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 
-## D-035-I：控制面最小闭环与初期实现约束
+### D-035-I：控制面最小闭环与初期实现约束
 
 2026-09-17 确定：先实现控制面最小闭环。保持代码简洁、干净，避免为尚未需要的扩展增加抽象和占位实现；能以简短清晰代码解决的问题不引入冗长框架。
 
@@ -631,7 +1026,7 @@ Workload contract 与指标见 [reference-workload.md](reference-workload.md)。
 
 Adapter Registry 的主动环境验证延后实现，初期先检查接入接口与契约的对应关系。这是原型限制，不改变目标契约：接口检查不构成隔离保证的实际验证，相关能力不得标记为已验证。尚未实现的差距是 Registry 自主建立环境、执行验证场景并形成验证证据。
 
-## D-047-I：重做由控制面拥有 Agent 状态的 Pi 最小接入
+### D-047-I：重做由控制面拥有 Agent 状态的 Pi 最小接入
 
 2026-10-24 确定：此前位于 Pi `packages/coding-agent/src/core/ascout.ts` 的 `SpeculativeTree`、`BranchRecord`、`ControlState` 和根目录一次性 `ascout.ts` 驱动不符合责任边界，统一作为废弃实验材料，不在其上继续扩展。它们把 AScout 的 Tree、Branch 生命周期、Policy 落实和用户入口编排放进 Agent 接入侧，不能作为正式系统或端到端完成度证据。
 
@@ -647,7 +1042,7 @@ Adapter Registry 的主动环境验证延后实现，初期先检查接入接口
 
 该实现随后被发现仍有三项边界错误，不能作为正确闭环继续扩展：Pi 接入由用户手工启动而非由控制面启动；控制面把目录直接当作独立执行环境；控制面用 Candidate output 而不是 Parent 的真实 outcome 作为 `match` evidence。后续实现必须由 AScout 用户入口向控制面提交请求，由控制面启动 Pi 和 Agent 接入；由 Runtime Adapter 创建并报告抽象的独立 Candidate 环境，当前目录只作为该 Adapter 的实现细节；并由 Parent outcome 与 Candidate hypothesis 完成 Policy 匹配。
 
-## D-036-I：Policy DSL 首版编译为 Python 脚本
+### D-036-I：Policy DSL 首版编译为 Python 脚本
 
 2026-09-17 确定：PolicyDefinition 只通过 Policy DSL 定义；九类 Decision 都需要根据各自的输入作出规定输出，每个位置必须具有明确行为。固定取值和常用规则只是决策逻辑的快捷表达，例如 Eager 编译为恒定返回 `true` 的 `launch` 决策。
 
@@ -667,7 +1062,7 @@ Adapter Registry 的主动环境验证延后实现，初期先检查接入接口
 
 开始实现不表示其全部候选能力已完成。代码中实际采用的原型接口以开发文档为准，不把尚未实现的草案能力写成可用能力。
 
-## D-016-I：默认 Runtime 优先高效隔离
+### D-016-I：默认 Runtime 优先高效隔离
 
 默认 Runtime 面向可信 Child Agent 与工具，优先低开销环境隔离，不提供 adversarial containment。它必须强制维护声明的环境、资源和效果边界，以及停止和 cleanup。Agent Session、执行实体的本地上下文、operation 归属和 capability 路由由 Agent 接入侧管理。
 
@@ -675,11 +1070,11 @@ Adapter Registry 的主动环境验证延后实现，初期先检查接入接口
 
 需要 adversarial containment 时，用户选择另行适配的 sandbox/hardened Runtime。AScout 不协商 security guarantee；当前首个实现为文件系统 Backend（overlay/btrfs）与进程 Backend，见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
 
-## D-017-I：新 Rust 实现不继承旧代码
+### D-017-I：新 Rust 实现不继承旧代码
 
 新实现继续使用 Rust。旧 `src/**`、Cargo manifests、tests、examples、C header、构建产物和实验文件已经删除，未读取、迁移或复用。新实现只能依据已接受的设计与开发决策建立。
 
-## D-024-I：实现组织服从 AScout 可控边界
+### D-024-I：实现组织服从 AScout 可控边界
 
 当前实现组织遵循 Agent 接入侧、控制面与 Runtime 的责任边界。Runtime Adapter 是 Runtime 的接入边界，Effect Coordinator 属于 Runtime 的效果协调职责；这些职责不直接推出 crate、进程或部署数量。
 
@@ -689,346 +1084,9 @@ Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义�
 
 **废弃记录**：此前先要求“实现组织服从四侧一级架构”，随后又把 Runtime 定义为 AScout 不拥有的外部后端、把 Effect Coordinator 放在控制面。两种解释均已由 2026-11-04 的 Runtime 整体边界取代；不再以“四侧”推导源码或文档拓扑。
 
-## D-025-I：项目名称统一为 AScout
+### D-025-I：项目名称统一为 AScout
 
 2026-08 决定：项目现行名称统一为 **AScout**（Agent Scout），相关现行复合名称使用 `AScoutAgent`。正式设计、架构、使用和开发文档不再使用 `ASCout` 作为现行名称；本条仅保留旧拼写用于历史追溯。该名称变更不改变既有生命周期、Policy、Runtime 或接口语义。
-## 2026-11-02：独立 Agent 接入核心的第一步
+# 2026-11-16 交互实现纠正
 
-已确认并开始落实四层边界：控制面继续拥有 Speculative Tree、全局 Policy 和 Branch 生命周期；TypeScript 接入包承载 Agent 无关的协议类型、命令传输、命令去重、能力声明和局部执行 Policy；具体 Agent 通过 Adapter 提供会话与工具切点能力；Runtime 继续负责任务环境和工具效果约束。
-
-第一步已加入 `pi/packages/ascout-agent-access`。公共协议只使用 `branch_id`、`operation_id`、`tool_call_id` 和不透明的 `CheckpointHandle`，不暴露 Pi transcript 或 session 类型。`CheckpointHandle` 只能由产生它的 Adapter 解释，公共层只保存和转发。
-
-## 2026-11-02：Pi Adapter 与 Runtime 工具声明
-
-已完成第二步：
-
-- `AgentAccessCore` 真正驱动 Agent 连接和命令分发，并缓存重复命令的结果；同一 `command_id` 携带不同命令时返回 `rejected` 命令结果，而不是把协议冲突误报成 Branch 失败。
-- `agent-access.ts` 只保留入口连接与生命周期，Pi 的 session、transcript、checkpoint、工具拦截和候选续跑全部移入 `PiAdapter`。
-- Runtime Adapter 在 `Hello` 中声明 `RuntimeCapabilities`：可执行的 `RuntimeTool` 列表、是否共享底层环境、是否支持独立 `branch_environment`。
-- 控制面不再识别 `nle_action`。它按 Runtime 声明的工具名调用 `tool_context` 和 `invoke_tool`，用 Runtime 返回的 `result` 更新 Agent 工具通道，用 `evidence` 交给 Policy 匹配。
-- NLE Runtime 声明 `nle_action` 工具；Candidate 仍使用控制面分配的独占 Environment，具体 workload 内部世界行为不暴露给控制面。
-- Pi Adapter 从 `ASCOUT_RUNTIME_TOOLS` 读取 Runtime 工具描述并动态注册；它不知道 NetHack、动作编号或 NLE 语义。
-- 控制面在 ToolPending 后立即发送一次 `resolve_pending`；候选处置阶段只决定 Candidate 生命周期，不再重复发送同一 `command_id` 的 resolve 命令。
-
-验证：`npm run check`、`cargo check`、`cargo test --lib --bins` 通过。本地脚本模型加真实 Pi 工具完成一次 Promote 和旧 Parent 清理，并在 Promote 后继续下一轮。真实模型 DeepSeek V4.1 Flash 加真实 NLE 完成 10 次动作：9 次 Promote、1 次 Discard、10 次 Discard／Cleanup 命令 applied、0 次 `branch_failed`，总花费约 $0.0060；候选 Promote 后继续执行，旧 Parent 被清理。
-
-## 2026-11-03：Ledger 接管后的归档失败所有权
-
-废弃此前“不新增 Ledger 失败语义、错误直接返回调用方”的表述：它只说明了错误如何传出，没有说明已经移出活动 Tree 的 Branch 由谁保存。按值移交后若追加失败，Branch 会随调用返回被释放，历史在任何组件都不负责的情况下消失。
-
-现行规则：Branch 只有在 `Cleaned`、非当前 Authority、无未完成控制命令且无子 Branch 引用时才从活动 Tree 移交给 Ledger。Ledger 接管后，写入成功才按约定释放记录；写入失败时继续持有该 Branch，并由控制面报告这次运行的历史不完整。写入成功仍不包含强制 `flush`，失败后也不对已写入的部分内容作回滚或去重承诺，不引入自动重试或恢复队列，不把 Branch 放回活动 Tree。
-
-实现：`Ledger` 保留未写入的 Branch，`archive_branch` 失败时不再丢弃记录；控制面退出时列出未能归档的 Branch 并返回错误。
-
-### 2026-11-05：控制状态归树与消息触发
-
-用户确认：task 创建时建立树，具体投机状态归树；Controller 不持有 task 状态，可协调多棵树。Policy 为决策函数，树的方法负责合法转换和后续操作要求。消息／定时器触发同一 task 顺序处理，耗时操作异步返回。Gateway 的统一范围暂未决定。
-
-废弃实现：AgentController 持有 ControlState 和编号，及主循环每 100 毫秒扫描、同步调用 Policy／Runtime 的组织方式。此前 start_candidates、advance_candidates 与同步回调包装由树的事件处理和无状态协调替代。未经用户同意不提交。
-# 2026-11-09：物化责任边界与 Firecracker 清理
-
-控制面只报告操作间隙，Runtime 自行决定内部整理；控制面不持有物化专用语义。
-撤回 materialize 提案中控制面触发 `FilesystemMaterialize`、新增物化状态/确认
-字段、由控制面选择物化冲突策略的建议。本轮只同步文档，不实现新接口；宿主锁、
-冲突处理及环境保留仍待后续明确。
-
-Firecracker 停止未确认不标记 Terminated、不丢 Child、不拆资源；清理失败保留环境
-和网络所有权供重试，全部清理成功才释放。启动失败回滚适用同一规则。生命周期
-操作暂串行化，环境锁覆盖同环境操作，避免清理、重建与旧状态更新竞态。
-
-# 2026-11-14：物化完成条件、写回及恢复边界（文档确认、未实现）
-
-以下为本日早先阶段记录；其中 task 单位、完成判定及物化报告职责的待议状态已由本页“session 控制域、task 完成与物化报告”取代，仅暂停／退出映射等未决项继续保留。
-
-用户最新确认：正常完成仅在任务完成、无存活候选、任务相关写入完成后物化并重置
-基准，不为物化暂停执行。取消／失败／主动退出立即进入物化处理，实际写回同样须
-满足无候选及相关写入完成；只有暂停任务保留环境等待继续，此时仍有候选。
-task 单位、完成判定、控制面是否需要接收最终交付完成／失败事实及如何承接，以及暂停与既有主动退出恢复入口
-的映射仍待明确，不废弃整树与候选恢复能力，不新增接口。
-
-写回工作目录及任务允许修改的其他挂载，仅落实 Authority 相对基准的改动，包含
-文件属性（具体支持范围待细定）。冲突 Authority 覆盖，检测用于确定改动、异常
-诊断与冲突报告；运行期间不编辑宿主仅是使用约定，只需确认任务相关写入完成。
-暂允许中间态；部分失败保留已写部分、重试剩余，不承诺回滚；失败阻止任务成功
-报告。写入完成后正常退出可见，不新增掉电保证。旧环境及基准无人引用时释放。
-
-撤回上一轮“候选被接受只写入父分支”的固定规则：接受目标须按实际情况考虑，
-本轮未重新确定目标。废弃上一轮“具体物化时机、取消／退出、整体原子性与后台
-写者处理均未确定”的笼统状态，以及正式文档中“控制面不知道物化专用语义”
-对最终交付通知问题的预先裁定；Runtime 内部整理责任保留，控制面是否需要接收最终交付完成／失败事实、如何承接仍待讨论。
-现行要求与缺口见 `../fs-backend/materialize-proposal.md`，物化仍未实现。
-
-# 2026-11-14：物化必须最终落地与冲突覆盖（阶段记录，父分支规则已撤回）
-
-用户确认系统最终必须把 Authority 的结果物化到现实；候选被接受只写入父分支，
-不意味着每次接受都立即物化。物化冲突由 Authority 覆盖，运行期间不将用户正常
-编辑宿主目录作为预期使用方式。具体物化时机、结束时机、取消／退出、锁、整体
-原子性与后台写者处理仍未确定。
-
-废弃此前“物化是可选能力、不在关键路径上”及“冲突覆盖尚未最终确认”的表述；
-旧“任务结束即结束 authority 使命”不再作为物化与结束时机的规则。早期“冲突默认
-不覆盖”及 journal 逆序恢复提案仅作历史记录，不作为现行要求。
-现行边界见 `../fs-backend/materialize-proposal.md`；本轮只同步文档，物化仍未实现。
-
-# 2026-11-09：物化可选、宿主写回要求与后台回收（物化可选及冲突未定已废弃）
-
-用户确认以下实现边界：
-
-- 物化是可选能力，不在关键路径上。运行阶段物化后重置 authority 的基准；任务
-  结束即结束 authority 的使命。
-- 冲突处理倾向让 authority 覆盖，但尚未最终确认。当前暂不为被覆盖的宿主版本
-  保留可恢复副本；此前 materialize 提案中的 journal/备份恢复方案不作为现行
-  要求。
-- 写宿主文件的要求是：写前逐文件与基准比对，再原子替换。实现时必须检查性能，
-  先比较文件大小和修改时间，仅在不一致时再计算哈希。这是待实现的要求。
-- 嵌套挂载当前未实现，可以另找实现手段；当前 bwrap 参数层做不到不等于实际做
-  不到，不把该能力写成不可能。
-
-后台删除改为信号驱动：首次 discard 需要物理删除时向工作者发信号；工作者持续
-扫描 trash 并删除，直到为空后静默阻塞等待下一次信号，多次信号合并。启动时若
-trash 非空发一次信号回收崩溃遗留。删除失败不得静默丢弃：记录日志并保留条目，
-在下一次信号或有界延迟后重试，不忙等。工作者不持有 FilesystemBackend 强引用；
-backend 被 drop 时工作者退出，未删完的目录留在 trash 供下次启动回收。btrfs
-递归删除、只读属性处理、`BACKGROUND_DELETE_LOCK` 与 `fast_delete` 语义保持不变。
-
-损坏的 `operations.json` 改为失败关闭：改名隔离成功时以空记录继续并大声告警；
-改名失败时加载返回包含路径与底层错误的明确错误，不以空记录继续，也不覆盖或
-删除坏文件。元数据写入是 temp + `sync_all` + rename 原子写，因此“写到一半
-崩溃”不是 `operations.json` 的损坏原因；损坏来源包括磁盘错误、人为编辑和版本
-不一致。环境/快照元数据读不出来仍跳过并记录日志。
-
-**废弃记录**：移除 filesystem diff 的“比较另一个环境”参数及其未实现分支。
-diff 现在只表示该环境相对其 fork 基准的变化，行为不变；accept 的 target（目标
-环境）是另一个概念，不受影响。移除前检查了 protocol contract、Filesystem
-Backend 实现与分发、测试和文档，没有调用者传入该参数。
-
-# 2026-11-10：状态目录重叠默认拒绝启动
-
-决定：Filesystem Backend 的状态目录必须位于本次要 overlay 的挂载点之外。
-`establish` 和 `launch_fragment` 在创建环境根、upper 目录或环境元数据之前检查
-状态目录是否落在被隔离挂载点内；重叠时返回明确错误，错误包含状态目录路径、
-冲突挂载点路径，以及修复建议“把状态目录放到被隔离挂载点之外，例如独立挂载的
-文件系统”。
-
-理由：此前的 flatten 降级会掩盖部署错误，并让 fork/diff/accept 退化为
-O(upper)。flatten 路径保留，但只允许通过内部开关
-`allow_overlapping_state_directory` 启用；该开关仅用于测试与诊断，默认 false，
-不属于外部配置文件。
-
-**废弃记录**：不再把“检测到重叠后自动 flatten”作为默认策略。能力字段
-`state_directory_overlaps_mount` 与启动日志保留上报，日志措辞改为说明默认拒绝
-启动、除非内部开关开启。
-
-# 2026-11-10：fork 的逐挂载 Chain / Flatten 布局与链深度上限
-
-决定：fork 时每个有产出的挂载（upper 非空）单独选择一次布局，不再用
-“状态目录是否在该挂载内”这种对挂载恒定的判断。
-
-- **Chain**：对父 upper 做只读快照/复制得到 S，S 加入子 lower（子 lower =
-  父 lower + S），子 upper 为空。fork 便宜；子 upper 只含子自己的改动，
-  diff/accept 成本随改动量增长；代价是每次 fork 让链加深一层。
-- **Flatten**：父 upper 整个复制（或可写快照）成子 upper，子 lower = 父 lower，
-  不加入 S。链不增长；代价是 fork 复制父 upper，diff/accept 随 upper 条目数增长。
-
-选择规则：状态目录位于该挂载内（只可能由内部测试开关
-`allow_overlapping_state_directory` 制造）时强制 Flatten；否则用
-`upper_entry_count` 封顶计数，条目数 < `DEFAULT_FORK_FLATTEN_ENTRY_LIMIT` 用
-Flatten，否则用 Chain。新配置字段 `FilesystemConfig::fork_flatten_entry_limit`
-供测试与基准覆盖（`0` = 总是 Chain，`usize::MAX` = 总是 Flatten），默认取常量。
-它与 `SNAPSHOT_CLONE_ENTRY_LIMIT` 是两件事：后者决定 S 用复制还是 btrfs 快照，
-前者决定 S/父 upper 放在子 lower 还是子 upper。
-
-快照基准：`SnapshotRecord.lower` 无论布局都显式记录“父 lower + S”（该挂载有
-产出时），作为 diff/accept 三方合并的基准视图。Flatten 下不能直接取子挂载
-lower，否则基准会缺 S。
-
-diff/accept：`in_lower` 只判断 mount.lower 是否包含 base 路径（Chain 为真，
-Flatten 为假）。Flatten 走现有的 upper 副本比较（overlay：
-`changes_from_upper_copy` / `upper_delta_from_base`；btrfs：`btrfs_delta`）。
-accept 中 Chain 的 `delta_since` 必须排在 btrfs 分支之前；否则用 S 全量与只含
-本分支改动的子 upper 比较，会把父内容全部误判为删除。`needs_source_maps`
-不再按 btrfs/flatten 只读子 upper，而是 lower 为空时只读 upper，否则读取
-`read_chain(lower)` + upper。
-
-链深度保护：新增 `MAX_LOWER_DEPTH = 96`。本机无特权实测 `bwrap --overlay-src`
-叠层：231 个 lower 源成功，232 个 `Invalid argument`；bwrap 把源转成
-`/proc/self/fd/N`，限制与底层路径长度无关。取低于实测上限一半并留余量的 96。
-超过时 fork 在创建任何目录或元数据之前返回 `BackendError`，说明当前深度、上限
-和原因；不静默降级为 Flatten，也不实现整链合并。
-
-阈值标定：在同一非重叠布局下强制 Chain/Flatten，用 `examples/fs_bench.rs`
-（ITERS=5，N=16/64/256/1024/4096）。Flatten 的 diff+accept p50 在 N=256 首次
-比 Chain 高约 12.3ms（此前 N=16/64 分别约 5.5/2.2ms），向下取 2 的幂得到
-`DEFAULT_FORK_FLATTEN_ENTRY_LIMIT = 256`。数据与命令写入
-`docs/fs-backend/current-state.md`；这是本机测量，换环境需重测。
-
-用户已批准 `ForkLayout`、`fork_flatten_entry_limit`、`MAX_LOWER_DEPTH`、
-`allow_overlapping_state_directory` 命名；对应含义分别为逐次布局、Flatten 阈值、
-lower 深度上限、内部允许状态目录重叠开关。父目录变化保留，不通过生产过滤修改
-diff；测试必须精确计入对应数据面会报告的目录。
-
-**验证边界**：用户第三轮 `log-3.txt` 已进入真实 btrfs Chain/Flatten/mixed，但
-Chain/mixed 因 EXDEV、Flatten 因缺父目录预期失败；第四轮 `log-4.txt` 已验证修复后
-三项成功路径，详见下方第四轮记录。
-
-**废弃记录**：`FilesystemBackend::mount_uses_flattening` 及“flatten 只由状态目录
-重叠决定”的规则被删除；`launch_lowers` 不再因该判断忽略 lower 层，始终使用
-`[挂载点] + mount.lower` 的真实链。重叠场景仍强制 Flatten，但由逐次布局逻辑
-显式判断，不再有对挂载恒定的辅助函数。
-
-# 2026-11-10：第三轮特权失败修复与证据
-
-此前 send dump 修复历史：基线 `a37e75c` 的 `log.txt` 中宿主原始能力检查通过，
-Rust btrfs 测试却在 diff 断言失败、未到 accept。解析器未去掉 stream snapshot
-根（实际 `./upper/`）、只接受箭头 rename 而非真实 `dest=`、输出 `modify` 而非
-契约 `change`。修复按 snapshot 根和 inode 路径生成最终增量，临时创建/rename
-不产生伪删除；真实目录 rename 只扫描目标子树补足未修改子项。真实 dump 格式
-回归先失败后通过，accept 共用增量视图同步修复。随后 `log-2.txt` 319–324 行的
-两个旧特权测试通过，仅覆盖当时 Flatten 与 direct-root，不外推其它布局。
-
-- btrfs 挂载存储使用父 volume 子卷，内部含 upper/work。OverlayFS copy-up 的
-  work→upper rename 必须位于同一子卷；普通用户真实回归已复现旧布局 errno 18，
-  修复后覆盖建立、新挂载、空子挂载、Chain、Flatten、mark 与恢复。fork/mark/diff
-  快照父 volume，send dump 只解释 upper 子树；其中父目录变化仍保留。
-- 旧的 upper-as-subvolume 布局恢复时明确拒绝并保留原数据、元数据和 work，不做
-  自动搬迁；upper/work 的同设备检查也在创建/启动前执行，防止再次延迟到 copy-up
-  才暴露 EXDEV。
-- 特权脚本使用 `--show-output --format=pretty --color=never`，避免 nocapture
-  打断 libtest 结果行。`check-test-output.py` 分别验证精确名单、命令退出码、结果
-  行、running 数和最终摘要；执行数=通过+失败，ignored 不算执行，任何 SKIP 失败。
-  真实 libtest 交错回归先 red 后 green，保留原假命令场景，共 24 场景。
-- launch 的挂载就绪要求每个 overlay 目标都存在（解码 mountinfo 路径），不再
-  接受任意一个。目标未齐时每轮检查 owned child 的退出状态；只有确认它已退出才
-  接受短命令完成，覆盖 mountinfo 可读但不完整、ENOENT 和退出未回收时的 EINVAL。
-  其他读取错误上报，活进程仍须满足全部目标，保留 400 × 5ms 期限和真实退出码。
-  两项退出回归先 red 后 green；完整测试最终库 140 项、bin 1 项通过、0 失败，
-  其中无权限自行 SKIP 的 btrfs/特权项不作特权成功证据。
-  live-target 增加初始观察标记与分阶段计时，共用原 30 秒期限；无证据将偶发超时
-  归因为高负载。status pipe 首行仍阻塞，作为已知边界记录。
-
-**废弃记录**：btrfs upper 本身为独立子卷、work 位于其外部的布局被父 volume
-布局取代；从 `--nocapture` 日志精确 grep `test NAME ... ok` 的检查被捕获输出和
-摘要交叉核对取代。`log-3.txt` 中 4 执行/1 通过与 0/7 误判不是实际只执行了
-1 个或没有执行进程测试。
-
-# 2026-11-10：第四轮特权验证通过与范围
-
-用户 2026-11-10 第四轮验证中 Chain、Flatten、mixed、direct-root 四测试逐项 ok，
-4 passed、0 failed、0 ignored；三项 btrfs 场景均选中真实 btrfs，
-`incremental_diff=true fast_delete=true`。状态目录位于根 btrfs 挂载，workspace 在
-独立 `/tmp` tmpfs，默认非重叠布局成立。7 项进程测试全通过、0 failed、0 ignored，
-自动机制为 cgroup，强制 process_group fallback 也通过。原始子卷创建、只读快照、
-增量 send dump、严格删除及初始 userns 直接 lower=/ 均通过；脚本退出 0，
-全部 PASS，最终 `ALL PRIVILEGED CHECKS PASSED`。
-
-亲读 `tests/privileged.rs` 与 `tests/support.rs` 确认：Chain/Flatten 检查实际布局、
-真实进程修改/删除/新建、含父目录的精确 diff、accept 发布及后续真实视图与清理；
-mixed 检查两代 Chain→Flatten、accept 回 child1 且 root 不变及清理。accept 传入
-`target_mount_pid=None`，不是运行中 live-target 重放验收；不外推全部内核生成的
-overlay 元数据、特殊文件/ACL/ownership、偶发超时根因或物化完成。
-
-废弃的 `priv_btrfs_fork_diff_accept_discard` 已由 Chain/Flatten/mixed 三项替代，
-不再作为当前测试名单；先前失败与修复过程留在本文件，正式状态以第四轮证据为准。
-
-# 2026-11-10：删除用户日志与 FS 状态文档复查
-
-用户明确授权删除根目录 `log.txt`、`log-2.txt`、`log-3.txt`、`log-4.txt`。
-删除前已读取第四轮结果并与当前特权测试及 `652f60c`、`8c54403` 核对；当前文档
-保留准确测试名、通过数、能力值和边界，不再依赖已删除日志的行号。上文旧日志名与
-行号只作为失败/修复历史标识，原文件已按用户要求删除。
-
-复查修正：状态目录重叠默认拒绝，只有内部测试/诊断开关允许 Flatten；小 upper
-Flatten 只避免追加当前层，不会压平全部继承层，搬移状态目录也不会缩短既有链。
-ProcessBackend 已承担启动、冻结、终止及 namespace 记录，不再将这些现成功能
-列在未实现清单；跨 Backend 编排进一步统一与逃出进程组的后代仍保留为真实边界。
-信号驱动 trash、元数据隔离失败关闭、diff 比较目标移除的既有决定保持不变。
-# 2026-11-10：观察事件与增量读取
-
-按已确认设计，弃用 `GET /api/run-view` 整体轮询及 `ui.rs` 每次 `state.tree = tree.clone()` 的整体替换。内部 SpeculativeTree 不再作为外部序列化模型；原始 Agent/Runtime/Ledger 消息不进入公共观察流。AScoutRunView 仅为从公共事件折叠的本地 TUI 视图；对话通过独立读取接口取得。现有简易页面改为首次事件快照 + SSE，后续 React + React Flow 前端尚未实现。具体接口与差距见 observation.md。
-## 2026-11-10：状态事件集、Ledger 观察日志与 Tree 转换入口
-
-废弃观察接口的 snapshot / “快照”命名、`GET /api/observation/snapshot` 和 `ObservationSnapshot`：它们读取的是完整有序事件，不是被保存的状态。当前统一称状态事件集，英文直译为 `StateEventSet`，路径为 `/api/observation/state-event-set`。
-
-废弃 ui.rs 独立保存观察日志及通过 Tree 前后差异推断事件的做法。Ledger 在 events.jsonl 中以 `message: observation` 区分观察记录，直接提供只读句柄；Tree 在创建、生命周期、Authority 和环境转换入口产生待发事实，控制循环交给 Ledger 追加。保留同一次处理内的中间状态与入口明确给出的原因。观察日志不承担崩溃恢复整棵树的要求，不逐次保存完整树，也不实现折叠缓存。
-
-## 2026-11-10：投机起点与工具开始分离
-
-废弃“用 `SpeculativeAdmissionRequest.timestamp_ms` 合成 `ActionStarted` 作为工具开始时间”的做法：准入请求只登记 action 身份并表达投机起点，工具开始时间只来自接入侧真实的 `ActionStarted`。某 action 只有准入请求而尚无 `ActionStarted` 时，`tool_finished.started_at_ms` 为 null，耗时在起点和终点都可得时才计算。被准入投机的起点由 `branch_created.speculation_started_at_ms` 表达，取自对应准入请求的接入侧时刻；事件公共 `timestamp_ms` 仍是控制面记录时刻。`model_usage` 与 `tool_finished` 增加源侧 `started_at_ms` / `finished_at_ms`；`model_usage.action_id` 由可空改为必填字符串。
-
-## 2026-11-10：结算的实测/估计分离与未命中时间语义
-
-废弃 `settlement` 每个维度的 `{value, measured}` 形状（一个带符号数字加一个布尔标记），以及“未命中时间 = −(候选从投机起点到被丢弃的存活时长)”的语义。当前 `time_ms`、`money` 都是 `{measured, estimated}`：实测与估计各自独立，永远不相加，也不用其中一部分填充另一部分；未命中只记投机给整场运行（权威路径）造成的额外延迟的负值，不记候选存活时长或快速模型自身的“白耗”，没有可靠测量时对应部分为空。目标语义见 `docs/design/control-plane.md` §5，实现与数据缺口见 `docs/development/observation.md`。
-
-## 2026-11-10：控制面 WebUI 的构建与嵌入
-
-废弃 `src/bin/ascout-control-plane/web/index.html` 手写单页。浏览器界面改由仓库根目录 `webui/` 的 React + React Flow 应用实现，Vite 构建产物提交在 `webui/dist/`，由 `web.rs` 用 `include_bytes!` 嵌入二进制；`cargo build` 不依赖 Node，前端源码变化时重新构建并提交 `dist/`。控制面静态资源路由固定为 `/`、`/assets/app.js`、`/assets/app.css` 和 `/favicon.svg`；CSP 的脚本来源改为 `'self'`，不再需要内联脚本。界面只展示权威窗口对话，投机面板只读，结算的实测与估计分别显示；连续 `conversation_updated` 流式块在投机树中合并为一个就地更新的节点。实现说明见 `docs/development/web-ui.md`。
-
-## 2026-11-10：Edge 改为抽象模型，由 Chance 取代“有 id 的机会对象”
-
-废弃“Edge 是有 id、可枚举、被 `select` 选择、出现在 AssumptionSet（`Assumption=(edge_id, proposal_id)`）里的对象”以及“Edge 即投机机会”“嵌套 Edge 有自己的 Proposal、Branch 和过程状态”等表述。Edge 现在只是描述投机如何进行的抽象模型，不是运行时对象；其具体实例称为 Chance（被 `admit` 接纳的投机机会），从 `admit` 通过起拥有 id，直到被验证后接受或抛弃为止。待选集合、AssumptionSet 引用和运行时 Decision 作用对象均为 Chance。
-
-## 2026-11-11：投机树以 Branch 树为唯一几何依据
-
-废弃“以当前权威路径为居中主干、按子树宽度在权威两侧平衡、同一父节点的子枝头部统一排到父枝底部”的投机树布局。该布局让 Promote 改变几何：权威路径一变，主干、左右分配和分叉位置都会重排，已经长出的树形随之移动，分叉也被搬到新权威下方。
-
-现在的目标语义是：根 Branch 的枝顶固定在原点，子枝的横纵位置只由 `parentBranchId` 与 `createdAtSequence` 决定；子枝从父枝上“创建它时的调用槽位”（最后一个 `firstSequence <= createdAtSequence` 的调用）分叉，之后新增调用只向下延长枝干，不改已有槽位与分叉。只有新增兄弟分支时才允许重新分配左右并整体重排，且兄弟子树的横向范围不得相交。权威路径只进入样式：权威枝干实色更粗，候选细描边；权威祖先在通往当前权威的分叉之后的调用变暗。调用语义固定为“一次模型调用一根小枝条，其后的工具调用是这根枝条上的叶子，第一次模型调用之前的工具调用长在枝干上”；连续同签名调用可在同一根小枝条内合并。
-
-实现上每个 Branch 是一个 React Flow 节点，节点内部用一张 SVG 连续绘制枝干、小枝条、叶子、枝头标记和分叉起点；分叉本身用平滑曲线连接到子枝枝头。旧的独立枝干/小枝条/叶子节点类型与相关常量已删除。图例、悬停文案和详情点击行为随之改为新语义。
-# WebUI 树形与权威窗口（2026-11-11）
-
-## 已确定
-
-- 用户视图保留独立的权威窗口；它沿 `authorityHistory` 连续展示已成为权威路径的对话，候选内容只有 Promote 后才进入该时间线。按 Branch 查看仍是独立的只读窗口。
-- 投机树使用观察事件的逻辑时间和稳定哈希：Branch 是连续树干，模型调用是短叶茎，工具调用是末端叶片；长逻辑时间用单调平方根压缩并设单 Branch 上限，Chance 根部从父树干的对应时间点向侧面连接。
-- 权威切换只改变样式，不移动既有几何；候选未采纳使用中性文字。
-- 权威窗口的消息组件使用稳定身份和 memo；事件更新只刷新末尾内容，滚动只在用户贴近底部时跟随。
-
-## 废弃
-
-- 废弃把 Branch 作为垂直绝对槽位、把模型调用画成独立分支、以及按真实毫秒线性展开整棵树的做法；这些方案会破坏树干语义或使长任务不可读。
-
-## 2026-11-12：Transcript 引用与持久化 session 树迁移
-
-以下两项是已确定目标方案下的旧实现废弃记录；实现仍在迁移中，不表示目标能力已完整实现。
-
-- 废弃 Ledger 的 Transcript 原样保存 Pi 完整消息对象或正文的旧实现。目标方案由 Pi 格式的 `session.jsonl` 保存正文，Ledger 仅保存 Branch id、树文件记录 id、role 等引用事实。
-- 废弃 Candidate 使用仅存在内存的 Pi session，以及 Promote 只设置 `authority=branch` 的旧实现。目标方案中，Candidate 和 Promote 依赖持久化 session 树文件与权威路径标记；相关实现仍在迁移中。
-
-## 2026-11-12：投机树长度、方向、宽度与配对规则重写
-
-废弃以下旧实现与文档表述：把整枝长度写成“从 Branch 创建到当前的累计时间”的一次对数映射；把没有开始时间的调用跳过或用事件序号补时间；由“创建到最后事件（丢弃或清理更晚则取它）”决定枝长并追加固定短尾、最短长度和空枝固定长度；用指数回正加两根低频正弦决定航向；用 0.72 次幂、跨度 2.4%、4–90 的上限、26–56° 初始角、同侧 40 单位至少差 15° 等经验常数决定宽度和分叉角度。
-
-现在的规则：布局前先把工具调用配对到它之前最近的模型调用；所有调用必须带开始时间，缺失显式报错。纵向长度逐截计算，每截等于相邻两次调用开始时间间隔的对数，位置逐截累加；Chance 不切段，只在相邻两截之间插值；枝长止于最后一次调用。方向改为逐截随机行走：横向位置决定回中概率，每截相对上一截转固定小角度，方向限制在 ±60°。宽度按该点之后剩余调用数占本枝总数的平方根缩放；根宽是独立的树内参数（默认 45 单位），不随段长映射变化；子枝根宽按剩余份额从父枝宽度推导；删除全局上限与 0.9 封顶。Chance 半径取子枝根宽的一半，叶片与空枝芽改为无尖端的椭圆。前端仍以事件折叠结果作布局输入，观察事件格式不变。
-## 2026-11-13 NLE 初始化回归修正
-
-e89533d 保存／恢复逻辑曾为每次新世界增加独立随机 lgen 种子，废弃该初始化选择；它改变既有 core seed 的地图生成行为。新世界保持 lgen=None（地图生成沿用 core RNG），保存记录仍按自身完整 initial 重建。不撤销保存／恢复及指纹验证，不改变候选共享世界语义。旧日期消息及旧权威历史差异尚未解决，不通过重新录制、伪造工具结果或放宽匹配／验收绕过。证据见 replay.md 的 2026-11-13 核实。
-# 2026-11-13 叶茎完成位置与填充连接
-
-废弃按调用开始位置放置叶茎，因为叶茎表示已完成的模型调用。
-废弃 `stemAnchor` 及外沿偏移锚点，因为连接必须从完成位置中心线与最终可见轮廓求交。
-废弃叶茎描边与线帽，因为显式等宽填充轮廓才能复用两侧平滑连接并限制局部宽度。
-废弃只凭稳定随机偏好放侧，因为附近同侧子枝和叶茎需要参与角度间隔比较；稳定偏好仅用于同分。
-
-## 2026-11-13 通用回放持久化范围纠正
-
-废弃“回放与后续输入的 session/events 必须只在内存，因而改造 Ledger、SessionTree 和运行目录”的要求。用户明确允许正常新 run 的原生记录、日志和恢复资料照常落盘；不需要的是额外导出缓存、recording 副本。实现移除该过渡改造，直接复用正常运行路径；源 run 只读、每次重新读取，在内存准备回复队列。通用回放入口不包装 B3，也不推断其父目录配置布局。
-## 2026-11-14：外部回放职责收敛
-
-废弃控制面 `--replay` / `ASCOUT_REPLAY` 编排、Pi 专用 `ascout-replay` provider、运行侧共享 `agent-access/replay/` 和人工输入／模型切换自动停回放逻辑。回放读取和父链还原移入 `tools/replay/`；外部工具启动普通 AScout，以本地 OpenAI SSE 服务供给响应，通过正常接口顺序提交历史输入。用户先手动 `pause` 再交互。结束静默停自动输入，失败明确报错但保留系统；双方主动退出协调走正常 Shutdown/save。普通保存恢复能力保留，不引入确定性调度。新增通用追加模型配置、策略 artifact 加载和可输入状态接口，不覆盖 Pi 用户配置。
-# 2026-11-14：回放取消项修复
-
-废弃将明确 aborted assistant 从回放队列过滤的做法：该做法使源实际存在、被 AScout 取消的请求变成缺键。取消项现在按源顺序保留，命中后等待客户端取消，超时明确失败；成功输出统一等待一次 500ms。其他 error 不扩展为取消。验证中同时修正 HTTP Buffer 分块导致的 UTF-8 损坏，未改变匹配材料或放宽缺键断言。实施与证据见 `docs/development/replay.md`。
-# 2026-11-14：Gateway 三侧通信与 Registry 归属
-
-用户确认：名称采用 Gateway，统一 Agent 接入侧、UI 与 Runtime 三侧的通信接入、消息分发和送达；管理连接／会话、握手与断线，进行入口格式、身份、上下文和权限检查，转交请求／事实／回执，交付命令／已编译本地 Decision／结果／事件。消息对投机执行的变化由相应控制逻辑决定，Gateway 不拥有 Tree、Policy 或投机编排。实际启动由 Runtime 负责；transport、UI 部署和启动协调归属仍未决。
-
-Registry 已属于 Runtime，保留登记、契约兼容性、能力声明校验、主动验证和独立证据职责；Adapter 不得自填验证状态或以自测结果代替证明。控制面使用带验证状态的能力视图匹配 Policy、协调生命周期。当时 Agent、UI、Runtime 三条通信入口尚未统一实现；同日审查收尾已将三侧入口归入 `src/control_plane/gateway/`，见上文“Gateway 审查收尾”。
-
-废弃正式名称 Agent Control Gateway／ACGateway、将 Registry 列为控制面组件以及 Gateway 实际启动 Agent 的表述；此前“Gateway 是否覆盖 UI／Runtime 未定”仅为历史。本轮只同步文档，不修改代码、不提交、不运行模型或代码测试。
-# 2026-11-14：取消物化冲突检测与全量基准副本
-
-用户确认“直接写入”：废弃物化阶段宿主/共同祖先比较、冲突检测与报告及其全量
-publication/execution base 副本方案。直接按 Authority 增量最终视图覆盖受影响路径，
-保留未涉及路径，不做 Git diff/merge 或新增全量哈希，禁止复制整个挂载。
-不能用复制宿主挂载模拟运行中执行基准重置；该协调尚未完成。既有 recovery 的
-独立 lower 全量复制也不视为满足新约束，能力差距见 recovery/current-state 文档。
+废弃助手此前写入的“TUI 提示回答暂缓、纯 TUI 只能持续等候”及“输入 / 时重新请求 Pi 清单”的表述。当前决定是适配 AScout 终端文字提示；命令清单在 Pi 初始权威 session 完成扩展绑定与资源发现后读取一次，重连和换权威复用缓存。没有新的自动过期、轮询或 Runtime 工具取消设计。

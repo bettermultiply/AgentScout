@@ -121,6 +121,12 @@ Rust 协议、控制循环与 Pi 接入同步切换为 `ActionStarted` / `Action
 
 `/ascout` 选择 Branch 后，默认显示由 AScout 根据 SDK 消息排版的对话内容；Tab 切换 AScout 运行事实，↑/↓ 滚动，Esc 返回主对话。候选窗口不接收用户输入。当前仍使用 AScout 输入栏，不支持 Pi 完整编辑器、命令菜单或图片，也不承诺显示 Pi 原生终端画面。候选的独有输出分隔来自 Pi 接入侧的真实消息边界，不再复制 Rust 展示文本。
 
+### TUI 文字提示与命令
+
+真实入口是 `src/bin/ascout-control-plane/tui.rs`，由控制面启动时接入共享 Gateway Connection 和 LedgerReader。当前权威的 confirm/select/input/editor 提示出现时临时接管输入区域；候选提示不发布，Promote 后才展示。↑/↓ 选择是／否或选项，Enter 提交；input 可输入、退格并 Enter 提交。editor 显示预填内容，Enter 插入换行、退格编辑末尾、Ctrl-S 提交完整多行文本。Esc 取消当前提示（单独按键，等待约 100ms）；Ctrl-C 仍请求整轮中断，Ctrl-D 仍退出。回答、取消、换权威或断开后关闭提示，普通聊天草稿保留；答案只走 `UiPromptAnswer`，不向模型发送聊天。提示期间导航键用于提示，结束后恢复原观察导航。
+
+主对话输入 `/` 展示匹配的缓存命令，Tab 补全第一项后 Enter 原文执行；继续输入可缩小范围。清单由初始 Pi session 完成扩展绑定及资源发现后取得一次，重连与权威切换复用，不重新读取 Pi。启动扩展提问不依赖清单完成；无人回答不自动补值。`custom` 组件暂不支持，不嵌 Pi 原生终端组件。
+
 - 运行目录由调用方创建，控制面只使用它；Agent 日志、Adapter 日志和 `events.jsonl` 都在其中。
 - 初始 Authority 在运行目录的工作区中建立，连续请求使用同一 AgentSession。
 - 模型选择与认证使用 Pi 现有配置，不写死 provider。
@@ -169,7 +175,7 @@ Candidate 创建通过一次入口登记完整控制上下文。Policy 预测、
 
 ### 退出验证（2026-11-03）
 
-当前 Shutdown 请求及操作系统 SIGINT／SIGTERM 进入保存恢复路径，保存整棵有效树后退出，详细顺序与失败边界见[恢复](recovery.md)。Adapter 使用独立进程组，终端发给控制面前台进程组的信号不会直接终止子进程。TUI 捕获的 Ctrl-C 走 Interrupt，Ctrl-D 走退出入口。目标语义已确定为 Agent 常用 Ctrl-C／退出终止任务，结束候选和相关写入后物化；暂停由 AScout 独立接口提供。现有入口与物化尚未对齐，保存恢复能力保留，不据此宣称终止已实现。
+当前 SIGINT 与 TUI Ctrl-C 走 Interrupt，终止 task 并物化后保留程序和 session；SIGTERM、Shutdown 与 Ctrl-D 退出。保存整树由独立 `/pause` 入口触发，`/continue` 明确继续原任务且不进入模型。Adapter 使用独立进程组，终端发给控制面前台进程组的信号不会直接终止子进程。实际验收边界见[恢复](recovery.md)，不将局部入口通过视为全部 Authority 已完成。
 
 Agent 会话释放和 Runtime 环境清理分开记录；共享环境清理成功时更新 Tree 中仍引用它的所有 Branch。退出后 `final-tree.json` 保存最终状态，已归档 Branch 的历史事实不回写。
 
@@ -501,7 +507,7 @@ ASCOUT_RUNTIME_CONFIG=nle-runtime.json \
 
 `src/bin/ascout-control-plane/execution.rs` 接收 Agent 消息、UI 请求、操作返回及到期检查，同一 task 顺序处理。运行期间不再每 100 毫秒轮询；等待使用树给出的最近期限，期限到达才触发检查。Policy 与 Runtime 操作在工作线程完成，不阻塞控制事件处理。读取树的副本仅用于一次异步求值，不成为另一份可变控制状态。取消、结束或状态变化后，返回结果重新检查有效性；仍有环境操作在进行的 Branch 不得提前归档或清理。
 
-Gateway 的 Agent socket、UI HTTP/SSE 和 Runtime ControlSession 通信代码已统一归入 `src/control_plane/gateway/`。协调逻辑依赖类型化 Runtime 操作／结果接口，UI 绘制与对话折叠、Ledger 保存、Tree 转换仍在原责任处；详情、验证及剩余缺口见 [Gateway 实现核查](gateway.md)。本轮保持既有传输和进程部署，不决定未来 transport、UI 部署方式或启动协调归属；Gateway 不承担 Tree、Policy 或投机编排。
+Gateway 的 Agent socket、UI HTTP/SSE 和 Runtime ControlSession 通信代码已统一归入 `src/control_plane/gateway/`。协调逻辑依赖类型化 Runtime 操作／结果接口，UI 绘制与对话折叠、Ledger 保存、Tree 转换仍在原责任处；详情、验证及剩余缺口见 [Gateway 实现核查](gateway.md)。部署与生命周期以[控制面 §2.1](../design/control-plane.md#21-gateway)为准：Gateway 属于控制面，与 UI 均不独立部署，由控制面统一启动和停止；Gateway 与 Runtime 网络通信，Agent 与接入进程实际由 Runtime 启动、监视和回收。Gateway 不承担 Tree、Policy 或投机编排。
 
 验证结果和支持边界见本轮验收记录；脚本 Agent／Runtime 替身验证控制路径，不代表真实模型或 NLE 的端到端效果。完整 Policy 调度、嵌套与 Registry 能力验证仍属既有后续范围。
 

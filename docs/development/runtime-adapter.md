@@ -136,6 +136,8 @@ Pi 接入采用宿主单一进程托管全部 Branch session；文件系统 Bran
 - `guest_access_path`：写入每个 rootfs 副本的 `ascout-agent-access`；
 - `state_directory`：各环境的磁盘副本、API/vsock socket、snapshot 和运行日志目录。
 
+配置责任已确定：Adapter 只负责接入所需的配置，环境及其网络配置归 Runtime；实际 IP、端口等分配结果属于运行状态。当前 Firecracker 实现用同一份 JSON 承载接入与 Runtime 配置，不改变这些配置的归属，也不表示当前代码已按该边界重构。独立二进制不是语义要求，具体部署方式与配置文件组织由实现按需选择；正式边界见 [Runtime Adapter 契约 §1](../design/runtime-adapter-contract.md#1-契约边界)。
+
 `operate_environment` 固定通过 Firecracker vsock 调用 guest 接入侧，不自动回退到 SSH。SSH 只用于独立诊断。建立环境时 Adapter 复制 rootfs 并注入 guest 接入侧，不修改部署方提供的原始镜像。
 
 网络是环境的固有能力。建立环境时 Adapter 通过免密 sudo 创建独立 network namespace、网桥、TAP、veth 与双层 NAT，Firecracker 在该 namespace 内以降权用户运行，进程与文件保持 Adapter 用户归属；guest 使用固定 MAC 与地址，默认路由由 Adapter 在环境就绪后补齐。cleanup 回收 netns、veth 与 iptables 规则，终止按进程组回收 Firecracker 进程链。分支时 Adapter 短暂暂停父 VM，创建全量 snapshot 和独立磁盘副本，恢复父 VM，再以独立 rootfs、网络与 vsock 路径恢复子 VM。

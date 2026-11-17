@@ -6,6 +6,8 @@ Runtime 是 AScout 用来承载 Agent 一步动作的受约束执行系统。一
 
 Runtime 面向一般投机执行，不专门为 NLE 或某个 Agent 产品设计，也不等同于虚拟机。AScout 自身支持一套 Runtime；Runtime Adapter、Adapter Registry、Effect Coordinator、环境、进程与资源管理都属于这个整体中的接入或实现职责，而不是几套平级系统。适配外部执行机制是为了便于接入，不意味着 AScout 只有适配器而没有自己的 Runtime。Runtime 经 Gateway 与控制面通信，语义边界仍由 Runtime Adapter 契约规定；实际启动、监视和回收 Agent 与接入进程由 Runtime 负责。
 
+默认 Runtime 面向可信 workload；对抗性 containment 由部署方选择 hardened Runtime 与 Adapter 提供，不能改变 AScout 的生命周期语义。
+
 ## Adapter Registry
 
 Adapter Registry（简称 Registry）属于 Runtime，负责 Adapter 登记、契约兼容性和能力声明校验，维护接入状态、契约版本和声明快照。首期只检查控制面需要的 API 是否存在并可解析，不主动建立验证环境或执行验证场景；因此首期不产生环境保证已验证的结论。Adapter 提供接入信息，不得自行填写验证状态、验证证据，或以自测结果代替未来的 Registry 验证。
@@ -18,7 +20,7 @@ Environment 的身份由 Runtime 创建并随建立或派生结果返回；控�
 
 控制面与 Adapter 的 `ControlSession` 只承担网络连接、握手和请求/结果关联；单个 Runtime 对控制面表现为统一身份和统一入口，内部节点、进程、Backend instance 及路由不暴露。控制面为每个 Branch 显式维护独占的 `environment_id`，Runtime 普通请求只接收 `environment_id` 与 operation，不能从环境推导 Branch。Runtime 内部维护 Environment 与 Backend instance 的多对多组合，并以 `backend_id` 区分实例；控制面不传 `backend_id`。Adapter Registry 首期的 API 存在性/可解析检查也不等于环境保证已验证，Agent 接入验证与 Runtime 能力验证保持独立边界。
 
-系统最终必须把 Authority 的结果物化到现实。Agent 完成本轮工作、开始等待用户输入时，task 完成；正常完成时，在没有存活候选且任务相关写入完成后物化并重置基准，不为物化暂停执行。取消、失败或终止任务立即进入物化处理，先结束候选并等待任务相关写入完成，再实际写回。Agent 常用的 Ctrl-C 或退出均表示终止任务；这不规定 Ctrl-C 是否同时关闭整个程序。暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，保留整棵有效树、候选和环境等待继续；它与原 Agent 的 Ctrl-C／退出终止语义分开，暂停不意味着退出程序。Runtime 经接入边界向控制面报告物化完成或失败，物化失败等同操作失败；控制面必须等物化成功后才能宣告任务成功。旧环境及基准在无人引用时释放。
+系统最终必须把 Authority 的结果物化到现实。Agent 完成本轮工作、开始等待用户输入时，task 完成；正常完成时，在没有存活候选且任务相关写入完成后物化并重置基准，不为物化暂停执行。取消、失败或终止任务立即进入物化处理，先结束候选并等待任务相关写入完成，再实际写回。Agent 常用的 Ctrl-C 或退出均表示终止任务；Ctrl-C 不关闭程序，保留 session 并留在对话中，待候选结束、相关写入及物化处理完成后可接下一轮。暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，明确继续命令为 `/continue`，恢复原任务执行，保留原树、候选和环境关系；普通消息是否也解除暂停未定。它与原 Agent 的 Ctrl-C／退出终止语义分开，暂停不意味着退出程序。Runtime 经接入边界向控制面报告物化完成或失败，物化失败等同操作失败，须向用户显示失败；控制面必须等物化成功后才能宣告任务成功。旧环境及基准在无人引用时释放。
 
 接受候选并由其承接后续执行时，继续使用候选环境，不默认把候选改动复制回父分支。Runtime 保持必要状态交接、环境引用和效果边界；嵌套接受仍受祖先未决依赖约束，不能据此成为整棵树的 Authority 或提前物化。此选择不新增环境迁移模式或 Policy 选择接口。
 

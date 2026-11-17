@@ -2,13 +2,13 @@
 
 本表给出 AScout 每个术语的一句话定义与权威出处，并收录两套设计视角之间的关键映射。完整语义以各设计文档为准：抽象概念见 [`../design-model.md`](../design-model.md)，目标语义见 `docs/design/branch-semantics.md`、`docs/design/effect-management.md`、`docs/design/speculation-contract.md` 与 `docs/design/control-plane.md`，决策速查见 `docs/design/decisions.md` 与 `docs/design/speculation-decisions.md`。
 
-**权威范围**：一级架构以 `decisions.md` D-039 和 [`../architecture.md`](../architecture.md) 为准；Branch 生命周期与状态语义以 [`branch-semantics.md`](branch-semantics.md) 和 `decisions.md` 为准；投机执行抽象以 `speculation-decisions.md` 为准。不同文档若发生冲突，必须显式收敛并同步修改。
+**权威范围**：一级架构以 `decisions.md` D-039 和 [`../architecture.md`](../architecture.md) 为准；Branch 生命周期与状态语义以 [`branch-semantics.md`](branch-semantics.md) 和 `decisions.md` 为准；投机执行抽象以 [`../design-model.md`](../design-model.md) 与 [`policy-decisions.md`](policy-decisions.md) 为准。不同文档若发生冲突，必须显式收敛并同步修改。
 
 ## 视角映射
 
 **notification**：Policy 在既有 dispose／Promote 中可选构造、向成功 winner 交付的非空白上下文通知；缺省零记录，Pi 使用同名原生 custom message，不启动新 turn。见 [Agent 接入设计](agent-integration.md) §3。
 
-`decisions.md` 从 Speculative Tree 机制视角记录语义，`speculation-decisions.md` 从投机执行底座视角记录语义；二者描述同一个 AScout 系统。
+`decisions.md` 从 Speculative Tree 机制视角记录语义，`speculation-decisions.md` 从投机执行底座视角记录设计选择与理由；二者描述同一个 AScout 系统。
 
 | 底座术语 | Speculative Tree 视角 | 关系 |
 |---|---|---|
@@ -32,6 +32,7 @@
 - **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Root 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中 Agent 的一轮工作；Agent 完成本轮工作、开始等待用户输入时，task 完成。一个 session 对应一个 AScoutAgent 和一棵 Speculative Tree，多轮 task 共用该控制域。（`../mental-model.md` §4.2）
 - **AScoutAgent**：一个 session 对外呈现的单一 Agent 视图，也是该 session 在控制面中的控制域，拥有一棵 Speculative Tree；主对话操作当前有效的权威执行主线，另可只读观察该 Tree 的 Branch 状态与候选内容；候选内容与主对话分开，并随 Branch 的角色与状态显示其投机身份，不改变主对话路由或生命周期权限。（`../mental-model.md` §4.2；`agent-integration.md` §3）
+- **交互接口**：Agent 侧声明并提供、AScout 只发现并转发的一组输入能力与提示，其中输入能力包括命令清单、编辑器能力与特殊输入模式，提示包括确认、选择、输入和编辑器等对话式提示；AScout 不硬编码 Agent 的命令表，不嵌入也不复制 Agent 的原生界面或终端画面，不解释 Agent 语义，只转发。（`agent-integration.md` §3.1；`../development/agent-access.md` §3.1）
 - **`/ascout`**：AScout TUI 内打开当前 AScoutAgent 整棵 Speculative Tree 的只读观察操作，可从 Branch 关系与投机状态选择具体 Branch 深入查看；选择仅改变观察对象，不切换主对话、不向候选发送对话，也不接受或丢弃 Branch。它不是 Agent 产品自身的命令，不查询其他 Tree。（用户确认：2026-10-25；`../../Discussion.md`；`../development/decisions.md`）
 - **Agent 接入侧**：负责 Agent 执行实体、Session、执行活动、Branch context、operation 归属、Interposer、ASC-Proxy 和 Product Integration 等接入职责；其中 Interposer 统一承担 Agent 拦截与 operation integration。（`../architecture.md` §1；`agent-integration.md`）
 - **控制面**：负责 AScoutAgent、Speculative Tree 控制状态、Policy、请求校验、操作编排和 Runtime event 解释；包含 Gateway、Policy Engine、Speculation Coordinator 与 Ledger。Gateway 统一承接 Agent 接入侧、UI 与 Runtime 的通信，Registry 属于 Runtime。效果协调属于 Runtime 的整体责任。（`../architecture.md` §1；`control-plane.md`）
@@ -76,7 +77,7 @@
 - **ResolvePending**：控制面报告真实等待点的裁决，不阻塞 Parent 取得真实结果并继续；接替主路径由 Promote 命令落实，它本身不改变 Policy 裁决。（用户确认：2026-10-25；`../../Discussion.md`）
 
 - **branch**：从当前 Branch 创建一个或多个 direct child；投机场景中这些 child 才按角色称为 candidate。完整语义可携带 candidate 数量、Proposal、outcome slot 和可选 resolver override。（`branch-semantics.md` §Agent 最小感知模型；`decisions.md` D-037）
-- **commit / commit request**：candidate 显式提交自己的子树。可 conditional commit：未验证前提随 subtree 保留为 obligation，验证前不能 Accept。（`decisions.md` D-025、D-037）
+- **commit / commit request**：candidate 显式提交自己的子树。可 conditional commit：未验证前提随 subtree 保留为 obligation，验证前不能 Accept。（`branch-semantics.md` §4.3；`decisions.md` D-037）
 - **accept**：对 candidate 作出的接受裁决（resolution = accepted）；`Promote` 让候选保留自身 Branch identity 并替换 parent 在树中的位置，`Reuse` 只把已验证结果和按声明移交的受管状态交给现有权威延续并清理候选。（`branch-semantics.md`；`decisions.md` D-009/D-023）
 - **discard**：丢弃整个 child subtree（= Disposition 的 Discard / Preempt）；不要求 candidate ready，不自动把 partial state 反馈给 parent。（`branch-semantics.md`；`decisions.md` D-023）
 - **resolve()**：权威值到达时进行匹配、选择处置并沿 Proposal 依赖传播的关键路径操作，由 Speculation Coordinator 协调。（`control-plane.md` §2.3；`policy-decisions.md`）
@@ -101,10 +102,9 @@
 - **ChanceStage**：Chance 的阶段与结果枚举：Pending、Running、Resolving、Accepted(proposal_id)、Discarded(reason)。Pending 为已 `admit`、等待 `select`；Running 为已被选中；Resolving 为权威值已到、正在 `match` 与处置；Discarded 的原因取 MatchRejected、NotSelected、AncestorInvalidated、BudgetExhausted 或 Failed。（`branch-semantics.md` §2；`control-plane.md` §5）
 - **AuthorityState**：属于 Chance 的权威值取得状态，与 Chance 的 Running 并行，由 `launch` 改变：NotRequested、Fetching、Arrived、Unavailable。`launch=false` 只表示暂不请求权威值。（`branch-semantics.md` §2；`policy-decisions.md` §2.4）
 - **role**：`Authority | Speculative(d)`。这里的 Authority 是实例角色，不等同于可选的 Authority 输入来源；它不是静态标签，而是 `AssumptionSet == ∅` 的函数；promote 就是这个谓词翻转。（`spec-exec-abstraction.md` §10.1）
-- **grain**：`own-env | shared-env`；shared-env 仅对 PURE 效果开放，隔离粒度由 EffectClass 决定。（`spec-exec-abstraction.md` §10.1）
 - **lifecycle**：Branch 的生命周期与运行状态由 `BranchStatus` 表达，Chance 的阶段与结果由 `ChanceStage` 表达；`Accepted` 与 `Discarded` 等结果落在 Chance 上，Branch 的 Promote、Discard、Cleanup 等动作决定 BranchStatus。（`spec-exec-abstraction.md` §10.1；`branch-semantics.md` §2）
-- **obligation**：未验证前提随 subtree 保留的义务；在验证前不能 Accept。Proposal 仍在 `AssumptionSet` 中即表示相应依赖尚未确认。（`branch-semantics.md`；`decisions.md` D-025）
-- **capability**：resolver / validator 等授权能力；direct children 的 resolver capability 默认由 parent 持有，可显式委托给控制面。（`branch-semantics.md`；`decisions.md` D-022）
+- **obligation**：未验证前提随 subtree 保留的义务；在验证前不能 Accept。Proposal 仍在 `AssumptionSet` 中即表示相应依赖尚未确认。（`branch-semantics.md` §4.3）
+- **capability**：resolver / validator 等授权能力；direct children 的 resolver capability 默认由 parent 持有，可显式委托给控制面。（`branch-semantics.md` §6）
 
 ## 机制与概念
 
@@ -120,5 +120,5 @@
 
 ## 范围决策
 
-- **engine plane**：不做（D-013 修订）。KV cache 层 commit、partial-token accept、引擎压力调度、sequence residency 全部排除；跨层可见性降级为 API 可观测信号（延迟 / 限流 / 配额）。（`speculation-decisions.md` D-013/D-011/D-024/D-028）
+- **engine plane**：不做（D-013 修订）。KV cache 层 commit、partial-token accept、引擎压力调度、sequence residency 全部排除；跨层可见性降级为 API 可观测信号（延迟 / 限流 / 配额）。（`speculation-decisions.md` D-013/D-011/D-024）
 - **Agent Boundary / Isolation Boundary**：必需的两条边界；Engine Boundary 在范围外。（`speculation-decisions.md` D-024）

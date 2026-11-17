@@ -18,7 +18,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 
 1. [Branch 语义设计](design/branch-semantics.md)：Branch 与 Speculative Tree、隔离与通信、Agent 最小感知模型、Workspace/Command 粒度、可见执行环境与输入传播的目标语义。
 2. [设计决策](design/decisions.md)：AScout 核心 Speculative Tree 语义选择的速查手册与原始讨论记录。
-3. [投机执行底座：设计决策](design/speculation-decisions.md)：投机执行底座的已接受语义速查手册；其中的历史研究分类与当前 Policy Decisions 的整理关系见 [Policy Decisions 设计](design/policy-decisions.md)（D-001..D-028）。
+3. [投机执行底座：设计决策](design/speculation-decisions.md)：投机执行底座的已接受语义与理由速查；其中的历史研究分类与当前 Policy Decisions 的整理关系见 [Policy Decisions 设计](design/policy-decisions.md)。
 4. [术语表](design/glossary.md)：每个术语的一句话定义、权威出处，以及两套设计视角之间的术语映射。
 5. [Policy Decisions 设计](design/policy-decisions.md)：Policy 可作出的决策集合、阶段映射、扩展边界与 Mechanism 约束。
 6. [效果管理设计](design/effect-management.md)：世界状态分类、EffectClass、StateDomain、提交屏障与外部效果可见性。
@@ -44,7 +44,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 3. [投机执行底座：抽象设计札记](development/spec-exec-abstraction.md)：投机执行底座的论文调研与研究札记。已确定的设计以正式设计文档为准。
 4. [Runtime Adapter 接入指南](development/runtime-adapter.md)：Runtime 文件系统/进程 Backend 现状、接入责任、实现建议与尚待定义的接口事项。
 5. [Policy Engine 原型](development/policy-engine.md)：实际 YAML 编译、Python 求值接口、示例与当前限制。
-6. [Runtime 生命周期协议](development/runtime-discussion.md)：Runtime 生命周期操作、请求/环境身份、多 Backend 组合下的顺序、部分失败、状态聚合与清理责任。
+6. [Runtime 生命周期协议](development/runtime-lifecycle.md)：Runtime 生命周期操作、请求/环境身份、多 Backend 组合下的顺序、部分失败、状态聚合与清理责任。
 7. [控制面 WebUI](development/web-ui.md)：React + React Flow 界面的行为、开发代理、构建产物嵌入与当前缺口。
 8. [Agent 接入侧通用层](development/agent-access.md)：通用接入层的接口、覆盖范围与限制。
 9. [模型输出记录与回放](development/replay.md)：控制面观察与记录的下层开发说明，涵盖外部回放边界、消息引用和匹配限制。

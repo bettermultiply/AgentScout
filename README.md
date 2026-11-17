@@ -12,7 +12,7 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 ### 运行 AScout TUI 或浏览器 UI
 
-目标系统通过 Gateway 统一接入 Agent、UI 与 Runtime 的通信，将请求交给相应控制逻辑；实际启动 Agent 及接入进程由 Runtime 负责。三侧通信入口的源码职责已归入 Gateway，传输方式、UI 部署与启动协调仍未定，见 [Gateway 实现核查](docs/development/gateway.md)。当前原型使用 Pi 作为首个接入实现；Pi 接入只运行 AgentSession、收集 Agent 行为事实和执行控制命令，不是用户入口。
+目标系统通过 Gateway 统一接入 Agent、UI 与 Runtime 的通信，将请求交给相应控制逻辑；实际启动、监视和回收 Agent 及接入进程由 Runtime 负责。Gateway 属于控制面，不独立部署，由控制面统一启动和停止；UI 同样不独立部署，由控制面启动和停止。Gateway 与 Runtime 采用网络通信；这些边界不规定必须同进程，也不要求自动打开浏览器，见 [控制面 §2.1](docs/design/control-plane.md#21-gateway)。三侧通信入口的源码职责已归入 Gateway，实现现状见 [Gateway 实现核查](docs/development/gateway.md)。当前原型使用 Pi 作为首个接入实现；Pi 接入只运行 AgentSession、收集 Agent 行为事实和执行控制命令，不是用户入口。
 
 先在仓库根目录构建（需要 Make、Rust 与 Node 22.12 或更新版本）：
 

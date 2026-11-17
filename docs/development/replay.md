@@ -80,7 +80,7 @@ HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已�
 
 当前 Pi 接入由 `agent-access/pi/session-tree.ts` 维护每个 Branch 的原生持久 SessionManager，Candidate 从待决 checkpoint 复制原生记录及 ID，并由接入侧汇总最终文件。文件使用 Pi JSONL 格式，记录 id 与 parentId 表达记录的父子关系，不是第二棵控制 Tree。
 
-文件尾部的 `customType=authority` 自定义记录（authority 标记）只是给 Pi 重开文件的读取位置提示，使 resume 的叶子落在权威路径末端。它不进入模型上下文、不作权威裁决；与 Ledger 最后一次 Promote 不一致时以 Ledger 为准。恢复工具尚未实现。同一文件不等于同一个运行 session，winner 保留自己的 session 和在飞进展；历史整理不能据此直接替换运行上下文。
+文件尾部的 `customType=authority` 自定义记录（authority 标记）只是给 Pi 重开文件的读取位置提示，使 resume 的叶子落在权威路径末端。它不进入模型上下文、不作权威裁决；与 Ledger 最后一次 Promote 不一致时以 Ledger 为准。2026-11-16 确认当前不做基于 Ledger 历史查询、活动状态重建的恢复工具；已有保存及正常 resume 保留。同一文件不等于同一个运行 session，winner 保留自己的 session 和在飞进展；历史整理不能据此直接替换运行上下文。
 
 ### 已确认的历史语义与迁移缺口（2026-11-13）
 

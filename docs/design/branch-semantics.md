@@ -40,6 +40,8 @@ children(r_n)   = r_n 的直接 child Branch Root 集合
 
 Branch Root 在 Speculative Tree 中存在，与对应执行活动当前是否 running、waiting 或 suspended 是两套正交状态。一个 live Branch Root 可以暂时没有正在占用 CPU 的执行活动，但仍保留 parent/child relationship、Branch 状态和 capabilities，并可在事件到达后恢复。AScout 不为此引入 `lineage` 实体或专门术语。
 
+Child 不感知 ancestor PID、identity 或 execution liveness，也不依赖 parent Agent 持续运行。
+
 Branch Root 可以关联一个或多个承载其执行活动的 Instance。Instance 绑定到一个 Branch Root，并承载该 Branch Root 所属 Branch 的执行活动；逻辑 Branch 可以在 Instance 建立前先存在并推进。
 
 每个 candidate Branch 携带其路径上的未决 Proposal 引用集合：
@@ -77,6 +79,8 @@ AScout 使用 outcome-guided continuation branching 支持跨步骤投机。在 
 
 AScout 不定义创建 children 后长期冻结 parent 的 Parent barrier。Branch barrier 是真实 operation 开始前的短暂且原子的执行边界，用于建立共同 execution base、OutcomeSlot、candidate handles 和 capabilities，并让 parent/candidates 从同一个控制操作返回点按不同 role 恢复。
 
+Barrier 必须登记或排空 in-flight operations；少于请求数量的显式降级必须返回实际登记的 Branch 集合与实际建立的环境集合。
+
 ### 4.2 运行、等待与暂停
 
 在 speculation window 内，控制面根据 Policy 和当前执行事实协调 parent 的权威 operation、outcome 发布、candidate 推进与 resolution，不让 parent 与 candidates 同时推进同一份后续业务。若没有可接受 candidate，控制面安排 parent 从真实 outcome 继续；若接受 candidate，则执行 single-winner replacement，不执行 parent/candidate state merge。
@@ -107,7 +111,7 @@ Candidate 承接后续执行时保留并继续使用自己的环境，不默认�
 
 Promote 不以 candidate 会话或当前模型请求结束为前提；已满足提交、依赖和效果条件的在飞 candidate 可以在保留执行进展的情况下转为权威延续。用户端维持同一 AScoutAgent 视图，只更新该视图对应的权威执行及受控输入输出路由；不能因用户会话切换而取消或重启 winner。此保证不取消 resolution barrier，也不豁免旧 parent 和其他 loser 的停止、效果收敛与清理责任。
 
-`Reuse` 只把 candidate 已验证的 outcome 和按声明需要移交的受管状态交给现有权威延续；现有延续保留自己的 Branch identity、推理和上下文，candidate 自身在交接完成后清理。Reuse 不合并任意 Agent context，不转移未声明状态；未决 Proposal 必须先按既有规则确认或否定，带状态变更的复用还必须满足 D-031／Effect Management 的等价和移交条件。Reuse 不自动改变 descendant 的假设或挂载关系：只有现有权威延续能够提供 descendant 所需基础和依赖时，descendant 才按既有规则保留，否则取消或清理。其他 candidate 仍按 single-winner 失效，不能因为 Reuse 让多个互斥结果同时生效。
+`Reuse` 只把 candidate 已验证的 outcome 和按声明需要移交的受管状态交给现有权威延续；现有延续保留自己的 Branch identity、推理和上下文，candidate 自身在交接完成后清理。Reuse 不合并任意 Agent context，不转移未声明状态；未决 Proposal 必须先按既有规则确认或否定，带状态变更的复用还必须满足 Effect Management 的等价和移交条件。Reuse 不自动改变 descendant 的假设或挂载关系：只有现有权威延续能够提供 descendant 所需基础和依赖时，descendant 才按既有规则保留，否则取消或清理。其他 candidate 仍按 single-winner 失效，不能因为 Reuse 让多个互斥结果同时生效。
 
 在 `Promote` 中，candidate 按各状态类别规则已经可见的 parent state、已提交生效的 external effect 和已验证 outcome 必须随 winner 延续。正确的状态交接是机制必须保证的条件，不能仅靠 Policy 通知或路由切换代替。parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播；按状态类别完成必要交接不等于任意 parent/candidate state merge。
 
@@ -148,6 +152,8 @@ Candidate 未被接受不表示其不可行。受控 metadata 应区分 Proposal
 
 进程内存、Agent context、输入和全局服务不使用这一覆盖规则；输入遵循独立读取位置的传播语义，outcome 使用显式验证与交付，全局服务的外部效果遵循 obligation 语义。相关执行承载和环境保证见 [Runtime 语义整理](../development/default-runtime-semantics.md)。
 
+Agent 的文件工具、文件 API 和 shell command 直接操作 Branch Workspace View；command 是 operation 与 outcome 的粒度，未适配的命令可作为 branch-private opaque execution。
+
 ### 5.2 Ancestor 与 Branch 间通信
 
 Branch 对 ancestor state、输入和 outcome 的可见性分别遵循各自规则。Descendant 对某类 ancestor state 的可见性不代表 parent 可以反向获得 descendant 的未提交状态。Branch 之间传递信息必须经过显式的受控通道；通过受控通道传递的信息不改变 Branch 的结构关系，也不会使接收方获得对发送方未提交 Branch 状态的直接访问能力。
@@ -170,6 +176,10 @@ Agent 接入侧负责从产品执行接缝中识别并规范化 operation 及其
 
 本节保留显式 Agent 感知的设计位置。它描述未来若允许协作型 Agent 读取或参与 Branch 生命周期时需要满足的语义，不是当前 Agent 接入能力，也不是 Branch 正确性的前提。
 
+在这一未来设计中，direct children 的 evaluator／resolver capability 默认由 parent Branch 中的 Agent 持有，可显式委托给控制面；Runtime 不内建评价世界，也不固定评价策略，只验证授权并执行决定。
+
+Resolver delegation 作为 AScoutAgent 创建或 Branch 创建配置表达，不提供日常 `delegate-resolver` 命令。
+
 若未来开放显式感知，Agent 可以获得三类生命周期能力：创建 candidate Branch、提交一个 candidate subtree，以及裁决收到的 subtree。Candidate Agent 可以决定何时提交；持有 resolver capability 的授权主体可以决定是否接受、等待或丢弃 candidate subtree。Runtime 不替 Agent 或其 delegate 固化这些运行策略。
 
 未来的 routine Agent-facing control surface 可以保留两类查询和五类 lifecycle/activity operation slots：查询自身 `context`、查询 direct `children`、`branch`、`commit`、`accept`、`discard` 和等待 event。这里的 operation slots 不表示当前 Agent product 已经实际暴露接口。`branch` 表示从当前 Branch 创建一个或多个 direct child；在投机场景中这些 child 才按角色称为 candidate。完整语义中 `branch` 可以携带 candidate 数量、Proposal、outcome slot 和可选 resolver override，未指定 resolver 时使用 AScoutAgent 配置中的默认 resolver。具体参数、返回值、阻塞方式、event model、命令拼写以及 Agent-facing 组件和接入形式，见 [Agent 接入侧设计](agent-integration.md)，并须继续受本文件规定的 Branch lifecycle 语义约束。
@@ -177,6 +187,8 @@ Agent 接入侧负责从产品执行接缝中识别并规范化 operation 及其
 显式 Agent 感知不向端用户扩展独立用户会话。端用户始终通过 AScoutAgent 主对话直接操作当前有效的权威执行主线；携带未决 Proposal 的投机 Branch 不能作为正式回复向端用户输出或提问。独立的只读候选观察允许展示候选状态与内容；候选内容与主对话分开，并随 Branch 的角色与状态显示其投机身份。它不建立候选用户对话，不将其内容注入其他 Branch 上下文，也不表示 commit、Accept 或效果提交。Branch 接受、丢弃、重新挂载和清理仍由 Policy、授权 resolver 与控制面机制在内部完成，Accept 改变权威路径后，用户继续操作更新后的有效主线。
 
 未来的 Agent-facing context 不要求暴露 Runtime 内部的裸 Branch ID。若获得相应 capability，Agent 可以查询当前 depth、lifecycle state、Proposal 和 capabilities，也可以获取 direct children 的受控 metadata view；depth 是 Accept 后树位置的派生信息，不能代替稳定 identity 或用于推导权限。Direct-child 操作使用 session-scoped opaque candidate handle，不能借此读取不属于授权视图范围的 Branch 状态。
+
+默认 context 只返回紧凑统计；详细查询返回 session-scoped opaque candidate handle、state、Proposal 和显式 commit summary。Handle 只授权 direct-child 操作，不提供 sibling、transitive descendant 或 child local state 的读取能力。
 
 当前不支持上述显式 Agent 感知能力，默认 Agent 也不需要支持它们。Branch 的创建、推进、验证、接受、丢弃、重新挂载和清理继续由 AScout 的控制面与接入机制在 Agent 不知情的情况下完成。
 
