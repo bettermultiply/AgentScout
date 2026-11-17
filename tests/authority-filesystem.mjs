@@ -10,7 +10,7 @@ test('Authority publishes after background writers, resets across tasks, cancels
  const project=process.cwd(),root=fs.mkdtempSync('/tmp/opencode/authority-filesystem-');console.log('evidence',root);
  for(const name of ['workspace','pi','policy','tmp'])fs.mkdirSync(root+'/'+name);
  let requests=0;
-  const commands=[`printf first > a; (sleep 1; printf background > late) >/dev/null 2>&1 &`,null,
+  const commands=[`printf first > a; (echo $BASHPID > '${root}/background-pid'; while :; do printf x >> '${root}/background-heartbeat'; sleep 0.05; done) >/dev/null 2>&1 &`,null,
    {name:'write',args:{path:'b',content:'before'}},{name:'edit',args:{path:'b',oldText:'before',newText:'second'}},{name:'read',args:{path:'b'}},null,
    `printf cancelled > c; printf ready > '${root}/cancel-ready'; sleep 30`,null,`printf partial > partial; ln -sf new z`,null];
  const fake=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{
@@ -36,9 +36,23 @@ test('Authority publishes after background writers, resets across tasks, cancels
  await post({action:'prompt',prompt:'first'});
  await wait(()=>events().some(e=>e.message==='action_started'&&e.name==='bash'),'writer started');
  await new Promise(r=>setTimeout(r,200));
- assert.equal(fs.existsSync(root+'/workspace/a'),false,'background writer prevents publication');assert.equal(completed().length,0);
+  assert.equal(fs.existsSync(root+'/workspace/a'),false,'background writer prevents publication');assert.equal(completed().length,0);
+   // No release gate exists: only cancellation can end this resident writer.
+    await wait(()=>events().some(e=>e.message==='materialization_started'),'waiting on background writer');
+    await wait(()=>fs.existsSync(root+'/background-heartbeat'),'background writer alive');
+    const liveHeartbeat=fs.statSync(root+'/background-heartbeat').size;
+    await wait(()=>fs.statSync(root+'/background-heartbeat').size>liveHeartbeat,'writer continues without a release');
+    assert.equal(completed().length,0,'an infinite writer is not naturally drained');
+   const cancellationDeadline=Date.now()+3000;
+   p.kill('SIGINT');
+   while(completed().length===0&&Date.now()<cancellationDeadline)await new Promise(r=>setTimeout(r,20));
+   const responded=completed().length===1;
+    assert.ok(responded,'SIGINT must terminate a resident background writer during materialization');
  await wait(()=>completed().length===1,'first materialized');
-  assert.equal(completed()[0].status,'succeeded');assert.equal(fs.readFileSync(root+'/workspace/late','utf8'),'background');
+   assert.equal(completed()[0].status,'cancelled');
+   const heartbeat=fs.readFileSync(root+'/background-heartbeat','utf8');
+   await new Promise(r=>setTimeout(r,150));
+   assert.equal(fs.readFileSync(root+'/background-heartbeat','utf8'),heartbeat,'writer is stopped before task completion');
   assert.equal(events().find(e=>e.message==='materialization_completed').filesystem.confirmation.published,true,'publication receipt survives Runtime composition');
  fs.writeFileSync(root+'/workspace/a','host after first task');
  await post({action:'prompt',prompt:'second'});await wait(()=>completed().length===2,'second materialized');
@@ -51,7 +65,9 @@ test('Authority publishes after background writers, resets across tasks, cancels
   requests=8;
  fs.symlinkSync('old',root+'/workspace/z');
  await post({action:'prompt',prompt:'failure'});await wait(()=>events().some(e=>e.message==='materialization_failed'),'publication fails');
- assert.equal(completed().length,3,'failure cannot announce success');
+  assert.equal(completed().length,3,'failure cannot announce success');
+  const failureState=await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json();
+  assert.match(JSON.stringify(failureState),/Materialization failed/,'publication failure is visible to the user');
   assert.equal(fs.readlinkSync(root+'/workspace/z'),'old');
   assert.equal(fs.readFileSync(root+'/workspace/partial','utf8'),'partial');
   fs.writeFileSync(root+'/workspace/partial','host after receipt');
@@ -64,8 +80,37 @@ test('Authority publishes after background writers, resets across tasks, cancels
   const before=requests;
   await post({action:'prompt',prompt:'signal cancellation'});await wait(()=>requests>before,'SIGINT tool');
    await wait(()=>fs.existsSync(root+'/signal-ready'),'SIGINT write actually finished');
-  const done=once(p,'exit');p.kill('SIGINT');await done;assert.equal(p.exitCode,0);
-  assert.equal(fs.readFileSync(root+'/workspace/signal','utf8'),'sigint');
-  assert.equal(completed().at(-1).status,'cancelled','SIGINT must not turn cancellation into success');
+  const signalCount=completed().length;p.kill('SIGINT');await wait(()=>completed().length>signalCount,'SIGINT retains session');
+   assert.equal(fs.readFileSync(root+'/workspace/signal','utf8'),'sigint');
+   assert.equal(completed().at(-1).status,'cancelled','SIGINT must not turn cancellation into success');
+   await post({action:'prompt',prompt:'same session after SIGINT'});await wait(()=>completed().length===signalCount+2,'next task after SIGINT');
+   const idleCount=completed().length;
+   p.kill('SIGINT');await post({action:'prompt',prompt:'/continue'});
+   await new Promise(r=>setTimeout(r,100));assert.equal(completed().length,idleCount,'idle controls do not create a task');
+   await post({action:'prompt',prompt:'/pause'});
+   await wait(()=>fs.existsSync(root+'/recovery.json'),'idle pause saved');
+   p.kill('SIGINT');await wait(()=>completed().length===idleCount+1,'interrupt paused session');
+   await post({action:'prompt',prompt:'after paused interrupt'});await wait(()=>completed().length===idleCount+2,'new input after paused interruption');
+    // Keep the non-cancelled case: a live background writer may only publish
+    // after its explicit gate opens, and Pause cannot start a competing save.
+    commands[requests]=`printf waiting > natural; (while [ ! -e '${root}/release-natural' ]; do sleep 0.05; done; printf finished > natural-late) >/dev/null 2>&1 &`;
+    const naturalCount=completed().length,startedCount=events().filter(e=>e.message==='materialization_started').length;
+    await post({action:'prompt',prompt:'natural background completion'});
+    await wait(()=>events().filter(e=>e.message==='materialization_started').length>startedCount,'natural writer waiting');
+    await post({action:'pause'});await post({action:'prompt',prompt:'queued until publication'});
+    await new Promise(r=>setTimeout(r,100));
+    assert.equal(completed().length,naturalCount);assert.equal(fs.existsSync(root+'/workspace/natural'),false);
+    assert.equal(events().filter(e=>e.message==='materialization_started').length,startedCount+1,'only one publication in flight');
+    fs.writeFileSync(root+'/release-natural','release');
+    await wait(()=>completed().length===naturalCount+2,'natural writer and deferred input finish');
+    assert.equal(fs.readFileSync(root+'/workspace/natural-late','utf8'),'finished');
+    // Shutdown must also stop a resident writer while publication is waiting.
+    commands[requests]=`printf shutdown > shutdown-file; (while [ ! -e '${root}/release-shutdown' ]; do sleep 0.05; done; printf wrong > shutdown-late) >/dev/null 2>&1 &`;
+    const shutdownStarted=events().filter(e=>e.message==='materialization_started').length;
+    await post({action:'prompt',prompt:'shutdown while waiting'});
+    await wait(()=>events().filter(e=>e.message==='materialization_started').length>shutdownStarted,'shutdown writer waiting');
+    const done=once(p,'exit');p.kill('SIGTERM');await done;assert.equal(p.exitCode,0);
+    assert.equal(completed().at(-1).status,'cancelled');assert.equal(fs.readFileSync(root+'/workspace/shutdown-file','utf8'),'shutdown');
+    assert.equal(fs.existsSync(root+'/workspace/shutdown-late'),false);
  console.log('PASS Authority lifecycle',root);
 });

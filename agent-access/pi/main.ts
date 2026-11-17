@@ -13,7 +13,8 @@ import { Notifications } from './notification.ts';
 import {save as saveRecovery,load as loadRecovery} from './recovery.ts';
 import {recoveryBinding,snapshotResources} from './recovery-binding.ts';
 import { readFileSync } from 'node:fs';
-import {filesystemTools} from './filesystem-tools.ts';
+import {filesystemTools,stopFilesystemWriters} from './filesystem-tools.ts';
+import { Interaction } from './interaction.ts';
 
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
@@ -98,7 +99,40 @@ function captureHooks(){
     }
 }
 const notifications = new Notifications();
+const interaction = new Interaction(payload => report(payload));
+const extensionBindings = new Map<string, Promise<void>>();
+let commandCatalog;
+let commandCatalogStarted = false;
+function cacheCommands(session, branch) {
+    if (branch !== authority || commandCatalogStarted) return;
+    commandCatalogStarted = true;
+    // bindExtensions includes session_start followed by resources_discover.
+    // Publish prompts immediately; a session_start answer must not depend on
+    // this catalog becoming available.
+    void extensionBindings.get(branch).then(async () => {
+        commandCatalog = typeof session.getCommands === 'function' ? await session.getCommands() : [
+            ...(session.extensionRunner?.getRegisteredCommands() ?? []).map(item => ({name:item.invocationName,description:item.description,source:'extension',sourceInfo:item.sourceInfo})),
+            ...(session.promptTemplates ?? []).map(item => ({name:item.name,description:item.description,source:'prompt',sourceInfo:item.sourceInfo})),
+            ...(session.resourceLoader?.getSkills().skills ?? []).map(item => ({name:`skill:${item.name}`,description:item.description,source:'skill',sourceInfo:item.sourceInfo})),
+        ];
+        await report({message:'commands_listed',branch_id:authority,request_id:'startup',commands:commandCatalog});
+    }).catch(error => report({message:'branch_failed',branch_id:branch,reason:String(error)}));
+}
+function bindInteraction(session,branch) {
+    interaction.resume(branch);
+    sessions.set(branch,session);
+    install(session,branch);
+    // session_start extensions may ask the user. Never hold the command
+    // queue while their UI promise is outstanding (including on candidates).
+    const binding=session.bindExtensions({uiContext:interaction.context(branch)});
+    extensionBindings.set(branch,binding);
+    cacheCommands(session, branch);
+    void binding.catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error)}));
+}
 async function stopSession(branch) {
+    interaction.cancel(branch);
+    await extensionBindings.get(branch)?.catch(()=>{});
+    extensionBindings.delete(branch);
     const session=sessions.get(branch);
     await session?.abort();
     await Promise.allSettled([...(branchTasks.get(branch)??[])]);
@@ -368,7 +402,7 @@ async function run(session,branch,operation) {
 // A turn may wait for a later control command (runtime result, Promote or
 // Abort). Keep setup ordered, but never hold the command queue for the turn.
 function executeTurn(session,branch,operation) {
-    const task=run(session,branch,operation)
+    const task=run(session,branch,async()=>{await extensionBindings.get(branch);if(cancelled.has(branch)||closing) return;await operation()})
         .catch(error=>saving?undefined:report({message:'branch_failed',branch_id:branch,reason:String(error instanceof Error?error.message:error)}));
     tasks.add(task);
     const running=branchTasks.get(branch)??new Set();running.add(task);branchTasks.set(branch,running);
@@ -475,7 +509,7 @@ async function handle(command) {
                 for(const [branch,{manager,stopped}] of tree.branches){
                     if(stopped||candidateSetups.has(branch))continue;
                     const {session}=await createAgentSession({...filesystemToolSelection,cwd:manager.getHeader().cwd,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
-                    sessions.set(branch,session);install(session,branch);
+                    bindInteraction(session,branch);
                 }
                 saving=false;
                 recoveryPaused=true;
@@ -485,6 +519,7 @@ async function handle(command) {
         case 'local_policy':
             return;
         case 'suspend_recovery': {
+            interaction.cancel();
             saving=true;
             captureHooks();
             for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
@@ -501,15 +536,18 @@ async function handle(command) {
             if(command.role==='authority'){authority=branch;tree.adoptAuthority(branch)}
             const manager=tree.createBranch(branch,command.workspace,tree.manager,tree.tail(branch)??tree.manager.getLeafId());
             const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+            bindInteraction(session,branch);
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
-            sessions.set(branch,session);install(session,branch);
             await report({message:'branch_created',branch_id:branch});
             await report({message:'branch_started',branch_id:branch});
             await report({message:'branch_ready',branch_id:branch});
             if(command.prompt)executeTurn(session,branch,()=>session.prompt(command.prompt));
             return;
         }
+        case 'continue':
         case 'prompt': {
+            const continuing=command.command==='continue';
+            interaction.resume(branch);
             if(saving)throw Error('Execution is saved and waiting for exit');
             if(branch!==authority)throw Error('Only the authority accepts user input');
             const session=sessions.get(branch);if(!session)throw Error('Session missing');
@@ -544,10 +582,10 @@ async function handle(command) {
                         target.agent.state.messages=target.messages.filter(message=>
                             !(message.role==='toolResult'&&operations.has(message.toolCallId)&&latest.get(message.toolCallId)!==message)
                             && !(message.role==='assistant'&&['aborted','error'].includes(message.stopReason)));
-                        if(owner===authority)await target.prompt(command.prompt,{streamingBehavior:'followUp'});else await target.continue();
+                        if(owner===authority&&!continuing)await target.prompt(command.prompt,{streamingBehavior:'followUp'});else await target.continue();
                     });
                 }
-                for(const [owner,target] of sessions)if(owner!==authority&&interruptedBranches.has(owner)&&!grouped.has(owner)&&!candidateSetups.has(owner)&&!cancelled.has(owner)){
+                for(const [owner,target] of sessions)if((owner!==authority||continuing)&&interruptedBranches.has(owner)&&!grouped.has(owner)&&!candidateSetups.has(owner)&&!cancelled.has(owner)){
                     const last=target.messages.at(-1);
                     // Pi excludes aborted assistant output from model context;
                     // keep its native record but continue from its prior input.
@@ -555,9 +593,9 @@ async function handle(command) {
                     if(target.messages.at(-1)?.role!=='assistant')executeTurn(target,owner,()=>target.continue());
                 }
                 interruptedBranches.clear();
-                if(grouped.has(branch))return;
+                if(grouped.has(branch)||continuing)return;
             }
-            executeTurn(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));return;
+            if(!continuing)executeTurn(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));return;
         }
         case 'start_candidate': {
             environments.set(branch,command.environment_id);
@@ -574,7 +612,7 @@ async function handle(command) {
                 const resolved=resolveCliModel({cliModel:command.prediction.model,cliThinking:parent.thinkingLevel,modelRuntime:parent.modelRuntime});
                 if(resolved.error||!resolved.model)throw Error(resolved.error??'Unknown predictor model');
                 const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:resolved.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
-                sessions.set(branch,session);install(session,branch);
+                bindInteraction(session,branch);
                 modelForks.set(branch,{model:parent.model,thinkingLevel:parent.thinkingLevel,operation_id:command.operation_id});
                 candidateSetups.delete(branch);
                 await report({message:'branch_created',branch_id:branch});await report({message:'branch_started',branch_id:branch});await report({message:'branch_ready',branch_id:branch});
@@ -609,8 +647,8 @@ async function handle(command) {
             tree.settle();
             await access.control(command);
             const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+            bindInteraction(session,branch);
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
-            sessions.set(branch,session);install(session,branch);
             candidateSetups.delete(branch);
             await report({message:'branch_created',branch_id:branch});
             // Injected result is new candidate content, not copied from the Parent.
@@ -647,14 +685,27 @@ async function handle(command) {
                 }
             }
             return;
+        case 'ui_prompt_answer':
+            interaction.answer(branch,command.prompt_id,command.answer,command.cancelled,command.reason);return;
+        case 'get_commands': {
+            if(commandCatalog !== undefined) await report({message:'commands_listed',branch_id:authority,request_id:command.request_id,commands:commandCatalog});
+            return;
+        }
         case 'abort':
+            saving=false;
+            recoveryPaused=false;
+            interruptedBranches.delete(branch);
+            for(const [id,hook] of suspendedHooks)if(hook.branch===branch)suspendedHooks.delete(id);
+            if(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS)await stopFilesystemWriters(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS,environments.get(branch)??'');
+            interaction.cancel(branch);
             aborting.add(branch);
             reconnectControllers.get(branch)?.abort();
             try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');await report({message:'turn_completed',branch_id:branch}); }
             finally { aborting.delete(branch); }
             return;
-        case 'discard': cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;
+        case 'discard': interaction.cancel(branch);cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;
         case 'cleanup':
+            interaction.cancel(branch);
             cancelled.add(branch);releaseCandidateWaiters(branch);
             reconnectControllers.get(branch)?.abort();
             candidateSetups.delete(branch);
@@ -668,11 +719,11 @@ async function handle(command) {
     }
 }
 async function dispatch(command){
-    const operation=['promote','resolve_pending','discard','cleanup'].includes(command.command)?command.command:undefined;
+    const operation=['abort','promote','resolve_pending','discard','cleanup'].includes(command.command)?command.command:undefined;
     let reason;
     const acknowledgement=status=>({message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status,generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{})});
     try{
-        if(saving&&!['save','suspend_recovery','cancel_save','resolve_pending','promote','discard','cleanup','start_candidate'].includes(command.command))throw Error('Save in progress; command not applied');
+        if(saving&&!['abort','save','suspend_recovery','cancel_save','resolve_pending','promote','discard','cleanup','start_candidate'].includes(command.command))throw Error('Save in progress; command not applied');
         const generation=generations.get(command.branch_id);
         if(generation!==undefined&&command.generation!==undefined&&generation!==command.generation)throw Error('Stale command generation');
         if(command.generation!==undefined)generations.set(command.branch_id,command.generation);
@@ -680,7 +731,9 @@ async function dispatch(command){
         await handle(command);
     }catch(error){reason=String(error instanceof Error?error.message:error)}
     if(operation&&command.command_id)return {message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status:reason?'failed':'applied',generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{}),...(reason?{reason}:{})};
-    if(reason&&!(saving&&command.command==='start_candidate'))return {message:'branch_failed',branch_id:command.branch_id,reason};
+    // A failed command-list query is not a Branch failure; the UI simply gets
+    // no list for that request.
+    if(reason&&command.command!=='get_commands'&&!(saving&&command.command==='start_candidate'))return {message:'branch_failed',branch_id:command.branch_id,reason};
 }
 function startSetup(command){
     const task=dispatch(command);setupTasks.set(command.branch_id,task);
@@ -699,13 +752,16 @@ try{
         while(buffer.length>=4){const length=buffer.readUInt32BE(0);if(length>16777216)throw Error('Protocol frame too large');if(buffer.length<length+4)break;
             const wire=JSON.parse(buffer.subarray(4,length+4).toString());buffer=buffer.subarray(length+4);if(wire.kind!=='command')throw Error('Unexpected message direction');
             const command=wire.payload;
+            // Session-start extensions may themselves await a prompt while
+            // holding the command queue. Cancellation must release them first.
+            if(['abort','discard','cleanup'].includes(command.command))interaction.cancel(command.branch_id);
             const id=command.command_id;
             const old=id?commands.get(id):undefined;
             if(old&&old.serialized!==JSON.stringify(command)){await report({message:'branch_failed',branch_id:command.branch_id,reason:'Command id reused with different payload'});continue}
             // A candidate may wait for sibling tool results. It must not hold
             // up resolve_pending / cleanup on the transport's command queue.
             // Save must interrupt immediately even if setup is awaiting a tool.
-            const result=old?.result??(['save','suspend_recovery'].includes(command.command)
+            const result=old?.result??(['save','suspend_recovery','ui_prompt_answer'].includes(command.command)
                 ?dispatch(command):command.command==='start_candidate'
                 ?commandQueue.then(()=>dispatch(command))
                 :(commandQueue=commandQueue.then(()=>dispatch(command))));
@@ -725,7 +781,7 @@ try{
         if(!socket.destroyed)await new Promise(resolve=>socket.end(resolve));
         process.exit(transportError?1:0);
     }
-    closing=true;access.releaseAll();
+    closing=true;interaction.cancel();access.releaseAll();
     for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
     await commandQueue.catch(()=>{});
     await Promise.allSettled([...sessions.values()].map(s=>s.abort()));

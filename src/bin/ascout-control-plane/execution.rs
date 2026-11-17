@@ -1,15 +1,17 @@
 use super::*;
 use ascout::control_plane::agent_control::AgentController;
+use ascout::control_plane::coordination::session::Session;
 use ascout::control_plane::coordination::{ControlActions, ControlResult};
-use ascout::control_plane::coordination::{recovery::Recovery, task};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::Ordering;
 
 pub enum Event {
+    Interaction(ui::Request, mpsc::Sender<Result<(), String>>),
     Agent(io::Result<Option<AgentMessage>>),
     Request(ui::Request),
     Completed(u64, Result<ControlResult, String>),
+    Materialized(Result<ascout::protocol::contract::OperationResult, String>),
     Timer,
 }
 
@@ -19,15 +21,40 @@ struct Task<'a> {
     interface: &'a ui::Interface,
     capabilities: &'a RuntimeCapabilities,
     ledger: &'a mut Ledger,
-    notice: String,
     started: Instant,
     draining: bool,
-    recovery: Recovery,
-    pending_model: Option<String>,
-    model_changing: bool,
-    input_sequence: u64,
-    input_error: Option<String>,
-    lifecycle: task::Task,
+    control: Session,
+}
+
+fn forward_signals(
+    mut reader: UnixStream,
+    shutdown: &AtomicBool,
+    interrupt: &AtomicBool,
+    sender: mpsc::Sender<Event>,
+) {
+    // The pipe is only a wake hint. Check pending intent periodically too:
+    // a full pipe or a late flag must never strand the main loop in recv().
+    let mut byte = [0];
+    loop {
+        if shutdown.swap(false, Ordering::AcqRel) {
+            let _ = sender.send(Event::Request(ui::Request::Shutdown));
+        }
+        if interrupt.swap(false, Ordering::AcqRel) {
+            let _ = sender.send(Event::Request(ui::Request::Interrupt));
+        }
+        match reader.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Err(_) => break,
+        }
+    }
 }
 
 impl Task<'_> {
@@ -46,57 +73,30 @@ impl Task<'_> {
 
     fn handle(&mut self, event: Event) -> io::Result<Option<ControlActions>> {
         let mut actions = match event {
-            Event::Request(ui::Request::Pause) => ControlActions {
-                commands: self.recovery.pause(self.tree, now_ms())?,
-                ..Default::default()
-            },
-            Event::Request(ui::Request::Shutdown) | Event::Request(ui::Request::Interrupt) => {
-                self.notice = "Task cancellation requested".into();
-                ControlActions {
-                    commands: self.lifecycle.cancel(
-                        self.tree,
-                        matches!(event, Event::Request(ui::Request::Shutdown)),
-                    )?,
-                    ..Default::default()
+            Event::Interaction(request, reply) => {
+                let result = self.control.interaction(self.tree, request);
+                match result {
+                    Ok(command) => {
+                        let _ = reply.send(Ok(()));
+                        ControlActions {
+                            commands: command.into_iter().collect(),
+                            ..Default::default()
+                        }
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error.to_string()));
+                        ControlActions::default()
+                    }
                 }
             }
-            Event::Request(ui::Request::Model { model }) => {
-                if self.tree.recovering()
-                    || self.tree.authority_running()
-                    || self.tree.pending_work()
-                    || self.tree.recovery_pending_commands()
-                    || self.model_changing
-                {
-                    self.notice = "Model change failed: wait for an idle authority".into();
-                } else {
-                    self.pending_model = Some(model);
-                }
-                ControlActions::default()
-            }
-            Event::Request(ui::Request::Prompt { prompt }) => {
-                if prompt.trim() == "/pause" {
-                    return self.handle(Event::Request(ui::Request::Pause));
-                }
-                if !self.recovery.continue_execution(self.tree, now_ms()) {
-                    return Ok(Some(ControlActions::default()));
-                }
-                if self.tree.task_finishing() {
-                    self.lifecycle.retry_materialization();
-                    self.notice = "Finishing previous task; input deferred".into();
-                    self.tree.queue_prompt(prompt);
-                } else {
-                    self.tree.queue_prompt(prompt);
-                }
-                self.input_sequence += 1;
-                self.input_error = None;
-                self.notice = "Agent running".into();
-                ControlActions::default()
-            }
+            Event::Request(request) => self.control.request(self.tree, request, now_ms())?,
             Event::Completed(id, result) => self.tree.complete_work(id, result)?,
+            Event::Materialized(result) => {
+                self.control.materialized(result);
+                ControlActions::default()
+            }
             Event::Timer => {
-                if !self.tree.recovering() {
-                    self.tree.check_command_deadlines()?;
-                }
+                self.control.timer(self.tree)?;
                 ControlActions::default()
             }
             Event::Agent(message) => {
@@ -109,34 +109,7 @@ impl Task<'_> {
                         ))
                     };
                 };
-                match &message {
-                    AgentMessage::TurnFailed {
-                        branch_id, reason, ..
-                    } => {
-                        if self.tree.authority_branch_id.as_ref() == Some(branch_id) {
-                            self.input_error = Some(reason.clone());
-                            self.lifecycle.fail(self.tree);
-                        }
-                        self.notice = format!("Turn failed; session retained: {reason}");
-                    }
-                    AgentMessage::ModelChanged { model, error, .. } => {
-                        self.model_changing = false;
-                        self.notice = match error {
-                            Some(error) => format!("Model change failed: {error}"),
-                            None => format!("Model changed: {model}"),
-                        };
-                    }
-                    _ => {}
-                }
-                if let Some(notice) = self.recovery.handle(self.tree, &message)? {
-                    self.notice = notice;
-                }
-                let commands =
-                    if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
-                        Vec::new()
-                    } else {
-                        self.tree.handle_message(message.clone())?
-                    };
+                let actions = self.control.agent(self.tree, &message)?;
                 self.flush_observations()?;
                 self.interface.message(self.ledger, &message)?;
                 if !matches!(message, AgentMessage::Output { .. }) {
@@ -150,50 +123,12 @@ impl Task<'_> {
                     fact["source"] = json!("agent_adapter");
                     self.record(fact)?;
                 }
-                let mut actions =
-                    if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
-                        self.tree.speculative_admission(message)?
-                    } else {
-                        ControlActions::default()
-                    };
-                actions.commands.extend(commands);
                 actions
             }
         };
-        if let Some(reason) = self.tree.authority_failure()
-            && !self.tree.is_stopping()
-        {
-            self.input_error = Some(reason.to_string());
-            self.lifecycle.fail(self.tree);
-        }
-        let progress =
-            if !self.tree.recovering() && (self.model_changing || self.pending_model.is_some()) {
-                ControlActions::default()
-            } else {
-                self.tree.progress(self.capabilities)?
-            };
-        actions.commands.extend(progress.commands);
-        actions.operations.extend(progress.operations);
-        actions.records.extend(progress.records);
-        actions.commands.extend(self.lifecycle.progress(self.tree)?);
-        // Do not change a model beneath in-flight work or a pending Promote.
-        // Descendants retain their own model; newly forked sessions inherit
-        // the model from their actual parent, never a global replacement.
-        let idle = (!self.tree.recovering() || self.recovery.loaded)
-            && !self.model_changing
-            && self.tree.authority_ready()
-            && !self.tree.authority_running()
-            && !self.tree.pending_work()
-            && !self.tree.recovery_pending_commands();
-        if idle {
-            if let Some(model) = self.pending_model.take() {
-                self.model_changing = true;
-                actions.commands.push(AgentCommand::Model {
-                    branch_id: self.tree.authority_branch_id.clone().unwrap(),
-                    model,
-                });
-            }
-        }
+        actions = self
+            .control
+            .progress(self.tree, self.capabilities, actions)?;
         Ok(Some(actions))
     }
 
@@ -202,7 +137,7 @@ impl Task<'_> {
         for content in self.tree.drain_observations() {
             if let Err(error) = self
                 .ledger
-                .append_observation(&self.tree.execution_id, content)
+                .append_observation(self.tree.execution_id(), content)
             {
                 failure.get_or_insert(error);
             }
@@ -221,15 +156,15 @@ impl Task<'_> {
         self.flush_observations()?;
         self.flush_records()?;
         self.interface.publish_input_status(
-            self.input_sequence,
-            self.tree.input_ready() && !self.model_changing && self.pending_model.is_none(),
-            &self.input_error,
+            self.control.input_sequence(),
+            self.control.input_ready(self.tree),
+            self.control.input_error(),
         );
         self.interface.publish(
             self.ledger,
             self.tree.authority_ready(),
             self.tree.authority_running(),
-            &self.notice,
+            self.control.notice(),
         )
     }
 }
@@ -250,7 +185,8 @@ pub fn run(
     let (events, receiver) = channel;
     let sender = events.clone();
     connection.receive(move |message| sender.send(Event::Agent(message)).is_ok())?;
-    let (mut signal_reader, mut signal_writer) = UnixStream::pair()?;
+    let (signal_reader, mut signal_writer) = UnixStream::pair()?;
+    signal_reader.set_read_timeout(Some(Duration::from_millis(20)))?;
     signal_writer.set_nonblocking(true)?;
     use std::os::fd::AsRawFd;
     SIGNAL_FD.store(signal_writer.as_raw_fd(), Ordering::Relaxed);
@@ -260,26 +196,23 @@ pub fn run(
         interface,
         capabilities,
         ledger,
-        notice: "Starting Agent session…".into(),
         started: Instant::now(),
         draining: false,
-        recovery: Recovery::new(run_dir),
-        pending_model: resume_model,
-        model_changing: false,
-        input_sequence: 0,
-        input_error: None,
-        lifecycle: task::Task::default(),
+        control: Session::new(run_dir, resume_model),
     };
     let result = thread::scope(|scope| {
         let sender = events.clone();
         scope.spawn(move || {
-            let mut byte = [0];
-            if signal_reader.read(&mut byte).is_ok_and(|count| count > 0) {
-                let _ = sender.send(Event::Request(ui::Request::Shutdown));
-            }
+            forward_signals(
+                signal_reader,
+                &SHUTDOWN_REQUESTED,
+                &INTERRUPT_REQUESTED,
+                sender,
+            );
         });
-        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
-            let _ = events.send(Event::Request(ui::Request::Shutdown));
+        if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) || INTERRUPT_REQUESTED.load(Ordering::Relaxed)
+        {
+            let _ = signal_writer.write(&[1]);
         }
         let mut failure = None;
         let result = (|| -> io::Result<()> {
@@ -308,12 +241,9 @@ pub fn run(
                     Ok(None) => break,
                     Err(error) if !task.tree.is_stopping() && !task.tree.recovering() => {
                         task.publish()?;
-                        task.input_error = Some(error.to_string());
+                        let actions = task.control.fail_and_exit(task.tree, &error)?;
                         failure = Some(error);
-                        ControlActions {
-                            commands: task.lifecycle.fail_and_exit(task.tree)?,
-                            ..Default::default()
-                        }
+                        actions
                     }
                     Err(error) => {
                         task.publish()?;
@@ -350,50 +280,40 @@ pub fn run(
                         let _ = sender.send(Event::Completed(id, result));
                     });
                 }
-                if let Some(command) = task.recovery.save_command(task.tree) {
-                    task.connection.send(command)?;
-                }
-                if let Some((command, notice)) =
-                    task.recovery
-                        .publish(task.tree, runtime, run_dir, task.draining)
-                {
-                    task.connection.send(command)?;
-                    task.notice = notice;
-                }
                 let started = task.started;
                 let ledger = &mut task.ledger;
-                let terminating = task.lifecycle.terminating;
-                if let Some((commands, wake, result)) = task.lifecycle.materialize(
+                let (commands, wake, finish) = task.control.settle(
                     task.tree,
                     runtime,
                     capabilities,
-                    task.input_error.is_some(),
+                    run_dir,
+                    task.draining,
                     |mut value| {
                         value["t_ms"] = json!(started.elapsed().as_millis() as u64);
                         ledger.record(value)
                     },
-                )? {
-                    match result {
-                        Ok(()) => {
-                            task.notice = if task.input_error.is_some() || terminating {
-                                "Task ended"
-                            } else {
-                                "Task succeeded"
-                            }
-                            .into()
-                        }
-                        Err(error) => {
-                            task.input_error = Some(format!("Materialization failed: {error}"));
-                            task.notice =
-                                format!("Materialization failed; retained for retry: {error}");
-                        }
-                    }
-                    for command in commands {
-                        task.connection.send(command)?;
-                    }
-                    if wake {
-                        let _ = events.send(Event::Timer);
-                    }
+                    |environment| {
+                        let sender = events.clone();
+                        scope.spawn(move || {
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    ascout::control_plane::coordination::execution::runtime_call(
+                                        runtime,
+                                        &environment,
+                                        ascout::protocol::contract::Operation::MaterializeAuthority,
+                                    )
+                                    .map_err(|error| error.to_string())
+                                }))
+                                .unwrap_or_else(|_| Err("Materialization panicked".into()));
+                            let _ = sender.send(Event::Materialized(result));
+                        });
+                    },
+                )?;
+                for command in commands {
+                    task.connection.send(command)?;
+                }
+                if wake {
+                    let _ = events.send(Event::Timer);
                 }
                 loop {
                     let ids = task.tree.evictable_branches();
@@ -405,38 +325,24 @@ pub fn run(
                             .archive_branch(task.tree.take_archivable_branch(&id)?)?;
                     }
                 }
-                if !task.draining && task.lifecycle.finish_ready(task.tree)? {
+                if finish {
                     task.connection.finish()?;
                     task.draining = true;
-                }
-                if !task.tree.task_finishing()
-                    && !task.tree.recovering()
-                    && !task.notice.starts_with("Save failed")
-                    && !task.notice.starts_with("Turn failed")
-                    && !task.notice.starts_with("Model ")
-                {
-                    task.notice = if task.tree.is_stopping() {
-                        "Stopping"
-                    } else if task.tree.authority_running() {
-                        "Agent running"
-                    } else {
-                        "Ready"
-                    }
-                    .into();
                 }
                 task.publish()?;
             }
             failure.map_or(Ok(()), Err)
         })();
         SIGNAL_FD.store(-1, Ordering::Relaxed);
-        let _ = signal_writer.write(&[0]);
+        // EOF cannot be lost when the nonblocking wake socket is full.
+        let _ = signal_writer.shutdown(std::net::Shutdown::Write);
         task.connection.stop_receiving();
         result
     });
     task.flush_observations()?;
     interface.publish(task.ledger, false, false, "Stopped")?;
     let unarchived: Vec<_> = task.ledger.unarchived().collect();
-    if !unarchived.is_empty() && !task.recovery.saved {
+    if !unarchived.is_empty() && !task.control.saved() {
         return Err(format!(
             "{}; Ledger history incomplete: {}",
             result
@@ -456,4 +362,46 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::*;
+
+    #[test]
+    fn late_and_repeated_signals_do_not_need_another_pipe_byte() {
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let shutdown = AtomicBool::new(false);
+        let interrupt = AtomicBool::new(false);
+        let (sender, receiver) = mpsc::channel();
+        // Force the wake byte to be consumed before the pending flag is visible.
+        (&writer).write_all(&[1]).unwrap();
+        reader.read_exact(&mut [0]).unwrap();
+        thread::scope(|scope| {
+            scope.spawn(|| forward_signals(reader, &shutdown, &interrupt, sender));
+            let result = || {
+                for _ in 0..3 {
+                    interrupt.store(true, Ordering::Release);
+                    assert!(matches!(
+                        receiver.recv_timeout(Duration::from_millis(500)),
+                        Ok(Event::Request(ui::Request::Interrupt))
+                    ));
+                }
+                shutdown.store(true, Ordering::Release);
+                assert!(matches!(
+                    receiver.recv_timeout(Duration::from_millis(500)),
+                    Ok(Event::Request(ui::Request::Shutdown))
+                ));
+            };
+            // Close even when an assertion fails, so the scoped worker cannot hang.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(result));
+            writer.shutdown(std::net::Shutdown::Write).unwrap();
+            if let Err(error) = outcome {
+                std::panic::resume_unwind(error);
+            }
+        });
+    }
 }

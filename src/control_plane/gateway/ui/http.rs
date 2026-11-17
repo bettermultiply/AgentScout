@@ -3,7 +3,36 @@ use super::{Assets, Connection, Presentation, Request};
 use crate::control_plane::ledger::LedgerReader;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+/// Control-plane-owned listener and connection workers.
+pub struct Server {
+    stopped: Arc<AtomicBool>,
+    reader: LedgerReader,
+    worker: Option<JoinHandle<io::Result<()>>>,
+}
+
+impl Server {
+    pub fn stop(&mut self) -> io::Result<()> {
+        self.stopped.store(true, Ordering::Release);
+        self.reader.wake_readers();
+        match self.worker.take() {
+            Some(worker) => worker
+                .join()
+                .map_err(|_| io::Error::other("UI listener panicked"))?,
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
 
 pub fn start<P: Presentation + Clone + 'static>(
     address: &str,
@@ -11,7 +40,7 @@ pub fn start<P: Presentation + Clone + 'static>(
     connection: Connection,
     reader: LedgerReader,
     assets: Assets,
-) -> io::Result<()> {
+) -> io::Result<Server> {
     let address: std::net::SocketAddr = address
         .parse()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -22,23 +51,78 @@ pub fn start<P: Presentation + Clone + 'static>(
         ));
     }
     let listener = TcpListener::bind(address)?;
+    listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
     eprintln!("AScout browser UI: http://{address}");
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else {
-                break;
-            };
-            let interface = interface.clone();
-            let connection = connection.clone();
-            let reader = reader.clone();
-            let host = address.to_string();
-            std::thread::spawn(move || {
-                let _ = serve(&mut stream, &interface, &connection, &reader, &host, assets);
-            });
-        }
-    });
-    Ok(())
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_stopped = stopped.clone();
+    let wake_reader = reader.clone();
+    let worker = thread::Builder::new()
+        .name("ui-listener".into())
+        .spawn(move || {
+            let mut workers: Vec<(TcpStream, JoinHandle<()>)> = Vec::new();
+            let result = (|| -> io::Result<()> {
+                while !worker_stopped.load(Ordering::Acquire) {
+                    let mut index = 0;
+                    while index < workers.len() {
+                        if workers[index].1.is_finished() {
+                            let (_, worker) = workers.swap_remove(index);
+                            let _ = worker.join();
+                        } else {
+                            index += 1;
+                        }
+                    }
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(pair) => pair,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(20));
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let socket = stream.try_clone()?;
+                    let interface = interface.clone();
+                    let connection = connection.clone();
+                    let reader = reader.clone();
+                    let stopped = worker_stopped.clone();
+                    let host = address.to_string();
+                    let worker =
+                        thread::Builder::new()
+                            .name("ui-connection".into())
+                            .spawn(move || {
+                                let _ = serve(
+                                    &mut stream,
+                                    &interface,
+                                    &connection,
+                                    &reader,
+                                    &host,
+                                    assets,
+                                    &stopped,
+                                );
+                            })?;
+                    workers.push((socket, worker));
+                }
+                Ok(())
+            })();
+            drop(listener);
+            worker_stopped.store(true, Ordering::Release);
+            reader.wake_readers();
+            for (socket, _) in &workers {
+                // Interrupt idle/partial HTTP reads. Keep writes available so
+                // disconnected observation streams can drain their final events.
+                // A blocked write retains the existing two-second timeout.
+                let _ = socket.shutdown(std::net::Shutdown::Read);
+            }
+            for (_, worker) in workers {
+                let _ = worker.join();
+            }
+            result
+        })?;
+    Ok(Server {
+        stopped,
+        reader: wake_reader,
+        worker: Some(worker),
+    })
 }
 
 fn serve<P: Presentation>(
@@ -48,6 +132,7 @@ fn serve<P: Presentation>(
     reader: &LedgerReader,
     host: &str,
     assets: Assets,
+    stopped: &AtomicBool,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
@@ -142,7 +227,12 @@ fn serve<P: Presentation>(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
             )?;
             loop {
-                let events = reader.events_after(sequence).map_err(io::Error::other)?;
+                let events = reader
+                    .events_after_until(sequence, stopped)
+                    .map_err(io::Error::other)?;
+                if stopped.load(Ordering::Acquire) && reader.connected() {
+                    return Ok(());
+                }
                 for event in events {
                     sequence = event.sequence;
                     writeln!(
@@ -218,20 +308,30 @@ fn serve<P: Presentation>(
                 Ok(Request::Prompt { ref prompt }) if prompt.trim().is_empty() => {
                     reply(stream, "400 Bad Request", "text/plain", b"Prompt is empty")
                 }
-                Ok(request) => match connection.request(request) {
-                    Ok(()) => reply(
-                        stream,
-                        "202 Accepted",
-                        "application/json",
-                        b"{\"queued\":true}",
-                    ),
-                    Err(error) => reply(
-                        stream,
-                        "503 Service Unavailable",
-                        "text/plain",
-                        error.as_bytes(),
-                    ),
-                },
+                Ok(request) => {
+                    let interaction = matches!(
+                        request,
+                        Request::UiPromptAnswer { .. } | Request::GetCommands { .. }
+                    );
+                    match connection.request(request) {
+                        Ok(()) => reply(
+                            stream,
+                            "202 Accepted",
+                            "application/json",
+                            b"{\"queued\":true}",
+                        ),
+                        Err(error) => reply(
+                            stream,
+                            if interaction {
+                                "409 Conflict"
+                            } else {
+                                "503 Service Unavailable"
+                            },
+                            "text/plain",
+                            error.as_bytes(),
+                        ),
+                    }
+                }
                 Err(error) => reply(
                     stream,
                     "400 Bad Request",

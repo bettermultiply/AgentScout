@@ -149,6 +149,7 @@ pub struct ControlSession {
     /// Runtime has already gone away.
     disconnected: Arc<AtomicBool>,
     event_waker: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    reader: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl ControlSession {
@@ -157,10 +158,24 @@ impl ControlSession {
     }
     /// Close both socket halves, including the reader thread's cloned handle.
     pub fn shutdown(&self) -> io::Result<()> {
-        self.writer
+        let result = self
+            .writer
             .lock()
             .unwrap()
-            .shutdown(std::net::Shutdown::Both)
+            .shutdown(std::net::Shutdown::Both);
+        let joined = self
+            .reader
+            .lock()
+            .unwrap()
+            .take()
+            .map(|reader| reader.join());
+        if joined.is_some_and(|result| result.is_err()) {
+            return Err(io::Error::other("Runtime reader panicked"));
+        }
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::NotConnected => Ok(()),
+            result => result,
+        }
     }
     fn start(stream: TcpStream) -> io::Result<Self> {
         let mut reader = stream.try_clone()?;
@@ -172,6 +187,7 @@ impl ControlSession {
             events: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
             disconnected: Arc::new(AtomicBool::new(false)),
             event_waker: Arc::new(Mutex::new(None)),
+            reader: Mutex::new(None),
         };
 
         let hello = session.hello.clone();
@@ -179,64 +195,67 @@ impl ControlSession {
         let events = session.events.clone();
         let disconnected = session.disconnected.clone();
         let event_waker = session.event_waker.clone();
-        thread::spawn(move || {
-            loop {
-                let message = match transport::read_message::<_, AdapterMessage>(&mut reader) {
-                    Ok(message) => message,
-                    Err(error) => {
-                        eprintln!("control plane: failed to read Adapter message: {error}");
-                        disconnected.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                };
-                match message {
-                    Some(AdapterMessage::Hello {
-                        protocol_version,
-                        adapter_instance,
-                        capabilities,
-                        backend_ids,
-                    }) => {
-                        *hello.0.lock().unwrap() = Some(HelloInfo {
+        let reader = thread::Builder::new()
+            .name("runtime-reader".into())
+            .spawn(move || {
+                loop {
+                    let message = match transport::read_message::<_, AdapterMessage>(&mut reader) {
+                        Ok(message) => message,
+                        Err(error) => {
+                            eprintln!("control plane: failed to read Adapter message: {error}");
+                            disconnected.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                    };
+                    match message {
+                        Some(AdapterMessage::Hello {
                             protocol_version,
                             adapter_instance,
                             capabilities,
                             backend_ids,
-                        });
-                        hello.1.notify_all();
-                    }
-                    Some(AdapterMessage::Result(result)) => {
-                        results
-                            .0
-                            .lock()
-                            .unwrap()
-                            .insert(result.request_id.clone(), result);
-                        results.1.notify_all();
-                    }
-                    Some(AdapterMessage::Event(event)) => {
-                        let mut queue = events.0.lock().unwrap();
-                        queue.push_back(event);
-                        while queue.len() > EVENT_WINDOW {
-                            queue.pop_front();
+                        }) => {
+                            *hello.0.lock().unwrap() = Some(HelloInfo {
+                                protocol_version,
+                                adapter_instance,
+                                capabilities,
+                                backend_ids,
+                            });
+                            hello.1.notify_all();
                         }
-                        drop(queue);
-                        events.1.notify_all();
-                        if let Some(wake) = event_waker.lock().unwrap().as_ref() {
-                            wake();
+                        Some(AdapterMessage::Result(result)) => {
+                            results
+                                .0
+                                .lock()
+                                .unwrap()
+                                .insert(result.request_id.clone(), result);
+                            results.1.notify_all();
                         }
-                    }
-                    None => {
-                        disconnected.store(true, Ordering::SeqCst);
-                        break;
+                        Some(AdapterMessage::Event(event)) => {
+                            let mut queue = events.0.lock().unwrap();
+                            queue.push_back(event);
+                            while queue.len() > EVENT_WINDOW {
+                                queue.pop_front();
+                            }
+                            drop(queue);
+                            events.1.notify_all();
+                            if let Some(wake) = event_waker.lock().unwrap().as_ref() {
+                                wake();
+                            }
+                        }
+                        None => {
+                            disconnected.store(true, Ordering::SeqCst);
+                            break;
+                        }
                     }
                 }
-            }
-            // Wake every wait class.  The predicates below re-check the
-            // disconnect flag and return promptly with the appropriate
-            // absence/error instead of waiting for a 30-second request timer.
-            hello.1.notify_all();
-            results.1.notify_all();
-            events.1.notify_all();
-        });
+                // Wake every wait class.  The predicates below re-check the
+                // disconnect flag and return promptly with the appropriate
+                // absence/error instead of waiting for a 30-second request timer.
+                hello.1.notify_all();
+                results.1.notify_all();
+                events.1.notify_all();
+            })?;
+        *session.reader.lock().unwrap() = Some(reader);
 
         Ok(session)
     }

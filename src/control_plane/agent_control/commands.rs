@@ -3,6 +3,98 @@
 use super::*;
 
 impl SpeculativeTree {
+    pub fn drain_ui_commands(&mut self) -> Vec<AgentCommand> {
+        std::mem::take(&mut self.ui_commands)
+    }
+
+    pub(super) fn close_ui_prompt(&mut self, id: &str, cancelled: bool, reason: Option<String>) {
+        if let Some((branch_id, _, visible)) = self.ui_prompts.remove(id) {
+            if visible {
+                self.pending_observations.push(
+                    crate::control_plane::observation::ObservationContent::UiPromptResolved {
+                        branch_id,
+                        prompt_id: id.into(),
+                        cancelled,
+                        reason,
+                    },
+                );
+            }
+        }
+    }
+
+    pub(super) fn cancel_ui_prompts(&mut self, branch: Option<&str>, reason: &str) {
+        let ids: Vec<_> = self
+            .ui_prompts
+            .iter()
+            .filter(|(_, (owner, _, _))| branch.is_none_or(|branch| owner == branch))
+            .map(|(id, (owner, _, _))| (id.clone(), owner.clone()))
+            .collect();
+        for (prompt_id, branch_id) in ids {
+            self.close_ui_prompt(&prompt_id, true, Some(reason.into()));
+            self.ui_commands.push(AgentCommand::UiPromptAnswer {
+                branch_id,
+                prompt_id,
+                answer: Value::Null,
+                cancelled: true,
+                reason: Some(reason.into()),
+            });
+        }
+    }
+
+    pub fn answer_ui_prompt(
+        &mut self,
+        prompt_id: String,
+        answer: Value,
+        cancelled: bool,
+    ) -> io::Result<AgentCommand> {
+        let (branch_id, prompt, _) = self
+            .ui_prompts
+            .get(&prompt_id)
+            .ok_or_else(|| invalid_input("Unknown, already answered or cancelled prompt_id"))?;
+        if self.stopping || self.authority_branch_id.as_ref() != Some(branch_id) {
+            return Err(invalid_input(
+                "Prompt does not belong to the current authority",
+            ));
+        }
+        if !cancelled
+            && !match prompt.kind.as_str() {
+                "confirm" => answer.is_boolean(),
+                "select" => answer
+                    .as_str()
+                    .is_some_and(|s| prompt.options.iter().any(|o| o == s)),
+                "input" | "editor" => answer.is_string(),
+                _ => false,
+            }
+        {
+            return Err(invalid_input("Invalid answer for this prompt"));
+        }
+        let branch_id = branch_id.clone();
+        self.close_ui_prompt(&prompt_id, cancelled, None);
+        Ok(AgentCommand::UiPromptAnswer {
+            branch_id,
+            prompt_id,
+            answer,
+            cancelled,
+            reason: None,
+        })
+    }
+
+    pub fn get_commands(&mut self, request_id: String) -> io::Result<Option<AgentCommand>> {
+        let branch_id = self
+            .authority_branch_id
+            .clone()
+            .ok_or_else(|| invalid_input("No authority session"))?;
+        if let Some(commands) = &self.command_catalog {
+            self.pending_observations.push(
+                crate::control_plane::observation::ObservationContent::CommandsListed {
+                    branch_id,
+                    request_id,
+                    commands: commands.clone(),
+                },
+            );
+        }
+        Ok(None)
+    }
     pub fn recovery_pending_commands(&self) -> bool {
         !self.pending_commands.is_empty()
     }
@@ -138,6 +230,7 @@ impl SpeculativeTree {
 
     /// Cancellation affects all pending candidates; their subtrees are discarded by resolve_candidate.
     pub fn interrupt(&mut self) -> io::Result<Vec<AgentCommand>> {
+        self.cancel_ui_prompts(None, "Execution interrupted");
         self.queued_prompts.clear();
         for operation in self
             .branches
@@ -162,22 +255,23 @@ impl SpeculativeTree {
         }
         // A switch already in flight cannot be assumed rejected. Abort the
         // intended winner too, while retaining Promote's receipt until known.
-        for branch in self
+        let promoting: Vec<_> = self
             .branches
             .values()
             .filter(|branch| branch.status == BranchStatus::Promoting)
-        {
-            commands.push(AgentCommand::Abort {
-                branch_id: branch.branch_id.clone(),
-            });
+            .map(|branch| branch.branch_id.clone())
+            .collect();
+        for branch in promoting {
+            commands.push(self.make_abort_command(&branch)?);
         }
         if let Some(branch_id) = self.authority_branch_id.clone() {
-            commands.push(AgentCommand::Abort { branch_id });
+            commands.push(self.make_abort_command(&branch_id)?);
         }
         Ok(commands)
     }
 
     pub fn begin_shutdown(&mut self) -> io::Result<Vec<AgentCommand>> {
+        self.cancel_ui_prompts(None, "Session shutdown");
         if self.stopping {
             return Ok(Vec::new());
         }
@@ -262,6 +356,28 @@ impl SpeculativeTree {
                 deadline_at: Some(now_ms() + 120_000),
             });
         }
+        Ok(())
+    }
+
+    /// 保存 Runtime 实际返回的独占 Environment 身份；不据此宣告建立成功。
+    pub fn bind_environment(&mut self, branch_id: &str, environment_id: String) -> io::Result<()> {
+        self.branch(branch_id)?;
+        if environment_id.is_empty()
+            || self
+                .branches
+                .values()
+                .any(|record| record.environment_id.as_deref() == Some(&environment_id))
+        {
+            return Err(io::Error::other(
+                "Runtime returned an empty or already bound Environment identity",
+            ));
+        }
+        if self.branch(branch_id)?.environment_id.is_some() {
+            return Err(io::Error::other(
+                "Branch already has an Environment identity",
+            ));
+        }
+        self.branch_mut(branch_id)?.environment_id = Some(environment_id);
         Ok(())
     }
 

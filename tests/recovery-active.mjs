@@ -69,7 +69,7 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
   const pause=async()=>{
    const previous=fs.existsSync(root+'/recovery.json')?fs.readFileSync(root+'/recovery.json','utf8'):null;
    assert.equal(await post({action:'pause'}),202);
-   await wait(async()=>fs.existsSync(root+'/recovery.json')&&fs.readFileSync(root+'/recovery.json','utf8')!==previous&&JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Paused; enter input to continue'),'Pause published');
+    await wait(async()=>fs.existsSync(root+'/recovery.json')&&fs.readFileSync(root+'/recovery.json','utf8')!==previous&&JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Paused;'),'Pause published');
   };
  let p=await start(false);
  let baseline;
@@ -92,7 +92,7 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
   assert.equal(requests.length,1,'failure does not restart inference');
   fs.rmdirSync(root+'/recovery.tmp');
   if(failureMode==='continue') {
-   await post({action:'prompt',prompt:'Continue after failed save'});
+    await post({action:'prompt',prompt:'/continue'});
    await wait(()=>requests.length>=4,'all branches continue after failed save');
   }
    await pause();
@@ -117,8 +117,11 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
  }
  const count=requests.length;p=await start(true);await wait(()=>events().some(e=>e.message==='recovery_loaded'),'loaded');
  await new Promise(r=>setTimeout(r,200));assert.equal(requests.length,count,'restore waits for user input');
- await post({action:'prompt',prompt:'Continue after restart'});
- await wait(()=>requests.length>=count+(failureMode==='continue'?1:3),'branches advance');
+   const completedBeforeInput=events().filter(e=>e.message==='task_completed').length;
+   await post({action:'prompt',prompt:'/continue'});
+   if(failureMode==='continue')await post({action:'prompt',prompt:'Next task after completed recovery'});
+  await wait(()=>requests.length>=count+(failureMode==='continue'?1:3),'branches advance');
+  assert.ok(!requests.some(r=>r.messages.some(m=>m.role==='user'&&JSON.stringify(m.content).includes('/continue'))),'continue is a control command, not model input');
  const texts=fs.readFileSync(root+'/session.jsonl','utf8');assert.match(texts,/candidate advanced after recovery/);
  // Candidate model requests must contain paired real sibling results, not abort errors.
  const candidateRequests=requests.slice(1,failureMode==='continue'?count:undefined).filter(r=>r.messages.some(m=>m.role==='tool'&&['moved','blocked'].includes(m.content)));
@@ -133,8 +136,11 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
    const write=events().find(e=>e.message==='action_started'&&e.action_id==='promoted-write');
    assert.ok(write&&write.branch_id!=='authority','file tool belongs to promoted Branch');
   }
-  await pause();await endPaused(p);
- const afterManifest=JSON.parse(fs.readFileSync(root+'/recovery.json'));
+   // This path has submitted a new, finite task. Pause during finishing is
+   // intentionally ignored, so wait for its publication receipt first.
+   if(failureMode==='continue')await wait(()=>events().filter(e=>e.message==='task_completed').length>completedBeforeInput,'continued input task materialized');
+   await pause();await endPaused(p);
+  const afterManifest=JSON.parse(fs.readFileSync(root+'/recovery.json'));
  if(failureMode==='continue') {
   const entries=fs.readFileSync(root+'/session.jsonl','utf8').trim().split('\n').map(JSON.parse);
   assert.equal(entries.filter(e=>e.customType==='notification'&&e.content==='recovery authoritative notification').length,1,'Promote notice persists exactly once across recovery');

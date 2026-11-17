@@ -42,6 +42,227 @@ fn waiting() -> AgentMessage {
 }
 
 #[test]
+fn missing_materialization_authority_is_visible_and_retryable() {
+    for missing in ["environment", "branch", "authority"] {
+        let (mut tree, _root) = task();
+        tree.finish_task();
+        match missing {
+            "environment" => tree.branches.get_mut("authority").unwrap().environment_id = None,
+            "branch" => {
+                tree.branches.remove("authority");
+            }
+            _ => tree.authority_branch_id = None,
+        }
+        let mut lifecycle = task::Task::default();
+        assert!(
+            lifecycle
+                .start_materialization(&tree, |_| Ok(()))
+                .unwrap()
+                .is_none()
+        );
+        let mut records = Vec::new();
+        let (_, ready, result) = lifecycle
+            .materialize(&mut tree, false, |v| {
+                records.push(v);
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(!ready);
+        assert!(result.unwrap_err().contains("missing"));
+        assert!(lifecycle.materialization_failed);
+        assert!(
+            tree.task_finishing(),
+            "missing state cannot pretend publication succeeded"
+        );
+        assert_eq!(records[0]["message"], "materialization_failed");
+        lifecycle.retry_materialization();
+        tree.authority_branch_id = Some("authority".into());
+        if missing == "branch" {
+            continue;
+        }
+        tree.branches.get_mut("authority").unwrap().environment_id = Some("restored".into());
+        assert_eq!(
+            lifecycle.start_materialization(&tree, |_| Ok(())).unwrap(),
+            Some("restored".into())
+        );
+    }
+}
+
+#[test]
+fn materialization_is_single_flight_and_waits_for_abort_receipt_before_next_task() {
+    use crate::control_plane::gateway::ui::Request;
+    let (mut tree, root) = task();
+    let mut session = session::Session::new(root.path(), None);
+    tree.finish_task();
+    let mut lifecycle = task::Task::default();
+    let mut records = Vec::new();
+    assert!(
+        lifecycle
+            .start_materialization(&tree, |v| {
+                records.push(v);
+                Ok(())
+            })
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        lifecycle
+            .start_materialization(&tree, |_| Ok(()))
+            .unwrap()
+            .is_none()
+    );
+    let abort = lifecycle.cancel(&mut tree, false).unwrap();
+    assert_eq!(abort.len(), 1);
+    assert!(lifecycle.cancel(&mut tree, false).unwrap().is_empty());
+    assert!(
+        session
+            .request(&mut tree, Request::Pause, 1)
+            .unwrap()
+            .commands
+            .is_empty()
+    );
+    assert!(!tree.recovering());
+    tree.queue_prompt("next task".into());
+    assert!(tree.next_prompt().unwrap().is_none());
+    // A Runtime result alone cannot release the task before Abort is applied.
+    lifecycle.materialized(Err("publication failed".into()));
+    assert!(
+        lifecycle
+            .materialize(&mut tree, false, |_| Ok(()))
+            .unwrap()
+            .is_none()
+    );
+    let AgentCommand::Abort {
+        command_id,
+        generation,
+        ..
+    } = &abort[0]
+    else {
+        panic!("Abort expected")
+    };
+    tree.handle_message(AgentMessage::TurnCompleted {
+        branch_id: "authority".into(),
+    })
+    .unwrap();
+    assert!(
+        lifecycle
+            .materialize(&mut tree, false, |_| Ok(()))
+            .unwrap()
+            .is_none()
+    );
+    tree.handle_message(AgentMessage::CommandResult {
+        branch_id: "authority".into(),
+        command_id: command_id.clone(),
+        generation: *generation,
+        operation: CommandOperation::Abort,
+        operation_id: None,
+        status: CommandStatus::Applied,
+        reason: None,
+    })
+    .unwrap();
+    assert!(
+        lifecycle
+            .materialize(&mut tree, false, |_| Ok(()))
+            .unwrap()
+            .unwrap()
+            .2
+            .is_err()
+    );
+    assert!(tree.task_finishing());
+    assert!(
+        lifecycle
+            .start_materialization(&tree, |_| Ok(()))
+            .unwrap()
+            .is_none()
+    );
+    lifecycle.retry_materialization();
+    assert!(
+        lifecycle
+            .start_materialization(&tree, |_| Ok(()))
+            .unwrap()
+            .is_some()
+    );
+    // Shutdown while that retry is in flight records intent, not another call.
+    assert!(lifecycle.cancel(&mut tree, true).unwrap().is_empty());
+    assert!(lifecycle.exit_requested);
+    assert!(
+        lifecycle
+            .start_materialization(&tree, |_| Ok(()))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(records.len(), 1);
+}
+
+#[test]
+fn continue_command_is_not_a_chat_prompt_and_pause_cannot_block_termination() {
+    use crate::control_plane::gateway::ui::Request;
+    let (mut tree, root) = task();
+    let mut session = session::Session::new(root.path(), None);
+    session
+        .request(
+            &mut tree,
+            Request::Prompt {
+                prompt: "/continue".into(),
+            },
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        session.input_sequence(),
+        0,
+        "idle continue is not a user turn"
+    );
+    assert!(tree.next_prompt().unwrap().is_none());
+    tree.continue_authority("work".into()).unwrap();
+    session.request(&mut tree, Request::Interrupt, 2).unwrap();
+    session.request(&mut tree, Request::Pause, 3).unwrap();
+    assert!(
+        !tree.recovering(),
+        "pause must not block termination/materialization"
+    );
+}
+
+#[test]
+fn repeated_interrupt_and_idle_continue_do_not_start_another_turn() {
+    use crate::control_plane::gateway::ui::Request;
+    let (mut tree, root) = task();
+    let mut session = session::Session::new(root.path(), None);
+    assert!(
+        session
+            .request(&mut tree, Request::Interrupt, 1)
+            .unwrap()
+            .commands
+            .is_empty()
+    );
+    assert!(!tree.task_finishing());
+    tree.continue_authority("work".into()).unwrap();
+    assert!(
+        !session
+            .request(&mut tree, Request::Interrupt, 2)
+            .unwrap()
+            .commands
+            .is_empty()
+    );
+    assert!(
+        session
+            .request(&mut tree, Request::Interrupt, 3)
+            .unwrap()
+            .commands
+            .is_empty()
+    );
+    assert!(
+        session
+            .request(&mut tree, Request::Continue, 4)
+            .unwrap()
+            .commands
+            .is_empty()
+    );
+    assert_eq!(session.input_sequence(), 0);
+}
+
+#[test]
 fn promoting_branch_keeps_its_inflight_model_waiting_point_live() {
     use crate::control_plane::agent_control::{ActionKind, ActionStatus};
     let (mut tree, _root) = task();

@@ -73,6 +73,43 @@ interface EventBase {
   task_id: string
 }
 
+export interface UiPromptEvent extends EventBase {
+  event: 'ui_prompt_requested'
+  branch_id: string
+  prompt_id: string
+  kind: 'confirm' | 'select' | 'input' | 'editor'
+  title: string
+  message_text: string | null
+  options: string[]
+  placeholder: string | null
+  prefill: string | null
+}
+export interface UiPromptResolvedEvent extends EventBase {
+  event: 'ui_prompt_resolved'
+  branch_id: string
+  prompt_id: string
+  cancelled: boolean
+  reason: string | null
+}
+export interface AgentSlashCommand {
+  name: string
+  description?: string
+  source: string
+  sourceInfo: unknown
+}
+export interface CommandsListedEvent extends EventBase {
+  event: 'commands_listed'
+  branch_id: string
+  request_id: string
+  commands: AgentSlashCommand[]
+}
+export interface UiNotificationEvent extends EventBase {
+  event: 'ui_notification'
+  branch_id: string
+  text: string
+  level: string
+}
+
 export interface BranchCreatedEvent extends EventBase {
   event: 'branch_created'
   branch_id: string
@@ -239,6 +276,10 @@ export type ChanceObservationEvent =
   | ProposalValidatedEvent
 
 export type ObservationEvent =
+  | UiPromptEvent
+  | UiPromptResolvedEvent
+  | CommandsListedEvent
+  | UiNotificationEvent
   | BranchObservationEvent
   | ChanceObservationEvent
   | RunStatusEvent
@@ -282,10 +323,13 @@ export interface Conversation {
 }
 
 export type Request =
+  | { action: 'ui_prompt_answer'; prompt_id: string; answer: unknown; cancelled?: boolean }
+  | { action: 'get_commands'; request_id: string }
   | { action: 'model'; model: string }
   | { action: 'prompt'; prompt: string }
   | { action: 'interrupt' }
   | { action: 'pause' }
+  | { action: 'continue' }
   | { action: 'shutdown' }
 
 export function isChanceEvent(event: ObservationEvent): event is ChanceObservationEvent {

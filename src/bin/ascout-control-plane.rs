@@ -19,18 +19,18 @@ mod ui;
 #[path = "ascout-control-plane/view.rs"]
 mod view;
 
-use ascout::control_plane::agent_control::{AgentCommand, AgentMessage, SpeculativeTree};
+use ascout::control_plane::agent_control::{AgentMessage, SpeculativeTree};
 use ascout::control_plane::gateway::{
     agent,
     runtime::{ControlServer, ControlSession, Runtime},
 };
 use ascout::control_plane::ledger::Ledger;
-use ascout::control_plane::policy::{CompiledPolicy, Decision, PolicyEngine};
+use ascout::control_plane::policy::{CompiledPolicy, PolicyEngine};
 use ascout::control_plane::{
-    coordination::execution::{cleanup, runtime_call},
+    coordination::{execution::cleanup, session as coordination_session},
     recovery,
 };
-use ascout::protocol::contract::{AgentLaunch, Operation, RuntimeCapabilities};
+use ascout::protocol::contract::{AgentLaunch, RuntimeCapabilities};
 use serde_json::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -38,10 +38,15 @@ use sha2::{Digest, Sha256};
 static SIGNAL_FD: AtomicI32 = AtomicI32::new(-1);
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn request_shutdown(_: libc::c_int) {
+extern "C" fn request_shutdown(signal: libc::c_int) {
     // Signal handlers must not allocate, lock, or perform transport I/O.
-    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+    if signal == libc::SIGINT {
+        INTERRUPT_REQUESTED.store(true, Ordering::Release);
+    } else {
+        SHUTDOWN_REQUESTED.store(true, Ordering::Release);
+    }
     let fd = SIGNAL_FD.load(Ordering::Relaxed);
     if fd >= 0 {
         unsafe {
@@ -133,37 +138,45 @@ fn start_adapter(
         .stderr(Stdio::from(log))
         .spawn()?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    let session = loop {
-        match server.accept() {
-            Ok(session) => break session,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if let Some(status) = adapter.try_wait()? {
-                    let detail = fs::read_to_string(&log_path)
-                        .unwrap_or_default()
-                        .trim()
-                        .replace('\n', " | ");
-                    return Err(format!(
-                        "Runtime Adapter exited before connecting ({status}); see {}: {detail}",
-                        log_path.display()
-                    )
-                    .into());
+    let accepted = (|| -> io::Result<ControlSession> {
+        loop {
+            match server.accept() {
+                Ok(session) => break Ok(session),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if let Some(status) = adapter.try_wait()? {
+                        let detail = fs::read_to_string(&log_path)
+                            .unwrap_or_default()
+                            .trim()
+                            .replace('\n', " | ");
+                        return Err(io::Error::other(format!(
+                            "Runtime Adapter exited before connecting ({status}); see {}: {detail}",
+                            log_path.display()
+                        )));
+                    }
+                    if Instant::now() >= deadline {
+                        let _ = adapter.kill();
+                        let _ = adapter.wait();
+                        let detail = fs::read_to_string(&log_path)
+                            .unwrap_or_default()
+                            .trim()
+                            .replace('\n', " | ");
+                        return Err(io::Error::other(format!(
+                            "Runtime Adapter did not connect within 10s; see {}: {detail}",
+                            log_path.display()
+                        )));
+                    }
+                    thread::sleep(Duration::from_millis(30));
                 }
-                if Instant::now() >= deadline {
-                    let _ = adapter.kill();
-                    let _ = adapter.wait();
-                    let detail = fs::read_to_string(&log_path)
-                        .unwrap_or_default()
-                        .trim()
-                        .replace('\n', " | ");
-                    return Err(format!(
-                        "Runtime Adapter did not connect within 10s; see {}: {detail}",
-                        log_path.display()
-                    )
-                    .into());
-                }
-                thread::sleep(Duration::from_millis(30));
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error.into()),
+        }
+    })();
+    let session = match accepted {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = adapter.kill();
+            let _ = adapter.wait();
+            return Err(error.into());
         }
     };
     let hello = match session.wait_for_hello(Duration::from_secs(10)) {
@@ -237,22 +250,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Saved Policy exists; refusing to overwrite run data".into());
     }
     // Establish task control state before starting its execution infrastructure.
-    let recovered = if resume {
-        Some(recovery::load(&run_dir)?)
-    } else {
-        None
-    };
-    let recovery_generation = recovered.as_ref().map(|(_, path)| path.clone());
+    let (mut tree, recovery_generation) = coordination_session::prepare(&run_dir, resume)?;
     let (startup_model, resume_model, models) =
         recovery::models(&run_dir, recovery_generation.as_deref(), model, models)?;
-    let mut tree = if let Some((tree, _)) = recovered {
-        tree
-    } else {
-        if run_dir.join("recovery.json").exists() {
-            return Err("Saved execution exists; use --resume".into());
-        }
-        SpeculativeTree::with_workspace("agent", &run_dir)?
-    };
     let engine = PolicyEngine::default();
     let source_artifact = policy_artifact
         .clone()
@@ -307,8 +307,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(std::path::PathBuf::from)
         .or_else(|| {
             if resume {
-                tree.runtime_binding
-                    .as_ref()?
+                tree.runtime_binding()?
                     .get("config_path")?
                     .as_str()
                     .map(std::path::PathBuf::from)
@@ -318,7 +317,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .or_else(|| policy.runtime_config_path().map(std::path::PathBuf::from))
         .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
-    tree.execution_id = run_dir.display().to_string();
+    tree.set_execution_id(run_dir.display().to_string())?;
     let config_digest = if resume {
         recovery::validate_bindings(&tree, policy.digest(), &config_path)?
     } else {
@@ -340,264 +339,206 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = run_dir.join("agent.sock");
     let listener = agent::Listener::bind(&socket)?;
     let (mut adapter, session, runtime_capabilities) = start_adapter(&config_path, &run_dir)?;
-    if resume {
-        recovery::validate_capabilities(&tree, &runtime_capabilities)?;
-    }
-    tree.bind_execution(
-        policy_binding,
-        json!({"config_path": config_path,"sha256":config_digest}),
-        serde_json::to_value(&runtime_capabilities)?,
-    );
-    tree.bind_local_policy(policy.digest());
-    let runtime_tools = serde_json::to_string(&runtime_capabilities.tools)?;
-    // 用哪个 Agent 产品、哪个版本由控制面决定；启动它由 Runtime 完成。
-    let agent_entry = resolve_agent_entry()?;
-    let mut agent_args = vec![
-        "--import=".to_string()
-            + &pi_root
-                .join("packages/coding-agent/src/experimental/source-resolver.ts")
-                .display()
-                .to_string(),
-        "--experimental-strip-types".into(),
-        agent_entry.display().to_string(),
-        socket.display().to_string(),
-        "agent".into(),
-    ];
-    if let Some(model) = startup_model {
-        agent_args.push("--model".into());
-        agent_args.push(model);
-    }
-    if let Some(models) = models {
-        agent_args.push("--models".into());
-        agent_args.push(models.display().to_string());
-    }
-    if let Some(thinking) = thinking {
-        agent_args.push("--thinking".into());
-        agent_args.push(thinking);
-    }
-    let session_file = run_dir.join("session.jsonl");
-    let agent_env = std::collections::BTreeMap::from([
-        ("ASCOUT_RUNTIME_TOOLS".into(), runtime_tools),
-        ("ASCOUT_PI_ROOT".into(), pi_root.display().to_string()),
-        ("ASCOUT_TASK_ID".into(), tree.execution_id.clone()),
-        (
-            "ASCOUT_SESSION_FILE".into(),
-            session_file.display().to_string(),
-        ),
-    ]);
-    let agent_launch = AgentLaunch {
-        command: resolve_node()?.display().to_string(),
-        args: agent_args,
-        cwd: tree.workspace(),
-        log: run_dir.join("agent.log"),
-        instance_id: Some("agent".into()),
-        env: agent_env,
-    };
-    tree.set_agent_launch(agent_launch.clone());
-    let (events, receiver) = mpsc::channel();
-    let runtime_events = events.clone();
-    session.set_event_waker(move || {
-        let _ = runtime_events.send(execution::Event::Timer);
-    });
-    let requests = events.clone();
-    let mut ledger = Ledger::open(&run_dir.join("events.jsonl"))?;
-    ledger.record(json!({
-        "source": "control_plane",
-        "message": "session_file",
-        "task_id": tree.execution_id,
-        "session_file": session_file,
-    }))?;
-    let interface = ui::Interface::new(tree.execution_id.clone(), ledger.reader());
-    let ui_connection =
-        ascout::control_plane::gateway::ui::Connection::new(ledger.reader(), move |request| {
-            requests
-                .send(execution::Event::Request(request))
-                .map_err(|_| "Control plane disconnected".into())
-        });
-    let mut tui_thread = None;
-    let mut authority_command = if resume {
-        AgentCommand::Load {
-            environments: tree
-                .branches
-                .iter()
-                .filter_map(|(id, record)| {
-                    record.environment_id.clone().map(|env| (id.clone(), env))
-                })
-                .collect(),
-            branch_id: tree
-                .authority_branch_id
-                .clone()
-                .ok_or("Recovery authority missing")?,
-            path: recovery_generation.as_ref().unwrap().join("agent.json"),
-        }
-    } else {
-        tree.create_authority("authority", "")?
-    };
-    let authority_id = tree
-        .authority_branch_id
-        .clone()
-        .ok_or("authority missing")?;
+    // Every fallible assembly step after process launch shares this teardown.
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         if resume {
-            runtime_call(
-                &session,
-                "",
-                Operation::LoadRuntime {
-                    path: recovery_generation.as_ref().unwrap().join("runtime.json"),
-                },
-            )?;
-        } else {
-            let established = session.establish()?;
-            if !established.environment_id.is_empty() {
-                tree.branches
-                    .get_mut(&authority_id)
-                    .ok_or("authority Branch missing")?
-                    .environment_id = Some(established.environment_id.clone());
-            }
-            if established.status != ascout::protocol::contract::ResultStatus::Completed
-                || established.environment_id.is_empty()
-            {
-                return Err("Runtime failed to establish the authority Environment".into());
-            }
-            if let AgentCommand::StartBranch { environment_id, .. } = &mut authority_command {
-                *environment_id = Some(established.environment_id);
-            }
+            recovery::validate_capabilities(&tree, &runtime_capabilities)?;
         }
-        let authority_environment = tree.branches[&authority_id]
-            .environment_id
-            .as_deref()
-            .ok_or("authority Environment missing")?;
-        // 环境建立后，由 Runtime 在其中建立 Agent 接入侧。
-        runtime_call(
-            &session,
-            authority_environment,
-            Operation::OperateEnvironment {
-                command: Vec::new(),
-                agent: Some(agent_launch.clone()),
-            },
-        )?;
-        if resume {
-            for branch in tree.branches.values().filter(|branch| {
-                branch.branch_id != authority_id
-                    && (branch.status.is_live_candidate() || branch.status.is_live_authority())
-            }) {
-                runtime_call(
-                    &session,
-                    branch
-                        .environment_id
-                        .as_deref()
-                        .ok_or("live Branch Environment missing")?,
-                    Operation::OperateEnvironment {
-                        command: Vec::new(),
-                        agent: Some(agent_launch.clone()),
-                    },
-                )?;
-            }
-        }
-        let mut connection = listener.accept("agent", Duration::from_secs(30))?;
-        let command = authority_command;
-        tree.record_runtime_state(
-            &authority_id,
-            ascout::control_plane::agent_control::RuntimeExecutionState::Ready,
-        )?;
-        let decisions = Decision::ALL
-            .into_iter()
-            .map(|decision| {
-                Ok((
-                    decision.as_str().to_string(),
-                    json!(policy.script(decision)?),
-                ))
-            })
-            .collect::<Result<serde_json::Map<_, _>, Box<dyn std::error::Error>>>()?;
-        connection.send(AgentCommand::LocalPolicy {
-            branch_id: "authority".into(),
-            policy_digest: policy.digest().into(),
-            decisions: serde_json::Value::Object(decisions),
-        })?;
-        connection.send(command)?;
-        let mut observation_error = None;
-        for content in tree.drain_observations() {
-            if let Err(error) = ledger.append_observation(&tree.execution_id, content) {
-                observation_error.get_or_insert(error);
-            }
-        }
-        if let Some(error) = observation_error {
-            return Err(error.into());
-        }
-        interface.publish(&mut ledger, false, false, "Starting Agent session…")?;
-        tui_thread = if let Some(address) = &web_address {
-            ascout::control_plane::gateway::ui::start(
-                address,
-                interface.clone(),
-                ui_connection.clone(),
-                ledger.reader(),
-                ascout::control_plane::gateway::ui::Assets {
-                    index_html: include_bytes!("../../webui/dist/index.html"),
-                    app_js: include_bytes!("../../webui/dist/assets/app.js"),
-                    app_css: include_bytes!("../../webui/dist/assets/app.css"),
-                    favicon_svg: include_bytes!("../../webui/dist/favicon.svg"),
-                },
-            )?;
-            None
-        } else {
-            Some(tui::start(
-                interface.clone(),
-                ui_connection.clone(),
-                ledger.reader(),
-            )?)
-        };
-        let result = execution::run(
-            &mut connection,
-            &mut tree,
-            &policy,
-            &engine,
-            &session,
-            &runtime_capabilities,
-            &interface,
-            &mut ledger,
-            (events, receiver),
-            &run_dir,
-            resume_model,
+        tree.bind_execution(
+            policy_binding,
+            json!({"config_path": config_path,"sha256":config_digest}),
+            serde_json::to_value(&runtime_capabilities)?,
         );
-        result
-    })();
-    // 先让 Runtime 停掉环境里的 Agent 进程，再断开 Adapter 让它自行退出。
-    let runtime_result = cleanup(&session, &runtime_capabilities, &mut tree);
-    let observation_result = (|| -> io::Result<()> {
-        let mut failure = None;
-        for content in tree.drain_observations() {
-            if let Err(error) = ledger.append_observation(&tree.execution_id, content) {
+        tree.bind_local_policy(policy.digest());
+        let runtime_tools = serde_json::to_string(&runtime_capabilities.tools)?;
+        // 用哪个 Agent 产品、哪个版本由控制面决定；启动它由 Runtime 完成。
+        let agent_entry = resolve_agent_entry()?;
+        let mut agent_args = vec![
+            "--import=".to_string()
+                + &pi_root
+                    .join("packages/coding-agent/src/experimental/source-resolver.ts")
+                    .display()
+                    .to_string(),
+            "--experimental-strip-types".into(),
+            agent_entry.display().to_string(),
+            socket.display().to_string(),
+            "agent".into(),
+        ];
+        if let Some(model) = startup_model {
+            agent_args.push("--model".into());
+            agent_args.push(model);
+        }
+        if let Some(models) = models {
+            agent_args.push("--models".into());
+            agent_args.push(models.display().to_string());
+        }
+        if let Some(thinking) = thinking {
+            agent_args.push("--thinking".into());
+            agent_args.push(thinking);
+        }
+        let session_file = run_dir.join("session.jsonl");
+        let agent_env = std::collections::BTreeMap::from([
+            ("ASCOUT_RUNTIME_TOOLS".into(), runtime_tools),
+            ("ASCOUT_PI_ROOT".into(), pi_root.display().to_string()),
+            ("ASCOUT_TASK_ID".into(), tree.execution_id().to_string()),
+            (
+                "ASCOUT_SESSION_FILE".into(),
+                session_file.display().to_string(),
+            ),
+        ]);
+        let agent_launch = AgentLaunch {
+            command: resolve_node()?.display().to_string(),
+            args: agent_args,
+            cwd: tree.workspace(),
+            log: run_dir.join("agent.log"),
+            instance_id: Some("agent".into()),
+            env: agent_env,
+        };
+        let (events, receiver) = mpsc::channel();
+        let runtime_events = events.clone();
+        session.set_event_waker(move || {
+            let _ = runtime_events.send(execution::Event::Timer);
+        });
+        let requests = events.clone();
+        let mut ledger = Ledger::open(&run_dir.join("events.jsonl"))?;
+        ledger.record(json!({
+            "source": "control_plane",
+            "message": "session_file",
+            "task_id": tree.execution_id(),
+            "session_file": session_file,
+        }))?;
+        let interface = ui::Interface::new(tree.execution_id().to_string(), ledger.reader());
+        let ui_connection =
+            ascout::control_plane::gateway::ui::Connection::new(ledger.reader(), move |request| {
+                if matches!(
+                    request,
+                    ascout::control_plane::gateway::ui::Request::UiPromptAnswer { .. }
+                        | ascout::control_plane::gateway::ui::Request::GetCommands { .. }
+                ) {
+                    let (reply, receiver) = mpsc::channel();
+                    requests
+                        .send(execution::Event::Interaction(request, reply))
+                        .map_err(|_| "Control plane disconnected".to_string())?;
+                    return receiver
+                        .recv()
+                        .map_err(|_| "Control plane disconnected".to_string())?;
+                }
+                requests
+                    .send(execution::Event::Request(request))
+                    .map_err(|_| "Control plane disconnected".into())
+            });
+        let mut tui_thread = None;
+        let mut web_server = None;
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let command = coordination_session::start(
+                &mut tree,
+                &session,
+                agent_launch,
+                recovery_generation.as_deref(),
+            )?;
+            let mut connection = listener.accept("agent", Duration::from_secs(30))?;
+            let commands = coordination_session::connected(&mut tree, &policy, command)?;
+            for command in commands {
+                connection.send(command)?;
+            }
+            let mut observation_error = None;
+            for content in tree.drain_observations() {
+                if let Err(error) = ledger.append_observation(tree.execution_id(), content) {
+                    observation_error.get_or_insert(error);
+                }
+            }
+            if let Some(error) = observation_error {
+                return Err(error.into());
+            }
+            interface.publish(&mut ledger, false, false, "Starting Agent session…")?;
+            tui_thread = if let Some(address) = &web_address {
+                web_server = Some(ascout::control_plane::gateway::ui::start(
+                    address,
+                    interface.clone(),
+                    ui_connection.clone(),
+                    ledger.reader(),
+                    ascout::control_plane::gateway::ui::Assets {
+                        index_html: include_bytes!("../../webui/dist/index.html"),
+                        app_js: include_bytes!("../../webui/dist/assets/app.js"),
+                        app_css: include_bytes!("../../webui/dist/assets/app.css"),
+                        favicon_svg: include_bytes!("../../webui/dist/favicon.svg"),
+                    },
+                )?);
+                None
+            } else {
+                Some(tui::start(
+                    interface.clone(),
+                    ui_connection.clone(),
+                    ledger.reader(),
+                )?)
+            };
+            let result = execution::run(
+                &mut connection,
+                &mut tree,
+                &policy,
+                &engine,
+                &session,
+                &runtime_capabilities,
+                &interface,
+                &mut ledger,
+                (events, receiver),
+                &run_dir,
+                resume_model,
+            );
+            result
+        })();
+        // 先让 Runtime 停掉环境里的 Agent 进程，再断开 Adapter 让它自行退出。
+        let runtime_result = cleanup(&session, &runtime_capabilities, &mut tree);
+        let observation_result = (|| -> io::Result<()> {
+            let mut failure = None;
+            for content in tree.drain_observations() {
+                if let Err(error) = ledger.append_observation(tree.execution_id(), content) {
+                    failure.get_or_insert(error);
+                }
+            }
+            if let Err(error) = interface.publish(&mut ledger, false, false, "Stopped") {
                 failure.get_or_insert(error);
             }
+            if let Err(error) = interface.disconnect(&mut ledger) {
+                failure.get_or_insert(error);
+            }
+            failure.map_or(Ok(()), Err)
+        })();
+        if let Some(thread) = tui_thread {
+            let _ = thread.join();
         }
-        if let Err(error) = interface.publish(&mut ledger, false, false, "Stopped") {
-            failure.get_or_insert(error);
+        // Cleanup failure must not skip closing the cloned reader socket or
+        // reaping the Adapter. Preserve every failure instead of hiding one.
+        let mut errors = Vec::new();
+        if let Some(mut server) = web_server {
+            if let Err(error) = server.stop() {
+                errors.push(format!("UI shutdown: {error}"));
+            }
         }
-        if let Err(error) = interface.disconnect(&mut ledger) {
-            failure.get_or_insert(error);
+        if let Err(error) = observation_result {
+            errors.push(format!("Observation history incomplete: {error}"));
         }
-        failure.map_or(Ok(()), Err)
+        if let Err(error) = result {
+            errors.push(format!("Agent execution/shutdown: {error}"));
+        }
+        if let Err(error) = runtime_result {
+            errors.push(format!("Runtime cleanup: {error}"));
+        }
+        let final_state = serde_json::to_vec_pretty(&tree)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| std::fs::write(run_dir.join("final-tree.json"), bytes));
+        if let Err(error) = final_state {
+            errors.push(format!("Final Tree recording: {error}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; ").into())
+        }
     })();
-    if let Some(thread) = tui_thread {
-        let _ = thread.join();
-    }
-    // Cleanup failure must not skip closing the cloned reader socket or
-    // reaping the Adapter. Preserve every failure instead of hiding one.
     let mut errors = Vec::new();
-    if let Err(error) = observation_result {
-        errors.push(format!("Observation history incomplete: {error}"));
-    }
     if let Err(error) = result {
-        errors.push(format!("Agent execution/shutdown: {error}"));
-    }
-    if let Err(error) = runtime_result {
-        errors.push(format!("Runtime cleanup: {error}"));
-    }
-    let final_state = serde_json::to_vec_pretty(&tree)
-        .map_err(std::io::Error::other)
-        .and_then(|bytes| std::fs::write(run_dir.join("final-tree.json"), bytes));
-    if let Err(error) = final_state {
-        errors.push(format!("Final Tree recording: {error}"));
+        errors.push(error.to_string());
     }
     if let Err(error) = session.shutdown() {
         errors.push(format!("Runtime connection shutdown: {error}"));

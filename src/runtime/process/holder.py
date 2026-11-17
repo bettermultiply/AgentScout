@@ -8,6 +8,7 @@ work started by an earlier command.
 """
 
 import base64
+import ctypes
 import json
 import os
 import select
@@ -19,6 +20,10 @@ import threading
 import time
 
 SOCKET = sys.argv[1]
+# Adopt detached tool descendants even when the launcher does not create a
+# private PID namespace. Never treat other processes in /proc as owned.
+if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "cannot adopt tool descendants")
 POLL_SECONDS = 0.01
 # After the foreground exits, keep forwarding briefly so bytes still buffered
 # in a pipe held open by a background descendant are not lost. A background
@@ -34,6 +39,7 @@ listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 listener.bind(SOCKET)
 os.chmod(SOCKET, 0o600)
 listener.listen(64)
+writer_lock = threading.Lock()
 
 
 def send_event(connection, payload):
@@ -175,6 +181,26 @@ def client_closed(connection):
         return True
 
 
+def owned_writers():
+    processes = {}
+    for name in os.listdir('/proc'):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        try:
+            with open('/proc/' + name + '/stat') as source:
+                status = source.read().rsplit(')', 1)[1].split()
+            processes[int(name)] = (int(status[1]), status[0])
+        except (OSError, IndexError):
+            pass
+    owned = {os.getpid()}
+    while True:
+        added = {pid for pid, (parent, _) in processes.items() if parent in owned} - owned
+        if not added:
+            break
+        owned.update(added)
+    return [pid for pid in owned if pid != os.getpid() and processes[pid][1] != 'Z']
+
+
 def serve(connection):
     state = {
         "finished": False,
@@ -190,6 +216,28 @@ def serve(connection):
         if not line:
             return
         request = json.loads(line)
+        if request.get("op") == "drain":
+            # Only descendants owned by this holder can be writers. Detached
+            # descendants are adopted via subreaper; unrelated PIDs are ignored.
+            while True:
+                # Do not let the passive drain overtake cancellation's receipt
+                # and stop this holder before its cancelling client is answered.
+                with writer_lock:
+                    children = owned_writers()
+                    if request.get('cancel'):
+                        while children:
+                            for pid in children:
+                                try:
+                                    os.kill(pid, signal.SIGKILL)
+                                except ProcessLookupError:
+                                    pass
+                            time.sleep(POLL_SECONDS)
+                            children = owned_writers()
+                    if not children:
+                        send_event(connection, {"exit_code": 0})
+                        return
+                time.sleep(POLL_SECONDS)
+            return
         if request.get("op") != "exec":
             raise RuntimeError("unknown holder operation")
         environment = dict(os.environ)

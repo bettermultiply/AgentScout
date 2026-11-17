@@ -128,6 +128,7 @@ pub enum AuthorityState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandOperation {
+    Abort,
     Promote,
     ResolvePending,
     Discard,
@@ -190,6 +191,7 @@ pub(crate) struct ActionFinishedFact {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
+    Abort,
     Tool,
     StartAgent,
     StartCandidate,
@@ -241,28 +243,28 @@ pub enum RuntimeExecutionState {
 /// 控制面保存的一条 Branch 记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchRecord {
-    pub branch_id: String,
+    pub(crate) branch_id: String,
     #[serde(default)]
-    pub environment_id: Option<String>,
+    pub(crate) environment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_branch_id: Option<String>,
-    pub role: BranchRole,
-    pub status: BranchStatus,
+    pub(crate) parent_branch_id: Option<String>,
+    pub(crate) role: BranchRole,
+    pub(crate) status: BranchStatus,
     #[serde(default)]
-    pub generation: u64,
+    pub(crate) generation: u64,
     #[serde(default)]
-    pub execution_position: ExecutionPosition,
+    pub(crate) execution_position: ExecutionPosition,
     /// 这个 Branch 所属的 Chance；Proposal 内容和验证依据都在 Chance 上。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chance_id: Option<String>,
+    pub(crate) chance_id: Option<String>,
     /// 这个 Branch 携带的未确认前提，含祖先路径上的前提；自身的前提是
     /// `chance_id` 对应的那一项。
     #[serde(default)]
-    pub assumption_set: Vec<Assumption>,
+    pub(crate) assumption_set: Vec<Assumption>,
     #[serde(default)]
-    pub pending_operations: Vec<PendingOperation>,
+    pub(crate) pending_operations: Vec<PendingOperation>,
     #[serde(default)]
-    pub execution_state: BranchExecutionState,
+    pub(crate) execution_state: BranchExecutionState,
 }
 
 /// Branch 在完整投机执行历史中的位置。
@@ -398,37 +400,37 @@ pub struct BranchExecutionState {
 /// 一个 Agent 的完整投机树视图。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeculativeTree {
-    pub agent_id: String,
+    pub(crate) agent_id: String,
     #[serde(default)]
-    pub execution_id: String,
+    pub(crate) execution_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub history_root_branch_id: Option<String>,
+    pub(crate) history_root_branch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authority_branch_id: Option<String>,
-    pub branches: BTreeMap<String, BranchRecord>,
+    pub(crate) authority_branch_id: Option<String>,
+    pub(crate) branches: BTreeMap<String, BranchRecord>,
     /// 尚未收敛的 Chance；Proposal 和验证依据都挂在这里。
     #[serde(default)]
-    pub chances: BTreeMap<String, ChanceRecord>,
+    pub(crate) chances: BTreeMap<String, ChanceRecord>,
     /// Only live actions are retained; completed facts belong to the Ledger.
     #[serde(default)]
-    pub active_actions: BTreeMap<String, BTreeMap<String, ActionRecord>>,
+    pub(crate) active_actions: BTreeMap<String, BTreeMap<String, ActionRecord>>,
     #[serde(default)]
     pub(crate) action_facts: BTreeMap<String, BTreeMap<String, ActionFinishedFact>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_binding: Option<Value>,
+    pub(crate) policy_binding: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_binding: Option<Value>,
+    pub(crate) runtime_binding: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capability_view: Option<Value>,
+    pub(crate) capability_view: Option<Value>,
     /// Digest of the local Policy artifact delivered to the Agent Adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_policy_digest: Option<String>,
+    pub(crate) local_policy_digest: Option<String>,
     #[serde(default)]
     pending_commands: BTreeMap<String, PendingCommand>,
     #[serde(default)]
     queued_prompts: VecDeque<String>,
     #[serde(default)]
-    pub workspace_root: PathBuf,
+    pub(crate) workspace_root: PathBuf,
     #[serde(default)]
     pub(crate) pending_work: BTreeMap<u64, crate::control_plane::coordination::ControlOperation>,
     /// 已准入投机的内部事实，按 Branch 保存；不进入 Branch 归档。
@@ -467,6 +469,14 @@ pub struct SpeculativeTree {
     next_command_id: u64,
     #[serde(skip)]
     pending_observations: Vec<crate::control_plane::observation::ObservationContent>,
+    #[serde(skip)]
+    ui_prompts: BTreeMap<String, (String, UiPrompt, bool)>,
+    #[serde(default)]
+    command_catalog: Option<Value>,
+    #[serde(skip)]
+    ui_commands: Vec<AgentCommand>,
+    #[serde(skip)]
+    command_queries: BTreeMap<String, String>,
     #[serde(skip)]
     pending_records: Vec<Value>,
     /// The control plane's logical transcript, retained independently of
@@ -512,6 +522,10 @@ impl SpeculativeTree {
             next_generation: 1,
             next_command_id: 1,
             pending_observations: Vec::new(),
+            ui_prompts: BTreeMap::new(),
+            command_catalog: None,
+            ui_commands: Vec::new(),
+            command_queries: BTreeMap::new(),
             pending_records: Vec::new(),
             transcripts: BTreeMap::new(),
             agent_launch: None,
@@ -578,6 +592,17 @@ fn deserialize_notification<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AgentCommand {
+    UiPromptAnswer {
+        branch_id: String,
+        prompt_id: String,
+        answer: Value,
+        cancelled: bool,
+        reason: Option<String>,
+    },
+    GetCommands {
+        branch_id: String,
+        request_id: String,
+    },
     Model {
         branch_id: String,
         model: String,
@@ -586,6 +611,9 @@ pub enum AgentCommand {
         branch_id: String,
     },
     CancelSave {
+        branch_id: String,
+    },
+    Continue {
         branch_id: String,
     },
     Save {
@@ -610,6 +638,8 @@ pub enum AgentCommand {
     },
     Abort {
         branch_id: String,
+        command_id: String,
+        generation: u64,
     },
     /// `rebalance` 的 `pause`：Agent Adapter 在下一个边界停住该 Branch，
     /// 并以 `branch_suspended` 报告。
@@ -685,10 +715,40 @@ pub enum AgentCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiPrompt {
+    pub kind: String,
+    pub title: String,
+    pub message_text: Option<String>,
+    pub options: Vec<String>,
+    pub placeholder: Option<String>,
+    pub prefill: Option<String>,
+}
+
 /// Agent Adapter 向控制面报告的事实；不包含 Runtime 或 Tree 完成事实。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AgentMessage {
+    UiPromptRequested {
+        branch_id: String,
+        prompt_id: String,
+        #[serde(flatten)]
+        prompt: UiPrompt,
+    },
+    UiPromptCancelled {
+        branch_id: String,
+        prompt_id: String,
+    },
+    UiNotification {
+        branch_id: String,
+        text: String,
+        level: String,
+    },
+    CommandsListed {
+        branch_id: String,
+        request_id: String,
+        commands: Value,
+    },
     TurnFailed {
         branch_id: String,
         reason: String,
@@ -858,6 +918,7 @@ struct PendingCommand {
 
 fn operation_name(operation: CommandOperation) -> &'static str {
     match operation {
+        CommandOperation::Abort => "abort",
         CommandOperation::Promote => "promote",
         CommandOperation::ResolvePending => "resolve",
         CommandOperation::Discard => "discard",

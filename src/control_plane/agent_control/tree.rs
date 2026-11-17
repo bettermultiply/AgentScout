@@ -2,7 +2,91 @@
 
 use super::*;
 
+impl BranchRecord {
+    pub fn branch_id(&self) -> &str {
+        &self.branch_id
+    }
+    pub fn environment_id(&self) -> Option<&str> {
+        self.environment_id.as_deref()
+    }
+    pub fn parent_branch_id(&self) -> Option<&str> {
+        self.parent_branch_id.as_deref()
+    }
+    pub fn role(&self) -> BranchRole {
+        self.role
+    }
+    pub fn status(&self) -> BranchStatus {
+        self.status
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn execution_position(&self) -> &ExecutionPosition {
+        &self.execution_position
+    }
+    pub fn chance_id(&self) -> Option<&str> {
+        self.chance_id.as_deref()
+    }
+    pub fn assumption_set(&self) -> &[Assumption] {
+        &self.assumption_set
+    }
+    pub fn pending_operations(&self) -> &[PendingOperation] {
+        &self.pending_operations
+    }
+    pub fn execution_state(&self) -> &BranchExecutionState {
+        &self.execution_state
+    }
+}
+
 impl SpeculativeTree {
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+    pub fn execution_id(&self) -> &str {
+        &self.execution_id
+    }
+    pub fn history_root_branch_id(&self) -> Option<&str> {
+        self.history_root_branch_id.as_deref()
+    }
+    pub fn authority_branch_id(&self) -> Option<&str> {
+        self.authority_branch_id.as_deref()
+    }
+    pub fn branches(&self) -> &BTreeMap<String, BranchRecord> {
+        &self.branches
+    }
+    pub fn chances(&self) -> &BTreeMap<String, ChanceRecord> {
+        &self.chances
+    }
+    pub fn active_actions(&self) -> &BTreeMap<String, BTreeMap<String, ActionRecord>> {
+        &self.active_actions
+    }
+    pub fn policy_binding(&self) -> Option<&Value> {
+        self.policy_binding.as_ref()
+    }
+    pub fn runtime_binding(&self) -> Option<&Value> {
+        self.runtime_binding.as_ref()
+    }
+    pub fn capability_view(&self) -> Option<&Value> {
+        self.capability_view.as_ref()
+    }
+    pub fn local_policy_digest(&self) -> Option<&str> {
+        self.local_policy_digest.as_deref()
+    }
+    pub fn workspace_root(&self) -> &std::path::Path {
+        &self.workspace_root
+    }
+
+    /// Set the recording identity before execution starts; it cannot change under live work.
+    pub fn set_execution_id(&mut self, execution_id: String) -> io::Result<()> {
+        if self.authority_branch_id.is_some() && !self.recovering {
+            return Err(invalid_input(
+                "execution identity cannot change during execution",
+            ));
+        }
+        self.execution_id = execution_id;
+        Ok(())
+    }
+
     pub fn set_agent_launch(&mut self, launch: crate::protocol::contract::AgentLaunch) {
         self.agent_launch = Some(launch);
     }
@@ -92,6 +176,15 @@ impl SpeculativeTree {
         status: BranchStatus,
         reason: &str,
     ) -> io::Result<()> {
+        if matches!(
+            status,
+            BranchStatus::Discarding
+                | BranchStatus::Discarded
+                | BranchStatus::Cleaning
+                | BranchStatus::Cleaned
+        ) {
+            self.cancel_ui_prompts(Some(id), "Branch is closing");
+        }
         let branch = self.branch_mut(id)?;
         if branch.status == status {
             return Ok(());
@@ -124,6 +217,10 @@ impl SpeculativeTree {
         let previous = self.authority_branch_id.replace(id.into());
         if let Some(old) = &previous {
             self.branch_mut(old)?.role = BranchRole::Candidate;
+            // Only the current authority's prompts can be answered. A prompt
+            // already shown for the outgoing authority would otherwise stay
+            // visible while every answer is rejected.
+            self.cancel_ui_prompts(Some(old), "Branch is no longer the authority");
         }
         self.branch_mut(id)?.role = BranchRole::Authority;
         self.pending_observations.push(
@@ -132,6 +229,18 @@ impl SpeculativeTree {
                 previous_authority: previous,
             },
         );
+        for (prompt_id, (owner, prompt, visible)) in &mut self.ui_prompts {
+            if owner == id && !*visible {
+                *visible = true;
+                self.pending_observations.push(
+                    crate::control_plane::observation::ObservationContent::UiPromptRequested {
+                        branch_id: id.into(),
+                        prompt_id: prompt_id.clone(),
+                        prompt: prompt.clone(),
+                    },
+                );
+            }
+        }
         Ok(())
     }
     pub fn with_workspace(
@@ -267,7 +376,7 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    pub(crate) fn branch(&self, branch_id: &str) -> io::Result<&BranchRecord> {
+    pub fn branch(&self, branch_id: &str) -> io::Result<&BranchRecord> {
         self.branches
             .get(branch_id)
             .ok_or_else(|| invalid_input("branch does not exist"))
@@ -311,6 +420,7 @@ impl SpeculativeTree {
             },
         );
         let kind = match operation {
+            CommandOperation::Abort => OperationKind::Abort,
             CommandOperation::Promote => OperationKind::Promote,
             CommandOperation::Discard => OperationKind::Discard,
             CommandOperation::Cleanup => OperationKind::Cleanup,
@@ -318,6 +428,16 @@ impl SpeculativeTree {
         };
         self.mark_operation_requested(branch_id, &id, kind)?;
         Ok(id)
+    }
+
+    pub(super) fn make_abort_command(&mut self, branch_id: &str) -> io::Result<AgentCommand> {
+        let generation = self.branch(branch_id)?.generation;
+        let command_id = self.register(branch_id, CommandOperation::Abort, None, generation)?;
+        Ok(AgentCommand::Abort {
+            branch_id: branch_id.into(),
+            command_id,
+            generation,
+        })
     }
 
     pub(super) fn make_promote_command(

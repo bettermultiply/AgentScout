@@ -358,33 +358,14 @@ impl SpeculativeTree {
     ) -> io::Result<()> {
         let result = match result {
             Ok(ControlResult::EnvironmentFailed(environment_id, reason)) => {
-                if environment_id.is_empty()
-                    || self
-                        .branches
-                        .values()
-                        .any(|record| record.environment_id.as_deref() == Some(&environment_id))
-                {
-                    return Err(io::Error::other(
-                        "Runtime returned an invalid failed Environment identity",
-                    ));
-                }
-                self.branches.get_mut(branch).unwrap().environment_id = Some(environment_id);
+                self.bind_environment(branch, environment_id)?;
                 Err(reason)
             }
             other => other,
         };
         match result {
             Ok(ControlResult::Environment(environment_id)) => {
-                if environment_id.is_empty()
-                    || self
-                        .branches
-                        .values()
-                        .any(|record| record.environment_id.as_deref() == Some(&environment_id))
-                {
-                    return Err(io::Error::other(
-                        "Runtime returned an empty or already bound Environment identity",
-                    ));
-                }
+                self.bind_environment(branch, environment_id.clone())?;
                 if let AgentCommand::StartCandidate {
                     environment_id: target,
                     ..
@@ -392,7 +373,6 @@ impl SpeculativeTree {
                 {
                     *target = Some(environment_id.clone());
                 }
-                self.branches.get_mut(branch).unwrap().environment_id = Some(environment_id);
                 self.record_runtime_state(branch, RuntimeExecutionState::Ready)?;
                 if !self.stopping && self.branches[branch].status == BranchStatus::Created {
                     actions.commands.push(command);

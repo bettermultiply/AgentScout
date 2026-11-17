@@ -49,6 +49,8 @@ pub struct ObservedTree {
 }
 
 pub struct AScoutRunView {
+    pub prompts: BTreeMap<String, (String, ascout::control_plane::agent_control::UiPrompt)>,
+    pub commands: Vec<Value>,
     pub tree: ObservedTree,
     pub events: Vec<Value>,
     pub ready: bool,
@@ -59,6 +61,8 @@ pub struct AScoutRunView {
 
 pub fn run_view(set: StateEventSet) -> AScoutRunView {
     let mut view = AScoutRunView {
+        prompts: BTreeMap::new(),
+        commands: Vec::new(),
         tree: Default::default(),
         events: Vec::new(),
         ready: false,
@@ -69,6 +73,19 @@ pub fn run_view(set: StateEventSet) -> AScoutRunView {
     for event in set.events {
         view.events.push(serde_json::to_value(&event).unwrap());
         match event.content {
+            ObservationContent::UiPromptRequested {
+                branch_id,
+                prompt_id,
+                prompt,
+            } => {
+                view.prompts.insert(prompt_id, (branch_id, prompt));
+            }
+            ObservationContent::UiPromptResolved { prompt_id, .. } => {
+                view.prompts.remove(&prompt_id);
+            }
+            ObservationContent::CommandsListed { commands, .. } => {
+                view.commands = commands.as_array().cloned().unwrap_or_default();
+            }
             ObservationContent::BranchCreated {
                 branch_id,
                 parent_branch_id,
@@ -99,6 +116,9 @@ pub fn run_view(set: StateEventSet) -> AScoutRunView {
                     branch.role = BranchRole::Authority;
                 }
                 view.tree.authority_branch_id = Some(branch_id);
+                view.prompts.retain(|_, (owner, _)| {
+                    Some(&*owner) == view.tree.authority_branch_id.as_ref()
+                });
             }
             ObservationContent::StatusChanged {
                 branch_id,
@@ -127,6 +147,9 @@ pub fn run_view(set: StateEventSet) -> AScoutRunView {
                 view.running = running;
                 view.notice = notice;
                 view.connected = connected;
+                if !connected {
+                    view.prompts.clear();
+                }
             }
             _ => {}
         }

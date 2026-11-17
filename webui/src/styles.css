@@ -2222,3 +2222,33 @@ select {
     scroll-behavior: auto !important;
   }
 }
+.agent-prompt {
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  white-space: pre-wrap;
+}
+.agent-prompt fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 0;
+  padding: 8px 0 0;
+  margin: 0;
+}
+.agent-prompt textarea,
+.agent-prompt input {
+  width: 100%;
+}
+.agent-prompt textarea {
+  min-height: 100px;
+}
+.agent-commands {
+  display: flex;
+  flex-direction: column;
+  max-height: 180px;
+  overflow: auto;
+  gap: 4px;
+  margin-bottom: 8px;
+}

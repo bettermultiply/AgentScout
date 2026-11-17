@@ -6,6 +6,115 @@ impl SpeculativeTree {
     /// 接收 Pi 报告的启动事实。
     pub fn handle_message(&mut self, message: AgentMessage) -> io::Result<Vec<AgentCommand>> {
         match message {
+            AgentMessage::UiPromptRequested {
+                branch_id,
+                prompt_id,
+                prompt,
+            } => {
+                // A prompt that cannot be shown is answered with a cancel
+                // command so the Agent stops waiting. Only messages that
+                // threaten control-plane state fail the connection.
+                let cancel = |reason: &str| {
+                    Ok(vec![AgentCommand::UiPromptAnswer {
+                        branch_id: branch_id.clone(),
+                        prompt_id: prompt_id.clone(),
+                        answer: Value::Null,
+                        cancelled: true,
+                        reason: Some(reason.into()),
+                    }])
+                };
+                if !matches!(
+                    prompt.kind.as_str(),
+                    "confirm" | "select" | "input" | "editor"
+                ) {
+                    return cancel("Unsupported text prompt kind");
+                }
+                let Ok(branch) = self.branch(&branch_id) else {
+                    return cancel("Unknown Branch");
+                };
+                if self.stopping
+                    || matches!(
+                        branch.status,
+                        BranchStatus::Discarding
+                            | BranchStatus::Discarded
+                            | BranchStatus::Cleaning
+                            | BranchStatus::Cleaned
+                    )
+                {
+                    return cancel("Branch is closing");
+                }
+                if self.ui_prompts.contains_key(&prompt_id) {
+                    // The Agent reuses prompt ids; close the recorded prompt
+                    // first so the reused id does not stay answerable.
+                    self.close_ui_prompt(&prompt_id, true, Some("Duplicate prompt_id".into()));
+                    return cancel("Duplicate prompt_id");
+                }
+                let visible = self.authority_branch_id.as_ref() == Some(&branch_id);
+                if visible {
+                    self.pending_observations.push(
+                        crate::control_plane::observation::ObservationContent::UiPromptRequested {
+                            branch_id: branch_id.clone(),
+                            prompt_id: prompt_id.clone(),
+                            prompt: prompt.clone(),
+                        },
+                    );
+                }
+                self.ui_prompts
+                    .insert(prompt_id, (branch_id, prompt, visible));
+                Ok(vec![])
+            }
+            AgentMessage::UiPromptCancelled {
+                branch_id,
+                prompt_id,
+            } => {
+                if self
+                    .ui_prompts
+                    .get(&prompt_id)
+                    .is_some_and(|(owner, _, _)| owner == &branch_id)
+                {
+                    self.close_ui_prompt(&prompt_id, true, Some("Agent cancelled prompt".into()));
+                }
+                Ok(vec![])
+            }
+            AgentMessage::UiNotification {
+                branch_id,
+                text,
+                level,
+            } => {
+                if self.authority_branch_id.as_ref() == Some(&branch_id) {
+                    self.pending_observations.push(
+                        crate::control_plane::observation::ObservationContent::UiNotification {
+                            branch_id,
+                            text,
+                            level,
+                        },
+                    );
+                }
+                Ok(vec![])
+            }
+            AgentMessage::CommandsListed {
+                branch_id,
+                request_id,
+                commands,
+            } => {
+                if (request_id == "startup"
+                    || self.command_queries.remove(&request_id).as_ref() == Some(&branch_id))
+                    && self.authority_branch_id.as_ref() == Some(&branch_id)
+                {
+                    if self.command_catalog.is_some() {
+                        return Ok(vec![]);
+                    }
+                    self.command_catalog = Some(commands.clone());
+                    self.pending_observations.push(
+                        crate::control_plane::observation::ObservationContent::CommandsListed {
+                            branch_id,
+                            request_id,
+                            commands,
+                        },
+                    );
+                }
+                Ok(vec![])
+            }
             AgentMessage::TurnFailed { .. } | AgentMessage::ModelChanged { .. } => Ok(vec![]),
             AgentMessage::RecoverySuspended
             | AgentMessage::RecoverySaved { .. }
@@ -494,6 +603,7 @@ impl SpeculativeTree {
     }
 
     fn handle_branch_released(&mut self, branch_id: &str) -> io::Result<Vec<AgentCommand>> {
+        self.cancel_ui_prompts(Some(branch_id), "Branch released");
         self.active_actions.remove(branch_id);
         let branch = self.branch_mut(branch_id)?;
         if branch.execution_state.agent != AgentExecutionState::Released {
@@ -504,6 +614,7 @@ impl SpeculativeTree {
     }
 
     fn handle_agent_session_released(&mut self, branch_id: &str) -> io::Result<Vec<AgentCommand>> {
+        self.cancel_ui_prompts(Some(branch_id), "Agent session released");
         self.active_actions.remove(branch_id);
         self.branch_mut(branch_id)?.execution_state.agent = AgentExecutionState::Released;
         self.branch_mut(branch_id)?.execution_state.turn_active = false;
@@ -515,6 +626,7 @@ impl SpeculativeTree {
         branch_id: &str,
         reason: String,
     ) -> io::Result<Vec<AgentCommand>> {
+        self.cancel_ui_prompts(Some(branch_id), "Branch failed");
         let branch = self.branch(branch_id)?.clone();
         if matches!(
             branch.status,
@@ -589,6 +701,12 @@ impl SpeculativeTree {
     ) -> io::Result<Vec<AgentCommand>> {
         let branch_status = self.branch(branch_id)?.status;
         match (operation, status) {
+            (CommandOperation::Abort, status) if status != CommandStatus::Applied => {
+                Err(io::Error::other(format!(
+                    "Agent abort {status:?}: {}",
+                    reason.unwrap_or("no reason reported")
+                )))
+            }
             (CommandOperation::Promote, CommandStatus::Applied)
                 if branch_status == BranchStatus::Promoting =>
             {

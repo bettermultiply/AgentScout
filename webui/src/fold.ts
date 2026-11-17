@@ -203,6 +203,9 @@ export function foldEvents(
 
 /** Incremental, immutable application of one already-ordered event. */
 export function applyEvent(state: RunState, event: ObservationEvent): RunState {
+  if (event.event === 'ui_prompt_requested' || event.event === 'ui_prompt_resolved' || event.event === 'commands_listed' || event.event === 'ui_notification') {
+    return { ...state, sequence: Math.max(state.sequence, event.sequence) }
+  }
   const taskExists = state.tasks[event.task_id] !== undefined
   const task: TaskState = taskExists
     ? { ...state.tasks[event.task_id] }

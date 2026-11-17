@@ -19,6 +19,28 @@ pub struct ObservationEvent {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ObservationContent {
+    UiPromptRequested {
+        branch_id: String,
+        prompt_id: String,
+        #[serde(flatten)]
+        prompt: super::agent_control::UiPrompt,
+    },
+    UiPromptResolved {
+        branch_id: String,
+        prompt_id: String,
+        cancelled: bool,
+        reason: Option<String>,
+    },
+    UiNotification {
+        branch_id: String,
+        text: String,
+        level: String,
+    },
+    CommandsListed {
+        branch_id: String,
+        request_id: String,
+        commands: Value,
+    },
     BranchCreated {
         branch_id: String,
         parent_branch_id: Option<String>,

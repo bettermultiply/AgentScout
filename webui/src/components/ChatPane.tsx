@@ -13,6 +13,7 @@ import type { BranchRole, BranchStatus, ConversationMessage } from '../types'
 import { useConversation } from '../useConversation'
 import { useAuthorityConversation } from '../useAuthorityConversation'
 import { ConversationView } from './ConversationView'
+import { AgentPrompt } from './AgentPrompt'
 
 function connectionLabel(connection: string): string {
   switch (connection) {
@@ -81,6 +82,9 @@ function BranchBadges({
 
 export function ChatPane() {
   const state = useAppStore((store) => store.state)
+  const uiPrompts = useAppStore(store => store.uiPrompts)
+  const agentCommands = useAppStore(store => store.agentCommands)
+  const notification = useAppStore(store => store.notification)
   const selectedTaskId = useAppStore((store) => store.selectedTaskId)
   const explicitAuthority = useAppStore((store) => store.selectedAuthorityBranchId)
   const connection = useAppStore((store) => store.connection)
@@ -157,9 +161,8 @@ export function ChatPane() {
     return () => window.clearTimeout(timer)
   }, [requestError])
 
-  async function submit() {
-    const text = prompt.trim()
-    if (!text || !canSend) return
+  async function submit(text = prompt) {
+    if (!text.trim() || !canSend) return
     setBusy(true)
     setRequestError(null)
     const pending: ConversationMessage = {
@@ -168,7 +171,7 @@ export function ChatPane() {
       pending: true,
       pendingAt: Date.now(),
     }
-    if (text !== '/pause') setPendingMessages((messages) => [...messages, pending])
+    if (!['/pause', '/continue'].includes(text.trim())) setPendingMessages((messages) => [...messages, pending])
     try {
       await sendRequest({ action: 'prompt', prompt: text })
       setPrompt('')
@@ -351,6 +354,13 @@ export function ChatPane() {
       )}
 
       <footer className="composer">
+        {isCurrent && Object.values(uiPrompts).filter(item => item.branch_id === current?.branchId).map(item => <AgentPrompt key={item.prompt_id} prompt={item} connected={connected} />)}
+        {isCurrent && notification && notification.branch_id === current?.branchId && <div className="notice message-text">{notification.text}</div>}
+        {isCurrent && prompt.startsWith('/') && agentCommands && <div className="agent-commands">
+          {agentCommands.commands.filter(command => `/${command.name}`.startsWith(prompt)).map(command => <button key={`${command.source}:${command.name}`} type="button" disabled={!canSend} onClick={() => void submit(`/${command.name}`)}>
+            /{command.name}{command.description ? ` — ${command.description}` : ''}
+          </button>)}
+        </div>}
         {requestError ? <div className="composer-error">{requestError}</div> : null}
         {!isCurrent && selected ? (
           <div className="composer-hint">历史权威窗口只读；切回当前权威窗口后可继续输入。</div>

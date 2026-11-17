@@ -86,3 +86,73 @@ fn command_results_require_exact_pending_identity_and_are_consumed() {
     assert!(duplicate.is_empty());
     assert_eq!(tree.authority_branch_id.as_deref(), Some("candidate"));
 }
+#[test]
+fn text_prompts_wait_for_authority_and_cached_commands_survive_authority_change() {
+    use crate::control_plane::observation::ObservationContent;
+    use serde_json::json;
+    let mut tree = tree();
+    tree.create_authority("authority", "").unwrap();
+    let mut candidate = tree.branches["authority"].clone();
+    candidate.branch_id = "candidate".into();
+    candidate.role = BranchRole::Candidate;
+    tree.branches.insert("candidate".into(), candidate);
+    tree.drain_observations();
+    tree.handle_message(AgentMessage::UiPromptRequested {
+        branch_id: "candidate".into(),
+        prompt_id: "question".into(),
+        prompt: UiPrompt {
+            kind: "editor".into(),
+            title: "Edit".into(),
+            message_text: None,
+            options: vec![],
+            placeholder: None,
+            prefill: Some("one\ntwo".into()),
+        },
+    })
+    .unwrap();
+    assert!(tree.drain_observations().is_empty());
+    assert!(
+        tree.answer_ui_prompt("question".into(), json!("answer"), false)
+            .is_err()
+    );
+    tree.handle_message(AgentMessage::CommandsListed {
+        branch_id: "authority".into(),
+        request_id: "startup".into(),
+        commands: json!([{"name":"loaded"}]),
+    })
+    .unwrap();
+    tree.change_authority("candidate").unwrap();
+    assert!(tree.drain_observations().iter().any(|o| matches!(o, ObservationContent::UiPromptRequested { prompt_id, .. } if prompt_id == "question")));
+    assert!(
+        tree.answer_ui_prompt("question".into(), json!(true), false)
+            .is_err()
+    );
+    assert!(
+        matches!(tree.answer_ui_prompt("question".into(), json!("one\ntwo"), false).unwrap(), AgentCommand::UiPromptAnswer { answer, cancelled: false, .. } if answer == json!("one\ntwo"))
+    );
+    assert!(
+        tree.answer_ui_prompt("question".into(), json!("late"), false)
+            .is_err()
+    );
+    assert!(tree.get_commands("reconnect".into()).unwrap().is_none());
+    assert!(tree.drain_observations().iter().any(|o| matches!(o, ObservationContent::CommandsListed { branch_id, commands, .. } if branch_id == "candidate" && commands[0]["name"] == "loaded")));
+    tree.handle_message(AgentMessage::UiPromptRequested {
+        branch_id: "candidate".into(),
+        prompt_id: "cancel".into(),
+        prompt: UiPrompt {
+            kind: "input".into(),
+            title: "Cancel".into(),
+            message_text: None,
+            options: vec![],
+            placeholder: None,
+            prefill: None,
+        },
+    })
+    .unwrap();
+    tree.change_authority("authority").unwrap();
+    assert!(tree.drain_ui_commands().iter().any(|c| matches!(c, AgentCommand::UiPromptAnswer { prompt_id, cancelled: true, .. } if prompt_id == "cancel")));
+    assert!(
+        tree.answer_ui_prompt("cancel".into(), json!("late"), false)
+            .is_err()
+    );
+}

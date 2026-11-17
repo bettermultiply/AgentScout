@@ -1,6 +1,6 @@
 //! Task termination and authority materialization coordination.
-use super::execution::runtime_call;
-use super::{AgentCommand, Operation, Runtime, RuntimeCapabilities, SpeculativeTree};
+use super::{AgentCommand, SpeculativeTree};
+use crate::protocol::contract::OperationResult;
 use serde_json::{Value, json};
 use std::io;
 
@@ -11,6 +11,8 @@ pub struct Task {
     pub materialization_failed: bool,
     aborted: std::collections::BTreeSet<String>,
     failed: bool,
+    materializing: bool,
+    materialized: Option<Result<OperationResult, String>>,
 }
 
 impl Task {
@@ -22,7 +24,6 @@ impl Task {
         // A Promote receipt can select a new writer while cancellation is in
         // transit. Stop that authority before allowing publication.
         if self.terminating
-            && tree.authority_running()
             && !tree.recovery_pending_commands()
             && tree
                 .authority_branch_id
@@ -40,6 +41,22 @@ impl Task {
         exit: bool,
     ) -> io::Result<Vec<AgentCommand>> {
         self.exit_requested |= exit;
+        if self.terminating {
+            self.retry_materialization();
+            return Ok(Vec::new());
+        }
+        if !tree.recovering()
+            && !tree.task_finishing()
+            && !tree.authority_running()
+            && !tree.pending_work()
+            && tree.task_writers_drained()
+        {
+            return if exit {
+                tree.begin_shutdown()
+            } else {
+                Ok(Vec::new())
+            };
+        }
         self.terminating = true;
         self.aborted
             .extend(tree.authority_branch_id.iter().cloned());
@@ -62,15 +79,48 @@ impl Task {
         Ok(tree.is_stopping() && !tree.cleanup_pending()? && !tree.pending_work())
     }
 
+    pub fn materialized(&mut self, result: Result<OperationResult, String>) {
+        self.materialized = Some(result);
+    }
+
+    pub fn start_materialization(
+        &mut self,
+        tree: &SpeculativeTree,
+        mut record: impl FnMut(Value) -> io::Result<()>,
+    ) -> io::Result<Option<String>> {
+        if !tree.task_finishing()
+            || tree.recovering()
+            || self.materialization_failed
+            || self.materializing
+            || tree.authority_running()
+            || !tree.task_writers_drained()
+        {
+            return Ok(None);
+        }
+        let authority = tree.authority_branch_id.as_ref();
+        let environment = authority
+            .and_then(|id| tree.branches.get(id))
+            .and_then(|branch| branch.environment_id.clone());
+        let Some(environment) = environment else {
+            // Report through the normal visible, retryable materialization failure path.
+            self.materializing = true;
+            self.materialized = Some(Err("authority Branch or Environment missing".into()));
+            return Ok(None);
+        };
+        record(json!({"message":"materialization_started","branch_id":authority}))?;
+        self.materializing = true;
+        Ok(Some(environment))
+    }
+
     pub fn materialize(
         &mut self,
         tree: &mut SpeculativeTree,
-        runtime: &dyn Runtime,
-        _capabilities: &RuntimeCapabilities,
         failed: bool,
         mut record: impl FnMut(Value) -> io::Result<()>,
     ) -> io::Result<Option<(Vec<AgentCommand>, bool, Result<(), String>)>> {
-        if !tree.task_finishing()
+        if !self.materializing
+            || self.materialized.is_none()
+            || !tree.task_finishing()
             || tree.recovering()
             || self.materialization_failed
             || tree.authority_running()
@@ -78,14 +128,9 @@ impl Task {
         {
             return Ok(None);
         }
-        let authority = tree.authority_branch_id.clone().unwrap();
-        let environment = tree
-            .branches
-            .get(&authority)
-            .and_then(|branch| branch.environment_id.as_deref())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "authority Branch missing"))?;
-        record(json!({"message":"materialization_started","branch_id":authority}))?;
-        match runtime_call(runtime, environment, Operation::MaterializeAuthority) {
+        let authority = tree.authority_branch_id.clone();
+        self.materializing = false;
+        match self.materialized.take().unwrap() {
             Ok(result) => {
                 record(
                     json!({"message":"materialization_completed","branch_id":authority,"filesystem":result.filesystem}),

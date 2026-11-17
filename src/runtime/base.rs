@@ -177,6 +177,32 @@ impl Backend for BaseRuntime {
                         "namespace holder launch template is missing; cannot mount the new generation",
                     )
                 })?;
+            let fragment = self.launch_fragment(context, &launch)?;
+            if let Some((directory, _)) = fragment.holder_bind {
+                use std::io::{BufRead, Write};
+                use std::os::fd::AsRawFd;
+                let directory =
+                    std::fs::File::open(directory).map_err(|e| BackendError::new(e.to_string()))?;
+                let mut socket = std::os::unix::net::UnixStream::connect(format!(
+                    "/proc/self/fd/{}/cmd.sock",
+                    directory.as_raw_fd()
+                ))
+                .map_err(|e| BackendError::new(e.to_string()))?;
+                socket
+                    .write_all(b"{\"op\":\"drain\"}\n")
+                    .map_err(|e| BackendError::new(e.to_string()))?;
+                let mut reply = String::new();
+                std::io::BufReader::new(socket)
+                    .read_line(&mut reply)
+                    .map_err(|e| BackendError::new(e.to_string()))?;
+                let reply: serde_json::Value =
+                    serde_json::from_str(&reply).map_err(|e| BackendError::new(e.to_string()))?;
+                if reply["exit_code"] != 0 {
+                    return Err(BackendError::new(format!(
+                        "holder writers did not drain: {reply}"
+                    )));
+                }
+            }
             self.process.terminate(&context.environment_id)?;
             self.process.stop(&context.environment_id)?;
             Some(launch)

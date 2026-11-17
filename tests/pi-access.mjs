@@ -33,6 +33,12 @@ export async function createAgentSession(options) {
     const controller = new AbortController();
     let subscriber = () => {};
     const session = {
+        async bindExtensions({uiContext}) {
+            await uiContext.confirm('Startup', 'Load resources?');
+            session.promptTemplates=[{name:'loaded',description:'after startup'}];
+        },
+        promptTemplates:[], resourceLoader:{getSkills:()=>({skills:[]})},
+        getCommands() { if(session.catalogRead) throw Error('catalog read twice'); session.catalogRead=true; return session.promptTemplates; },
         extensionRunner:{hasHandlers:()=>true,async emit(event){if(event.type==='session_shutdown'){await new Promise(r=>setImmediate(r));options.sessionManager.appendCustomEntry('shutdown-final',{reason:event.reason})}}},
          agent: {}, sessionManager:options.sessionManager, messages: options.sessionManager ? options.sessionManager.buildSessionContext().messages : [], subscribe(fn) {subscriber=fn}, dispose() {}, async abort() {controller.abort()},
         async continue() { return session.prompt('candidate'); },
@@ -146,6 +152,16 @@ export async function createAgentSession(options) {
     }
     send({command:'start_branch',branch_id:'authority',workspace:root,prompt:''});
     await expectMessage(m => m.message === 'branch_started');
+    const startup=await expectMessage(m=>m.message==='ui_prompt_requested'&&m.branch_id==='authority');
+    assert.equal(messages.some(m=>m.message==='commands_listed'),false);
+    send({command:'ui_prompt_answer',branch_id:'authority',prompt_id:startup.prompt_id,answer:true,cancelled:false});
+    const catalog=await expectMessage(m=>m.message==='commands_listed'&&m.request_id==='startup');
+    assert.equal(catalog.commands[0].name,'loaded');
+    for(const request_id of ['slash-1','slash-2']) {
+        send({command:'get_commands',branch_id:'authority',request_id});
+        const reply=await expectMessage(m=>m.message==='commands_listed'&&m.request_id===request_id);
+        assert.deepEqual(reply.commands,catalog.commands);
+    }
     send({command:'prompt',branch_id:'authority',prompt:'one tool call'});
     const inference = await expectMessage(m => m.message === 'action_started' && m.action_kind === 'model_inference' && m.branch_id === 'authority');
     const inferred = await expectMessage(m => m.message === 'action_finished' && m.action_id === inference.action_id);
@@ -167,6 +183,8 @@ export async function createAgentSession(options) {
         checkpoint:{adapter:pending.checkpoint.adapter,kind:pending.checkpoint.kind,opaqueId:pending.checkpoint.opaqueId},
         generation:2,command_id:'start-candidate'});
     await expectMessage(m => m.message === 'branch_started' && m.branch_id === 'candidate');
+    const candidateStartup=await expectMessage(m=>m.message==='ui_prompt_requested'&&m.branch_id==='candidate');
+    send({command:'ui_prompt_answer',branch_id:'candidate',prompt_id:candidateStartup.prompt_id,answer:true,cancelled:false});
     if (shutdownAt === 'candidate_gate') return finish(['candidate','authority']);
     send({command:'resolve_pending',branch_id:'authority',operation_id:'operation-1',
         command_id:'resolve-1',generation:1,outcome:{payload:'real-result'}});
@@ -238,6 +256,7 @@ export async function createAgentSession(options) {
     const controller = new AbortController();
     let subscriber = () => {};
     const session = {
+        async bindExtensions() {},
         agent: {}, messages: [], subscribe(fn) {subscriber=fn}, dispose() {}, async abort() {controller.abort()},
         async prompt(prompt) {
             const use = prompt === 'unpaired'

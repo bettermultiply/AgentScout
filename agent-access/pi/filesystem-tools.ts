@@ -21,6 +21,22 @@ sys.exit(code if code is not None and code>=0 else 1)
 `;
 
 type ToolResult = {exitCode: number | undefined};
+
+export async function stopFilesystemWriters(directory: string, environment: string) {
+    const plan=JSON.parse(readFileSync(join(directory,environment+'.json'),'utf8'));
+    if(!plan.holder_socket)return;
+    const fd=openSync(dirname(plan.holder_socket),'r');
+    try {
+        await new Promise<void>((resolve,reject)=>{
+            const socket=connectSocket(`/proc/self/fd/${fd}/${basename(plan.holder_socket)}`);
+            let buffer='';
+            socket.on('connect',()=>socket.write(JSON.stringify({op:'drain',cancel:true})+'\n'));
+            socket.on('error',reject);
+            socket.on('data',chunk=>{buffer+=chunk.toString();if(buffer.includes('\n')){try{const result=JSON.parse(buffer.split('\n')[0]);if(result.exit_code!==0)throw Error(JSON.stringify(result));resolve()}catch(error){reject(error)}finally{socket.destroy()}}});
+            socket.on('end',()=>{if(!buffer.includes('\n'))reject(Error('Writer stop was not confirmed'))});
+        });
+    } finally { closeSync(fd); }
+}
 type ToolOptions = {
     onData?: (chunk: Buffer) => void;
     signal?: AbortSignal;

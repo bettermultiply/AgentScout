@@ -43,7 +43,7 @@ test('filesystem main entry restores managed upper with current host lower and r
   const stop=async p=>{
    const previous=fs.existsSync(root+'/recovery.json')?fs.readFileSync(root+'/recovery.json','utf8'):null;
    const response=await post({action:'pause'});assert.equal(response.status,202);
-   await wait(async()=>fs.existsSync(root+'/recovery.json')&&fs.readFileSync(root+'/recovery.json','utf8')!==previous&&JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Paused; enter input to continue'),'Pause published');
+   await wait(async()=>fs.existsSync(root+'/recovery.json')&&fs.readFileSync(root+'/recovery.json','utf8')!==previous&&JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Paused;'),'Pause published');
    assert.equal(p.exitCode,null,'Pause saves without exiting');
    const done=once(p,'exit');p.kill('SIGKILL');await done;assert.equal(p.signalCode,'SIGKILL');
    await wait(()=>!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)),'paused task processes exited');

@@ -66,6 +66,19 @@ impl LedgerReader {
         events
     }
     pub fn events_after(&self, sequence: u64) -> Result<Vec<ObservationEvent>, String> {
+        self.events_after_until(sequence, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    pub(crate) fn wake_readers(&self) {
+        let _index = self.index.0.lock().unwrap();
+        self.index.1.notify_all();
+    }
+
+    pub(crate) fn events_after_until(
+        &self,
+        sequence: u64,
+        stopped: &std::sync::atomic::AtomicBool,
+    ) -> Result<Vec<ObservationEvent>, String> {
         let head = {
             let mut index = self.index.0.lock().unwrap();
             if sequence > index.sequence {
@@ -76,7 +89,9 @@ impl LedgerReader {
                     .index
                     .1
                     .wait_timeout_while(index, Duration::from_secs(15), |index| {
-                        index.sequence == sequence && index.connected
+                        index.sequence == sequence
+                            && index.connected
+                            && !stopped.load(std::sync::atomic::Ordering::Acquire)
                     })
                     .unwrap()
                     .0;

@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { eventStreamUrl, fetchStateEventSet } from './api'
 import { applyEvent, emptyRunState, foldEvents } from './fold'
 import type { RunState } from './fold'
-import type { ObservationEvent } from './types'
+import type { ObservationEvent, UiPromptEvent, CommandsListedEvent, UiNotificationEvent } from './types'
 import { buildTree, type TreeGraph } from './components/treeGraph'
 import { cachedLayoutTree, clearCachedTreeLayout } from './tree/geometry'
 import { DEFAULT_TUNING, normalizeTuning, type TreeTuning } from './tree/tuning'
@@ -28,6 +28,9 @@ export interface DetailAnchor {
 }
 
 interface AppStore {
+  uiPrompts: Record<string, UiPromptEvent>
+  agentCommands: CommandsListedEvent | null
+  notification: UiNotificationEvent | null
   treeGraph: TreeGraph
   treeTuning: TreeTuning
   setTreeTuning: (tuning: TreeTuning) => void
@@ -57,6 +60,20 @@ interface AppStore {
 let source: EventSource | null = null
 let generation = 0
 let started = false
+
+function foldInteraction(state: Pick<AppStore, 'uiPrompts' | 'agentCommands' | 'notification'>, event: ObservationEvent) {
+  let { uiPrompts, agentCommands, notification } = state
+  if (event.event === 'ui_prompt_requested') uiPrompts = { ...uiPrompts, [event.prompt_id]: event }
+  if (event.event === 'ui_prompt_resolved') {
+    uiPrompts = { ...uiPrompts }
+    delete uiPrompts[event.prompt_id]
+  }
+  if (event.event === 'commands_listed') agentCommands = event
+  if (event.event === 'ui_notification') notification = event
+  if (event.event === 'authority_changed') uiPrompts = Object.fromEntries(Object.entries(uiPrompts).filter(([, prompt]) => prompt.branch_id === event.branch_id))
+  if (event.event === 'run_status' && !event.connected) uiPrompts = {}
+  return { uiPrompts, agentCommands, notification }
+}
 
 function readPanelOpen(): boolean {
   try {
@@ -96,6 +113,7 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     stream.onopen = () => {
       if (currentGeneration !== generation) return
+      if (errors > 0) { void get().resync(); return }
       errors = 0
       set({ connection: 'open', error: null })
     }
@@ -129,11 +147,13 @@ export const useAppStore = create<AppStore>((set, get) => {
         void get().resync()
         return
       }
-      set({ connection: 'reconnecting' })
+      set({ connection: 'reconnecting', uiPrompts: {} })
     }
   }
 
   function loadStateEventSet(events: ObservationEvent[]): void {
+    let interaction = { uiPrompts: {} as Record<string, UiPromptEvent>, agentCommands: null as CommandsListedEvent | null, notification: null as UiNotificationEvent | null }
+    for (const event of events) interaction = foldInteraction(interaction, event)
     const state = foldEvents(events)
     const selectedTaskId = pickTask(state, get().selectedTaskId)
     const task = selectedTaskId ? state.tasks[selectedTaskId] : null
@@ -141,6 +161,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     const selectedAuthorityBranchId =
       explicit && task?.branches[explicit] ? explicit : null
     set({
+      ...interaction,
       state,
       selectedTaskId,
       selectedAuthorityBranchId,
@@ -149,6 +170,7 @@ export const useAppStore = create<AppStore>((set, get) => {
   }
 
   return {
+    uiPrompts: {}, agentCommands: null, notification: null,
     treeGraph: { nodes: [], latestNodeId: null, error: null },
     treeTuning: (() => {
       try {
@@ -182,7 +204,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       closeSource()
       clearCachedTreeLayout()
       set({ treeGraph: { nodes: [], latestNodeId: null, error: null } })
-      set({ connection: 'idle' })
+      set({ connection: 'idle', uiPrompts: {} })
     },
 
     async resync() {
@@ -224,6 +246,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
 
       set({
+        ...foldInteraction(get(), event),
         state,
         selectedTaskId,
         selectedAuthorityBranchId,

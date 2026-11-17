@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 mod http;
-pub use http::start;
+pub use http::{Server, start};
 
 /// Read-only presentation supplied by the UI; Gateway does not fold Tree facts.
 pub trait Presentation: Send + Sync {
@@ -22,10 +22,24 @@ pub struct Assets {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
-    Model { model: String },
-    Prompt { prompt: String },
+    UiPromptAnswer {
+        prompt_id: String,
+        answer: serde_json::Value,
+        #[serde(default)]
+        cancelled: bool,
+    },
+    GetCommands {
+        request_id: String,
+    },
+    Model {
+        model: String,
+    },
+    Prompt {
+        prompt: String,
+    },
     Interrupt,
     Pause,
+    Continue,
     Shutdown,
 }
 

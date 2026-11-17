@@ -29,7 +29,7 @@ export async function createAgentSession(options){
  manager._persist=entry=>{if(entry.type==='custom_message'&&existsSync(${JSON.stringify(join(root,'fail'))}))throw Error('injected notification write failure');return persist(entry)};
  const append=message=>{manager.appendCustomMessageEntry(message.customType,message.content,message.display,message.details);session.messages=manager.buildSessionContext().messages;subscriber({type:'message_end',message:{role:'custom',...message}})};
  const flush=()=>{const pending=queued;queued=[];for(const message of pending)append(message)};
- const session={agent:{},sessionManager:manager,messages:manager.buildSessionContext().messages,
+ const session={agent:{},sessionManager:manager,messages:manager.buildSessionContext().messages,async bindExtensions(){},
  subscribe(fn){subscriber=fn},dispose(){audit('dispose')},async waitForIdle(){await running},
  async abort(){audit('abort');controller.abort();await running},
  async sendCustomMessage(message,options){audit({send:message,options});if(running)queued.push(message);else append(message)},

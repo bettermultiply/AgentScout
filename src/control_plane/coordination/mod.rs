@@ -4,6 +4,7 @@ mod actions;
 mod controller;
 pub mod execution;
 pub mod recovery;
+pub mod session;
 pub mod task;
 
 #[cfg(test)]

@@ -63,6 +63,15 @@ impl Recovery {
         tree: &mut SpeculativeTree,
         message: &AgentMessage,
     ) -> io::Result<Option<String>> {
+        if !tree.recovering()
+            && matches!(
+                message,
+                AgentMessage::RecoverySaved { .. } | AgentMessage::RecoverySuspended
+            )
+        {
+            self.saved = false;
+            return Ok(None);
+        }
         match message {
             AgentMessage::RecoverySaved { path, error } => {
                 if path != &self.path {
@@ -112,7 +121,7 @@ impl Recovery {
         run_dir: &Path,
         draining: bool,
     ) -> Option<(AgentCommand, String)> {
-        if !self.saved || draining || tree.pending_work() {
+        if !tree.recovering() || !self.saved || draining || tree.pending_work() {
             return None;
         }
         let result = (|| -> io::Result<()> {
@@ -143,7 +152,7 @@ impl Recovery {
             Ok(()) => {
                 self.suspended = false;
                 self.save_requested = false;
-                "Paused; enter input to continue".into()
+                "Paused; /continue resumes the task".into()
             }
         };
         Some((
