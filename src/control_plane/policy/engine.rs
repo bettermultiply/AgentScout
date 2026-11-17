@@ -26,6 +26,7 @@ pub struct PolicyEngine {
     python: PathBuf,
     bubblewrap: PathBuf,
     timeout: Duration,
+    worker: std::sync::Mutex<BTreeMap<String, super::worker::Worker>>,
 }
 
 /// Executable resolution order: explicit environment variable, PATH, then the
@@ -58,6 +59,7 @@ impl Default for PolicyEngine {
             python: resolve_executable("ASCOUT_POLICY_PYTHON", "python3", "/usr/bin/python3"),
             bubblewrap: resolve_executable("ASCOUT_POLICY_BWRAP", "bwrap", "/usr/bin/bwrap"),
             timeout: Duration::from_secs(5),
+            worker: std::sync::Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -91,6 +93,7 @@ impl PolicyEngine {
             python,
             bubblewrap,
             timeout,
+            worker: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -234,7 +237,135 @@ impl PolicyEngine {
         Ok(result)
     }
 
+    /// Explicit deployment entry point using a killable IPC provider process.
+    pub fn evaluate_with_provider(
+        &self, policy: &CompiledPolicy, decision: Decision, data: &Value,
+        models: &[String], requests: usize, provider: &super::ModelProviderProcess,
+    ) -> io::Result<Value> {
+        self.evaluate_with_capabilities(policy, decision, data, models, requests,
+            &mut |request, deadline| provider.complete(request, deadline))
+    }
+
+    /// Explicit host grant; the callback must honor its deadline. The persistent
+    /// supervisor forks a clean evaluation child before loading untrusted code.
+    pub fn evaluate_with_capabilities(
+        &self,
+        policy: &CompiledPolicy,
+        decision: Decision,
+        data: &Value,
+        models: &[String],
+        requests: usize,
+        complete: &mut dyn FnMut(&Value, std::time::Instant) -> io::Result<Value>,
+    ) -> io::Result<Value> {
+        self.evaluate_capability_request(policy, decision, data, models, requests, complete, None)
+    }
+
+    /// Cancellation is checked during Python execution and provider IPC. On
+    /// cancellation both owned processes are killed and reaped before return.
+    pub fn evaluate_with_provider_cancellable(
+        &self, policy: &CompiledPolicy, decision: Decision, data: &Value,
+        models: &[String], requests: usize, provider: &super::ModelProviderProcess,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> io::Result<Value> {
+        self.evaluate_capability_request(policy, decision, data, models, requests,
+            &mut |request, deadline| provider.complete_cancellable(request, deadline, Some(cancelled)),
+            Some(cancelled))
+    }
+
+    fn evaluate_capability_request(
+        &self, policy: &CompiledPolicy, decision: Decision, data: &Value,
+        models: &[String], requests: usize,
+        complete: &mut dyn FnMut(&Value, Instant) -> io::Result<Value>,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> io::Result<Value> {
+        policy.validate()?;
+        validate_data(decision, &policy.decisions[&decision], data)?;
+        let deadline = std::time::Instant::now() + self.timeout;
+        let mut remaining = requests;
+        let request_id = tempfile::NamedTempFile::new()?
+            .path()
+            .to_string_lossy()
+            .into_owned();
+        let script = policy.script(decision)?;
+        let mut workers = self.worker.lock().map_err(|_| invalid("Policy worker lock poisoned"))?;
+        if !workers.contains_key(&script) {
+            if workers.len() >= 10 {
+                workers.clear();
+            }
+            workers.insert(script.clone(), super::worker::Worker::start(
+                &script, &self.python, &self.bubblewrap,
+            )?);
+        }
+        let result = workers.get_mut(&script).unwrap().evaluate_cancellable(
+            &json!({"data":data,"request_id":request_id}),
+            self.timeout,
+            &mut |request| {
+                let provider = request["provider"]
+                    .as_str()
+                    .ok_or_else(|| invalid("invalid provider"))?;
+                let model = request["model"]
+                    .as_str()
+                    .ok_or_else(|| invalid("invalid model"))?;
+                let prompt = request["prompt"]
+                    .as_str()
+                    .ok_or_else(|| invalid("invalid prompt"))?;
+                let tokens = request["max_tokens"].as_u64().unwrap_or(0);
+                if remaining == 0
+                    || std::time::Instant::now() >= deadline
+                    || prompt.len() > 16384
+                    || tokens == 0
+                    || tokens > 1024
+                    || !models.contains(&format!("{provider}/{model}"))
+                {
+                    return Err(invalid("Policy capability denied"));
+                }
+                remaining -= 1;
+                complete(request, deadline)
+            },
+            cancelled,
+        );
+        let result = result.and_then(|result| {
+            validate_result(decision, data, &result)?;
+            Ok(result)
+        });
+        if result.is_err() {
+            workers.remove(&script);
+        }
+        result
+    }
+
     fn execute(&self, script: &str, request: &Value) -> io::Result<Value> {
+        // The identity probe is a trusted one-shot program; compiled scripts
+        // implement the persistent protocol.
+        if !script.contains("MANIFEST =") {
+            return self.execute_once(script, request);
+        }
+        let mut slot = self
+            .worker
+            .lock()
+            .map_err(|_| invalid("Policy worker lock poisoned"))?;
+        if !slot.contains_key(script) {
+            // Fixed maximum: one worker for each of the ten Decision bindings.
+            // Eviction drops (kills and waits for) the previous owner.
+            if slot.len() >= 10 {
+                slot.clear();
+            }
+            slot.insert(
+                script.to_owned(),
+                super::worker::Worker::start(script, &self.python, &self.bubblewrap)?,
+            );
+        }
+        let result = slot
+            .get_mut(script)
+            .unwrap()
+            .evaluate(request, self.timeout);
+        if result.is_err() {
+            slot.remove(script);
+        }
+        result
+    }
+
+    fn execute_once(&self, script: &str, request: &Value) -> io::Result<Value> {
         require_executable(&self.python, "ASCOUT_POLICY_PYTHON", "python3")?;
         require_executable(&self.bubblewrap, "ASCOUT_POLICY_BWRAP", "bwrap")?;
         // No author data in a shared directory: tempfile creates a private 0700 root.

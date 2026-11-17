@@ -8,13 +8,13 @@
 
 ## 1. 已实现的路径
 
-### 接入侧 predictor 事实与准入顺序修复（2026-11-16）
+### Instrumentation predictor 事实与准入顺序修复（2026-11-16）
 
-依据 `docs/design/policy-decisions.md` §2.1，`has_predictor` 是粗筛之前已有的“对该结果可用的预测手段”事实，粗筛本身不做预测。当前接入侧唯一实际交付的预测入口是 `local_policy.decisions.predict`；`CompiledPolicy` 要求十个函数绑定完整，`script(Predict)` 把固定源码和绑定交付端侧，`createAgentAccess.predict` 也从同一个 `decisions.predict` 入口调用。当前没有另一个按操作类别声明 predictor 的注册表或配置。
+依据 `docs/design/policy-decisions.md` §2.1，`has_predictor` 是粗筛之前已有的“对该结果可用的预测手段”事实，粗筛本身不做预测。当前 Instrumentation 唯一实际交付的预测入口是 `local_policy.decisions.predict`；`CompiledPolicy` 要求十个函数绑定完整，`script(Predict)` 把固定源码和绑定交付端侧，`createAgentAccess.predict` 也从同一个 `decisions.predict` 入口调用。当前没有另一个按操作类别声明 predictor 的注册表或配置。
 
 因此 `hasPredictor(branch)` 只检查该 Branch 已交付的非空 `predict` 脚本，不调用任何 Decision，不依赖 `op` 或 `admit` 的结果；模型和工具 Hook 都先由该事实填充 `op.has_predictor`，再执行既有 `beforeAction`。工具入口同时保留原本查询时已有的 `authority` 事实，传入真正的准入输入。`admit` 仍决定当前具体操作是否值得作为入口；`predict` 仍决定当前输入能否产生 Proposal，允许空集合后走权威路径。可调用入口不承诺非空预测或预测正确性，不能把当前完整 Policy 总有 predict 绑定误解为对所有操作强制投机。未来若需按操作声明更细的预测能力，应先确认设计，不能在此修复中添加配置或工具白名单。
 
-原实现通过 `admit.opportunity_pass` 计算 `has_predictor`，构成循环依赖；模型首次请求和工具首次调用都可复现。修复没有改示例 Policy、预测算法、默认配置、控制面裁决、single-winner 或 commit/discard，没有捕获并转换 Policy 异常。已交付 Policy 的继承、恢复和清理直接决定该事实，无额外缓存。
+原实现通过 `admit.opportunity_pass` 计算 `has_predictor`，构成循环依赖；模型首次请求和工具首次调用都可复现。修复没有改示例 Policy、预测算法、默认配置、control plane 裁决、single-winner 或 commit/discard，没有捕获并转换 Policy 异常。已交付 Policy 的继承、恢复和清理直接决定该事实，无额外缓存。
 
 回归 `tests/predictor-fact.mjs` 使用失败 session 留档 Policy 的完整 files/binding/config 和当前正式 runner 构造端侧脚本，通过真实隔离求值复现两个入口；还检查查询不求值、准入拒绝、空预测、继承/恢复/清理、缺少 predict 入口及异常继续传播。`tests/pi-access.mjs` 的手工 admission fixture 补全 predict 入口，避免把只有 admit/extent 的不完整 fixture 当成具有预测手段。默认留档路径为 `/tmp/opencode/runtime-id-real-e2e-20261116/session/policy.json`，可通过 `ASCOUT_PREDICTOR_POLICY` 指定同一证据的搬迁位置；这两项专用验收脚本依赖保留的失败证据，不是干净克隆自包含测试。
 
@@ -24,11 +24,23 @@
 
 `CompiledPolicy` 可用 serde JSON 序列化。`script(decision)` 返回内含固定源码、该函数参数和执行入口的 Python 脚本。内容摘要覆盖源码、参数、入口、解释器标识和生成脚本使用的 runner；摘要不是来源认证，跨侧接收方仍须验证来源。当前接收方需要同版本的 AScout runner 和相同的 Python `sys.version`。这不是对标准库全部文件或动态库内容一致性的证明。
 
-`PolicyEngine::evaluate` 对已编译结果求值，不再读取作者 YAML 或原始源码。每次调用创建新进程，返回检查后的 JSON 值；Engine 不创建 Branch、不做效果操作，也不应用返回的选择。
+`PolicyEngine::evaluate` 对已编译结果求值，不再读取作者 YAML 或原始源码。Engine 最多持有十个按完整编译脚本区分的隔离 worker；同一脚本重复调用只通过有界 IPC 传递输入和结果。求值串行执行，超时、协议错误或进程退出后杀死并 wait，下一次重建；Engine 释放或池满清理时同样回收进程。Engine 不创建 Branch、不做效果操作，也不应用返回的选择。解释器身份探针仍为一次性进程。
+
+Pi `packages/pi-integration/src/local-policy.ts` 使用最多十个 worker 的固定池和串行请求队列，提供 `disposePolicyWorker` 显式释放，并在空闲一秒后释放。每个 worker 只在启动时创建 bwrap namespace。保留 1 MiB 输入和响应上限、5 秒 wall deadline、启动前及运行中取消检查、stderr 排空，失败后杀死进程并等待 close 后清理。池满或失败当前释放整个本地池。`tests/policy-local-supervision.mjs` 覆盖重复请求计数连续、显式释放后重建、取消、超时及超大输入／输出。
+
+Python 常驻进程只执行可信监督逻辑，每次请求先清理 `/tmp` 和 `/dev/shm` 的遗留文件，再 fork 求值子进程；子进程安装 seccomp 后才加载 Policy，完成后退出，由监督进程 wait 后才发布最终结果；子进程只持有内部管道，无法直接读取宿主的下一请求。`/dev` 挂载只读（单独的 `/dev/shm` 挂载仍按请求清理）。Policy 修改标准库对象不会回写监督进程，不以清理模块作为安全边界。同脚本连续两次请求复用一个 namespace／监督 PID，创建两个求值子进程；求值 PID 不复用。这是每次一次 fork 的隔离代价，不是每次启动 bwrap。标准库和动态库仍只读可见，不宣称禁止全部文件读取。`tests/policy-isolation.mjs` 验证标准库对象和两个可写挂载的数据不跨请求残留；任意自写 artifact runner 不具备该保障，正常入口必须交付宿主编译生成的脚本。
+
+`model_complete` 通过 capability IPC 请求宿主。Node 的 `evaluatePolicyArtifact` 第五参数是显式 grant，包含 Decision、模型名单、次数和宿主 complete 函数，默认拒绝。宿主校验当前 request ID、Decision、模型、额度、大小及 5 秒 deadline，结束时 abort provider 信号。`piModelComplete(models)` 使用 Pi 已配置的 Models 和认证并禁用重试。Rust 授权入口复用同一有界监督进程池；`evaluate_with_provider` 接收宿主配置的 `ModelProviderProcess`（可执行文件与参数），通过单请求 JSON 行 IPC 连接 provider，`evaluate_with_provider_cancellable` 同时检查宿主 AtomicBool。超时、取消或失败会 kill/wait provider 和异常 worker，不留下阻塞回调线程。Pi 导出 `servePolicyModel(models)`，由宿主服务启动代码注入已配置的 Models；服务不得启动脱离所有权的后代进程。旧 `evaluate_with_capabilities` 同步回调入口仍不能强制取消，调用方应使用进程入口获得该保障。
+
+真实请求的既有证据 `/tmp/ascout-real.log` 和 `tests/policy-capability-real.mjs` 保留。本轮未运行该脚本，剩余真实请求额度为 0。该历史脚本手工构造 runner 且返回 `{ok:true}`，只证明调用链 smoke，不证明正常 Effect schema 或完整 E2E。
+
+`tests/policy_provider.rs` 使用正常 YAML 编译、真实隔离 runner、Rust 进程 IPC、Pi `servePolicyModel`／`piModelComplete` 和 fake Models，检查正常 Effect 输出与宿主 schema 拒绝、默认拒绝、额度撤销、取消、超时及失败后恢复。未接入普通 Agent 启动时的 grant 产品配置；独立宿主入口已经可用，但需要宿主决定 Models 实例、可执行服务及 grant 配置的归属。没有修改 Agent/Instrumentation 启动参数或 has_predictor。install-lock 过期由已授权包名迁移造成，已用现有生成器离线重建并通过 `--check`，未新增依赖。
+
+本轮验证命令包括 `cargo test --lib control_plane`、`cargo test --test policy --test policy_provider`、`cargo check --all-targets`，Node capability／supervision／isolation／predictor 回归与 Pi TypeScript 检查。最终结果以实际命令输出为准；没有真实 provider 验证。
 
 ### 正常运行的 Policy 留档（2026-11-13）
 
-控制面在启动 Adapter 前保存 run 内 `policy.json`，复用 `CompiledPolicy` artifact。它包含同次编译读取的原 YAML 文本、原来源绝对路径、`files` 声明的完整 UTF-8 源码/资源、所有 Decision 绑定和配置、Python 标识、digest，以及 Runtime 引用按启动工作目录解析的路径。不是加载完成后重新读取外部文件；`files` 中的包与相对 import 继续由既有内嵌 source loader 解析。源码在编译期间逐个读取，不承诺外部多文件编辑的事务快照。
+control plane 在启动 Adapter 前保存 run 内 `policy.json`，复用 `CompiledPolicy` artifact。它包含同次编译读取的原 YAML 文本、原来源绝对路径、`files` 声明的完整 UTF-8 源码/资源、所有 Decision 绑定和配置、Python 标识、digest，以及 Runtime 引用按启动工作目录解析的路径。不是加载完成后重新读取外部文件；`files` 中的包与相对 import 继续由既有内嵌 source loader 解析。源码在编译期间逐个读取，不承诺外部多文件编辑的事务快照。
 
 保存使用同目录私有临时文件、sync 和不覆盖发布；失败明确返回错误，不启动 Adapter。已有 `policy.json` 的普通启动拒绝覆盖。保存成功但后续基础设施启动失败会留下完整 artifact，不自动删除运行资料。`CompiledPolicy::load` 校验既有 executable digest，Tree 的原生 Policy binding 另外绑定 artifact 字节 SHA-256；YAML/来源元数据不改变原 Decision digest 算法。
 
@@ -71,7 +83,7 @@ printf '%s\n' '{"process_state":{"steps_completed":5,"hook_count":5,"phase":"rea
 
 ## 2. 首版 YAML 与调用约定
 
-本地默认策略见 `assets/policy/policy/policy.yaml` 和 `assets/policy/policy/decisions.py`。顶层必需字段是 `version: 1`、`language: python`、`files`、`fidelity: Best-effort`、`decisions`。可选顶层字段 `runtime` 指定该 Policy 使用的 Runtime 配置路径，路径按控制面当前工作目录解析；控制面优先使用 `ASCOUT_RUNTIME_CONFIG` 覆盖。默认 `select` 的 `max_chances: 0` 不选择任何待选 Chance，保持普通执行。
+本地默认策略见 `assets/policy/policy/policy.yaml` 和 `assets/policy/policy/decisions.py`。顶层必需字段是 `version: 1`、`language: python`、`files`、`fidelity: Best-effort`、`decisions`。可选顶层字段 `runtime` 指定该 Policy 使用的 Runtime 配置路径，路径按 control plane 当前工作目录解析；control plane 优先使用 `ASCOUT_RUNTIME_CONFIG` 覆盖。默认 `select` 的 `max_chances: 0` 不选择任何待选 Chance，保持普通执行。
 
 ### 本地策略目录（2026-11-14）
 
@@ -81,7 +93,7 @@ printf '%s\n' '{"process_state":{"steps_completed":5,"hook_count":5,"phase":"rea
 
 现有默认声明的 `predict` 缺少算法要求的 `enum_values`，`match` 缺少 `value_type`；直接调用相应非空结果路径会报错，不能仅把 `max_chances` 改成正数就认为投机配置完整。默认输入样例也尚缺 `extent` 声明要求的 `hook_count`。本次仅整理目录与分离算法，保留声明内容和这些既有限制。
 
-本轮验证：三份声明逐字迁移、三份策略均经真实 Engine 编译，NLE／Pi Runtime 路径仍绑定启动 cwd；301 组手构造输入比较拆分前后适用分支的输出及异常一致。现有候选顺序测试 1/1、Policy 集成测试 1/1、控制面测试 26/26、恢复测试 5/5 通过，`cargo check --all-targets` 与 `cargo build --bins --example policy` 通过。恢复测试显式组合抽样预测与 NLE verifier，使用本地伪模型，无真实模型请求；测试与示例依赖本地未跟踪策略，不构成干净克隆后的自包含交付。
+本轮验证：三份声明逐字迁移、三份策略均经真实 Engine 编译，NLE／Pi Runtime 路径仍绑定启动 cwd；301 组手构造输入比较拆分前后适用分支的输出及异常一致。现有候选顺序测试 1/1、Policy 集成测试 1/1、control plane 测试 26/26、恢复测试 5/5 通过，`cargo check --all-targets` 与 `cargo build --bins --example policy` 通过。恢复测试显式组合抽样预测与 NLE verifier，使用本地伪模型，无真实模型请求；测试与示例依赖本地未跟踪策略，不构成干净克隆后的自包含交付。
 
 每个函数绑定使用 `file`、`function`，可选 `policy_config` 和 `inputs`：
 
@@ -101,7 +113,7 @@ def extent(data, *, policy_config, capabilities):
 
 - 参数只传给对应函数；省略 `policy_config` 时传空映射。不支持全局参数、继承或覆盖。
 - `inputs` 选择该类允许的可选输入；声明后调用方必须提供，未声明的数据被拒绝。
-- `capabilities` 当前传 `None`，没有外部计算权限。声明 `capabilities`、`requirements`、`outputs` 等尚未实现的字段会报错，不会被忽略。
+- `capabilities` 仅在宿主显式授予时提供 `model_complete(request)`；默认调用不获得外部计算权限。grant 属于宿主本次求值上下文，不由 Policy 声明授权。声明 `requirements`、`outputs` 等尚未实现的 DSL 字段仍会报错。
 - 九类行为都必须显式绑定；不补系统默认函数。入口必须是模块顶层、未装饰的普通同步函数，能按上述形式调用；生成器和异步函数被拒绝。
 - YAML 拒绝重复键（包括参数内部）、锚点、别名、tag、指令、merge key、多文档、非字符串键及非有限数值。只按 YAML 1.2 规则识别布尔值，不将 `yes`／`on` 当成布尔值。
 - YAML 和全部声明源码分别限 1 MiB，文件最多 128 个，数据嵌套最多 32 层，整数限有符号 64 位。文件采用 UTF-8 文本；二进制资源尚不支持。
@@ -110,7 +122,7 @@ def extent(data, *, policy_config, capabilities):
 
 ## 3. 输入与输出范围
 
-调用方负责准备已经授权、符合任务领域 schema 的事实快照，不能直接传控制面内部对象或未筛选的上下文。原型检查顶层字段、JSON 类型、必要进度事实、机会事实和选择成员资格等，不具备完整的领域 schema 注册与校验；这部分接入责任尚未自动化，不能声称任意嵌套 JSON 都是已授权的事实。
+调用方负责准备已经授权、符合任务领域 schema 的事实快照，不能直接传 control plane 内部对象或未筛选的上下文。原型检查顶层字段、JSON 类型、必要进度事实、机会事实和选择成员资格等，不具备完整的领域 schema 注册与校验；这部分接入责任尚未自动化，不能声称任意嵌套 JSON 都是已授权的事实。
 
 | 入口 | 必需顶层字段 | 可声明的可选字段 | 当前接受的输出 |
 |---|---|---|---|
@@ -133,9 +145,9 @@ def extent(data, *, policy_config, capabilities):
 
 当前支持 Linux，默认使用 `/usr/bin/python3`、`/usr/bin/bwrap` 和 5 秒 wall time；部署方可通过 `PolicyEngine::new` 指定可信的绝对程序路径与超时。所选解释器须适配当前 `/usr/lib`、`/lib`、`/lib64` 标准库及动态库布局。需要系统 `libseccomp.so.2`；缺少工具、namespace 权限或过滤支持时失败，不回退无隔离执行。
 
-- 编译加载和求值均使用全新 bubblewrap namespace；无外网、宿主工作区、home、凭证或控制面 socket，不挂载 `/proc`。只读挂载解释器、系统库、固定脚本和本次输入；根只读，`/tmp` 与 `/dev/shm` 各限 16 MiB。
+- 编译加载和求值均使用全新 bubblewrap namespace；无外网、宿主工作区、home、凭证或 control plane socket，不挂载 `/proc`。只读挂载解释器、系统库、固定脚本和本次输入；根只读，`/tmp` 与 `/dev/shm` 各限 16 MiB。
 - 用户模块导入前加载 seccomp，禁止进程／线程创建、执行其他程序、网络 socket、调试其他进程及若干扩权相关系统调用。没有第三方库加载或联网安装路径。
-- 每次调用限制地址空间 256 MiB、CPU 3 秒、单文件 1 MiB、文件描述符 32；禁用 core dump。输入输出分别限 1 MiB，错误诊断最多保留 16 KiB。
+- 每个 worker 限制地址空间 256 MiB、单文件 1 MiB、文件描述符 32；禁用 core dump。不使用跨请求累计的 CPU 限额，逐次请求由宿主 wall deadline 监督。输入输出分别限 1 MiB；Rust 持久 worker 当前丢弃 stderr，本地 worker 排空 stderr。
 - Python 通过独立 fd 3 返回带长度前缀的 JSON；普通 stdout 重定向为诊断。Rust 检查长度、完整退出、JSON、结果结构及相应成员资格。用户代码可以伪造自己的求值结果，但不能借该通道请求系统操作；输出仍须在受信 Rust 侧检查。
 - 超时、进程崩溃、Python 异常、输入／输出不合法均显式报错，不转换成 `false`、空候选或“安全默认”。超时或超大输出时终止 bubblewrap 并等待退出，其 PID namespace 随之回收。
 - 当前没有异步取消 API、cgroup 总量统计、固定标准库内容摘要、最小动态库文件集或外部能力代理。只读 `/usr/lib` 仍暴露部署方系统库，不适合作为恶意多租户的强化隔离承诺。错误文本可能包含作者主动输出的数据，调用方须限制输入中的敏感内容并控制日志访问。
@@ -148,10 +160,15 @@ def extent(data, *, policy_config, capabilities):
 
 ## Chance id 的当前实现
 
-`admit` 通过时 Tree 创建 Chance 并生成 `chance-<n>` 不透明 id；`select` 的 `frontier_view`、`predict` 的 `assumption_set`、`launch`/`predict` 的 `chance_context` 以及观察事件中的 `chance_id` 都使用这个 id。`branch_created` 携带 Branch 所属 Chance；初始权威 Branch 为 null。控制面不再用 operation id 冒充 Chance id。
+`admit` 通过时 Tree 创建 Chance 并生成 `chance-<n>` 不透明 id；`select` 的 `frontier_view`、`predict` 的 `assumption_set`、`launch`/`predict` 的 `chance_context` 以及观察事件中的 `chance_id` 都使用这个 id。`branch_created` 携带 Branch 所属 Chance；初始权威 Branch 为 null。control plane 不再用 operation id 冒充 Chance id。
 
-`extent` 与 `effect` 由 Agent 接入侧的通用层在真实执行边界按同一编译 Policy 求值，并通过 `branch_suspended` 的原因让控制面记录 Blocked；`rebalance` 由控制面在 Tree 版本变化后求值并下发 pause/resume/preempt。控制面不重复求值 extent/effect，因此没有其它接入形式的实现时，这两类 Decision 不会在控制面侧单独生效。
+`extent` 与 `effect` 由 Instrumentation 的通用层在真实执行边界按同一编译 Policy 求值，并通过 `branch_suspended` 的原因让 control plane 记录 Blocked；`rebalance` 由 control plane 在 Tree 版本变化后求值并下发 pause/resume/preempt。control plane 不重复求值 extent/effect，因此没有其它接入形式的实现时，这两类 Decision 不会在 control plane 侧单独生效。
 
-当前是最小接线：extent 在 Pi 接入的工具执行点按 action 计数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolved_pending` 或取消释放；effect 只处理接入侧对 candidate 外部工具效果求值的 `block`/`deny` 计划，模型推理作为 PURE 步骤不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。
+当前是最小接线：extent 在 Pi 接入的工具执行点按 action 计数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolved_pending` 或取消释放；effect 只处理 Instrumentation 对 candidate 外部工具效果求值的 `block`/`deny` 计划，模型推理作为 PURE 步骤不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。
 
-嵌套 Chance 已按 Chance 语义接通：权威等待点只要求父 Branch 仍存活（当前权威或候选），父 Branch 不是全局权威不再使 Chance 失效，候选 Branch 上再次 `admit` 的 Chance 与根 Branch 上的 Chance 一样走 Pending、Running、Resolving、Accepted/Discarded。嵌套候选 Branch 的 `AssumptionSet` 携带祖先未确认的 Proposal；祖先 Chance 未 Accepted 前它没有提交资格，match 成功也停留到可提交时再按同一 Promote 流程处置。父 Branch 进入 Discarding/Discarded 时，其上未收敛的 Chance 以 `Discarded(AncestorInvalidated)` 收敛，这是嵌套失效的唯一传播路径；候选 Branch 的外部效果仍受 effect 闸门约束。尚未覆盖的是 Runtime 侧的嵌套执行承载和候选状态重新挂载，当前只保证控制面状态、提交资格与失效传播。
+嵌套 Chance 已按 Chance 语义接通：权威等待点只要求父 Branch 仍存活（当前权威或候选），父 Branch 不是全局权威不再使 Chance 失效，候选 Branch 上再次 `admit` 的 Chance 与根 Branch 上的 Chance 一样走 Pending、Running、Resolving、Accepted/Discarded。嵌套候选 Branch 的 `AssumptionSet` 携带祖先未确认的 Proposal；祖先 Chance 未 Accepted 前它没有提交资格，match 成功也停留到可提交时再按同一 Promote 流程处置。父 Branch 进入 Discarding/Discarded 时，其上未收敛的 Chance 以 `Discarded(AncestorInvalidated)` 收敛，这是嵌套失效的唯一传播路径；候选 Branch 的外部效果仍受 effect 闸门约束。尚未覆盖的是 Runtime 侧的嵌套执行承载和候选状态重新挂载，当前只保证 control plane 状态、提交资格与失效传播。
+
+## 实现差距
+
+每次求值新建 namespace 已被否定，替代机制未选，现有 bubblewrap 路径仍是未替换的原型。
+control plane 入口仍内嵌 Pi 启动参数；目标是入口不内嵌产品启动参数，由 UI 提供，通道尚未实现。

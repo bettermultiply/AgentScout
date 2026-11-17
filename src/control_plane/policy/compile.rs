@@ -93,6 +93,11 @@ impl CompiledPolicy {
         &self.digest
     }
 
+    /// Whether the compiled Policy contains this Decision.
+    pub fn has_decision(&self, decision: Decision) -> bool {
+        self.decisions.contains_key(&decision)
+    }
+
     /// Runtime configuration selected by this Policy, if any.
     pub fn runtime(&self) -> Option<&str> {
         self.runtime.as_deref()

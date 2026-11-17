@@ -9,12 +9,14 @@ import inspect
 import math
 import os
 import resource
+import shutil
 import sys
 
 
 def restrict():
     resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024,) * 2)
-    resource.setrlimit(resource.RLIMIT_CPU, (3, 3))
+    # Wall-clock supervision belongs to the host. RLIMIT_CPU is cumulative
+    # across requests and would eventually kill a healthy persistent worker.
     resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024,) * 2)
     resource.setrlimit(resource.RLIMIT_NOFILE, (32, 32))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -94,12 +96,30 @@ def json_value(value, depth=0):
     raise TypeError("result must contain only JSON values with bounded integers")
 
 
-def main():
+class Capabilities:
+    def __init__(self, request_id):
+        self.request_id = request_id
+
+    def model_complete(self, request):
+        encoded = json.dumps({"type": "capability", "request_id": self.request_id,
+                              "capability": "model_complete", "request": request}, allow_nan=False).encode()
+        if len(encoded) > 1024 * 1024:
+            raise ValueError("capability request exceeds size limit")
+        message = len(encoded).to_bytes(4, "big") + encoded
+        while message:
+            message = message[os.write(3, message):]
+        line = sys.stdin.buffer.readline(1024 * 1024 + 2)
+        reply = json.loads(line)
+        if reply.get("request_id") != self.request_id or reply.get("type") != "capability_result":
+            raise RuntimeError("invalid capability reply")
+        if "error" in reply:
+            raise PermissionError(reply["error"])
+        return reply["response"]
+
+
+def main(request):
     if sys.version != MANIFEST["python"]:
         raise RuntimeError("compiled Policy Python version mismatch")
-    with open("/request.json", "rb") as stream:
-        request = json.load(stream)
-    restrict()
     sources = MANIFEST["files"]
     for filename in sources:
         if filename.endswith(".py"):
@@ -141,10 +161,11 @@ def main():
     if request.get("check") is True:
         result = True
     else:
-        # No capability has been authorized in this prototype. This is deliberately
-        # not an object exposing host functions or state lookups.
-        result = function(request["data"], policy_config=binding["policy_config"], capabilities=None)
+        result = function(request["data"], policy_config=binding["policy_config"],
+                          capabilities=Capabilities(request["request_id"]) if "request_id" in request else None)
     json_value(result)
+    if "request_id" in request:
+        result = {"type": "result", "request_id": request["request_id"], "result": result}
     encoded = json.dumps(result, allow_nan=False, separators=(",", ":")).encode("utf-8")
     if len(encoded) > 1024 * 1024:
         raise ValueError("result exceeds size limit")
@@ -155,4 +176,77 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Only this supervisor survives requests. No Policy code runs in it.
+    # Fork before seccomp: each child gets a pristine interpreter snapshot;
+    # child mutations cannot contaminate subsequent grants or Branches.
+    while True:
+        line = sys.stdin.buffer.readline(1024 * 1024 + 2)
+        if not line:
+            break
+        if len(line) > 1024 * 1024 or not line.endswith(b"\n"):
+            raise ValueError("input exceeds size limit")
+        # These writable mounts also survive fork. Clean them in the trusted
+        # parent, without following symlinks, before exposing a new request.
+        for directory in ("/tmp", "/dev/shm"):
+            for entry in os.scandir(directory):
+                if entry.is_dir(follow_symlinks=False):
+                    shutil.rmtree(entry.path)
+                else:
+                    os.unlink(entry.path)
+        request = json.loads(line)
+        response_read, response_write = os.pipe()
+        reply_read, reply_write = os.pipe()
+        child = os.fork()
+        if child == 0:
+            # Never leave the host's duplex IPC fd accessible to Policy code.
+            os.dup2(reply_read, 0)
+            os.dup2(response_write, 3)
+            for descriptor in (response_read, response_write, reply_read, reply_write):
+                if descriptor not in (0, 3):
+                    os.close(descriptor)
+            sys.stdin = open(0, "r", closefd=False)
+            try:
+                restrict()
+                main(request)
+            except BaseException:
+                os._exit(1)
+            os._exit(0)
+        os.close(response_write)
+        os.close(reply_read)
+        def read_exact(size):
+            chunks = b""
+            while len(chunks) < size:
+                chunk = os.read(response_read, size - len(chunks))
+                if not chunk:
+                    raise RuntimeError("Policy child response closed")
+                chunks += chunk
+            return chunks
+        try:
+            while True:
+                header = read_exact(4)
+                size = int.from_bytes(header, "big")
+                if size > 1024 * 1024:
+                    raise ValueError("Policy child response exceeds limit")
+                payload = read_exact(size)
+                value = json.loads(payload)
+                capability = ("request_id" in request and type(value) is dict
+                              and value.get("type") == "capability")
+                if not capability:
+                    # Reap before publishing: the old child must never see the
+                    # next host request, even if it forges a premature result.
+                    _, status = os.waitpid(child, 0)
+                    if status != 0:
+                        raise RuntimeError("Policy evaluation child failed")
+                message = header + payload
+                while message:
+                    message = message[os.write(3, message):]
+                if not capability:
+                    break
+                reply = sys.stdin.buffer.readline(1024 * 1024 + 2)
+                if not reply or len(reply) > 1024 * 1024:
+                    raise ValueError("invalid host capability reply")
+                while reply:
+                    reply = reply[os.write(reply_write, reply):]
+        finally:
+            os.close(response_read)
+            os.close(reply_write)
