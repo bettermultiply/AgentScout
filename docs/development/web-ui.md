@@ -53,7 +53,7 @@ RangeError: Maximum call stack size exceeded
 先以 Web 模式启动 control plane（绑定的地址会打印在 control plane 输出中）：
 
 ```sh
-cargo run --bin ascout-control-plane -- /path/to/run-dir ../pi --web 127.0.0.1:8080
+cargo run --bin ascout-control-plane -- ../pi --web 127.0.0.1:8080
 ```
 
 再启动 Vite 开发服务器：

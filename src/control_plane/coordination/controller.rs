@@ -98,28 +98,6 @@ impl SpeculationCoordinator {
                 })
                 .map_err(|error| error.to_string())
             }
-            ControlOperation::Invoke(tool) => {
-                let output = call(
-                    environment()?,
-                    Operation::InvokeTool {
-                        tool_name: tool.tool_name.clone(),
-                        arguments: tool.arguments.clone(),
-                    },
-                )?
-                .output
-                .ok_or("Runtime tool result missing")?;
-                let mut value: Value =
-                    serde_json::from_str(&output.stdout).map_err(|error| error.to_string())?;
-                let result = value
-                    .get_mut("result")
-                    .map(Value::take)
-                    .ok_or("Runtime result missing")?;
-                let evidence = value
-                    .get_mut("evidence")
-                    .map(Value::take)
-                    .ok_or("Runtime evidence missing")?;
-                Ok(ControlResult::Outcome(result, evidence))
-            }
             ControlOperation::Establish(command) => {
                 if capabilities.branch_environment {
                     let AgentCommand::StartCandidate {
@@ -160,7 +138,8 @@ impl SpeculationCoordinator {
                                 .into(),
                         );
                     }
-                    return Ok(ControlResult::Environment(result.environment_id));
+                    let bound = call(&result.environment_id, Operation::BindExecution { branch_id: branch_id.clone() })?;
+                    return Ok(ControlResult::Environment(result.environment_id, bound.execution_access));
                 } else {
                     return Err("Runtime cannot create a Candidate Environment".into());
                 }

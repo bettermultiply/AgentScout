@@ -116,15 +116,15 @@ branch_environment；内部资源可以共享。候选实际建立 Backend 环�
 等待任务相关写入完成后物化。Ctrl-C 保留程序和 session，留在对话中，待上述处理
 完成后可接下一轮；Runtime 报告物化失败时须显示失败，control plane 不能宣告任务成功。
 暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，明确继续命令为 `/continue`，
-恢复原任务执行，保留原树、候选和环境关系；普通消息是否也解除暂停未定。
+恢复原任务执行，保留原树、候选和环境关系。暂停期间的普通消息先留着，不解除暂停；`/continue` 之后再按原顺序交给模型。
 它与原 Agent 的 Ctrl-C／退出终止语义分开，暂停不意味着退出程序。独立暂停入口的
 具体 UI 未定。task 是 Agent 的一轮
 工作，Agent 完成本轮工作并开始等待用户输入时完成。
 
 当前 SIGINT 与 TUI Ctrl-C 走 `Interrupt`，终止当前 task 后保留 control plane 和 session；
 SIGTERM 与显式 Shutdown 仍退出。Pause／`/pause` 保存整树；`/continue` 经专用
-控制命令恢复原任务而不新增模型用户消息。普通输入解除暂停兼容现状，不将其提升为
-新的设计决定。保存尚未完成时 `/continue` 不启动工作；终止期间不再允许 Pause
+控制命令恢复原任务而不新增模型用户消息。目标语义已定：暂停期间的普通消息先留着，不解除暂停；`/continue` 之后再按原顺序交给模型。
+当前代码尚未按此修改。保存完成后，`Request::Prompt` 仍会先解除暂停，再把这句话排进模型输入。保存未完成时这句话会被丢掉，而不是留着。保存尚未完成时 `/continue` 不启动工作；终止期间不再允许 Pause
 阻塞物化，重复取消不重复发出中断。物化失败保留重试状态且不报告 task 成功。
 已有保存不构成物化完成，候选被接受后继续使用候选环境的关联与交接仍需核查，
 不能以能恢复环境证明接受路径已对齐。见
@@ -160,7 +160,7 @@ Instrumentation 保存 `suspendedHooks`（Branch、toolCall 身份、原 assista
 
 ```sh
 cargo build --bins
-target/debug/ascout-control-plane <run-dir> <pi-root> --resume --web 127.0.0.1:8080 --model <provider/model>
+target/debug/ascout-control-plane <pi-root> --resume <session-id> --web 127.0.0.1:8080 --model <provider/model>
 ```
 
 保存通过 Pause／`/pause`，成功后程序保持暂停等待继续；目录包含 `recovery-<timestamp>/{tree,agent,runtime}.json` 和 `recovery.json`。恢复不能只复制最终 `session.jsonl`；`sessions/` 保存各 Branch 的原上下文。NLE 重建只在固定版本和固定配置下校验，不声称公共 observation/RNG 校验是任意隐藏状态等价的数学证明。任意外部工具副作用不能靠此重放。

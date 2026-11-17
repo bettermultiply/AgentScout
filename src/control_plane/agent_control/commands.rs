@@ -105,6 +105,7 @@ impl SpeculativeTree {
     }
 
     pub fn next_prompt(&mut self) -> io::Result<Option<AgentCommand>> {
+        if self.recovering { return Ok(None); }
         let Some(prompt) = self.queued_prompts.front().cloned() else {
             return Ok(None);
         };
@@ -131,6 +132,8 @@ impl SpeculativeTree {
 
     pub fn continue_authority(&mut self, prompt: String) -> io::Result<Option<AgentCommand>> {
         if self.task_finishing
+            || self.recovering
+            || self.stopping
             || !self.authority_ready()
             || self.authority_running()
             || self
@@ -454,6 +457,21 @@ impl SpeculativeTree {
             .iter_mut()
             .find(|operation| operation_id.is_none_or(|id| operation.operation_id == id))
         {
+            if matches!(
+                operation.status,
+                OperationStatus::Succeeded | OperationStatus::Failed
+            ) {
+                if operation.status != status {
+                    let operation_id = operation.operation_id.clone();
+                    let previous = operation.status;
+                    self.pending_records.push(serde_json::json!({
+                        "message": "feedback_conflict", "branch_id": branch_id,
+                        "operation_id": operation_id,
+                        "reason": format!("conflicting terminal feedback: {previous:?} then {status:?}")
+                    }));
+                }
+                return Ok(());
+            }
             operation.status = status;
         }
         Ok(())
@@ -493,6 +511,7 @@ impl SpeculativeTree {
         self.mark_operation_requested(&branch_id, "start-agent", OperationKind::StartAgent)?;
         Ok(AgentCommand::StartBranch {
             environment_id: self.branches[&branch_id].environment_id.clone(),
+            execution_access: None,
             role: BranchRole::Authority,
             workspace: self.workspace(),
             branch_id,

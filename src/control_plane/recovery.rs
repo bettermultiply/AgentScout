@@ -153,7 +153,7 @@ pub fn load(run_dir: &Path) -> io::Result<(SpeculativeTree, std::path::PathBuf)>
     let mut tree: SpeculativeTree =
         serde_json::from_slice(&fs::read(generation.join("tree.json"))?)?;
     validate(&tree, &generation)?;
-    if tree.execution_id != run_dir.display().to_string() {
+    if Some(tree.execution_id.as_str()) != run_dir.file_name().and_then(|name| name.to_str()) {
         return Err(io::Error::other("Recovery task identity mismatch"));
     }
     tree.load_recovery();

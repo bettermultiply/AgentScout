@@ -1,3 +1,4 @@
+// Runtime-side filesystem adapter. Instrumentation never loads this module.
 // Pi sessions remain in their host process; every built-in file operation uses
 // the plan of its own Branch. A fresh mount per operation permits baseline
 // replacement between tasks without touching any live overlay.
@@ -157,7 +158,7 @@ export function filesystemTools(directory: string, branch: string, cwd: string, 
     // or a second implementation. Both sniffing and reading run in the Branch.
     const detectImageMimeType=async (path: string): Promise<string | null>=>{
         const quote=(value: unknown)=>"'"+String(value).replaceAll("'","'\\''")+"'";
-        const module=new URL('../../../pi/packages/coding-agent/src/utils/mime.ts',import.meta.url).href;
+        const module=new URL('../../../../../pi/packages/coding-agent/src/utils/mime.ts',import.meta.url).href;
         const code=`import {detectSupportedImageMimeTypeFromFile as detect} from ${JSON.stringify(module)}; console.log(await detect(process.argv[1])??'')`;
         const chunks: Buffer[]=[];
         const result=await exec('node --input-type=module -e '+quote(code)+' -- '+quote(translate(path)),cwd,{onData:data=>chunks.push(data)});

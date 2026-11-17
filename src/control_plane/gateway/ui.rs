@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 mod http;
-pub use http::{Server, start};
+pub use http::{start, Server};
 
 /// Read-only presentation supplied by the UI; Gateway does not fold Tree facts.
 pub trait Presentation: Send + Sync {
@@ -45,13 +45,13 @@ pub enum Request {
 
 #[derive(Clone)]
 pub struct Connection {
-    reader: crate::control_plane::ledger::LedgerReader,
+    reader: crate::control_plane::ui_projection::UiProjection,
     deliver: Arc<dyn Fn(Request) -> Result<(), String> + Send + Sync>,
 }
 
 impl Connection {
     pub fn new(
-        reader: crate::control_plane::ledger::LedgerReader,
+        reader: crate::control_plane::ui_projection::UiProjection,
         deliver: impl Fn(Request) -> Result<(), String> + Send + Sync + 'static,
     ) -> Self {
         Self {

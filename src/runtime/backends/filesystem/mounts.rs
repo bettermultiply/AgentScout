@@ -286,17 +286,6 @@ impl FilesystemBackend {
             ),
             ..LaunchFragment::default()
         };
-        // The host Pi process reads one tool plan per Branch. It never enters
-        // this namespace; the plan only tells its file tools where that
-        // Branch's holder and sandbox workspace are.
-        fragment.env.insert(
-            "ASCOUT_FILESYSTEM_TOOL_PLANS".into(),
-            self.config
-                .state_directory
-                .join("tool-plans")
-                .display()
-                .to_string(),
-        );
         let holder_dir = self
             .config
             .state_directory

@@ -22,19 +22,31 @@ make
 
 `make` 先准备前端依赖并构建 WebUI，再执行 `cargo build`，`make -j` 同样保证此顺序；任一步失败即停止。前端产物在本地生成并嵌入 Rust 二进制，不入库，具体规则见 [control plane WebUI](docs/development/web-ui.md#生产构建)。
 
-从真实终端启动（运行目录由调用方创建）：
+配置文件为 `~/.config/ascout/config.toml`，仅使用以下键（下列为缺省值）：
+
+```toml
+policy_dir = "~/.local/share/ascout/policies"
+runs_dir = "~/.local/share/ascout/runs"
+default_policy = "policy"
+log_path = "~/.local/share/ascout/ascout.log"
+```
+
+`log_path` 指定 control plane 进程持有的系统运行日志。格式固定为 UTF-8 逐行 UTC 时间、级别、组件、可选 session 和说明，说明中的换行转为空格；只可改路径，不能配置格式或归属。启动时无法打开日志即拒绝启动；不做日志轮转。界面经 Gateway → UI Projection → Ledger 读取已保存记录，系统报警由 UI Projection 独立转发，不写入 Ledger。
+
+仓库示例请将 `policy_dir` 设置为本仓库 `assets/policy` 的绝对路径；不要把开发策略复制到用户目录。每份 Policy 是含 `policy.yaml` 和 `decisions.py` 的子目录。交互启动会列出并询问 Policy，允许改选；非交互启动使用 `--policy <name>` 或默认 Policy，不等待输入。
+
+从真实终端启动（系统自动创建 session 目录）：
 
 ```sh
-mkdir -p /tmp/opencode/run-1
 ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
-cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi
+cargo run --bin ascout-control-plane -- ../pi
 ```
 
 如果更方便使用浏览器页面，可让 control plane 绑定本机地址：
 
 ```sh
 ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
-cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi --web 127.0.0.1:8080
+cargo run --bin ascout-control-plane -- ../pi --web 127.0.0.1:8080
 ```
 
 浏览器 UI 只绑定 loopback；用本机浏览器打开本机 control plane 输出的地址即可。左侧是权威窗口对话，右侧是可隐藏的投机面板（投机树与分支详情）；候选内容始终只读。TUI 与浏览器 UI 不共享绘制代码，只通过 control plane 提供的 AScoutRunView 和操作请求接口工作。界面的开发代理、构建与嵌入方式见 [control plane WebUI](docs/development/web-ui.md)。
@@ -42,28 +54,27 @@ cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi --web 127.0.0.
 外部回放工具从已有 run 的原生 `session.jsonl`、`events.jsonl` 在内存提供模型回复，并启动普通 AScout 执行 Runtime 与 Policy：
 
 ```sh
-mkdir /tmp/opencode/replay-run
-node tools/replay/run.ts /path/to/source-run /tmp/opencode/replay-run ../pi \
+node tools/replay/run.ts /path/to/source-run ../pi \
   --runtime /path/to/runtime.json \
   --web 127.0.0.1:8080
 ```
 
-源 `policy.json` 优先；缺失时在 Pi 路径后显式传入原 Policy YAML。用 `--runtime` 明确提供新运行环境。源目录只读；普通 AScout 负责新 run 的记录和恢复。工具终端输入 `pause` 暂停自动输入后，可在 WebUI 手动输入或切换模型；`resume` 继续，`status` 查看消费情况，`quit` 协调正常保存退出。完成或缺键仅停止自动输入，保留系统。详见[回放工具](tools/replay/README.md)及[开发边界](docs/development/replay.md)。
+源 `policy.json` 优先；缺失时用 `--policy <name>` 选择原 Policy。用 `--runtime` 明确提供新运行环境。源目录只读；普通 AScout 负责新 run 的记录和恢复。工具终端输入 `pause` 暂停自动输入后，可在 WebUI 手动输入或切换模型；`resume` 继续，`status` 查看消费情况，`quit` 协调正常保存退出。完成或缺键仅停止自动输入，保留系统。详见[回放工具](tools/replay/README.md)及[开发边界](docs/development/replay.md)。
 
-第一个参数是本次运行目录，第二个参数是 Pi 源码路径。运行目录、Agent 日志和事件记录都由调用方持有。Runtime Adapter 在环境内启动 Agent 接入进程，control plane 只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。Ctrl-C 请求中断，Ctrl-D 退出，TUI 中 ↑/↓ 滚动。运行目录及 `agent.log` 保留用于检查。
+唯一位置参数是 Pi 源码路径。运行目录由系统在配置的运行根目录下创建，结束时输出 session id。`ascout-control-plane sessions` 列出已有 session；`ascout-control-plane ../pi --resume <session-id>` 恢复。Runtime Adapter 在环境内启动 Agent 接入进程，control plane 只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。Ctrl-C 请求中断，Ctrl-D 退出，TUI 中 ↑/↓ 滚动。运行目录及 `agent.log` 保留用于检查。
 
-已接通真实工具等待点：Candidate 从共同消息上下文与预测工具结果续跑；Parent 工具执行一次，真实结果返回后由 Policy 比较并 Promote 或 Discard。Promote 保留候选会话和在飞输出，用户仍使用同一个主对话；不命中则 Parent 使用真实结果继续。默认 Policy 禁用候选；可显式启用字符串枚举预测示例：
+已接通工具与模型执行前等待点：Candidate 在独立 session 使用预测工具结果或替代模型续跑。eager 并行放行权威调用；speculative-first 保持原调用等待，由 Policy 依据真实结果或明确的可接受性规则裁决。接受时 Promote 候选 session 并取消旧 Parent，不向旧调用注入候选结果；全部候选不可接受时原调用放行一次。用户仍使用同一个主对话。默认 Policy 禁用候选；可显式启用字符串枚举预测示例：
 
 ```sh
 ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
-cargo run --bin ascout-control-plane -- /tmp/opencode/run-1 ../pi assets/policy/pi-tool/policy.yaml
+cargo run --bin ascout-control-plane -- ../pi --policy pi-tool
 ```
 
 该示例 Policy 从 `example`、`true`、`false` 中无固定种子地抽取两个不同预测。具体随机场景、脚本模型接口及启动方式见 [验证 Workload](docs/development/reference-workload.md)。`/ascout` 查看预测、实际结果、处置和清理，`/events` 查看原始事件；运行目录的 `events.jsonl` 保留原始事实。已有脚本模型接口加真实 Pi/bash 的验证，不冒充真实大模型验证，不宣称预测质量或加速收益。
 
 Runtime Adapter 可以在握手中声明环境工具及其参数结构。control plane 只按声明调用 `tool_context`／`invoke_tool`，不识别具体 workload 的工具名；Pi 接入从声明动态注册工具，NLE 的名称和动作编号不进入通用接入层。
 
-Parent 收到真实结果立即继续，验证并行进行；仅 Promote 时停止旧 Parent。已接入同一等待点的两个 Candidate，至多一个胜出，其余被取消。工具等待点逐项交给 Policy；并行消息续跑需补齐其他工具的真实结果，不重跑这些工具。接入目前支持字符串和布尔预测，复杂结果类型、非标准上下文、嵌套、完整效果隔离、Runtime Registry 与能力验证、多行编辑及确认式退出清理仍未完成。详见 [当前实现与验证边界](docs/development/reference-workload.md)。
+Parent 已放行并收到真实结果后立即继续，验证并行进行；仅 Promote 时停止旧 Parent。已接入同一等待点的两个 Candidate，至多一个胜出，其余被取消。工具等待点逐项交给 Policy；并行消息续跑需补齐其他工具的真实结果，不重跑这些工具。接入目前支持字符串和布尔预测，复杂结果类型、非标准上下文、嵌套、完整效果隔离、Runtime Registry 与能力验证、多行编辑及确认式退出清理仍未完成。详见 [当前实现与验证边界](docs/development/reference-workload.md)。
 
 Policy YAML 编译与受限 Python 求值已可独立运行。本地策略按 `assets/policy/<策略目录>/` 独立保存声明和算法，目前均不随 Git 交付；以下命令及相关测试需要先准备这些本地文件，布局见 [Policy Engine 原型](docs/development/policy-engine.md)。默认 `policy/policy.yaml` 禁用候选：
 

@@ -185,11 +185,12 @@ impl SpeculativeTree {
         ) {
             self.cancel_ui_prompts(Some(id), "Branch is closing");
         }
-        let branch = self.branch_mut(id)?;
-        if branch.status == status {
+        if self.branch(id)?.status == status {
             return Ok(());
         }
+        let branch = self.branch_mut(id)?;
         branch.status = status;
+        self.touch_policy_branch(id);
         self.epoch += 1;
         if matches!(status, BranchStatus::Discarding | BranchStatus::Discarded) {
             self.invalidate_chances_on_branch(id, reason)?;
@@ -216,12 +217,14 @@ impl SpeculativeTree {
         }
         let previous = self.authority_branch_id.replace(id.into());
         if let Some(old) = &previous {
+            self.touch_policy_branch(old);
             self.branch_mut(old)?.role = BranchRole::Candidate;
             // Only the current authority's prompts can be answered. A prompt
             // already shown for the outgoing authority would otherwise stay
             // visible while every answer is rejected.
             self.cancel_ui_prompts(Some(old), "Branch is no longer the authority");
         }
+        self.touch_policy_branch(id);
         self.branch_mut(id)?.role = BranchRole::Authority;
         self.pending_observations.push(
             crate::control_plane::observation::ObservationContent::AuthorityChanged {
@@ -382,7 +385,14 @@ impl SpeculativeTree {
             .ok_or_else(|| invalid_input("branch does not exist"))
     }
 
+    pub(crate) fn touch_policy_branch(&mut self, id: &str) {
+        let revision = self.policy_revisions.entry(id.to_owned()).or_default();
+        *revision = revision.checked_add(1).expect("Policy revision exhausted");
+    }
+
     pub(super) fn branch_mut(&mut self, branch_id: &str) -> io::Result<&mut BranchRecord> {
+        let revision = self.policy_record_revisions.entry(branch_id.to_owned()).or_default();
+        *revision = revision.checked_add(1).expect("Branch record revision exhausted");
         self.branches
             .get_mut(branch_id)
             .ok_or_else(|| invalid_input("branch does not exist"))

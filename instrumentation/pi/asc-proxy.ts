@@ -1,0 +1,93 @@
+/** ASC-Proxy owns the separate control and backend-neutral execution channels. */
+import {connect} from 'node:net';
+type Access = {transport:string;address:string;environment_id:string};
+export class AscProxy {
+    private control?:ReturnType<typeof connect>;
+    private outgoing=Promise.resolve();
+    error?:unknown;
+    async open(path:string){
+        const socket=connect({path,allowHalfOpen:true});this.control=socket;
+        socket.on('error',error=>{this.error=error;socket.destroy()});
+        await new Promise<void>((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject)});
+    }
+    destroy(){this.control?.destroy()}
+    async send(wire:unknown){
+        const socket=this.control;if(!socket||socket.destroyed)return;
+        const bytes=Buffer.from(JSON.stringify(wire)),header=Buffer.alloc(4);header.writeUInt32BE(bytes.length);
+        this.outgoing=this.outgoing.then(()=>new Promise<void>((resolve,reject)=>{
+            if(socket.destroyed){resolve();return}
+            socket.write(Buffer.concat([header,bytes]),error=>error?reject(error):resolve());
+        })).catch(error=>{this.error=error;socket.destroy()});
+        await this.outgoing;
+    }
+    async *messages(){
+        if(!this.control)throw Error('Control connection not open');
+        let buffer=Buffer.alloc(0);
+        for await(const chunk of this.control.iterator({destroyOnReturn:false})){
+            buffer=Buffer.concat([buffer,chunk]);
+            while(buffer.length>=4){
+                const length=buffer.readUInt32BE(0);if(length>16777216)throw Error('Protocol frame too large');
+                if(buffer.length<length+4)break;
+                const wire=JSON.parse(buffer.subarray(4,length+4).toString());buffer=buffer.subarray(length+4);
+                yield wire;
+            }
+        }
+        if(buffer.length)throw Error('Truncated control frame');
+    }
+    async close(){await this.outgoing;const socket=this.control;if(socket&&!socket.destroyed)await new Promise<void>(resolve=>socket.end(resolve))}
+    private accesses=new Map<string,Access>();
+    private active=new Map<string,{accepted:Promise<void>;cancel?:Promise<unknown>}>();
+    private sequence=0;
+    private generations=new Map<string,number>();
+    private cancelling=new Map<string,Promise<void>>();
+    bind(branch:string,access:Access|undefined){if(access)this.accesses.set(branch,access)}
+    has(branch:string){return this.accesses.has(branch)}
+    private request(branch:string,operation:string,command:string,extra:Record<string,unknown>={},accepted?:()=>void,output?:(value:any)=>void):Promise<any>{
+        const access=this.accesses.get(branch);
+        if(!access||access.transport!=='unix-json-lines')return Promise.reject(Error('Branch execution access missing or unsupported'));
+        return new Promise((resolve,reject)=>{
+            const socket=connect(access.address);let buffer='',settled=false;
+            const finish=(error?:Error,value?:unknown)=>{if(settled)return;settled=true;socket.destroy();error?reject(error):resolve(value)};
+            socket.on('connect',()=>socket.write(JSON.stringify({command,branch_id:branch,operation_id:operation,environment_id:access.environment_id,...extra})+'\n'));
+            socket.on('error',error=>finish(error));
+            socket.on('data',chunk=>{buffer+=chunk.toString();let index;while((index=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,index);buffer=buffer.slice(index+1);try{const event=JSON.parse(line);if(event.event==='rejected')finish(Error(event.reason));else if(event.event==='accepted')accepted?.();else if(event.event==='output')output?.(event.value);else if(['terminal','confirmed'].includes(event.event))finish(undefined,event)}catch(error){finish(error as Error)}}});
+            socket.on('close',()=>finish(Error('Execution connection closed before terminal confirmation')));
+        });
+    }
+    async execute(branch:string,operation:string,tool:string,args:unknown,context:unknown,signal?:AbortSignal,output?:(value:any)=>void){
+        if(signal?.aborted)throw Error('Tool cancelled before execution');
+        if(this.cancelling.has(branch))throw Error('Branch cancellation in progress');
+        const identity=JSON.stringify([branch,operation]);
+        if(this.active.has(identity))throw Error('Operation is already executing');
+        let accept!:()=>void,failAcceptance!:(error:unknown)=>void;
+        const active={accepted:new Promise<void>((resolve,reject)=>{accept=resolve;failAcceptance=reject}),cancel:undefined as Promise<unknown>|undefined};
+        void active.accepted.catch(()=>{});
+        this.active.set(identity,active);
+        const result=this.request(branch,operation,'execute',{request_id:`req-${++this.sequence}`,generation:this.generations.get(branch)??0,tool,arguments:args,context},accept,output);
+        void result.catch(failAcceptance);
+        const abort=()=>{active.cancel??=active.accepted.then(()=>this.request(branch,operation,'cancel'));void active.cancel.catch(()=>{})};
+        signal?.addEventListener('abort',abort,{once:true});
+        if(signal?.aborted)abort();
+        try {
+            const event=await result;
+            await active.cancel;
+            await this.request(branch,operation,'confirm');
+            if(event.status!=='succeeded')throw Error(event.reason??event.status);
+            const value=event.output?.stdout?JSON.parse(event.output.stdout):event.value;
+            if(value.result===undefined)throw Error('Runtime result missing');
+            return value;
+        } finally {signal?.removeEventListener('abort',abort);this.active.delete(identity)}
+    }
+    async cancel(branch:string){
+        const pending=this.cancelling.get(branch);if(pending)return pending;
+        const cancellation=this.cancelBranch(branch);this.cancelling.set(branch,cancellation);
+        try{await cancellation}finally{this.cancelling.delete(branch)}
+    }
+    private async cancelBranch(branch:string){
+        // A rejected execution has no backend entry to cancel. The branch
+        // drain must still run, including when an earlier execute failed
+        // admission or its cancellation connection failed.
+        await Promise.allSettled([...this.active].map(async([identity,active])=>{const [owner,operation]=JSON.parse(identity);if(owner===branch){active.cancel??=active.accepted.then(()=>this.request(branch,operation,'cancel'));await active.cancel}}));
+        if(this.has(branch)){const terminal=await this.request(branch,'branch-cancellation','cancel_branch');this.generations.set(branch,terminal.generation)}
+    }
+}

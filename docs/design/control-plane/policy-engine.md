@@ -87,7 +87,7 @@ Policy Engine 编译全部 Decision。会改写全局控制状态或必须在多
 各组件围绕这两项职责与 Policy Engine 协作：
 
 - **Speculation Coordinator** 为相关 Decision 提供输入，并落实本次 Policy Decision。
-- **Adapter Registry** 属于 Runtime，提供 Runtime Adapter 的能力信息和验证状态，作为 Policy 编译时的约束依据。
+- **Runtime** 通过现有 hello 报告 backend 身份。Policy Engine 在 control plane 启动握手后只确认 Policy 要求的 backend 存在；没有要求则不检查，缺少则拒绝启动。接口存在性及可解析性由 Runtime 自行检查，不属于 Policy 编译，也不代表环境保证已验证。
 - **Instrumentation** 本地求值并落实 `effect`，将模拟操作交给 External Effect Coordinator，后者判断能否模拟并明确反馈。
 - **Gateway** 交付编译结果、端侧 Decision 结果和执行记录；Policy Engine 不拥有通信会话或传输状态。
 - **Instrumentation** 对 control plane 交付的 Decision 以相同语义求值，并返回结果和执行记录。
@@ -99,3 +99,9 @@ Policy Engine 编译全部 Decision。会改写全局控制状态或必须在多
 - [Speculation Contract](../speculation-contract.md)：Policy 与 Runtime Adapter 能力的语义对齐
 - [Instrumentation 设计](../agent-integration.md)：本地 Decision 的求值与记录
 - [开发决策](../../development/decisions.md)：当前编译产物与实现限制
+
+## Policy 与 session 的目录
+
+Policy Engine 管理固定根目录中的多份 Policy，每份是含 `policy.yaml` 与 `decisions.py` 的独立子目录。配置文件为 `~/.config/ascout/config.toml`，支持 `policy_dir`、`runs_dir`、`default_policy` 与 `log_path` 四个键，缺省分别为 `~/.local/share/ascout/policies`、`~/.local/share/ascout/runs`、`policy` 与 `~/.local/share/ascout/ascout.log`；`log_path` 只配置系统运行日志的路径，格式及进程归属固定，启动时打不开即拒绝启动，不轮转。
+
+交互终端启动前列出 Policy 并询问，允许改选；空输入使用当前默认选择。非交互启动使用显式 Policy 名字，否则使用默认。一次 session 内 Policy 固定。系统在运行根目录下创建 session 子目录，以 session id 标识运行，结束时返回该 id；会话列表列出已有 session id，恢复按 id 找到目录，不以路径作为 execution id。

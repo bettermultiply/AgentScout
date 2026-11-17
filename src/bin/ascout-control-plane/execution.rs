@@ -1,5 +1,5 @@
 use super::*;
-use ascout::control_plane::agent_control::SpeculationCoordinator;
+use ascout::control_plane::agent_control::{AgentCommand, SpeculationCoordinator};
 use ascout::control_plane::coordination::session::Session;
 use ascout::control_plane::coordination::{ControlActions, ControlResult};
 use std::io::{Read, Write};
@@ -12,6 +12,7 @@ pub enum Event {
     Request(ui::Request),
     Completed(u64, Result<ControlResult, String>),
     Materialized(Result<ascout::protocol::contract::OperationResult, String>),
+    Delivered(AgentCommand, io::Result<()>),
     Timer,
 }
 
@@ -21,8 +22,10 @@ struct Task<'a> {
     interface: &'a ui::Interface,
     capabilities: &'a RuntimeCapabilities,
     ledger: &'a mut Ledger,
+    system_log: &'a ascout::control_plane::system_log::SystemLog,
     started: Instant,
     draining: bool,
+    delivery_failed: bool,
     control: Session,
 }
 
@@ -60,13 +63,23 @@ fn forward_signals(
 impl Task<'_> {
     fn record(&mut self, mut value: Value) -> io::Result<()> {
         value["t_ms"] = json!(self.started.elapsed().as_millis() as u64);
-        self.ledger.record(value.clone())?;
+        if let Err(error) = self.ledger.record(value.clone()) {
+            self.system_log.history_failure(
+                self.tree.execution_id(),
+                &format!("record append failed: {error}"),
+            );
+        }
         if value["message"] == "candidate_created" {
-            self.interface.fork(
+            if let Err(error) = self.interface.fork(
                 self.ledger,
                 value["parent"].as_str().unwrap(),
                 value["branch_id"].as_str().unwrap(),
-            )?;
+            ) {
+                self.system_log.history_failure(
+                    self.tree.execution_id(),
+                    &format!("observation append failed: {error}"),
+                );
+            }
         }
         Ok(())
     }
@@ -95,23 +108,52 @@ impl Task<'_> {
                 self.control.materialized(result);
                 ControlActions::default()
             }
+            Event::Delivered(command, result) => match result {
+                Err(error) if error.kind() != io::ErrorKind::Interrupted => {
+                    let commands = self.tree.delivery_failed(&command, error.to_string())?;
+                    if self.tree.authority_failure().is_some() && !self.delivery_failed {
+                        self.delivery_failed = true;
+                        self.control.fail_and_exit(self.tree, &error)?
+                    } else {
+                        ControlActions {
+                            commands,
+                            ..Default::default()
+                        }
+                    }
+                }
+                _ => ControlActions::default(),
+            },
             Event::Timer => {
                 self.control.timer(self.tree)?;
                 ControlActions::default()
             }
             Event::Agent(message) => {
-                let Some(message) = message? else {
-                    return if self.draining {
-                        Ok(None)
-                    } else {
-                        Err(io::Error::other(
-                            "Agent disconnected; cleanup is not confirmed",
-                        ))
-                    };
+                let message = match message {
+                    Ok(Some(message)) => message,
+                    result => {
+                        if self.draining {
+                            return Ok(None);
+                        }
+                        let error = result.err().unwrap_or_else(|| {
+                            io::Error::other("Agent disconnected; cleanup is not confirmed")
+                        });
+                        self.delivery_failed = true;
+                        let actions = self.control.fail_and_exit(self.tree, &error)?;
+                        return Ok(Some(self.control.progress(
+                            self.tree,
+                            self.capabilities,
+                            actions,
+                        )?));
+                    }
                 };
                 let actions = self.control.agent(self.tree, &message)?;
                 self.flush_observations()?;
-                self.interface.message(self.ledger, &message)?;
+                if let Err(error) = self.interface.message(self.ledger, &message) {
+                    self.system_log.history_failure(
+                        self.tree.execution_id(),
+                        &format!("observation append failed: {error}"),
+                    );
+                }
                 if !matches!(message, AgentMessage::Output { .. }) {
                     let mut fact = serde_json::to_value(&message)?;
                     if let AgentMessage::Transcript { entry, .. } = &message {
@@ -139,15 +181,35 @@ impl Task<'_> {
                 .ledger
                 .append_observation(self.tree.execution_id(), content)
             {
+                self.system_log.history_failure(
+                    self.tree.execution_id(),
+                    &format!("observation append failed: {error}"),
+                );
                 failure.get_or_insert(error);
             }
         }
-        failure.map_or(Ok(()), Err)
+        let _ = failure;
+        Ok(())
     }
 
     fn flush_records(&mut self) -> io::Result<()> {
         for record in self.tree.drain_records() {
-            self.ledger.record(record)?;
+            if record["message"] == "feedback_conflict" {
+                if let Err(error) = self.system_log.write(
+                    "ERROR",
+                    "coordinator",
+                    Some(self.tree.execution_id()),
+                    &record.to_string(),
+                ) {
+                    eprintln!("System log write failed: {error}; {record}");
+                }
+            }
+            if let Err(error) = self.ledger.record(record) {
+                self.system_log.history_failure(
+                    self.tree.execution_id(),
+                    &format!("record append failed: {error}"),
+                );
+            }
         }
         Ok(())
     }
@@ -160,12 +222,19 @@ impl Task<'_> {
             self.control.input_ready(self.tree),
             self.control.input_error(),
         );
-        self.interface.publish(
+        let published = self.interface.publish(
             self.ledger,
             self.tree.authority_ready(),
             self.tree.authority_running(),
             self.control.notice(),
-        )
+        );
+        if let Err(error) = published {
+            self.system_log.history_failure(
+                self.tree.execution_id(),
+                &format!("observation append failed: {error}"),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -178,9 +247,11 @@ pub fn run(
     capabilities: &RuntimeCapabilities,
     interface: &ui::Interface,
     ledger: &mut Ledger,
+    system_log: &ascout::control_plane::system_log::SystemLog,
     channel: (mpsc::Sender<Event>, mpsc::Receiver<Event>),
     run_dir: &std::path::Path,
     resume_model: Option<String>,
+    initial_commands: Vec<AgentCommand>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (events, receiver) = channel;
     let sender = events.clone();
@@ -190,17 +261,32 @@ pub fn run(
     signal_writer.set_nonblocking(true)?;
     use std::os::fd::AsRawFd;
     SIGNAL_FD.store(signal_writer.as_raw_fd(), Ordering::Relaxed);
+    let mut writer = connection.delivery_writer()?;
+    let (deliveries, delivery_queue) =
+        mpsc::channel::<(AgentCommand, std::sync::Arc<AtomicBool>)>();
+    let mut pending_deliveries: Vec<(String, std::sync::Arc<AtomicBool>)> = Vec::new();
     let mut task = Task {
         tree,
         connection,
         interface,
         capabilities,
         ledger,
+        system_log,
         started: Instant::now(),
         draining: false,
+        delivery_failed: false,
         control: Session::new(run_dir, resume_model),
     };
     let result = thread::scope(|scope| {
+        let completed = events.clone();
+        scope.spawn(move || {
+            while let Ok((command, cancellation)) = delivery_queue.recv() {
+                let result = writer.send_cancellable(command.clone(), &cancellation);
+                if completed.send(Event::Delivered(command, result)).is_err() {
+                    break;
+                }
+            }
+        });
         let sender = events.clone();
         scope.spawn(move || {
             forward_signals(
@@ -217,6 +303,8 @@ pub fn run(
         let mut failure = None;
         let result = (|| -> io::Result<()> {
             task.publish()?;
+            let mut outstanding = initial_commands.len();
+            queue_deliveries(&deliveries, &mut pending_deliveries, initial_commands)?;
             loop {
                 let event = match if task.tree.recovering() {
                     None
@@ -236,10 +324,29 @@ pub fn run(
                         .recv()
                         .map_err(|_| io::Error::other("Control event channel disconnected"))?,
                 };
+                if matches!(&event, Event::Delivered(..)) {
+                    outstanding = outstanding.saturating_sub(1);
+                }
+                if matches!(
+                    &event,
+                    Event::Request(ui::Request::Shutdown | ui::Request::Interrupt)
+                ) {
+                    for (_, token) in &pending_deliveries {
+                        token.store(true, Ordering::Release);
+                    }
+                }
                 let actions = match task.handle(event) {
                     Ok(Some(actions)) => actions,
                     Ok(None) => break,
+                    Err(error) if task.delivery_failed && !task.tree.is_stopping() => {
+                        failure.get_or_insert(error);
+                        ControlActions {
+                            commands: task.tree.begin_shutdown()?,
+                            ..Default::default()
+                        }
+                    }
                     Err(error) if !task.tree.is_stopping() && !task.tree.recovering() => {
+                        task.delivery_failed = true;
                         task.publish()?;
                         let actions = task.control.fail_and_exit(task.tree, &error)?;
                         failure = Some(error);
@@ -250,15 +357,22 @@ pub fn run(
                         return Err(error);
                     }
                 };
+                for error in runtime.drain_delivery_errors() {
+                    task.system_log.write(
+                        "ERROR",
+                        "runtime",
+                        Some(task.tree.execution_id()),
+                        &error,
+                    )?;
+                }
                 for event in runtime.drain_events() {
                     task.record(
                         json!({"source":"runtime","message":"runtime_event","event":event}),
                     )?;
                 }
                 task.publish()?;
-                for command in actions.commands {
-                    task.connection.send(command)?;
-                }
+                outstanding += actions.commands.len();
+                queue_deliveries(&deliveries, &mut pending_deliveries, actions.commands)?;
                 for record in actions.records {
                     task.record(record)?;
                 }
@@ -282,6 +396,7 @@ pub fn run(
                 }
                 let started = task.started;
                 let ledger = &mut task.ledger;
+                let session_id = task.tree.execution_id().to_string();
                 let (commands, wake, finish) = task.control.settle(
                     task.tree,
                     runtime,
@@ -290,7 +405,13 @@ pub fn run(
                     task.draining,
                     |mut value| {
                         value["t_ms"] = json!(started.elapsed().as_millis() as u64);
-                        ledger.record(value)
+                        if let Err(error) = ledger.record(value) {
+                            system_log.history_failure(
+                                &session_id,
+                                &format!("record append failed: {error}"),
+                            );
+                        }
+                        Ok(())
                     },
                     |environment| {
                         let sender = events.clone();
@@ -309,9 +430,8 @@ pub fn run(
                         });
                     },
                 )?;
-                for command in commands {
-                    task.connection.send(command)?;
-                }
+                outstanding += commands.len();
+                queue_deliveries(&deliveries, &mut pending_deliveries, commands)?;
                 if wake {
                     let _ = events.send(Event::Timer);
                 }
@@ -321,11 +441,14 @@ pub fn run(
                         break;
                     }
                     for id in ids {
-                        task.ledger
-                            .archive_branch(task.tree.take_archivable_branch(&id)?)?;
+                        let _ = task.ledger.archive_branch(
+                            task.tree.take_archivable_branch(&id)?,
+                            task.tree.execution_id(),
+                            task.system_log,
+                        );
                     }
                 }
-                if finish {
+                if finish && outstanding == 0 {
                     task.connection.finish()?;
                     task.draining = true;
                 }
@@ -336,25 +459,62 @@ pub fn run(
         SIGNAL_FD.store(-1, Ordering::Relaxed);
         // EOF cannot be lost when the nonblocking wake socket is full.
         let _ = signal_writer.shutdown(std::net::Shutdown::Write);
+        drop(deliveries);
+        for (_, token) in &pending_deliveries {
+            token.store(true, Ordering::Release);
+        }
         task.connection.stop_receiving();
         result
     });
     task.flush_observations()?;
-    interface.publish(task.ledger, false, false, "Stopped")?;
-    let unarchived: Vec<_> = task.ledger.unarchived().collect();
-    if !unarchived.is_empty() && !task.control.saved() {
-        return Err(format!(
-            "{}; Ledger history incomplete: {}",
-            result
-                .as_ref()
-                .err()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            unarchived.join(", ")
-        )
-        .into());
+    if let Err(error) = interface.publish(task.ledger, false, false, "Stopped") {
+        system_log.history_failure(
+            task.tree.execution_id(),
+            &format!("observation append failed: {error}"),
+        );
     }
     result.map_err(Into::into)
+}
+
+fn queue_deliveries(
+    sender: &mpsc::Sender<(AgentCommand, std::sync::Arc<AtomicBool>)>,
+    pending: &mut Vec<(String, std::sync::Arc<AtomicBool>)>,
+    commands: Vec<AgentCommand>,
+) -> io::Result<()> {
+    pending.retain(|(_, token)| std::sync::Arc::strong_count(token) > 1);
+    for command in commands {
+        let branch = serde_json::to_value(&command)?["branch_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if matches!(
+            &command,
+            AgentCommand::Abort { .. }
+                | AgentCommand::Discard { .. }
+                | AgentCommand::Cleanup { .. }
+        ) {
+            for (id, token) in pending.iter() {
+                if id == &branch {
+                    token.store(true, Ordering::Release);
+                }
+            }
+        }
+        let token = std::sync::Arc::new(AtomicBool::new(false));
+        if matches!(
+            &command,
+            AgentCommand::StartCandidate { .. }
+                | AgentCommand::StartBranch { .. }
+                | AgentCommand::Prompt { .. }
+                | AgentCommand::ResolvePending { .. }
+                | AgentCommand::Continue { .. }
+        ) {
+            pending.push((branch, token.clone()));
+        }
+        sender
+            .send((command, token))
+            .map_err(|_| io::Error::other("Agent delivery worker stopped"))?;
+    }
+    Ok(())
 }
 
 fn now_ms() -> u64 {
@@ -367,6 +527,47 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod signal_tests {
     use super::*;
+
+    #[test]
+    fn waiting_delivery_does_not_block_cancel_or_disable_cleanup() {
+        let (sender, queue) = mpsc::channel();
+        let mut pending = Vec::new();
+        queue_deliveries(
+            &sender,
+            &mut pending,
+            vec![AgentCommand::Prompt {
+                branch_id: "b".into(),
+                prompt: "go".into(),
+            }],
+        )
+        .unwrap();
+        let (_, startup) = queue.recv().unwrap();
+        // The delivery worker is still waiting. The control path can enqueue
+        // cancellation and cleanup without waiting for any reception receipt.
+        queue_deliveries(
+            &sender,
+            &mut pending,
+            vec![
+                AgentCommand::Abort {
+                    branch_id: "b".into(),
+                    command_id: "abort".into(),
+                    generation: 0,
+                },
+                AgentCommand::Cleanup {
+                    branch_id: "b".into(),
+                    workspace: "/tmp/fake".into(),
+                    command_id: "cleanup".into(),
+                    generation: 0,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(startup.load(Ordering::Acquire));
+        let (_, abort) = queue.recv().unwrap();
+        let (_, cleanup) = queue.recv().unwrap();
+        assert!(!abort.load(Ordering::Acquire));
+        assert!(!cleanup.load(Ordering::Acquire));
+    }
 
     #[test]
     fn late_and_repeated_signals_do_not_need_another_pipe_byte() {

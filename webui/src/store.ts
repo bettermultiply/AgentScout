@@ -118,6 +118,10 @@ export const useAppStore = create<AppStore>((set, get) => {
       set({ connection: 'open', error: null })
     }
 
+    stream.addEventListener('system-warning', (message) => {
+      if (currentGeneration === generation) set({ error: JSON.parse((message as MessageEvent).data) as string })
+    })
+
     stream.onmessage = (message) => {
       if (currentGeneration !== generation) return
       let event: ObservationEvent

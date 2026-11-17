@@ -22,11 +22,33 @@ fn operation_context(environment_id: &str, request: &OperationRequest) -> Backen
 
 impl Shared {
     pub(super) fn dispatch(self: &Arc<Self>, request: OperationRequest) {
+        use sha2::{Digest, Sha256};
+        let fingerprint: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&request).expect("operation requests serialize"))
+                .into();
         {
             let mut seen = self.seen.lock().unwrap();
-            if !seen.insert(request.request_id.clone()) {
+            if let Some((original, completed)) = seen.get(&request.request_id) {
+                if original != &fingerprint {
+                    let _ = self.out.send(AdapterMessage::Rejected {
+                        request_id: request.request_id.clone(),
+                        reason: "request id reused with different content".into(),
+                    });
+                    return;
+                }
+                let completed = *completed;
+                let _ = self.out.send(AdapterMessage::Received {
+                    request_id: request.request_id.clone(),
+                });
                 drop(seen);
                 let results = self.results.lock().unwrap();
+                if completed && results.get(&request.request_id).is_none() {
+                    let mut result = make_result(&request, ResultStatus::Failed, None, false);
+                    result.reason =
+                        Some("original result expired; request will not execute again".into());
+                    let _ = self.out.send(AdapterMessage::Result(result));
+                    return;
+                }
                 let (_results, timeout) = self
                     .result_signal
                     .wait_timeout_while(results, RESULT_WAIT_TIMEOUT, |cache| {
@@ -45,6 +67,17 @@ impl Shared {
                 }
                 return;
             }
+            if let Some(reason) = seen.admission_error(&request.request_id) {
+                let _ = self.out.send(AdapterMessage::Rejected {
+                    request_id: request.request_id.clone(),
+                    reason: reason.into(),
+                });
+                return;
+            }
+            seen.insert(request.request_id.clone(), (fingerprint, false));
+            let _ = self.out.send(AdapterMessage::Received {
+                request_id: request.request_id.clone(),
+            });
         }
         let queue = self.queue_for(&request.environment_id);
         let preempt = matches!(
@@ -78,6 +111,22 @@ impl Shared {
         let state = self.runtime.state(environment_id);
         let context = operation_context(environment_id, request);
         match &request.operation {
+            Operation::BindExecution { branch_id } => {
+                if state != Some(EnvironmentState::Available) || branch_id.is_empty() {
+                    return self.reasoned_failure(
+                        request,
+                        state,
+                        "Branch binding requires an available Environment",
+                    );
+                }
+                let Some(commands) = &self.commands else {
+                    return self.reasoned_failure(request, state, "execution endpoint unavailable");
+                };
+                if let Err(reason) = commands.bind(branch_id, environment_id) {
+                    return self.reasoned_failure(request, state, reason);
+                }
+                self.success(request, state, true)
+            }
             Operation::MaterializeAuthority => match self.runtime.materialize(&context) {
                 Ok(filesystem) => {
                     let mut result = self.success(request, state, can_accept(state));
@@ -412,7 +461,10 @@ impl Shared {
             );
         }
         match self.runtime.cleanup_with_context(context) {
-            Ok(()) => self.success(request, self.runtime.state(environment_id), false),
+            // Successful cleanup is the backend's resource-release receipt.
+            // Backends may remove the record, so a subsequent state lookup
+            // cannot be used to reconstruct this completed transition.
+            Ok(()) => self.success(request, Some(EnvironmentState::Cleaned), false),
             Err(error) => self.backend_error(request, environment_id, error),
         }
     }
@@ -529,6 +581,10 @@ impl Shared {
             );
         }
         result.backend_states = self.runtime.backend_states(&request.environment_id);
+        result.execution_access = self
+            .commands
+            .as_ref()
+            .map(|commands| commands.access(&request.environment_id));
         result
     }
 
@@ -542,6 +598,10 @@ impl Shared {
         let mut result = self.success(request, state, can_accept_operations);
         result.environment_id = environment_id.to_string();
         result.backend_states = self.runtime.backend_states(environment_id);
+        result.execution_access = self
+            .commands
+            .as_ref()
+            .map(|commands| commands.access(environment_id));
         if state.is_none() {
             result.status = ResultStatus::Failed;
             result.can_accept_operations = false;

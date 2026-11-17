@@ -1,5 +1,11 @@
 # Instrumentation 通用层
 
+Product Integration 对应 `instrumentation/pi/`，Interposer 对应 `instrumentation/core/` 的 `createAgentAccess`。`instrumentation/pi/asc-proxy.ts` 的进程内 ASC-Proxy 同时管理控制 Gateway Unix socket 和独立的 Runtime 执行连接。Branch 直接传入，control plane 通过 `BindExecution` 明确建立 Branch→Environment 独占绑定，端点校验绑定后才接受执行、取消与确认。文件工具与 Runtime 声明工具都经执行连接调用；私有文件工具计划及 Pi 工具适配器位于 `src/runtime/backends/filesystem/`，Instrumentation 不读取这些计划。
+
+2026-11-17：完整脚本模型 benchmark 的 match、mismatch、authority_first、fast_failure 均通过；证据分别为 `/tmp/opencode/benchmark-task-gT3UtV`、`/tmp/opencode/benchmark-task-y4bhE3`、`/tmp/opencode/benchmark-task-JaHLiL`、`/tmp/opencode/benchmark-task-JaZYQN`。恢复文件场景通过，证据 `/tmp/opencode/recovery-filesystem-f2BUCi`。provider 在首个流事件前失败时保留 action 身份，供 Pi 随后生成的失败消息关联 Usage；恢复后的运行重新发布当前连接状态，避免历史断开事件阻止 `/continue`。未调用真实模型。
+
+执行协议包含接受、增量 output、终态、cancel 和 confirm。取消等待端点接受后转发并等待 backend 返回终态。NLE 工具模拟延迟在 backend 内可取消等待，并用独立动作锁维持共享世界动作顺序，不再占住 bridge 阻塞候选环境创建；请求已进入 bridge 后仍发送取消并等待其终态，动作已进入同步游戏调用时等待调用返回。Branch 取消还调用 holder 的 `drain(cancel:true)`，清理已完成工具留下的后代。确认释放结果正文与增量输出；请求使用已有 `req-N` 连续序号窗口，保留最近身份指纹及未确认操作，超窗旧序号拒绝重放，长期序号缺口或未确认操作占满 1024 槽位时明确拒绝新增操作。回归覆盖连续 1299 个已确认操作，不能将窗口有界理解为终身最多执行 1024 次。
+
 Pi 目前保留 SDK 宿主，不启动原生 CLI：原生 RPC 的 fork/clone 切换单一当前 session，缺少并行候选、待决工具恢复与当前 continue 的对应命令。原生 `context` 可等待并用 `ctx.abort()` 在 fake transport 前取消；`before_provider_request` 的取消仍可能进入 provider，不能把它当作请求前强制阻止保证。生产命令发现已通过原生 inline extension 的公开 `getCommands()` 实现，保留默认资源加载。集成参数 `--models` 继续解释为 provider JSON，不等同于原生 CLI 模型列表。
 
 Agent 与 Instrumentation 宿主在所有 BaseRuntime 路径都位于 Branch 隔离外，由 Runtime 启停；有 holder 的文件系统路径仅把 holder 和受管命令放进环境。Adapter 的直接启动路径（包括 Firecracker）同样在宿主运行；Guest Agent 留在 guest 提供 Runtime 命令服务。扩展直接使用 Node 的工作区读写、进程启动或直接 shell 不会自动得到 Branch 视图；只有已适配的文件工具和 Runtime 工具受到当前环境约束。内建文件工具的覆盖不等于任意自定义工具已隔离。所有网络无需统一绕行 Runtime。
@@ -8,6 +14,28 @@ Agent 与 Instrumentation 宿主在所有 BaseRuntime 路径都位于 Branch 隔
 本文记录 Instrumentation 通用层的当前实现、接口与限制；目标语义见 [Instrumentation 设计](../design/agent-integration.md)。
 
 ## 本轮验证与能力边界
+
+2026-11-17 最终 focused correction（下列早先整组检查未重跑）：先以手工 Rust 事件复现工具空预测／预测失败未放行，以及 speculative-first 候选不能进入 Policy 裁决；分别复用 `authorize_authority`／`resolve_pending` 和既有 `Validate → match/dispose` 修复。扩展回归又复现预测失败后的模型结果无法配对及终态 Chance 过早回收，修复结果过滤及等待点释放前的回收条件。`cargo test --lib held_authority -- --test-threads=1` 三项通过；`node --test --test-concurrency=1 tests/pi-access.mjs tests/pi-asc-proxy.mjs` 九项通过，均无真实模型调用。
+
+四路径回归 `held_authority_four_launch_paths_promote_or_fallback_once` 覆盖工具／模型 × eager／speculative-first × 接受／拒绝的控制状态、执行授权次数、Promote Applied 后父 Discard、无父结果注入及回退一次。它注入 `ControlResult::Disposition`，不是实际 Policy 求值或 Pi SDK 四路径端到端验收。现有 Pi access doubles 覆盖工具执行前等待、独立候选 session、Promote 后执行和各等待点取消；不据此声称模型 held hook 与工具 held hook 的完整矩阵均已端到端验证。
+
+相邻定向检查：`ordinary_prompt_is_queued_while_paused_until_continue`、`cancellation_fences_admission_until_writers_stop_and_old_generation_stays_dead`、`promoting_branch_keeps_its_inflight_model_waiting_point_live` 各一项通过；`cargo test --lib validation -- --test-threads=1` 三项通过；最终 `git diff --check` 通过。未重复父轮完成的 202 lib、37 Pi、7 recovery、6 VM 整组，也未重新运行全目标 check。
+
+speculative-first 在已有 Proposal、launch 已决定且没有在飞 launch 时进入现有 Policy `match/dispose`；没有权威结果时输入为 null，由 Policy 的明确可接受性规则裁决。默认需要真实比较的 Policy 不因此自动具备独立 validator；`Indeterminate` 会保留等待，是否转为 eager 仍由 `launch` 决定。未完成替代模型不伪造 Proposal，候选失败沿 BranchFailed／Discard 收敛并放行父调用。
+
+暂停普通输入只入队，不自动恢复；`/continue` 先恢复原任务，原轮结束后按队列顺序交付消息。恢复时以当前 `execution_accesses` 覆盖 session 和待启动 candidate setup 的旧访问地址；ASC-Proxy 的执行 generation 属于当前 Runtime 端点，重建端点后从其初始 generation 开始，不从保存文件复用。Branch 命令 generation 和执行 generation 是不同协议字段，前者随 Tree 恢复，后者由 cancel_branch 的 Runtime 回执更新。
+
+2026-11-17 最终定向复核：`cargo check --all-targets` 无警告通过；`cargo test --lib -- --test-threads=1` 202/202 通过。`cargo test --test firecracker_e2e -- --test-threads=1 --skip codex_starts_and_reaches_the_model_service` 真实 VM 6/6 通过，覆盖生命周期、独立 sibling 快照、退出事件、重试、SSH 和在飞操作中断。模型服务用例排除，因为本轮禁止真实模型请求；早先未排除的整组运行在该用例超时，不能宣称 7/7。fixture 状态目录使用工作区祖先的短 `afc/` 路径，既避开 Unix socket 长度上限，也不把内存快照放入容量不足的 `/tmp` tmpfs。namespace 清理严格接受 `/run/netns` 和 `/var/run/netns` 的缺资源诊断；成功 cleanup 用 backend 回执报告 Cleaned，不依赖可能已移除的 backend 记录。
+
+`node --test --test-concurrency=1 tests/pi*.mjs tests/predictor-fact-e2e.mjs` 37/37 通过，包括 notification adapter 9 项及 predictor 单步／五步 2 项；顺序扩大运行未重现此前的 Policy 求值失败，不据此猜测根因。predictor 证据 `/tmp/opencode/predictor-fact-e2e-tOnzRM`、`/tmp/opencode/predictor-fact-e2e-IBvClg`。notification fixture 补齐 Pi 工具定义模块，并使用独立执行 socket 的接受／取消／终态／确认流程。模型 admission 不使工具验证过期的回归为 `next_model_admission_does_not_expire_tool_validation`；checkpoint 已有工具结果时不重复登记恢复调用。
+
+此前 benchmark 独立重跑 4/4：`/tmp/opencode/benchmark-task-YpE6yi`、`/tmp/opencode/benchmark-task-zGiA9N`、`/tmp/opencode/benchmark-task-iZAXXl`、`/tmp/opencode/benchmark-task-0hANuI`；本次未重新执行 benchmark。全仓 `cargo fmt --check` 仍有既有／其他工作差异，原始证据 `/tmp/opencode/instrumentation-fmt-before.log`；只格式化相关 Rust，不批量覆盖共享工作树。
+
+`node --test --test-concurrency=1 tests/authority-filesystem.mjs tests/recovery-active.mjs tests/recovery-filesystem.mjs` 7/7 通过。活跃恢复五场景已连续两组全部通过；最新证据 none `/tmp/opencode/recovery-active-TsQSEH`、retry `/tmp/opencode/recovery-active-RQCi3k`、continue `/tmp/opencode/recovery-active-MV0IBH`、multiple `/tmp/opencode/recovery-active-Rn2sMG`、filesystem `/tmp/opencode/recovery-active-ZAcmf9`。fixture 在实际 before-tool/checkpoint 后、执行前阻塞 sibling，不向生产代码添加 op 编号顺序；continue 场景等 task_completed 后再保存。恢复中的 candidate setup 使用当前 Runtime 下发的 execution access，不复用保存时已失效的 socket。断言保留待决 sibling、候选配对结果及实际动作次数，未放宽重复执行检查。authority 文件测试覆盖后台写者、跨 task 复用、中断和失败重试。
+
+Branch cancellation 与 Execute 使用同一 admission 锁：开始取消时推进 execution generation，关闭新 admission，等待已有操作终态后 drain 写者；成功后开放新 generation，旧 generation 不能复活。drain 失败仍关闭执行，但允许重试 drain，不再永久卡死。确定性回归覆盖活跃操作取消、清理期间新增执行拒绝、drain 失败／重试、延迟旧请求拒绝及存活 authority 的新 task 执行；1299 次确认回归仍通过。
+
+补充检查：`cargo test --bins --test filesystem_backend_identity --test ledger_projection --test policy --test policy_provider -- --test-threads=1` 9/9 通过；ASC-Proxy 的独立 `tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --skipLibCheck ../pi/node_modules/@types/node/index.d.ts instrumentation/pi/asc-proxy.ts` 通过（使用 `../pi/node_modules/.bin/tsc`）。`git diff --check` 通过。全仓格式最终记录 `/tmp/opencode/instrumentation-fmt-final.log`，剩余 24 个文件均已出现在本轮格式化前记录中。ASC-Proxy 的个别取消失败不会跳过 branch-wide drain，新增 socket 回归核对该流程。
 
 `cargo check --all-targets`、`cargo test --lib`（178 项）、`node --test tests/pi*.mjs`（32 项）、`tests/predictor-fact-e2e.mjs`（2 项，正常单步及 Promote 后五步）、相邻 Pi 原生边界与摘要验证（20 项）、Pi `npm run check` 通过。端到端仅使用 loopback fake SSE；证据目录为 `/tmp/opencode/predictor-fact-e2e-CAb2ux` 和 `/tmp/opencode/predictor-fact-e2e-FtNgKj`。本轮无真实模型请求。Firecracker 实机和不受本机支持的隔离 backend 未做端到端验收，不由库测试通过推定全部 backend 已验证。
 
@@ -59,7 +87,7 @@ Agent 与 Instrumentation 宿主在所有 BaseRuntime 路径都位于 Branch 隔
 ## 3. 当前覆盖
 
 - `admit.opportunity_pass` 与 `admit.feasibility_pass` 在通用层求值；准入成立时上报 `speculative_admission_request`。
-- `extent` 按 Branch 和 action identity 计数，只在工具执行点求值；结果为 `stop` 时上报 `branch_suspended(extent_reached)` 并等待 `resolve_pending` 或取消释放。
+- `extent` 按 Branch 和 action identity 计数，在工具与模型执行前求值；结果为 `stop` 时上报 `branch_suspended(extent_reached)` 并等待 `resolve_pending` 或取消释放。
 - `effect` 只对 `tool_execution` 执行点求值；`deny` 直接抛错，`block` 上报 `branch_suspended(effect_gate)` 并等待 Promote、Discard 或清理释放。模型推理是 PURE 步骤，不经过 effect 闸门。
 - `rebalance` 的 pause/resume 与 extent/effect hold 都由通用层保存和释放；`branch_suspended` / `branch_resumed` 由通用层上报。
 - control plane 命令的 hold 生命周：`start_candidate` 建立 effect hold，`promote` 释放 effect/extent，`discard`、`cleanup` 释放全部 hold 并清理本地状态，`resolve_pending` 释放 extent。
@@ -76,7 +104,7 @@ Agent 与 Instrumentation 宿主在所有 BaseRuntime 路径都位于 Branch 隔
 
 本轮验证：先用 `tests/pi-interaction.mjs` 稳定复现回答后 Promise 不完成，再移除外层提前 `pending.delete`，由内部 finish 统一删除并 resolve；回答、明确取消、分支取消、AbortSignal 与无人回答保持等待均通过。实际 TUI 输入循环的手工字节回归覆盖 confirm/select/input/editor、中文退格、多行提交及 Esc 取消，不把答案当聊天。控制树 13 项相关测试通过，含候选提示挂起→换权威发布→回答、迟到／错类型拒绝、换权威取消与缓存查询。`tests/pi*.mjs` 全部 32 项通过；SDK double 的 session_start 先等待回答，再完成资源加载，断言清单读取一次、重复请求只回缓存。WebUI 手工事件核对换权威保留清单、关闭旧提示、重连折叠恢复缓存。`cargo check --all-targets`、WebUI typecheck/build、`git diff --check` 通过；构建保留现有大包体提示。未调用真实模型、未执行特权环境测试，也未完成真实终端／浏览器／真实扩展的人工全链路验收。
 
-中断方面，整轮中断已有基础：中止权威执行、丢弃候选，并把仍在请求阶段的工具操作标记为失败。Runtime 中已经开始执行的工具没有取消通道，仍属实现缺口，归后续取消相关项。
+整轮中断中止权威执行、丢弃候选，并把仍在请求阶段的工具操作标记为失败。文件、shell 和 Runtime 工具通过同一执行协议转发取消，只有 backend 终态和遗留写者清理确认后才结束 Branch 取消；本地 Promise 结束不作为 backend 停止证据。
 
 本轮补充验证：`cargo test --lib control_plane::` 27 项通过；`interaction.ts` 独立 TypeScript 检查通过，手工构造事件核对 confirm 的 false 原样返回、AbortSignal、取消及 custom reject 均通过。以上不等于真实扩展与浏览器全链路验收。
 
@@ -118,10 +146,10 @@ Agent 与 Instrumentation 宿主在所有 BaseRuntime 路径都位于 Branch 隔
 
 ## 5. 限制
 
-- 2026-11-16：Pi `custom` 提示立即 reject 并说明不支持；终端组件、主题、状态与编辑器装饰接口仅最小空实现，`notify` 为文字观察事件。AScout TUI 提供 confirm/select/input/editor 回答与取消入口，多行 editor 可用，操作见 [TUI 使用说明](reference-workload.md)。无人回答保持等待，不补默认答案或超时；明确取消才按 Pi 的取消值结束。挂起提示不提供跨崩溃恢复，主动恢复暂停会取消提示。Runtime 中已开始的工具仍无取消通道。
+- 2026-11-16：Pi `custom` 提示立即 reject 并说明不支持；终端组件、主题、状态与编辑器装饰接口仅最小空实现，`notify` 为文字观察事件。AScout TUI 提供 confirm/select/input/editor 回答与取消入口，多行 editor 可用，操作见 [TUI 使用说明](reference-workload.md)。无人回答保持等待，不补默认答案或超时；明确取消才按 Pi 的取消值结束。挂起提示不提供跨崩溃恢复，主动恢复暂停会取消提示。
 - 只有 Pi 一个 Product Integration；sub-agent 启动前仍无统一 Hook。
 - effect 只实现 `block` / `deny` 两种最小计划，没有 Reuse、Salvage 或更多效果模式。
 - extent 计数的是工具执行点的 action 次数，不是模型语义上已完成步骤数；子 Chance 的计数独立于父 Chance。
 - hold 的 Promise 只存在于接入进程内；主动退出保存 hold 所属 Branch 与工具／候选配对描述，跨进程重新建立等待，用户继续后才推进。control plane 仍是 Tree、Chance 和提交资格的唯一权威。实际验收与 backend 边界见 [恢复](recovery.md)。
-- 通用层不等待“control plane 返回的任意处置”；它只把 control plane 命令落实为 hold 的释放，真正的继续/阻止/使用结果仍由 Product Integration 在本次调用返回路径上完成。
+- 通用层把 control plane 命令落实为 hold 的释放；Product Integration 负责放行或取消原调用，以及候选 session 的创建和接替。候选预测输入不用于替旧父调用完成。
 - `node --test tests/pi-access.mjs` 覆盖 Pi 接入行为，使用伪造 SDK 与手工事件，不调用真实模型；本轮没有新增测试。

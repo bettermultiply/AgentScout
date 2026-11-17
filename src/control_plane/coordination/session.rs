@@ -32,6 +32,7 @@ pub fn start(
     tree.set_agent_launch(launch.clone());
     let mut command = if let Some(path) = recovery_generation {
         AgentCommand::Load {
+            execution_accesses: Default::default(),
             environments: tree
                 .branches
                 .iter()
@@ -68,8 +69,9 @@ pub fn start(
         if established.status != ResultStatus::Completed || established.environment_id.is_empty() {
             return Err("Runtime failed to establish the authority Environment".into());
         }
-        if let AgentCommand::StartBranch { environment_id, .. } = &mut command {
+        if let AgentCommand::StartBranch { environment_id, execution_access, .. } = &mut command {
             *environment_id = Some(established.environment_id);
+            *execution_access = established.execution_access;
         }
     }
     let environment = tree
@@ -85,6 +87,13 @@ pub fn start(
             agent: Some(launch.clone()),
         },
     )?;
+    let bound = runtime_call(runtime, environment, Operation::BindExecution { branch_id: authority.clone() })?;
+    if let AgentCommand::StartBranch { execution_access, .. } = &mut command {
+        *execution_access = bound.execution_access.clone();
+    }
+    if let AgentCommand::Load { execution_accesses, .. } = &mut command {
+        if let Some(access) = bound.execution_access { execution_accesses.insert(authority.clone(), access); }
+    }
     if recovery_generation.is_some() {
         for branch in tree.branches.values().filter(|branch| {
             branch.branch_id != authority
@@ -101,6 +110,10 @@ pub fn start(
                     agent: Some(launch.clone()),
                 },
             )?;
+            let started = runtime_call(runtime, branch.environment_id.as_deref().ok_or("live Branch Environment missing")?, Operation::BindExecution { branch_id: branch.branch_id.clone() })?;
+            if let AgentCommand::Load { execution_accesses, .. } = &mut command {
+                if let Some(access) = started.execution_access { execution_accesses.insert(branch.branch_id.clone(), access); }
+            }
         }
     }
     Ok(command)
@@ -247,9 +260,7 @@ impl Session {
                 if prompt.trim() == "/continue" {
                     return self.request(tree, Request::Continue, at);
                 }
-                if !self.recovery.continue_execution(tree, at) {
-                    return Ok(ControlActions::default());
-                }
+                let paused = tree.recovering();
                 if tree.task_finishing() {
                     self.lifecycle.retry_materialization();
                     self.notice = "Finishing previous task; input deferred".into();
@@ -257,7 +268,7 @@ impl Session {
                 tree.queue_prompt(prompt);
                 self.input_sequence += 1;
                 self.input_error = None;
-                self.notice = "Agent running".into();
+                self.notice = if paused { "Input queued while paused" } else { "Agent running" }.into();
                 Vec::new()
             }
         };

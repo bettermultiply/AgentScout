@@ -34,6 +34,8 @@ import re
 import secrets
 import sys
 import time
+import threading
+import queue
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -241,8 +243,30 @@ def main() -> int:
 
     worlds: dict[str, World] = {}
     environment_states: dict[str, str] = {}
-    for line in sys.stdin:
-        request = json.loads(line)
+    requests = queue.Queue()
+    cancellation = {}
+    lock = threading.Lock()
+
+    def receive():
+        for line in sys.stdin:
+            request = json.loads(line)
+            with lock:
+                if request.get("op") == "cancel":
+                    event = cancellation.get(request.get("id"))
+                    if event is not None:
+                        event.set()
+                    continue
+                event = threading.Event()
+                cancellation[request.get("id")] = event
+            requests.put((request, event))
+        requests.put(None)
+
+    threading.Thread(target=receive, daemon=True).start()
+    while True:
+        item = requests.get()
+        if item is None:
+            break
+        request, cancelled = item
         request_id = request.get("id")
         try:
             operation = request.get("op")
@@ -273,8 +297,9 @@ def main() -> int:
                     or not 0 <= action < world.environment.action_space.n
                 ):
                     raise ValueError("action is outside the NLE action space")
-                if args.delay > 0:
-                    time.sleep(args.delay)
+                if cancelled.wait(max(0, args.delay)):
+                    reply(sys.stdout, request_id, ok=False, cancelled=True)
+                    continue
                 observation, reward, terminated, truncated, _ = step(world, action)
                 world.observation = digest(observation)
                 reply(
@@ -302,8 +327,6 @@ def main() -> int:
                     ):
                         raise ValueError("action is outside the NLE action space")
                     before = world.observation
-                    if args.delay > 0:
-                        time.sleep(args.delay)
                     observation, _reward, _terminated, _truncated, _ = step(world, action)
                     after = digest(observation)
                     world.observation = after
@@ -400,6 +423,9 @@ def main() -> int:
                 raise ValueError("unsupported operation")
         except Exception as error:
             reply(sys.stdout, request_id, ok=False, error=f"{type(error).__name__}: {error}")
+        finally:
+            with lock:
+                cancellation.pop(request_id, None)
     for name in list(worlds):
         release(worlds, name)
     return 0

@@ -158,6 +158,27 @@ impl SpeculativeTree {
                 result,
                 evidence,
             } => {
+                if task_id != self.execution_id {
+                    return Err(invalid_input("action task does not match tree"));
+                }
+                self.branch(&branch_id)?;
+                if let Some(previous) = self
+                    .action_facts
+                    .get(&branch_id)
+                    .and_then(|facts| facts.get(&action_id))
+                {
+                    if previous.status != status
+                        || previous.action_kind != action_kind
+                        || previous.result.as_ref() != Some(&result)
+                        || previous.evidence != evidence
+                    {
+                        self.pending_records.push(serde_json::json!({
+                            "message": "feedback_conflict", "branch_id": branch_id,
+                            "operation_id": action_id, "reason": "conflicting ActionFinished feedback"
+                        }));
+                    }
+                    return Ok(vec![]);
+                }
                 let tool_calls = result.get("tool_calls").cloned().or_else(|| {
                     evidence
                         .as_ref()
@@ -184,6 +205,23 @@ impl SpeculativeTree {
                     .get(&branch_id)
                     .is_some_and(|a| a.contains_key(&action_id));
                 let mut pending_commands = Vec::new();
+                if live && action_kind == ActionKind::ToolExecution {
+                    let ids: Vec<_> = self.chances.values().filter(|chance|
+                        chance.parent_branch_id == branch_id && chance.operation_id == action_id
+                        && chance.authority == AuthorityState::Fetching).map(|chance| chance.chance_id.clone()).collect();
+                    for id in ids {
+                        let chance = self.chance(&id)?.clone();
+                        let mut actions = crate::control_plane::coordination::ControlActions::default();
+                        let outcome = if status == ActionStatus::Succeeded {
+                            Ok(crate::control_plane::coordination::ControlResult::Outcome(result.clone(), evidence.clone().unwrap_or(Value::Null)))
+                        } else { Err(format!("Authority tool {status:?}")) };
+                        self.complete_tool_outcome(crate::control_plane::coordination::ToolPending {
+                            chance_id:id,branch_id:branch_id.clone(),operation_id:action_id.clone(),tool_name:chance.tool_name,arguments:chance.arguments
+                        },outcome,&mut actions)?;
+                        pending_commands.extend(actions.commands);
+                        self.pending_records.extend(actions.records);
+                    }
+                }
                 if live
                     && action_kind == ActionKind::ModelInference
                     && status == ActionStatus::Succeeded
@@ -194,7 +232,8 @@ impl SpeculativeTree {
                         .filter(|c| {
                             c.parent_branch_id == branch_id
                                 && c.operation_id == action_id
-                                && !c.stage.is_terminal()
+                                && (!c.stage.is_terminal()
+                                    || c.authority == AuthorityState::Fetching)
                         })
                         .map(|c| c.chance_id.clone())
                         .collect();
@@ -621,6 +660,22 @@ impl SpeculativeTree {
         Ok(vec![])
     }
 
+    pub fn delivery_failed(&mut self, command: &AgentCommand, reason: String) -> io::Result<Vec<AgentCommand>> {
+        let value = serde_json::to_value(command)?;
+        let branch = value["branch_id"].as_str().unwrap_or_default();
+        if matches!(command, AgentCommand::StartBranch { .. } | AgentCommand::StartCandidate { .. }) && self.branches.get(branch).is_some_and(|b| b.pending_operations.iter().any(|op| matches!(op.kind, OperationKind::StartAgent | OperationKind::StartCandidate) && op.status == OperationStatus::Succeeded)) {
+            return Ok(vec![]);
+        }
+        if let Some(id) = value["command_id"].as_str() {
+            if let Some(pending) = self.pending_commands.get(id).cloned() {
+                return self.handle_command_result(id, branch, pending.operation_id.as_deref(), pending.operation, CommandStatus::Failed, pending.generation, Some(&reason));
+            }
+            // A business result may already have consumed this command.
+            if !matches!(command, AgentCommand::StartCandidate { .. }) { return Ok(vec![]); }
+        }
+        self.handle_branch_failed(branch, reason)
+    }
+
     fn handle_branch_failed(
         &mut self,
         branch_id: &str,
@@ -668,6 +723,28 @@ impl SpeculativeTree {
         reason: Option<&str>,
     ) -> io::Result<Vec<AgentCommand>> {
         let Some(pending) = self.pending_commands.get(command_id).cloned() else {
+            if !matches!(status, CommandStatus::Accepted | CommandStatus::Started)
+                && self.branches.get(branch_id).is_some_and(|branch| {
+                    branch.generation == generation
+                        && branch.pending_operations.iter().any(|operation| {
+                            operation.operation_id == command_id
+                                && matches!(
+                                    operation.status,
+                                    OperationStatus::Succeeded | OperationStatus::Failed
+                                )
+                        })
+                })
+            {
+                self.complete_operation(
+                    branch_id,
+                    Some(command_id),
+                    if status == CommandStatus::Applied {
+                        OperationStatus::Succeeded
+                    } else {
+                        OperationStatus::Failed
+                    },
+                )?;
+            }
             return Ok(vec![]);
         };
         if pending.branch_id != branch_id

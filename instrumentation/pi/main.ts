@@ -1,9 +1,10 @@
-/** AScout-owned integration using Pi's public SDK, without Pi UI internals. */
+/** Product Integration: Pi SDK hooks and session management; createAgentAccess
+ * supplies the Interposer and AscProxy supplies ASC-Proxy communication. */
 // This is a protocol boundary: Pi's SDK types are intentionally loaded from
 // the selected checkout at runtime, so the Rust-side wire schema remains the
 // compile-time contract for this small launcher.
 // @ts-nocheck
-import { connect } from 'node:net';
+import { IdentityWindow, positiveSequence } from '../../../pi/packages/pi-integration/src/identity-window.ts';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
 import { evaluatePolicyArtifact } from '../../../pi/packages/pi-integration/src/local-policy.ts';
@@ -13,7 +14,7 @@ import { Notifications } from './notification.ts';
 import {save as saveRecovery,load as loadRecovery} from './recovery.ts';
 import {recoveryBinding,snapshotResources} from './recovery-binding.ts';
 import { readFileSync } from 'node:fs';
-import {filesystemTools,stopFilesystemWriters} from './filesystem-tools.ts';
+import {AscProxy} from './asc-proxy.ts';
 import { Interaction } from './interaction.ts';
 
 const root = process.env.ASCOUT_PI_ROOT;
@@ -46,6 +47,9 @@ const socketPath = args.shift();
 const agentId = args.shift() ?? 'agent';
 const taskId = process.env.ASCOUT_TASK_ID ?? '';
 const environments=new Map<string,string>();
+const ascProxy=new AscProxy();
+const executionResults=new Map();
+const toolHolds=new Map();
 let nextAction = 1;
 if (!socketPath) throw Error('usage: main.ts <socket> <agent> [--model provider/model] [--thinking level]');
 let modelPattern, modelsPath, additionalModels, thinkingLevel = 'low';
@@ -78,6 +82,13 @@ if (modelPattern || modelsPath) {
 tree.initialize(model,thinkingLevel);
 const sessions = new Map(), checkpoints = new Map(), results = new Map(), waiters = new Map(), resultWaiters = new Map();
 const cancelled = new Set(), generations = new Map(), commands = new Map();
+let commandPrefix=0;
+const commandAhead=new Set<number>();
+const commandSequence=id=>{const match=/^command-([1-9][0-9]*)-/.exec(id);if(!match)return undefined;const n=Number(match[1]);return Number.isSafeInteger(n)?n:undefined};
+function pruneCommands(){
+    const floor=Math.max(0,commandPrefix-256);
+    for(const [id,item] of commands)if(item.settled&&commandSequence(id)!==undefined&&commandSequence(id)<=floor)commands.delete(id);
+}
 const activeActions = new Map(), reportedActions = new Set();
 const aborting = new Set();
 const modelActions = new Map();
@@ -110,6 +121,7 @@ function captureHooks(){
         const position=session.messages.indexOf(assistant),following=session.messages.slice(position+1);
         for(const part of assistant.content)if(part.type==='toolCall'&&!following.some(m=>m.role==='toolResult'&&m.toolCallId===part.id)){
             const id=key(branch,part.id);
+            if(checkpoints.get(id)?.result)continue;
             if(pendingHooks.get(id)?.started&&!runtimeTools.some(spec=>spec.name===part.name))continue;
             if(!suspendedHooks.has(id))suspendedHooks.set(id,{branch,toolCall:structuredClone(part),args:structuredClone(part.arguments),assistantMessage:structuredClone(assistant),admitted:checkpoints.has(id)});
         }
@@ -199,58 +211,38 @@ const capabilities = {
     cancelCompletion:true,
     toolResultInjection:true,
 };
-let authority = tree.authority, closing = false, outgoing = Promise.resolve();
-const socket = connect({path:socketPath,allowHalfOpen:true});
-await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject)});
+let authority = tree.authority, closing = false;
+await ascProxy.open(socketPath);
 let transportError;
-socket.on('error',error=>{transportError=error;socket.destroy()});
 const report = payload => {
     if(payload.message==='action_started'){activeActions.set(key(payload.branch_id,payload.action_id),payload);reportedActions.add(key(payload.branch_id,payload.action_id));}
     if(payload.message==='action_finished')activeActions.delete(key(payload.branch_id,payload.action_id));
     payload={source:'agent_adapter',...payload};
-    if(socket.destroyed)return Promise.resolve();
-    const bytes = Buffer.from(JSON.stringify({kind:'message',payload})), header=Buffer.alloc(4);
-    header.writeUInt32BE(bytes.length);
-    outgoing=outgoing.then(()=>new Promise((resolve,reject)=>{
-        if(socket.destroyed){resolve();return}
-        socket.write(Buffer.concat([header,bytes]),error=>error?reject(error):resolve());
-    })).catch(error=>{transportError=error;socket.destroy()});
-    return outgoing;
+    return sendWire({kind:'message',payload});
 };
+const sendWire = wire => ascProxy.send(wire);
 const access = createAgentAccess({taskId,report,evaluate:evaluatePolicyArtifact});
 const key = (branch, operation) => JSON.stringify([branch,operation]);
 const text = value => typeof value==='string'?value:JSON.stringify(value);
 async function finishActions(branch,status) {
-    for(const action of [...activeActions.values()])if(action.branch_id===branch)
+    for(const action of [...activeActions.values()])if(action.branch_id===branch && !(saving && suspendedHooks.has(key(branch,action.action_id))))
         await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:action.action_kind,status,result:null,timestamp_ms:Date.now()});
 }
 function tools(branch) {
     const cwd=tree.branches.get(branch)?.manager.getHeader().cwd??process.cwd();
-    const fileTools=process.env.ASCOUT_FILESYSTEM_TOOL_PLANS
-        ? filesystemTools(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS,environments.get(branch)??'',cwd,require(resolve(root,'packages/coding-agent/src/core/tools/index.ts')))
-        : [];
-    return [...fileTools,...runtimeTools.map(spec=>({name:spec.name,label:spec.name,description:spec.description,parameters:Type.Unsafe(spec.parameters),execute:async(operation,_args,signal)=>{
-        // Candidate access is decided by the control-plane Policy/Runtime
-        // gates. Pi must report the attempted call and its real failure, not
-        // encode a business admission rule here.
-        const id=key(branch,operation);
-        let value;
-        if(results.has(id)){value=results.get(id);results.delete(id)}
-        else value=await new Promise((resolve,reject)=>{
-            const abort=()=>{waiters.delete(id);reject(Error('Runtime operation cancelled'))};
-            waiters.set(id,value=>{signal?.removeEventListener('abort',abort);resolve(value)});
-            signal?.addEventListener('abort',abort,{once:true});
-            if(signal?.aborted||closing)abort();
-        });
-        return {content:[{type:'text',text:text(value)}],details:undefined};
-    }}))];
+    const sdk=require(resolve(root,'packages/coding-agent/src/core/tools/index.ts'));
+    const definitions=new Map(['read','bash','edit','write'].map(name=>[name,sdk.createToolDefinition(name,cwd)]));
+    for(const spec of runtimeTools)definitions.set(spec.name,{...spec,label:spec.name,parameters:Type.Unsafe(spec.parameters)});
+    return [...definitions.values()].map(spec=>({...spec,execute:async(operation,args,signal,onUpdate)=>{
+        const value=await ascProxy.execute(branch,operation,spec.name,args,{task_id:taskId},signal,onUpdate);
+        executionResults.set(key(branch,operation),value);
+        return value.result?.content?value.result:{content:[{type:'text',text:text(value.result)}],details:undefined};
+    }}));
 }
 // FS execution must never fall back to host implementations selected through
 // user settings or extensions. Only the isolated built-ins and Runtime tools
 // have an execution plan in this integration.
-const filesystemToolSelection=process.env.ASCOUT_FILESYSTEM_TOOL_PLANS
-    ? {tools:['read','bash','edit','write',...runtimeTools.map(tool=>tool.name)]}
-    : {};
+const filesystemToolSelection={tools:['read','bash','edit','write',...runtimeTools.map(tool=>tool.name)]};
 async function beforeModelInference(branch, modelValue, context, signal) {
     await modelRestores.get(branch);
     syncTranscript(branch);
@@ -299,12 +291,10 @@ async function beforeModelInference(branch, modelValue, context, signal) {
         // has started so message_end can still pair the usage. Only forget an
         // action that produced no message at all (the request threw before the
         // stream started), so it cannot be paired with a later message.
-        if(!action.seen_message){
-            const pending=modelActions.get(branch),index=pending?.indexOf(action)??-1;
-            if(index>=0)pending.splice(index,1);
-            if(pending?.length===0)modelActions.delete(branch);
-        }
-        if(!action.seen_message)await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',status:status??(signal?.aborted?'cancelled':'failed'),result:null,timestamp_ms:Date.now()});
+        // A provider can fail before its first stream event. Pi then emits a
+        // synthetic assistant message after this callback; retain its identity
+        // until that message arrives (or the turn exits without a message).
+        action.terminalStatus=status??(signal?.aborted?'cancelled':'failed');
     };
 }
 function install(session,branch) {
@@ -340,25 +330,34 @@ function install(session,branch) {
             checkpoints.set(key(branch,context.toolCall.id),{saved,checkpoint,treeTail,manager:tree.branches.get(branch).manager});
             return checkpoint;
         };
-        await access.beforeAction({
+        const hold=Promise.withResolvers();toolHolds.set(hookKey,hold);
+        const disposition=await access.beforeAction({
             branch,
             actionId:context.toolCall.id,
             actionKind:'tool_execution',
             name:context.toolCall.name,
             arguments:context.args,
             op:{kind:context.toolCall.name,name:context.toolCall.name,arguments:context.args,authority:branch===authority,has_predictor:await access.hasPredictor(branch)},
-            contractContext:{arguments:context.args,runtime_capabilities:runtimeTools,isolated:!!process.env.ASCOUT_FILESYSTEM_TOOL_PLANS&&!runtimeTools.some(t=>t.name===context.toolCall.name)},
+            contractContext:{arguments:context.args,runtime_capabilities:runtimeTools,isolated:!runtimeTools.some(t=>t.name===context.toolCall.name)},
             admit:()=>branch===authority,
             admissionFacts:()=>({checkpoint:prepareCheckpoint()}),
             admitted:suspendedHooks.get(hookKey)?.admitted??false,
             signal,
         });
+        if(disposition.kind==='admit')await new Promise((resolve,reject)=>{
+            const abort=()=>reject(Error('Tool admission cancelled'));
+            signal?.addEventListener('abort',abort,{once:true});
+            hold.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
+            if(signal?.aborted)abort();
+        });
+        toolHolds.delete(hookKey);
         if(signal?.aborted)throw Error('Tool cancelled');
         const toolCheckpoint=prepareCheckpoint();
         await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
         const hook=pendingHooks.get(hookKey);if(hook)hook.started=true;
         return previous;
         } catch(error) {
+            toolHolds.delete(hookKey);
             if(!saving)pendingHooks.delete(key(branch,context.toolCall.id));
             throw error;
         }
@@ -375,7 +374,8 @@ function install(session,branch) {
             const resultKey=key(branch,context.toolCall.id);
             for(const resolve of resultWaiters.get(resultKey)??[])resolve(result);
             resultWaiters.delete(resultKey);
-            if(reportedActions.delete(key(branch,context.toolCall.id)))await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',status:signal?.aborted?'cancelled':isError?'failed':'succeeded',result:{payload:content.length===1&&content[0].type==='text'?content[0].text:null,content,is_error:isError},timestamp_ms:Date.now()})
+            const execution=executionResults.get(resultKey);executionResults.delete(resultKey);
+            if(reportedActions.delete(key(branch,context.toolCall.id)))await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',status:signal?.aborted?'cancelled':isError?'failed':'succeeded',result:execution?.result??{payload:content.length===1&&content[0].type==='text'?content[0].text:null,content,is_error:isError},evidence:execution?.evidence,timestamp_ms:Date.now()})
         }
         return previous;
     };
@@ -423,8 +423,8 @@ function executeTurn(session,branch,operation) {
         .catch(error=>saving?undefined:report({message:'branch_failed',branch_id:branch,reason:String(error instanceof Error?error.message:error)}));
     tasks.add(task);
     const running=branchTasks.get(branch)??new Set();running.add(task);branchTasks.set(branch,running);
-    void task.finally(()=>{running.delete(task);if(!running.size)branchTasks.delete(branch)}).catch(()=>socket.destroy());
-    void task.finally(()=>tasks.delete(task)).catch(()=>socket.destroy());
+    void task.finally(()=>{running.delete(task);if(!running.size)branchTasks.delete(branch)}).catch(()=>ascProxy.destroy());
+    void task.finally(()=>tasks.delete(task)).catch(()=>ascProxy.destroy());
 }
 async function handle(command) {
     const branch=command.branch_id;
@@ -478,6 +478,7 @@ async function handle(command) {
                     additionalModels:additionalModels??null,
                     access:access.snapshot(),generations:[...generations],results:[...results],
                     cancelled:[...cancelled],reportedEntries:[...reportedEntries],commands:commandRecords,
+                    commandPrefix,commandAhead:[...commandAhead],
                     suspendedHooks:[...suspendedHooks],candidateSetups:[...candidateSetups],
                     interruptedBranches:[...interruptedBranches],
                     checkpoints:[...checkpoints].map(([id,c])=>[id,{...c,manager:sourceFiles.get(c.manager.getSessionFile())}])});
@@ -488,12 +489,14 @@ async function handle(command) {
         }
         case 'load': {
             for(const [branch,environment] of Object.entries(command.environments))environments.set(branch,environment as string);
+            for(const [branch,access] of Object.entries(command.execution_accesses??{}))ascProxy.bind(branch,access);
             // A failed load must not settle/delete the saved native sources.
             saving=true;
             let error;
             try {
                 if(sessions.size)throw Error('Load requires an empty Agent adapter');
                 const record=loadRecovery(command.path);
+                if(record.commands.length>1024||(record.commandAhead?.length??0)>1024)throw Error('Recovery command identity window exceeds capacity');
                 if(record.taskId!==taskId)throw Error('Recovery task identity mismatch');
                 if(record.resourceBinding&&JSON.stringify(record.resourceBinding)!==JSON.stringify(await recoveryBinding(root,record.tree.sources.map(source=>source.header.cwd))))throw Error('Recovery Pi code, extension or configuration resources changed');
                 snapshotResources(record.tree.sources,record.snapshotResources);
@@ -518,10 +521,16 @@ async function handle(command) {
                 for(const [id,value] of record.results)results.set(id,value);
                 for(const value of record.cancelled)cancelled.add(value);
                 for(const value of record.reportedEntries)reportedEntries.add(value);
-                for(const [id,value] of record.commands)commands.set(id,{serialized:value.serialized,result:Promise.resolve(value.reply)});
+                commandPrefix=record.commandPrefix??0;
+                for(const n of record.commandAhead??[])commandAhead.add(n);
+                for(const [id,value] of record.commands)commands.set(id,{serialized:value.serialized,result:Promise.resolve(value.reply),settled:true});
                 for(const [id,c] of record.checkpoints)checkpoints.set(id,{...c,manager:managers.get(c.manager)});
                 for(const [id,hook] of record.suspendedHooks??[])suspendedHooks.set(id,hook);
-                for(const [id,setup] of record.candidateSetups??[])candidateSetups.set(id,setup);
+                for(const [id,setup] of record.candidateSetups??[]){
+                    const execution_access=command.execution_accesses?.[id];
+                    if(!execution_access)throw Error('Recovered candidate execution access missing');
+                    candidateSetups.set(id,{...setup,execution_access});
+                }
                 for(const branch of record.interruptedBranches??[])interruptedBranches.add(branch);
                 for(const [branch,{manager,stopped}] of tree.branches){
                     if(stopped||candidateSetups.has(branch))continue;
@@ -547,6 +556,7 @@ async function handle(command) {
         }
         case 'start_branch': {
             environments.set(branch,command.environment_id);
+            ascProxy.bind(branch,command.execution_access);
             // The control plane explicitly starts this Branch as the authority;
             // a leftover authority marker in a reused session file must not
             // keep a previous run's winner in charge.
@@ -616,6 +626,7 @@ async function handle(command) {
         }
         case 'start_candidate': {
             environments.set(branch,command.environment_id);
+            ascProxy.bind(branch,command.execution_access);
             candidateSetups.set(branch,structuredClone(command));
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
@@ -679,6 +690,7 @@ async function handle(command) {
             return;
         case 'resolve_pending': {
             if(command.outcome===undefined)return;
+            if(command.outcome?.phase==='execute'){toolHolds.get(key(branch,command.operation_id))?.resolve();modelHolds.get(key(branch,command.operation_id))?.resolve();return;}
             const modelHold=modelHolds.get(key(branch,command.operation_id));
             if(modelHold){modelHold.resolve();return;}
             if(command.outcome?.phase==='continue'){modelResultHolds.get(branch)?.resolve();modelResultHolds.delete(branch);return;}
@@ -713,14 +725,13 @@ async function handle(command) {
             recoveryPaused=false;
             interruptedBranches.delete(branch);
             for(const [id,hook] of suspendedHooks)if(hook.branch===branch)suspendedHooks.delete(id);
-            if(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS)await stopFilesystemWriters(process.env.ASCOUT_FILESYSTEM_TOOL_PLANS,environments.get(branch)??'');
             interaction.cancel(branch);
             aborting.add(branch);
             reconnectControllers.get(branch)?.abort();
-            try { await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');await report({message:'turn_completed',branch_id:branch}); }
+            try { const stopped=sessions.get(branch)?.abort();await ascProxy.cancel(branch);await stopped;await finishActions(branch,'cancelled');await report({message:'turn_completed',branch_id:branch}); }
             finally { aborting.delete(branch); }
             return;
-        case 'discard': interaction.cancel(branch);cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await finishActions(branch,'cancelled');tree.settle();return;
+        case 'discard': interaction.cancel(branch);cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await ascProxy.cancel(branch);await finishActions(branch,'cancelled');tree.settle();return;
         case 'cleanup':
             interaction.cancel(branch);
             cancelled.add(branch);releaseCandidateWaiters(branch);
@@ -758,23 +769,34 @@ function startSetup(command){
 }
 await report({message:'agent_connected',agent_id:agentId,capabilities});
 await report({message:'agent_ready',agent_id:agentId});
-let buffer=Buffer.alloc(0);const tasks=new Set();
+const tasks=new Set();
+const deliveries=new IdentityWindow(positiveSequence);
 let commandQueue: Promise<unknown>=Promise.resolve();
 try{
     // Do not let the async iterator's clean EOF destroy the socket with a
     // synthetic AbortError while the writable half is still ending. Keep the
     // explicit half-close below as the only shutdown path.
-    for await(const chunk of socket.iterator({destroyOnReturn:false})){
-        buffer=Buffer.concat([buffer,chunk]);
-        while(buffer.length>=4){const length=buffer.readUInt32BE(0);if(length>16777216)throw Error('Protocol frame too large');if(buffer.length<length+4)break;
-            const wire=JSON.parse(buffer.subarray(4,length+4).toString());buffer=buffer.subarray(length+4);if(wire.kind!=='command')throw Error('Unexpected message direction');
-            const command=wire.payload;
+    for await(const wire of ascProxy.messages()){
+            if(!['command','delivery'].includes(wire.kind))throw Error('Unexpected message direction');
+            const command=wire.kind==='delivery'?wire.payload.command:wire.payload;
+            if(wire.kind==='delivery'){
+                const id=String(wire.payload.id),encoded=JSON.stringify(command),previous=deliveries.get(id);
+                if(previous!==undefined&&previous!==encoded)throw Error('delivery id reused with different command');
+                if(previous===undefined)deliveries.accept(id,encoded);
+                await sendWire({kind:'received',payload:{id:wire.payload.id}});
+                if(previous!==undefined)continue;
+            }
             // Session-start extensions may themselves await a prompt while
             // holding the command queue. Cancellation must release them first.
-            if(['abort','discard','cleanup'].includes(command.command))interaction.cancel(command.branch_id);
             const id=command.command_id;
             const old=id?commands.get(id):undefined;
             if(old&&old.serialized!==JSON.stringify(command)){await report({message:'branch_failed',branch_id:command.branch_id,reason:'Command id reused with different payload'});continue}
+            pruneCommands();
+            const sequence=id?commandSequence(id):undefined;
+            if(!old&&id&&(sequence!==undefined&&(sequence<=commandPrefix||commandAhead.has(sequence))||commands.size>=1024)){
+                await report({message:'branch_failed',branch_id:command.branch_id,reason:'Command identity expired or window full; command was not executed'});continue;
+            }
+            if(!old&&['abort','discard','cleanup'].includes(command.command))interaction.cancel(command.branch_id);
             // A candidate may wait for sibling tool results. It must not hold
             // up resolve_pending / cleanup on the transport's command queue.
             // Save must interrupt immediately even if setup is awaiting a tool.
@@ -786,17 +808,19 @@ try{
                 setupTasks.set(command.branch_id,result);
                 void result.finally(()=>{if(setupTasks.get(command.branch_id)===result)setupTasks.delete(command.branch_id)}).catch(()=>{});
             }
-            if(id&&!old)commands.set(id,{serialized:JSON.stringify(command),result});
-            const task=result.then(reply=>reply?report(reply):undefined);tasks.add(task);void task.finally(()=>tasks.delete(task)).catch(()=>socket.destroy());
-        }
+            if(id&&!old){
+                const item={serialized:JSON.stringify(command),result,settled:false};commands.set(id,item);
+                if(sequence!==undefined){commandAhead.add(sequence);while(commandAhead.delete(commandPrefix+1))commandPrefix++}
+                void result.finally(()=>{item.settled=true;pruneCommands()}).catch(()=>{});
+            }
+            const task=result.then(reply=>reply?report(reply):undefined);tasks.add(task);void task.finally(()=>tasks.delete(task)).catch(()=>ascProxy.destroy());
     }
 }catch(error){
     transportError??=error;
 }finally{
     if(saving){
-        await outgoing;
-        if(!socket.destroyed)await new Promise(resolve=>socket.end(resolve));
-        process.exit(transportError?1:0);
+        await ascProxy.close();
+        process.exit(transportError||ascProxy.error?1:0);
     }
     closing=true;interaction.cancel();access.releaseAll();
     for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
@@ -813,12 +837,11 @@ try{
     }
     tree.settle();
     if(!transportError)await report({message:'agent_released',agent_id:agentId});
-    await outgoing;
-    if(!socket.destroyed)await new Promise(resolve=>socket.end(resolve));
+    await ascProxy.close();
     // An aborted local-policy evaluation can leave the evaluator child's stdio
     // handles open after it rejects; those handles would otherwise keep this
     // adapter alive even though every report is flushed and the socket is
     // closed. Shutdown is complete here, so terminate explicitly.
     if(transportError)console.error('Agent control connection failed:',transportError);
-    process.exit(transportError?1:0);
+    process.exit(transportError||ascProxy.error?1:0);
 }

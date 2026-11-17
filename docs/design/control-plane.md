@@ -28,7 +28,7 @@ control plane 对 Policy 负有两类责任。
 
 ## 2. 组件与状态
 
-control plane 由 Gateway、Policy Engine、Speculation Coordinator 与 Ledger 等组件构成。Gateway 统一承接 Instrumentation、UI 与 Runtime 的通信；Registry 属于 Runtime。它们围绕属于 control plane 的 Speculative Tree 协作；Policy 的 `effect` 由 Instrumentation 本地求值并落实。
+control plane 由 Gateway、UI Projection、Policy Engine、Speculation Coordinator 与 Ledger 等组件构成。Gateway 统一承接 Instrumentation、UI 与 Runtime 的通信；Registry 属于 Runtime。它们围绕属于 control plane 的 Speculative Tree 协作；Policy 的 `effect` 由 Instrumentation 本地求值并落实。
 
 ### 2.1 Gateway
 
@@ -46,13 +46,9 @@ Policy Engine 是可替换 Policy 进入 control plane 的固定入口，只有�
 
 ### 2.3 与 Runtime 内 Adapter Registry 的协作
 
-Adapter Registry 属于 Runtime，负责 Adapter 的接入登记、契约兼容性检查和能力声明解析。首期只检查 control plane 当前需要的 API 是否存在且可解析，不建立验证环境、不执行验证场景，也不把 API 检查写成环境保证已经验证；主动验证与独立证据保留为后续能力。Runtime 侧职责见 [Runtime 设计](runtime.md#adapter-registry)。
+Runtime 通过现有 hello 能力报告提供 backend 身份。control plane 启动时，在收到报告之后，由 Policy Engine 确认 Policy 要求的 backend 存在；Policy 未要求 backend 时不检查，缺少时明确拒绝启动。Policy Engine 不解析 backend 接口，也不把存在检查视为环境保证已验证。
 
-Registry 维护 Adapter 的接入状态、契约版本、能力声明快照和 API 检查结果，但不持有 Speculative Tree、Branch 生命周期或 Runtime 的执行状态。它向 Policy Engine 发布能力事实及其当前检查状态；首期不能据此宣称环境保证已验证。具体的 operation/event 契约与检查标准见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
-
-Adapter 配置在运行期不允许变化。若运行期发现 Adapter 的实际能力不符合声明，Registry 将能力视图降级到仍然经过验证的范围；control plane 让全部任务使用降级后的能力视图，协调停止并清理依赖失效能力的投机活动，不依赖的活动可以继续。重新验证通过后，Adapter 才能恢复新的能力范围。
-
-Registry 不直接编排 Branch 生命周期，也不替代 Speculation Coordinator 解释运行期事件。Speculation Coordinator 只使用 Registry 提供的接入结果和能力信息协调 Task 运行。首期 Registry 只做声明解析和所需 API 检查；主动验证和独立验证证据属于后续能力。Adapter 不得自行填写验证状态或以自测结果自证。
+接口是否存在、能否解析由 Runtime 对自己的 backend 检查；进一步验证是后续能力，不新增 Registry 验证协议。
 
 ### 2.4 Speculation Coordinator
 
@@ -78,15 +74,33 @@ Policy 的 `effect` 由 Instrumentation 本地求值并落实。External Effect 
 
 Instrumentation 将被定为模拟的操作交给 External Effect Coordinator。可模拟时才返回明确标记来源的临时结果；不能模拟时，真实请求继续暂存在本机，Branch 不获得模拟结果，在效果边界阻塞并保留已完成进展，不因此直接拒绝整个投机。该 Branch 成为权威后才发出真实请求并继续，丢弃或前提失效则取消。模拟结果遵守假设与验证语义，具体纪律见 [效果管理](effect-management.md)。
 
+### UI Projection
+
+UI Projection 位于 Gateway 和 Ledger 之间，按序号读取 Ledger 已保存的记录，缓存界面当前需要的内容，并管理界面连接自身的资源，包括当前连接和每个连接已经读到的位置。缓存可以丢弃，丢失后重新向 Ledger 按序号读取。浏览器 HTTP 和终端界面都通过 UI Projection 读取；Gateway 只转交界面读取请求，不保存这份缓存。
+
+UI Projection 不拥有 Tree，不裁决投机，不把画面状态或报警写回 Ledger。
+
+### 系统运行日志
+
+系统运行日志不是新的投机组件，由 control plane 进程持有；组件在进程内写入警告和错误。普通 Ledger 写入错误由 Speculation Coordinator 报告；Branch 归档由 Ledger 完成一次重试及最终失败报警，释放前写入警告。警告标明历史不完整，归档最终失败包含 session id、Branch id 和失败原因；Branch 控制状态保持不变，也不把已移出的 Branch 放回 Tree。界面需要显示时由 UI Projection 转发报警，不追加为 Ledger 记录。
+
+日志格式固定、不可配置：UTF-8，每条一行，字段依次为 UTC 时间、级别、组件、可选的 `session=<id>`、说明；说明中的换行改为空格。例如：
+
+```text
+2026-08-14T12:34:56.789Z WARN ledger session=session-abc history incomplete: observation append failed: disk full
+```
+
+`~/.config/ascout/config.toml` 的 `log_path` 缺省为 `~/.local/share/ascout/ascout.log`。只允许配置路径，不允许配置格式或归属。control plane 启动时打不开文件就拒绝启动。不做日志轮转。
+
 ### 2.6 Ledger
 
 Ledger 记录运行事实，不承担合规或安全取证 audit；持久、tamper-evident audit 由具体 Runtime 按部署需求提供，control plane 正确性不依赖它。
 
 Ledger 以异步旁路记录 control plane 需要保留的运行事实，包括 Policy 决策、Branch 与 Proposal 状态变化、验证依据、效果与 obligation 处理结果、资源使用、取消与清理结果、Adapter 映射结果与 Runtime 失败。它用于状态对齐、问题定位、shadow/replay 和契约校验；它不从记录中重新决定生命周期，也不代替 Runtime 持有执行状态。
 
-Ledger 是观察事件日志的唯一保存者，在追加时分配同一运行内连续递增的序号，并直接提供状态事件集和按序号补发的只读接口。读取完整历史不得阻塞追加。Tree 在创建 Branch、切换 Authority、改变生命周期和环境状态的统一入口产生事件，由协调循环取走并交给 Ledger；事件记录实际转换及其原因，保留同一次处理中连续经过的中间状态。观察日志只承担观察和事实记录，不要求据此在崩溃后重建整棵树，也不为恢复逐次记录完整树状态。
+Ledger 只追加并保存记录，是观察事件日志的唯一保存者，在成功追加时分配同一运行内连续递增的序号；读取只从已保存的记录按序号取出，不以完整内存历史替代失败的文件写入。读取完整历史不得阻塞追加。Tree 在创建 Branch、切换 Authority、改变生命周期和环境状态的统一入口产生事件，由协调循环取走并交给 Ledger；事件记录实际转换及其原因，保留同一次处理中连续经过的中间状态。观察日志只承担观察和事实记录，不要求据此在崩溃后重建整棵树，也不为恢复逐次记录完整树状态。
 
-已经退出活动控制范围、移交 Ledger 的 Branch 由 Ledger 承担保存责任。写入失败时 Ledger 继续持有该记录，并报告这次运行的历史不完整；不得在返回错误的同时静默释放它，也不因此把 Branch 重新放回活动 Tree。记录成功写出的判定不包含强制 `flush`，Ledger 不对已失败的文件内容作回滚或去重承诺。
+已经退出活动控制范围、移交 Ledger 的 Branch，首次归档写入失败后先重试一次。重试前必须安全恢复完整行的追加边界，避免把部分写入和重试拼接；无法安全恢复时明确报告恢复失败及重试无法完成。最终失败先将 session id、Branch id 与失败原因写入系统运行日志并经既有 UI Projection 通道报警，再释放 BranchRecord；不永久保留未归档集合，不放回活动 Tree，不恢复已结束的控制状态。系统日志写入失败时以 stderr 回退，仍保留上述身份与原因。失败记录不发布为观察事件。记录成功写出的判定不包含强制 `flush`。
 
 session 记录由 Instrumentation 完整持久化并汇总为单一最终权威 session，其真实结果整理规则见 [Agent 接入设计](agent-integration.md) §3。Ledger 的 transcript 事实只保存 Branch id、消息记录 id 与 role，并记录文件位置，不重复保存正文。必须先写文件、后写引用；允许文件存在未被 Ledger 引用的记录，不承诺两者原子提交。运行期多 session 汇总时，Instrumentation 必须保持引用可定位；引用不承诺恢复完整活动 Tree，也不能把整理后的父链当作原始模型请求上下文。产品格式与读取位置提示不构成 control plane 裁决；内部记录引用不直接扩大只读观察接口公开范围。
 

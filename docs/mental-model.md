@@ -22,7 +22,7 @@ AScout 不是某个固定算法，也不要求每个动作都建立完整、昂�
 
 记录、保存和恢复属于正常 AScout；模型输出回放是系统外的验证工具，通过正常模型接口及用户输入接口驱动普通运行，不进入运行机制。具体边界见[记录与回放](development/replay.md)。
 
-系统最终必须把 Authority 的结果物化到现实。Agent 完成本轮工作、开始等待用户输入时，task 完成；正常完成须在无存活候选且任务相关写入完成后物化，不为物化暂停执行。Runtime 向 control plane 报告物化结果；物化失败按操作失败处理，control plane 必须等物化成功后才能宣告任务成功。Agent 常用的 Ctrl-C 或退出均终止任务，取消、失败和终止须结束候选并等待相关写入完成后物化。Ctrl-C 保留程序和 session，留在对话中，待上述处理完成后可接下一轮；物化失败须显示失败，不能宣告成功。暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，明确继续命令为 `/continue`，恢复原任务执行，保留原树、候选和环境关系，暂停不意味着退出程序。普通消息是否也解除暂停未定。目标边界见 [Runtime 设计](design/runtime.md)，物化及终止／暂停入口对齐仍有实现缺口，见[恢复](development/recovery.md)。
+系统最终必须把 Authority 的结果物化到现实。Agent 完成本轮工作、开始等待用户输入时，task 完成；正常完成须在无存活候选且任务相关写入完成后物化，不为物化暂停执行。Runtime 向 control plane 报告物化结果；物化失败按操作失败处理，control plane 必须等物化成功后才能宣告任务成功。Agent 常用的 Ctrl-C 或退出均终止任务，取消、失败和终止须结束候选并等待相关写入完成后物化。Ctrl-C 保留程序和 session，留在对话中，待上述处理完成后可接下一轮；物化失败须显示失败，不能宣告成功。暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，明确继续命令为 `/continue`，恢复原任务执行，保留原树、候选和环境关系，暂停不意味着退出程序。暂停期间的普通消息先留着，不解除暂停，也不在暂停期间交给模型；必须先 `/continue`，之后再按原顺序交给模型。目标边界见 [Runtime 设计](design/runtime.md)，物化及终止／暂停入口对齐仍有实现缺口，见[恢复](development/recovery.md)。
 
 文件系统物化按 Authority 增量最终视图直接覆盖受影响路径，保留未涉及路径，不检测或报告物化冲突；禁止复制整个挂载。任务完成须等待物化确认，完成后以新的受管增量基准继续执行。具体写回范围和属性保留要求见[物化提案](fs-backend/materialize-proposal.md)；组合 Runtime、工具接入和存储后端的验收状态见[当前实现](fs-backend/current-state.md)。
 
@@ -34,7 +34,11 @@ Agent 以 action 及其结果报告执行事实，action 不限于工具调用�
 
 Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Policy 使用外部模型必须经宿主逐请求授予 capability，凭证由宿主持有，详见 [Policy Engine](design/control-plane/policy-engine.md)。Instrumentation 负责 Agent 内部会话和行为接入；Agent 与随附 Instrumentation 在 Branch 隔离环境外的可信宿主运行，由 Runtime 管理宿主生命周期。工作区文件访问、shell、受管子程序和效果在对应 Branch 环境执行，模型、内存和控制通信不绕经文件系统隔离；挂载切换与物化不要求重启宿主。Instrumentation 由与产品无关的通用层和产品专用的 Product Integration 组成——`admit` 的 `opportunity_pass`、`feasibility_pass`、`extent` 和 `effect` 由通用层求值，Product Integration 只把产品执行点接入并执行处置结果；会改写全局控制状态或必须在多个 Chance、Branch、Proposal 之间协调的其余 Decision（包括 `predict`）由 control plane 求值并落实，所缺的本地事实由 Instrumentation 计算后提交；Runtime 承载动作并提供隔离、资源和效果边界；control plane 负责全局编排、校验和裁决。Runtime Adapter 是 Runtime 的接入边界，不是与 Runtime 平级的另一套 Runtime。Speculation Contract 约束 Policy、control plane 和 Runtime 之间的可观察语义；Runtime 内部可以组合不同的执行和效果管理能力。
 
+工具与模型推理均可 eager 并行启动权威调用，或 speculative-first 将权威调用挂在执行前、让独立候选先行。接受时 Promote 候选 session 并取消旧 Parent，不向旧调用填入候选结果；全部候选不可接受时原调用放行一次。上文 Parent 得到真实结果后继续的规则适用于已被放行的调用。
+
 每个 session 的 AScoutAgent 拥有自己的一棵 Speculative Tree，Tree 属于 control plane。树拥有该 session 的投机控制状态，其方法检查合法转换；Policy 函数计算策略选择。Speculation Coordinator 可以协调多棵树，不保存具体 session 的第二份投机状态。同一棵树由消息和定时器触发顺序处理，耗时操作异步返回；Agent 的普通执行由 Instrumentation 负责。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。
+
+Instrumentation 的 ASC-Proxy 管理控制连接和独立的 Runtime 执行连接。control plane 建立 Branch 对 Environment 的明确授权并转交执行访问信息；工具执行直接进入 Runtime，结果、增量输出和取消终态由 Instrumentation 接收并报告，control plane 不代执行工具。
 
 工作模型的完整权威描述见 [设计模型](design-model.md) §2。
 
@@ -56,7 +60,7 @@ AScout 按以下责任边界组织，控制请求向下流动，结果与事件�
 
 ```text
 Instrumentation <-> Gateway <-> 控制逻辑
-UI         <-> Gateway
+UI         <-> Gateway <-> UI Projection <-> Ledger
 Runtime    <-> Gateway（经 Runtime Adapter 契约）
 ```
 
@@ -71,7 +75,7 @@ Policy Action -> control plane 编排 -> Gateway 送达 -> Runtime Adapter 接�
 
 Adapter Registry 属于 Runtime，负责登记、契约与能力声明校验、主动验证及独立验证证据，向 control plane 提供带验证状态的能力事实；control plane 据此匹配 Policy 并作出投机裁决。Registry 的归属不允许 Adapter 自行证明其声明成立。Agent 与接入进程的实际启动、监视和回收由 Runtime 负责。
 
-Runtime 创建 Environment 并返回身份，control plane 独占绑定 `Branch -> Environment`，每个 Environment 只属于一个 Branch。建立初始环境不预定身份，派生仅指定父 Environment；创建前 Branch 可以无绑定。Runtime 不接收 `branch_id`，对外统一使用 Environment identity；其内部以独立 `BackendConnection.id` 标识 Backend instance，并维护 Environment 与 Backend instance 的多对多关联。因而不同 Environment 可以分别选择 `fs1/process1` 与 `fs1/process2/network1`，而不把共享的 Backend 内部世界误认为共享 Environment 生命周期。Candidate 建立、Promote、暂停与恢复使用实际返回并保存的 Environment identity，不能以 Branch 或 authority 常量替代。
+Runtime 创建 Environment 并返回身份，control plane 独占绑定 `Branch -> Environment`，每个 Environment 只属于一个 Branch。建立初始环境不预定身份，派生仅指定父 Environment；创建前 Branch 可以无绑定。Runtime 的执行接入边界验证 `branch_id` 授权，内部 Backend 只使用 Environment identity，不接收或推导 Branch 身份；其内部以独立 `BackendConnection.id` 标识 Backend instance，并维护 Environment 与 Backend instance 的多对多关联。因而不同 Environment 可以分别选择 `fs1/process1` 与 `fs1/process2/network1`，而不把共享的 Backend 内部世界误认为共享 Environment 生命周期。Candidate 建立、Promote、暂停与恢复使用实际返回并保存的 Environment identity，不能以 Branch 或 authority 常量替代。
 
 ### 4.2 核心对象与所有权
 
@@ -99,6 +103,8 @@ control plane 在运行时以三类状态描述一次投机，它们分别回答
 AScout 管理稳定交互入口、显示区域与自身控制事实；Pi 等 Agent 的消息、思考、工具调用和结果通过公开 SDK 报告给 AScout，再由 AScout 的 UI 排版展示，不嵌入 Agent 产品的终端画面。浏览器 UI 与 TUI 共享事实和操作接口，但彼此不依赖绘制实现。用户可从当前 AScoutAgent 的整棵 Tree 查看 Branch 关系与投机状态，并选择具体 Branch 深入只读观察；选择观察对象不改变权威路径或 Branch 生命周期。
 
 观察以受限的只读事件接口提供：首次取得状态事件集，随后接收有序增量并支持断线补发；客户端折叠事件得到展示状态，对话内容按 Branch 按需读取。接口不直接公开 control plane 的内部 Tree。详细语义见 [control plane 设计](design/control-plane.md) §5。
+
+UI Projection 按序号读取 Ledger 已保存记录，持有可丢弃的界面缓存与连接读取位置；HTTP 和终端界面均经它读取。它不拥有 Tree、不裁决投机，也不向 Ledger 写回画面状态或报警。系统运行日志由 control plane 进程持有，独立保存警告和错误；Ledger 写入失败报告历史不完整；已退出 Tree 的 Branch 归档首次失败后安全恢复追加边界并重试一次，最终失败先记录 session id、Branch id 与原因、经 UI Projection 报警，再释放记录。Branch 控制状态不变，报警由 UI Projection 转发。日志只允许配置路径，启动时打不开即拒绝启动，不轮转；详见 [control plane](design/control-plane.md)。
 
 ## 相关文档
 

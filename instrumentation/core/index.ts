@@ -1,10 +1,13 @@
 /**
- * Product-independent Agent access.
+ * Interposer: product-independent Agent access, exposed by createAgentAccess.
  *
  * This module owns the parts of the Agent access side that do not depend on a
  * concrete Agent product: local Policy evaluation, per-Branch hook counting and
  * `extent`, the `effect` gate, control-plane reports, and waiting for the
- * control plane's disposition. A Product Integration only turns its own
+ * control plane's disposition. Product-specific pre-execution holds and session
+ * continuation belong to Product Integration (instrumentation/pi/main.ts);
+ * ASC-Proxy (instrumentation/pi/asc-proxy.ts) owns communication.
+ * A Product Integration only turns its own
  * execution points into `ExecutionPoint` values and executes the disposition;
  * it does not evaluate `extent` or `effect` itself.
  */

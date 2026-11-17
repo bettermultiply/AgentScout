@@ -102,11 +102,6 @@
 结论：面向 Agent 的控制操作保持最小。
 为什么：Agent 只需要表达自身意图，不应承担 Runtime 内部 outcome routing、capability transfer 或状态机复合操作。缩小 routine surface 可以避免裸 identity、隐式权限和 profile-specific lifecycle。
 
-## D-038：ASC-Proxy 作为 Agent-facing context boundary
-
-结论：ASC-Proxy 隐藏本地调用身份。
-为什么：把上下文隐藏和本地调用入口收敛到 ASC-Proxy，可以让 CLI/library 使用稳定的无身份请求，同时保持 Gateway 的统一通信边界，并将控制面与 Runtime 的状态责任分开。
-
 ## D-039：接入侧、控制面与 Runtime
 
 结论：接入、控制与执行承载分责。
@@ -151,6 +146,21 @@
 
 结论：分支独占环境，后端资源内部组合。
 为什么：控制面必须能明确审计 Branch 的资源归属并避免多个 Branch 互相污染；同时 Backend instance 的共享/独占策略属于 Runtime 内部，不应泄漏成控制面资源选择。
+
+## D-048：Branch 身份直接传递
+
+结论：调用方直接带上 Branch 身份，不设无身份请求。
+为什么：现在的控制消息已经直接带 Branch。让 CLI 或库不带身份、再由代理补上的计划没有对应入口，也不再保留。
+
+## D-049：暂停只能用 `/continue` 解除
+
+结论：暂停期间的普通消息先留着，不解除暂停；`/continue` 之后再按原顺序交给模型。
+为什么：`/continue` 只恢复执行，不应该被一句普通输入顺便替代。这句话仍然是用户要说的内容，不能丢掉。
+
+## D-050：执行端点地址下发，命令由 Instrumentation 发送
+
+结论：执行端点的访问方式由 Runtime 交给 control plane，再交给 Instrumentation。命令由 Instrumentation 发给该端点，control plane 不代为执行。
+为什么：Instrumentation 不该自己去读 Runtime 留下的地址文件，也不该让 control plane 替它跑命令。control plane 需要的结果，由 Instrumentation 执行后上报。
 
 ## 相关文档
 

@@ -38,6 +38,7 @@ pub(super) fn result(
     OperationResult {
         request_id: request.request_id.clone(),
         environment_id: request.environment_id.clone(),
+        execution_access: None,
         status,
         environment_state,
         can_accept_operations,

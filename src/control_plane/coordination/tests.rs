@@ -42,6 +42,203 @@ fn waiting() -> AgentMessage {
 }
 
 #[test]
+fn held_authority_prediction_failure_or_empty_releases_tool_and_model_once() {
+    use crate::control_plane::agent_control::ActionKind;
+    for kind in [ActionKind::ToolExecution, ActionKind::ModelInference] {
+        for failure in [false, true] {
+            let (mut tree, _root) = task();
+            let mut message = waiting();
+            if let AgentMessage::SpeculativeAdmissionRequest { action_kind, .. } = &mut message { *action_kind = kind; }
+            tree.speculative_admission(message).unwrap();
+            let select = tree.progress(&RuntimeCapabilities::default()).unwrap().operations[0].0;
+            let predict = tree.complete_work(select, Ok(ControlResult::Selected(vec!["chance-1".into()]))).unwrap().operations[0].0;
+            let actions = tree.complete_work(predict, if failure { Err("predict failed".into()) } else { Ok(ControlResult::Predictions(vec![])) }).unwrap();
+            assert_eq!(actions.commands.iter().filter(|c| matches!(c, AgentCommand::ResolvePending { outcome: Some(value), .. } if value["phase"] == "execute")).count(), 1, "{kind:?}, failure={failure}");
+            assert_eq!(tree.chances["chance-1"].authority, AuthorityState::Fetching);
+            assert!(tree.progress(&RuntimeCapabilities::default()).unwrap().commands.is_empty());
+            if kind == ActionKind::ModelInference {
+                tree.handle_message(AgentMessage::ActionFinished { task_id: String::new(), branch_id: "authority".into(), action_id: "op".into(), action_kind: kind, status: crate::control_plane::agent_control::ActionStatus::Succeeded, result: json!({"tool_calls":[]}), evidence: None, timestamp_ms: 1 }).unwrap();
+                assert_eq!(tree.chances["chance-1"].authority, AuthorityState::Arrived, "fallback result must remain paired after predict failure");
+                let actions = tree.progress(&RuntimeCapabilities::default()).unwrap();
+                assert!(actions.commands.iter().any(|c| matches!(c, AgentCommand::ResolvePending { outcome: Some(value), .. } if value["phase"] == "continue")));
+                assert!(!tree.progress(&RuntimeCapabilities::default()).unwrap().commands.iter().any(|c| matches!(c, AgentCommand::ResolvePending { .. })));
+            }
+        }
+    }
+}
+
+#[test]
+fn held_authority_candidate_can_be_validated_without_parent_result() {
+    use crate::control_plane::agent_control::{ActionKind, ActionStatus};
+    for kind in [ActionKind::ToolExecution, ActionKind::ModelInference] {
+        let (mut tree, _root) = task();
+        let mut message = waiting();
+        if let AgentMessage::SpeculativeAdmissionRequest { action_kind, .. } = &mut message { *action_kind = kind; }
+        tree.speculative_admission(message).unwrap();
+        tree.change_chance_stage("chance-1", ChanceStage::Running, "selected").unwrap();
+        let command = if kind == ActionKind::ModelInference { tree.start_model_candidate("chance-1", json!({"predict":"branch_model","model":"fake"})) } else { tree.start_candidate("chance-1", json!("guess")) }.unwrap();
+        let AgentCommand::StartCandidate { branch_id, .. } = command else { unreachable!() };
+        tree.handle_message(AgentMessage::BranchStarted { branch_id: branch_id.clone() }).unwrap();
+        if kind == ActionKind::ModelInference {
+            assert!(!tree.candidate_due(&branch_id), "unfinished alternate model is not a Proposal");
+            tree.handle_message(AgentMessage::ActionStarted { task_id: String::new(), branch_id: branch_id.clone(), action_id: "op".into(), action_kind: kind, parent_action_id: None, name: "model".into(), arguments: json!({}), checkpoint: None, timestamp_ms: 1 }).unwrap();
+            tree.handle_message(AgentMessage::ActionFinished { task_id: String::new(), branch_id: branch_id.clone(), action_id: "op".into(), action_kind: kind, status: ActionStatus::Succeeded, result: json!({"tool_calls":[]}), evidence: None, timestamp_ms: 2 }).unwrap();
+        }
+        let launch = tree.progress(&RuntimeCapabilities::default()).unwrap().operations.into_iter().find(|(_, work)| matches!(work, ControlOperation::Launch(_))).unwrap().0;
+        tree.complete_work(launch, Ok(ControlResult::Launch(false))).unwrap();
+        assert!(tree.candidate_due(&branch_id), "{kind:?} candidate stalled with authority held");
+        tree.handle_message(AgentMessage::BranchFailed {
+            branch_id,
+            reason: "candidate execution failed".into(),
+        }).unwrap();
+        let actions = tree.progress(&RuntimeCapabilities::default()).unwrap();
+        assert_eq!(actions.commands.iter().filter(|command| matches!(command,
+            AgentCommand::ResolvePending { outcome: Some(value), .. }
+            if value["phase"] == "execute")).count(), 1);
+        assert!(!tree.progress(&RuntimeCapabilities::default()).unwrap().commands.iter()
+            .any(|command| matches!(command, AgentCommand::ResolvePending { .. })));
+    }
+}
+
+#[test]
+fn held_authority_four_launch_paths_promote_or_fallback_once() {
+    use crate::control_plane::agent_control::{ActionKind, ActionStatus};
+    for kind in [ActionKind::ToolExecution, ActionKind::ModelInference] {
+        for eager in [false, true] {
+            for accepted in [false, true] {
+                let (mut tree, _root) = task();
+                let mut message = waiting();
+                if let AgentMessage::SpeculativeAdmissionRequest { action_kind, .. } = &mut message { *action_kind = kind; }
+                tree.speculative_admission(message).unwrap();
+                tree.change_chance_stage("chance-1", ChanceStage::Running, "selected").unwrap();
+                let command = if kind == ActionKind::ModelInference { tree.start_model_candidate("chance-1", json!({"predict":"branch_model","model":"fake"})) } else { tree.start_candidate("chance-1", json!("guess")) }.unwrap();
+                let AgentCommand::StartCandidate { branch_id, .. } = command else { unreachable!() };
+                tree.handle_message(AgentMessage::BranchStarted { branch_id: branch_id.clone() }).unwrap();
+                if kind == ActionKind::ModelInference {
+                    tree.handle_message(AgentMessage::ActionStarted { task_id: String::new(), branch_id: branch_id.clone(), action_id: "op".into(), action_kind: kind, parent_action_id: None, name: "model".into(), arguments: json!({}), checkpoint: None, timestamp_ms: 1 }).unwrap();
+                    tree.handle_message(AgentMessage::ActionFinished { task_id: String::new(), branch_id: branch_id.clone(), action_id: "op".into(), action_kind: kind, status: ActionStatus::Succeeded, result: json!({"tool_calls":[]}), evidence: None, timestamp_ms: 2 }).unwrap();
+                }
+                let launch = tree.progress(&RuntimeCapabilities::default()).unwrap().operations.into_iter().find(|(_, work)| matches!(work, ControlOperation::Launch(_))).unwrap().0;
+                let actions = tree.complete_work(launch, Ok(ControlResult::Launch(eager))).unwrap();
+                let executes = |actions: &ControlActions| actions.commands.iter().filter(|c| matches!(c, AgentCommand::ResolvePending { outcome: Some(value), .. } if value["phase"] == "execute")).count();
+                assert_eq!(executes(&actions), usize::from(eager));
+                assert_eq!(tree.chances["chance-1"].authority, if eager { AuthorityState::Fetching } else { AuthorityState::NotRequested });
+                if eager { tree.record_authority_outcome("chance-1", json!("real"), None).unwrap(); }
+                assert!(tree.candidate_due(&branch_id));
+                let mut actions = ControlActions::default();
+                tree.schedule(ControlOperation::Validate(branch_id.clone()), &mut actions);
+                let actions = tree.complete_work(actions.operations[0].0, Ok(ControlResult::Disposition(accepted, if accepted { "compatible" } else { "incompatible" }.into(), None, Some(3)))).unwrap();
+                if accepted {
+                    let promotion = actions.operations.iter().find(|(_, work)| matches!(work, ControlOperation::Promote(..))).unwrap().0;
+                    let actions = tree.complete_work(promotion, Ok(ControlResult::Completed)).unwrap();
+                    let command = actions.commands.iter().find(|c| matches!(c, AgentCommand::Promote { .. })).unwrap();
+                    let AgentCommand::Promote { command_id, generation, .. } = command else { unreachable!() };
+                    let commands = tree.handle_message(AgentMessage::CommandResult { branch_id: branch_id.clone(), command_id: command_id.clone(), generation: *generation, operation: CommandOperation::Promote, operation_id: None, status: CommandStatus::Applied, reason: None }).unwrap();
+                    assert_eq!(tree.authority_branch_id.as_deref(), Some(branch_id.as_str()));
+                    assert!(commands.iter().any(|c| matches!(c, AgentCommand::Discard { branch_id, .. } if branch_id == "authority")));
+                    assert!(!commands.iter().any(|c| matches!(c, AgentCommand::ResolvePending { .. })), "Promote must cancel parent, never inject candidate result");
+                } else {
+                    let actions = tree.progress(&RuntimeCapabilities::default()).unwrap();
+                    assert_eq!(executes(&actions), usize::from(!eager));
+                    assert_eq!(executes(&tree.progress(&RuntimeCapabilities::default()).unwrap()), 0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn consumed_work_keeps_first_fingerprint_and_reports_only_conflicts() {
+    let (mut tree, _root) = task();
+    let mut actions = ControlActions::default();
+    tree.schedule(ControlOperation::Select(vec![]), &mut actions);
+    let id = actions.operations[0].0;
+    tree.complete_work(id, Ok(ControlResult::Selected(vec![]))).unwrap();
+    let first = tree.completed_work[&id];
+    tree.complete_work(id, Ok(ControlResult::Selected(vec![]))).unwrap();
+    assert!(!tree.pending_records.iter().any(|r| r["reason"] == "conflicting complete_work feedback"));
+    tree.complete_work(id, Err("late failure".into())).unwrap();
+    assert_eq!(tree.completed_work[&id], first);
+    assert!(tree.pending_records.iter().any(|r| r["reason"] == "conflicting complete_work feedback"));
+    assert!(!tree.pending_work.contains_key(&id));
+}
+
+#[test]
+fn select_result_cannot_select_a_chance_outside_original_request() {
+    let (mut tree, _root) = task();
+    tree.speculative_admission(waiting()).unwrap();
+    let mut actions = ControlActions::default();
+    tree.schedule(ControlOperation::Select(vec![]), &mut actions);
+    let result = tree
+        .complete_work(
+            actions.operations[0].0,
+            Ok(ControlResult::Selected(vec!["chance-1".into()])),
+        )
+        .unwrap();
+    assert!(result.operations.is_empty());
+    assert_eq!(tree.chances["chance-1"].stage, ChanceStage::Pending);
+}
+
+#[test]
+fn conflicting_operation_feedback_preserves_first_terminal_state() {
+    let (mut tree, _root) = task();
+    tree.complete_operation("authority", Some("start-agent"), OperationStatus::Succeeded)
+        .unwrap();
+    tree.complete_operation("authority", Some("start-agent"), OperationStatus::Failed)
+        .unwrap();
+    assert_eq!(
+        tree.branches["authority"].pending_operations[0].status,
+        OperationStatus::Succeeded
+    );
+}
+
+#[test]
+fn rebalance_ignores_changed_branch_but_keeps_unrelated_result() {
+    let (mut tree, _root) = task();
+    tree.speculative_admission(waiting()).unwrap();
+    let command = tree
+        .start_candidate("chance-1", json!({"result": "x"}))
+        .unwrap();
+    let AgentCommand::StartCandidate { branch_id, .. } = command else {
+        unreachable!()
+    };
+    tree.branches.get_mut(&branch_id).unwrap().status = BranchStatus::Running;
+    let mut actions = ControlActions::default();
+    tree.schedule(ControlOperation::Rebalance, &mut actions);
+    // An unrelated Branch changes. The unchanged Candidate's result is valid.
+    tree.branches.get_mut("authority").unwrap().generation += 1;
+    let completed = tree
+        .complete_work(
+            actions.operations[0].0,
+            Ok(ControlResult::Rebalance(vec![(
+                branch_id.clone(),
+                "pause".into(),
+            )])),
+        )
+        .unwrap();
+    assert_eq!(completed.commands.len(), 1);
+    // A transition back to the original value still invalidates the decision.
+    tree.schedule(ControlOperation::Rebalance, &mut actions);
+    tree.change_status(&branch_id, BranchStatus::Blocked(BlockedReason::Rebalanced), "test pause").unwrap();
+    tree.change_status(&branch_id, BranchStatus::Running, "test resume").unwrap();
+    let completed = tree.complete_work(
+        actions.operations[1].0,
+        Ok(ControlResult::Rebalance(vec![(branch_id.clone(), "pause".into())])),
+    ).unwrap();
+    assert!(completed.commands.is_empty());
+
+    tree.schedule(ControlOperation::Rebalance, &mut actions);
+    tree.branches.get_mut(&branch_id).unwrap().generation += 1;
+    let completed = tree
+        .complete_work(
+            actions.operations[2].0,
+            Ok(ControlResult::Rebalance(vec![(branch_id, "pause".into())])),
+        )
+        .unwrap();
+    assert!(completed.commands.is_empty());
+}
+
+#[test]
 fn missing_materialization_authority_is_visible_and_retryable() {
     for missing in ["environment", "branch", "authority"] {
         let (mut tree, _root) = task();
@@ -225,6 +422,21 @@ fn continue_command_is_not_a_chat_prompt_and_pause_cannot_block_termination() {
 }
 
 #[test]
+fn ordinary_prompt_is_queued_while_paused_until_continue() {
+    use crate::control_plane::gateway::ui::Request;
+    let (mut tree, root) = task();
+    let mut session = session::Session::new(root.path(), None);
+    session.request(&mut tree, Request::Pause, 1).unwrap();
+    session.request(&mut tree, Request::Prompt { prompt: "queued".into() }, 2).unwrap();
+    assert!(tree.recovering());
+    assert!(tree.next_prompt().unwrap().is_none());
+    session.agent(&mut tree, &AgentMessage::RecoveryLoaded { error: None }).unwrap();
+    let commands = session.request(&mut tree, Request::Continue, 3).unwrap();
+    assert!(commands.commands.iter().any(|command| matches!(command, AgentCommand::Continue { .. })));
+    assert!(matches!(tree.next_prompt().unwrap(), Some(AgentCommand::Prompt { prompt, .. }) if prompt == "queued"));
+}
+
+#[test]
 fn repeated_interrupt_and_idle_continue_do_not_start_another_turn() {
     use crate::control_plane::gateway::ui::Request;
     let (mut tree, root) = task();
@@ -339,6 +551,21 @@ fn interrupt_invalidates_a_prediction_already_in_flight() {
         .unwrap();
     assert!(actions.operations.is_empty());
     assert_eq!(tree.branches.len(), 1);
+}
+
+#[test]
+fn next_model_admission_does_not_expire_tool_validation() {
+    let (mut tree, _root) = task();
+    tree.speculative_admission(waiting()).unwrap();
+    let AgentCommand::StartCandidate { branch_id, .. } = tree.start_candidate("chance-1", json!("guess")).unwrap() else { unreachable!() };
+    let mut model = waiting();
+    if let AgentMessage::SpeculativeAdmissionRequest { action_id, action_kind, name, .. } = &mut model {
+        *action_id = "next-model".into();
+        *action_kind = crate::control_plane::agent_control::ActionKind::ModelInference;
+        *name = "model".into();
+    }
+    tree.speculative_admission(model).unwrap();
+    assert!(!tree.authority_advanced_past(&tree.branches[&branch_id]));
 }
 
 #[test]
@@ -673,6 +900,48 @@ fn branch_cannot_be_archived_while_its_environment_is_still_being_created() {
 }
 
 #[test]
+fn cancelled_creation_keeps_late_resource_for_cleanup() {
+    let (mut tree, root) = task();
+    let chance = tree.admit_chance("authority", "op", "tool", json!({}), None, None).unwrap();
+    let command = tree.start_candidate(&chance, json!("guess")).unwrap();
+    let AgentCommand::StartCandidate { branch_id: child, .. } = &command else { unreachable!() };
+    let child = child.clone();
+    let mut scheduled = ControlActions::default();
+    tree.schedule(ControlOperation::Establish(command), &mut scheduled);
+    let mut session = session::Session::new(root.path(), None);
+    session.request(&mut tree, crate::control_plane::gateway::ui::Request::Shutdown, 0).unwrap();
+    let actions = tree.complete_work(scheduled.operations[0].0, Ok(ControlResult::Environment("late-resource".into(), None))).unwrap();
+    assert_eq!(tree.branches[&child].environment_id.as_deref(), Some("late-resource"));
+    assert!(!actions.commands.iter().any(|c| matches!(c, AgentCommand::StartCandidate { .. })));
+    assert!(!tree.evictable_branches().contains(&child));
+    let AgentCommand::Cleanup { command_id, generation, .. } = tree.begin_cleanup(&child).unwrap() else { unreachable!() };
+    tree.handle_message(AgentMessage::CommandResult { command_id, branch_id: child.clone(), operation_id: None, operation: CommandOperation::Cleanup, status: CommandStatus::Applied, generation, reason: None }).unwrap();
+    let capabilities = RuntimeCapabilities { branch_environment: true, ..Default::default() };
+    let progress = tree.progress(&capabilities).unwrap();
+    let (terminate, _) = progress.operations.iter().find(|(_, op)| matches!(op, ControlOperation::Terminate(id) if id == &child)).expect("late resource must be terminated");
+    let cleanup = tree.complete_work(*terminate, Ok(ControlResult::Completed)).unwrap();
+    let (cleanup, _) = cleanup.operations.iter().find(|(_, op)| matches!(op, ControlOperation::Cleanup(id) if id == &child)).expect("terminated resource must be cleaned");
+    tree.complete_work(*cleanup, Ok(ControlResult::Completed)).unwrap();
+    assert_eq!(tree.branches[&child].execution_state.runtime, RuntimeExecutionState::Cleaned);
+}
+
+#[test]
+fn failed_delivery_uses_branch_failure_and_ignores_completed_start() {
+    let (mut tree, _root) = task();
+    let chance = tree.admit_chance("authority", "op", "tool", json!({}), None, None).unwrap();
+    let command = tree.start_candidate(&chance, json!("guess")).unwrap();
+    let AgentCommand::StartCandidate { branch_id: child, .. } = &command else { unreachable!() };
+    let child = child.clone();
+    let actions = tree.delivery_failed(&command, "disconnected".into()).unwrap();
+    assert!(!actions.is_empty());
+    assert!(tree.branches[&child].execution_state.failure.is_some());
+    let authority = AgentCommand::StartBranch { branch_id: "authority".into(), environment_id: None, execution_access: None, role: BranchRole::Authority, workspace: "/tmp/fake".into(), prompt: String::new() };
+    // task() already consumed BranchStarted: a delayed send timeout is not a new failure.
+    assert!(tree.delivery_failed(&authority, "receipt lost".into()).unwrap().is_empty());
+    assert!(tree.authority_failure().is_none());
+}
+
+#[test]
 fn failed_creation_preserves_runtime_identity_without_starting_candidate() {
     let (mut tree, _root) = task();
     let chance = tree
@@ -754,6 +1023,7 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
                         .unwrap()
                         .push((request.environment_id.clone(), request.operation.clone()));
                     let result = OperationResult {
+                        execution_access: None,
                         request_id: request.request_id.clone(),
                         environment_id: "runtime-returned-child".into(),
                         status: ResultStatus::Completed,
@@ -792,7 +1062,7 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
             &ControlOperation::Establish(command),
         )
         .unwrap();
-    assert!(matches!(&result, ControlResult::Environment(id) if id == "runtime-returned-child"));
+    assert!(matches!(&result, ControlResult::Environment(id, _) if id == "runtime-returned-child"));
     let actions = tree
         .complete_work(scheduled.operations[0].0, Ok(result))
         .unwrap();
@@ -804,12 +1074,14 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
         matches!(&actions.commands[0], AgentCommand::StartCandidate { environment_id: Some(id), .. } if id == "runtime-returned-child")
     );
     let calls = recorded.lock().unwrap();
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 2);
     assert_eq!(
         Some(calls[0].0.as_str()),
         tree.branches["authority"].environment_id.as_deref()
     );
     assert_eq!(calls[0].1, Operation::BranchEnvironment { agent: None });
+    assert_eq!(calls[1].0, "runtime-returned-child");
+    assert_eq!(calls[1].1, Operation::BindExecution { branch_id: child });
     session.shutdown().unwrap();
     client.join().unwrap();
 }

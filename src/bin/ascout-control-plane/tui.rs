@@ -5,7 +5,7 @@ use super::{
 };
 use ascout::control_plane::agent_control::BranchRole;
 use ascout::control_plane::gateway::ui::Connection;
-use ascout::control_plane::ledger::LedgerReader;
+use ascout::control_plane::ui_projection::UiProjection;
 use std::io::{self, Read, Write};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -25,7 +25,7 @@ impl Drop for Terminal {
 pub fn start(
     interface: Interface,
     connection: Connection,
-    reader: LedgerReader,
+    reader: UiProjection,
 ) -> io::Result<JoinHandle<()>> {
     let mut original = std::mem::MaybeUninit::uninit();
     if unsafe { libc::tcgetattr(0, original.as_mut_ptr()) } != 0 {
@@ -50,7 +50,7 @@ pub fn start(
     }))
 }
 
-fn run(interface: &Interface, connection: &Connection, reader: &LedgerReader) -> io::Result<()> {
+fn run(interface: &Interface, connection: &Connection, reader: &UiProjection) -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         for byte in io::stdin().lock().bytes() {
@@ -65,7 +65,7 @@ fn run(interface: &Interface, connection: &Connection, reader: &LedgerReader) ->
 fn run_input(
     interface: &Interface,
     connection: &Connection,
-    reader: &LedgerReader,
+    reader: &UiProjection,
     rx: mpsc::Receiver<io::Result<u8>>,
 ) -> io::Result<()> {
     let (mut input, mut escape) = (Vec::new(), Vec::new());
@@ -78,7 +78,11 @@ fn run_input(
     let mut answer = Vec::new();
     let mut choice = 0usize;
     loop {
-        let state = super::ui::run_view(reader.state_event_set());
+        let mut state = super::ui::run_view(reader.state_event_set());
+        let warnings = reader.warnings();
+        if !warnings.is_empty() {
+            state.notice = warnings.join("\n");
+        }
         if !state.connected {
             break;
         }
@@ -450,7 +454,7 @@ mod tests {
                     },
                 )
                 .unwrap();
-            let reader = ledger.reader();
+            let reader = UiProjection::new(ledger.reader());
             let ledger = Arc::new(Mutex::new(ledger));
             let replies = Arc::new(Mutex::new(Vec::new()));
             let captured = replies.clone();

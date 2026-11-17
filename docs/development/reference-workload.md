@@ -95,9 +95,9 @@
 
 Pi 握手中的能力字段是接入原语声明，不是模型推理或 sub-agent Hook 的证明。当前值为：工具执行前 Hook、模型推理前 Hook、local Decision evaluation、checkpoint continuation、independent candidate session、cancel completion、tool result injection 为 `true`；sub-agent 前 Hook 为 `false`。模型 action 由真实 `streamSimple` 请求前的 Hook 创建，普通 action 仍发送 `action_started` 事实；工具 Hook 按下发 Policy 的 `admit` 结果决定是否发送 `speculative_admission_request`。不要把 `message_start` 当作模型推理前 Hook。
 
-Rust 协议、控制循环与 Pi 接入同步切换为 `ActionStarted` / `ActionFinished`。action 包含 task/Branch/action identity、类型、可选父 action、结果终态和 evidence，并携带 Instrumentation 测量的 `timestamp_ms`；`SpeculativeAdmissionRequest` 也携带该时刻，`Usage` 必须关联模型 `action_id` 并提供 Instrumentation 开始与结束时间。Tree 只保存活动 action，完成事实进入 Ledger。Pi 从 SDK assistant message 边界报告模型推理，从工具 Hook 报告工具 action，输出与使用量可关联模型 action。`result_pending=true` 表示 action 已登记但真实执行仍停在执行前边界。Candidate 推理不再使用角色专用完成事件。Agent session 与 Branch 执行释放分开报告；命令接收/开始回执不提前完成 Tree 操作。Runtime Adapter 独立报告操作开始/结果及环境事件，环境建立失败不再伪装成 Agent 失败。
+Rust 协议、控制循环与 Pi 接入使用 `ActionStarted` / `ActionFinished`。action 包含 task/Branch/action identity、类型、可选父 action、结果终态和 evidence，并携带 Instrumentation 测量的 `timestamp_ms`；`SpeculativeAdmissionRequest` 登记执行前的等待身份和准入时刻，不伪造实际开始。`Usage` 关联模型 `action_id` 并提供 Instrumentation 起止时间。Tree 保存活动 action，完成事实进入 Ledger。Pi 从真实请求前 Hook 报告模型开始，从工具 Hook 报告工具 action，输出与使用量可关联模型 action。Candidate 推理不使用角色专用完成事件。Agent session 与 Branch 执行释放分开报告；命令接收/开始回执不提前完成 Tree 操作。Runtime Adapter 独立报告操作开始/结果及环境事件，环境建立失败不伪装成 Agent 失败。
 
-能力边界：通用协议可表达 sub-agent 等 action，但 Pi 当前只采集模型推理与工具执行；工具 Hook 已执行 control plane 下发的已编译本地 Decision，普通工具仍沿原有 Runtime 等待路径继续，Policy 允许时才产生 `speculative_admission_request`。模型推理前 Hook 为 true，sub-agent 启动前 Hook 为 false；不要把 `message_start` 当作模型推理前 Hook。只有 `predict` 返回非空预测才是投机机会；空预测直接按权威路径执行，不保留挂起的 Proposal。投机预测、checkpoint 续跑和 Runtime invoke 仍只接通工具等待路径，不宣称任意 action 均可投机。模型开始时间是真实请求前 Hook 的时刻，不是 SDK 首次 assistant message 事实。extent stop 可在工具 Hook 边界暂停，discard、cleanup、取消和合法恢复会释放等待；断线不会伪造完成。Agent 自身超时须由 Instrumentation 实际观察后报告，control plane 超时不伪造 timed_out action 事实。Agent 命令的分阶段回执当前覆盖已有身份管理的 Promote、ResolvePending、Discard、Cleanup；其他命令仍依其 Branch/回合事实。Runtime 资源清单仍随 OperationResult 返回，独立资源/效果事件尚未接通。
+能力边界：通用协议可表达 sub-agent 等 action，但 Pi 当前只采集模型推理与工具执行；二者的真实执行前 Hook 均执行下发的本地 Decision，Policy 允许时产生 `speculative_admission_request`，通过既有 launch 控制 eager／speculative-first。sub-agent 启动前 Hook 仍为 false；不要把 `message_start` 当作模型推理前 Hook，也不宣称任意 action 均可投机。空预测或预测失败放行原权威调用一次，不保留挂起的 Proposal。模型开始时间来自真实请求前 Hook，而非首次 assistant message。extent stop 支持工具与模型边界；discard、cleanup、取消和合法恢复释放等待，断线不伪造完成。Agent 自身超时须实际观察后报告。分阶段回执覆盖已有身份管理的 Promote、ResolvePending、Discard、Cleanup；其他命令依其 Branch／回合事实。Runtime 资源清单随 OperationResult 返回，独立资源／效果事件尚未接通。
 
 ### 模型投机 `branch_model`（当前已接通的语义）
 
@@ -145,7 +145,7 @@ Candidate 创建通过一次入口登记完整控制上下文。Policy 预测、
 
 本轮本地验证：`cargo check --all-targets`、`cargo test --lib --bins`（11 项）及 `/usr/bin/node --test tests/pi-access.mjs`（3 项）。新增回归针对实际发现的“请求晋级就提前清理旧 Parent／派发后续输入”问题，覆盖确认前不切换、确认后剪枝与已结束候选接收后续输入。没有执行真实 NLE 模型验收。一次未限定范围的 `cargo test` 启动 Firecracker 端到端测试，7 项失败，首个错误为 Unix socket 路径过长；不计作本轮通过证据，也未修改后端以绕过。
 
-尚未解决 Ledger 归档失败后的 Branch 所有权；不宣称已实现全部调度、预算、嵌套接入或独立环境端到端能力。
+Ledger 归档失败按一次重试、最终失败先报警再释放的规则处理，见 [UI Projection](ui-projection.md)；不宣称已实现全部调度、预算、嵌套接入或独立环境端到端能力。
 
 补充真实模型验收（用户明确要求后执行，代码版本 `e9694c4`）：两轮均使用 `openai/gpt-6-luna --thinking low`、现有 seed 7／1 秒延迟 NLE 配置，没有修改默认模型或 Policy。
 
@@ -195,12 +195,11 @@ Agent 会话释放和 Runtime 环境清理分开记录；共享环境清理成�
 cargo build
 
 # 2. 建运行目录（由调用方创建，control plane 不创建也不删除）
-mkdir -p /tmp/opencode/run-1
 
 # 3. 启动（相对路径按当前目录解析，所以要在仓库根目录）
 PATH=/usr/bin:$PATH \
 ASCOUT_RUNTIME_CONFIG=nle-runtime.json \
-./target/debug/ascout-control-plane /tmp/opencode/run-1 ../pi assets/policy/nle/policy.yaml
+./target/debug/ascout-control-plane ../pi --policy nle
 ```
 
 终端里出现 AScout 界面后，首次消息使用 [NLE 任务说明](../../examples/nle-task.md) 中的完整文本（多行可合并成一行粘贴）。不要只依赖下面这句简短目标：它没有解释动作编号、公开观测和接口限制。
@@ -278,7 +277,7 @@ Workload 是具体运行场景，Policy 不选择业务场景，只对等待点�
 
 ```sh
 PI_CODING_AGENT_DIR=/tmp/opencode/ascout-check-config \
-cargo run --bin ascout-control-plane -- /tmp/opencode ../pi assets/policy/pi-tool/policy.yaml
+cargo run --bin ascout-control-plane -- ../pi --policy pi-tool
 ```
 
 输入任意请求触发场景。2026-10-25 实测日志 `/tmp/opencode/ascout-f7tYJy/events.jsonl`：两个 Candidate 均在 Parent 返回前执行完成，真实值 `example` 后一个 Promote、另一个 Discard，旧 Parent 开始默认命令后被取消，Tree 确认旧 Parent 与 loser 已 Cleaned。这是脚本模型接口加真实工具验证，不是真实大模型成功证据。
@@ -315,7 +314,7 @@ NLE 是 AScout 的外部测试 workload，不属于 AScout 实现。下面描述
 
 NLE workload 保持单世界方案，不改变 control plane 的 Branch→Environment 独占绑定；Candidate 创建仍必须得到不同的 Environment id。NleBackend 声明 `branch_environment: true`，表示建立独立身份与生命周期，不表示复制世界。暂停一个 Environment 不暂停其他引用；终止或清理一个引用不销毁其他使用者的世界，最后一个引用释放时才关闭世界。保存恢复继续按唯一世界记录 seed 与公开动作历史，重建世界后恢复各 Environment 原身份和生命周期。Runtime 内部如何组合 Backend instance 不暴露给 control plane。Candidate 的动作在 Instrumentation 被暂存，Promote 前不进入环境；这是该 workload 的共享资源约束，不是 AScout 核心的自动隔离保证。动作前可配置固定延迟（`action_delay_seconds`），用来模拟慢动作并把投机推理的窗口显性化。种子必须通过 `env.unwrapped.seed(seed)` 再 `reset()` 设置；NLE 忽略 `reset(seed=...)`。Agent 权限和 Policy 准入不由这个 bridge 代替。
 
-Rust 的 `NleBackend` 通过已有 `Backend` 接口调用该 bridge。运行时 Adapter 配置使用 `"backend": "nle"`、Python 解释器和 bridge 路径。Runtime 在握手中声明 `nle_action` 和 `nethack_guide` 工具；control plane 仍为每个 Branch 维护独占 Environment，control plane 只使用通用的 `tool_context` 和 `invoke_tool` 操作，不再识别工具名或动作编号。NLE 的 `invoke_tool` 返回工具通道结果 `result` 与 Policy 匹配证据 `evidence`，两者都只含公开观察。游戏观察的摘要和 `Guidebook` 章节都由 bridge 生成，`NleBackend` 只转发；control plane 不解析 `blstats`、`chars` 或 `message`。
+Rust 的 `NleBackend` 通过已有 `Backend` 接口调用该 bridge。运行时 Adapter 配置使用 `"backend": "nle"`、Python 解释器和 bridge 路径。Runtime 在握手中声明 `nle_action` 和 `nethack_guide` 工具；control plane 为每个 Branch 维护独占 Environment，用通用 `tool_context` 查询预测上下文；工具执行由 Instrumentation 经独立连接直接请求 Runtime。NLE backend 的 `invoke_tool` 返回 `result` 与 Policy 匹配证据 `evidence`，两者都只含公开观察。游戏观察的摘要和 `Guidebook` 章节由 bridge 生成，`NleBackend` 只转发；control plane 不解析 `blstats`、`chars` 或 `message`。
 
 已完成的实际验证：
 
@@ -445,7 +444,7 @@ Node 使用系统 `/usr/bin/node`（v26.12.1，满足 Pi 要求的 ≥22.19）�
 ```sh
 PATH=/usr/bin:$PATH \
 ASCOUT_RUNTIME_CONFIG=nle-runtime.json \
-./target/debug/ascout-control-plane /tmp/ascout-run6 ../pi assets/policy/pi-tool/policy.yaml
+./target/debug/ascout-control-plane ../pi --policy pi-tool
 ```
 
 输入三轮后取得命中结果。`/tmp/ascout-run6/events.jsonl` 中的事实：
@@ -472,7 +471,7 @@ Promote 后继续输入第四轮，`candidate-5` 作为当前权威 Branch 接�
 ```sh
 PATH=/usr/bin:$PATH \
 ASCOUT_RUNTIME_CONFIG=nle-runtime.json \
-./target/debug/ascout-control-plane /tmp/ascout-real2 ../pi assets/policy/nle/policy.yaml
+./target/debug/ascout-control-plane ../pi --policy nle
 ```
 
 首次消息使用 `examples/nle-task.md` 的完整任务说明。模型连续执行了 10 次动作，`/tmp/ascout-real2/events.jsonl` 的结果：

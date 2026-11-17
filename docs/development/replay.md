@@ -41,12 +41,11 @@ Replay 套件的职责仅限于读取已有运行的模型响应并按顺序提�
 ### 通用入口（2026-11-14）
 
 ```sh
-mkdir /tmp/opencode/replay-run
-node tools/replay/run.ts /path/to/source-run /tmp/opencode/replay-run ../pi \
+node tools/replay/run.ts /path/to/source-run ../pi \
   --runtime /path/to/runtime.json --web 127.0.0.1:8080
 ```
 
-源 run 的 `policy.json` 优先，经正常 `--policy-artifact` 加载；不存在时必须在 Pi 路径后显式提供 `original-policy.yaml`，不得回退默认策略。若两者都提供，核对编译 digest。外部工具要求显式 `--runtime`；配置须使用 `control_address` TCP 地址，不得位于源目录。新 run 不得位于源目录内。Runtime 的其他可写路径和初始环境由调用方明确提供，工具不会猜测目录布局或拿退出快照当初始状态。
+新 replay session 必须通过 `--policy NAME` 选择配置目录中的 Policy；源 session 的 `policy.json` 仅用于源 session 自身恢复，不可作为启动参数加载。外部工具要求显式 `--runtime`；配置须使用 `control_address` TCP 地址，不得位于源目录。新 session 的 Runtime 可写路径和初始环境由调用方明确提供，工具不会猜测目录布局或拿退出快照当初始状态。
 
 `tools/replay/recording.ts` 每次启动读取原生 session/events，在内存恢复候选请求上下文。外部本地 HTTP 服务以 OpenAI SSE 返回记录回复，通过通用 `--models` 追加模型配置；普通 Pi 模型、认证和扩展仍可用，重复 provider 拒绝覆盖。运行侧不导入测试工具。按 events 文件顺序、原生 ID 去重，仅将已消费 `message.role=user` 的纯文本输入经 `POST /api/request` 送入当前权威；通知不作为用户输入。不重现墙钟时刻、Interrupt 或未消费队列。
 

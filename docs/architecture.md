@@ -10,7 +10,7 @@ Instrumentation 上报通用 action 生命周期及 Agent/Branch 元事件，控
 
 候选承接后续执行时继续使用候选环境；Instrumentation 与 Runtime 保持执行、环境及必要状态交接的一致性，嵌套接受仍受祖先约束。Agent 常用 Ctrl-C 或退出终止任务；Ctrl-C 保留程序和 session，结束候选并等待相关写入及物化处理后，在同一对话中接下一轮。AScout 的独立暂停接口保留树、候选和环境；具体边界见 [Agent 接入设计](design/agent-integration.md) §5。
 
-Parent 取得真实 operation 结果后可以立即继续，候选验证并行进行，不以验证结束阻塞真实结果交付；合法 Promote 才使旧 Parent 失去权威并受管停止。工具准入与结果兼容性由 Policy 结合接入能力判断，operation 归属与结果配对由 Mechanism 保证。
+工具与模型推理均可由 Policy 选择 eager（权威调用与候选并行）或 speculative-first（权威调用在执行前等待，独立候选先行）。候选被接受后 Promote 其 session 并取消旧 Parent，不向旧调用注入候选结果；全部候选不可接受时原调用只放行一次。Parent 已放行并取得真实结果后可以立即继续，不以候选验证结束阻塞结果交付。工具准入与结果兼容性由 Policy 结合接入能力判断，operation 归属与结果配对由 Mechanism 保证。
 
 用户端还可提供独立于主对话的只读候选观察，显示候选运行事实和内容；候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份。观察不改变权威输出路由，不给候选建立用户输入通道，也不将观察内容反馈给其他 Branch。生命周期状态取自 control plane，实际执行活动由 Instrumentation 报告，环境操作完成与否依据实际返回结果展示，不以命令已发出代替完成。
 
@@ -64,11 +64,13 @@ control plane 是整体 Speculative Tree 和控制语义的权威来源。Runtim
 
 | 侧面 | 组件 | 状态 |
 |---|---|---|
-| Instrumentation | Interposer（拦截与操作集成）、ASC-Proxy（受管控制通信）、Product Integration（产品接入） | 当前 Agent 与 Branch 的本地执行上下文 |
-| control plane | Gateway、Policy Engine、Speculation Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、请求校验与投机编排；Gateway 只持有通信所需状态 |
+| Instrumentation | Interposer（拦截与操作集成）、ASC-Proxy（受管控制与独立执行通信）、Product Integration（产品接入） | 当前 Agent 与 Branch 的本地执行上下文 |
+| control plane | Gateway、UI Projection、Policy Engine、Speculation Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、请求校验与投机编排；Gateway 只持有通信所需状态；界面缓存与连接读取位置由 UI Projection 管理，系统运行日志由进程持有 |
 | Runtime | 包含 Runtime Adapter 接入边界及所需的执行、状态派生、进程、资源、隔离和效果管理能力；Registry 属于 Runtime | 管理实际承载、能力声明校验与效果状态；不决定 Speculative Tree 的全局裁决，不呈现第二份 Tree 权威状态 |
 
 ASC-Proxy、Interposer 等 Instrumentation 组件随 Agent 留在 Branch 隔离环境外的可信宿主，由 Runtime 管理。Environment 身份按 Branch 独占；候选 session 保持独立，不因共用宿主进程而合并上下文。环境内受管子程序仍须按环境归属取消和清理。
+
+执行端点以共同准入边界协调 Branch 取消与新操作：取消等待已接受操作终态和后台写者清理；清理成功后仅新执行 generation 可进入，旧请求不能复活。清理失败时保持准入关闭并允许重试。恢复时 control plane 重新向 Instrumentation 提供当前执行访问信息，不复用旧端点。
 
 ## 3.1 代码模块结构
 

@@ -49,6 +49,9 @@ impl FilesystemBackend {
 }
 
 impl Backend for FilesystemBackend {
+    fn filesystem_tool_directory(&self) -> Option<PathBuf> {
+        Some(self.config.state_directory.join("tool-plans"))
+    }
     fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
         self.materialize_authority(&context.environment_id)
     }
@@ -73,6 +76,7 @@ impl Backend for FilesystemBackend {
 
     fn capabilities(&self) -> RuntimeCapabilities {
         RuntimeCapabilities {
+            backends: vec![self.backend_id().to_string()],
             branch_environment: self.usable,
             tools: Vec::new(),
             filesystem_fast_delete: Some(self.fast_delete),

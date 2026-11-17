@@ -37,11 +37,12 @@ impl Adapter {
         });
 
         let shared = Arc::new(Shared {
+            commands: Some(commands::Commands::start(self.runtime.clone())?),
             preserving: std::sync::atomic::AtomicBool::new(false),
             runtime: self.runtime,
             out,
             queues: Mutex::new(HashMap::new()),
-            seen: Mutex::new(HashSet::new()),
+            seen: Mutex::new(Default::default()),
             results: Mutex::new(ResultCache::default()),
             result_signal: Condvar::new(),
             known: Mutex::new(HashMap::new()),

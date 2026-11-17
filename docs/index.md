@@ -25,7 +25,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 7. [Speculation Contract 设计](design/speculation-contract.md)：Policy、control plane 与 Runtime 之间的总体语义对齐契约。
 8. [Runtime 设计](design/runtime.md)：Runtime 的动作承载、状态边界和可插拔能力。
 9. [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)：Runtime 通过 Adapter 面向 control plane 的具体接入契约与校验要求。
-10. [Instrumentation 设计](design/agent-integration.md)：Product Integration、Interposer、Session 与 ASC-Proxy 的责任边界。
+10. [Instrumentation 设计](design/agent-integration.md)：Product Integration、Interposer 与 ASC-Proxy 的责任边界；session 管理由 Product Integration 承担。
 11. [control plane 设计](design/control-plane.md)：control plane 作为 Mechanism 的实现主体，如何把 Contract 落到投机执行的控制路径。
     - [Policy Engine 设计](design/control-plane/policy-engine.md)：Policy DSL、编译、查询、执行与跨侧交付边界。
 

@@ -14,6 +14,8 @@ test(`notification through main.ts: ${mode}`,{timeout:15000},async t=>{
     const failed=mode.includes('write'),idle=mode==='default'||mode.startsWith('idle_');
     const root=await mkdtemp('/tmp/opencode/notification-adapter-');
     await mkdir(join(root,'packages/coding-agent/src'),{recursive:true});
+    await mkdir(join(root,'packages/coding-agent/src/core/tools'),{recursive:true});
+    await writeFile(join(root,'packages/coding-agent/src/core/tools/index.ts'),`export const createToolDefinition=name=>({name,parameters:{type:'object'}});`);
     await mkdir(join(root,'node_modules/typebox'),{recursive:true});
     await writeFile(join(root,'package.json'),' {"type":"module"}');
     await writeFile(join(root,'node_modules/typebox/index.js'),'exports.Type={Unsafe:x=>x};');
@@ -39,7 +41,7 @@ export async function createAgentSession(options){
   const message={role:'assistant',content:[{type:'toolCall',...toolCall}],stopReason:'toolUse',model:'fixture',usage:{}};
   subscriber({type:'message_start',message});session.messages.push(message);manager.appendMessage(message);subscriber({type:'message_end',message});await done('succeeded');
   await session.agent.beforeToolCall({toolCall,args:{}},controller.signal);
-  try {const result=await options.customTools[0].execute('op',{},controller.signal);await session.agent.afterToolCall({toolCall,result,isError:false});
+   try {const result=await options.customTools.find(t=>t.name==='runtime_tool').execute('op',{},controller.signal);await session.agent.afterToolCall({toolCall,result,isError:false});
    const message={role:'toolResult',toolCallId:'op',toolName:'runtime_tool',content:result.content};session.messages.push(message);manager.appendMessage(message);subscriber({type:'message_end',message});
   }catch(error){if(!controller.signal.aborted)throw error}
   flush();
@@ -47,7 +49,12 @@ export async function createAgentSession(options){
  };return {session};
 }
 `);
-    const messages=[];let client,buffer=Buffer.alloc(0),stderr='';
+    const messages=[];let client,buffer=Buffer.alloc(0),stderr='',toolSocket;
+    const executionServer=createServer(socket=>{let input='';socket.on('data',chunk=>{input+=chunk;if(!input.includes('\n'))return;const request=JSON.parse(input.split('\n')[0]);
+        if(request.command==='execute'){toolSocket=socket;socket.write(JSON.stringify({event:'accepted'})+'\n')}
+        else {if(request.command==='cancel'&&toolSocket){toolSocket.end(JSON.stringify({event:'terminal',status:'cancelled'})+'\n');toolSocket=undefined}socket.end(JSON.stringify({event:request.command==='confirm'?'confirmed':'terminal',status:'cancelled',generation:1})+'\n')}
+    })});
+    await new Promise(r=>executionServer.listen(join(root,'execution.sock'),r));
     const server=createServer(socket=>{client=socket;socket.on('data',chunk=>{
         buffer=Buffer.concat([buffer,chunk]);
         while(buffer.length>=4&&buffer.length>=4+buffer.readUInt32BE(0)){
@@ -58,7 +65,7 @@ export async function createAgentSession(options){
     const child=spawn(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,resolve('instrumentation/pi/main.ts'),join(root,'agent.sock'),'agent'],{env:{...process.env,ASCOUT_PI_ROOT:root,ASCOUT_SESSION_FILE:join(root,'session.jsonl'),ASCOUT_RUNTIME_TOOLS:JSON.stringify([{name:'runtime_tool',description:'fixture',parameters:{type:'object'}}])},stdio:['ignore','pipe','pipe']});
     child.stderr.on('data',chunk=>stderr+=chunk);
     const exited=new Promise(r=>child.once('exit',(code,signal)=>r({code,signal})));
-    t.after(async()=>{client?.destroy();if(child.exitCode===null){child.kill();await exited}await new Promise(r=>server.close(r))});
+    t.after(async()=>{client?.destroy();toolSocket?.destroy();if(child.exitCode===null){child.kill();await exited}await new Promise(r=>server.close(r));await new Promise(r=>executionServer.close(r))});
     async function wait(predicate){
         const deadline=Date.now()+5000;
         while(Date.now()<deadline){const found=messages.find(predicate);if(found)return found;if(child.exitCode!==null)break;await new Promise(r=>setTimeout(r,5))}
@@ -67,7 +74,7 @@ export async function createAgentSession(options){
     function send(payload){const body=Buffer.from(JSON.stringify({kind:'command',payload})),header=Buffer.alloc(4);header.writeUInt32BE(body.length);client.write(Buffer.concat([header,body]))}
     const result=(id,status)=>wait(m=>m.message==='command_result'&&m.command_id===id&&m.status===status);
     await wait(m=>m.message==='agent_ready');
-    send({command:'start_branch',branch_id:'authority',role:'authority',workspace:root,prompt:idle?'':'run'});
+    send({command:'start_branch',branch_id:'authority',role:'authority',workspace:root,prompt:idle?'':'run',execution_access:{transport:'unix-json-lines',address:join(root,'execution.sock'),environment_id:'environment'}});
     await wait(m=>m.message==='branch_ready');
     if(!idle)await wait(m=>m.message==='action_started'&&m.action_kind==='tool_execution');
     const command={command:'promote',branch_id:'authority',command_id:'promote-notice',generation:1,...(mode==='default'?{}:{notification:'real authoritative result'})};
@@ -82,6 +89,7 @@ export async function createAgentSession(options){
     assert.equal(audit.filter(e=>e.send).length,mode==='default'?0:1,'full command retransmission sends once');
     if(mode!=='default')assert.equal(messages.filter(m=>m.message==='transcript'&&m.entry.role==='custom').length,0,'queued is not delivered');
     if(mode==='turn_end'){
+        toolSocket.end(JSON.stringify({event:'terminal',status:'succeeded',output:{stdout:JSON.stringify({result:'real'})}})+'\n');toolSocket=undefined;
         send({command:'resolve_pending',branch_id:'authority',command_id:'finish-tool',operation_id:'op',generation:1,outcome:'real'});await wait(m=>m.message==='turn_completed');
         send(command);send({command:'resolve_pending',branch_id:'authority',command_id:'after-delivery',generation:1});await result('after-delivery','applied');
         send({...command,notification:'changed payload'});send({command:'resolve_pending',branch_id:'authority',command_id:'after-conflict',generation:1});await result('after-conflict','applied');

@@ -33,6 +33,134 @@ pub struct BaseRuntime {
 }
 
 impl BaseRuntime {
+    fn execute_filesystem_tool(
+        &self,
+        context: &BackendContext,
+        tool: &str,
+        arguments: &Value,
+        cancel: &CancelHandle,
+    ) -> Result<BackendExecution, BackendError> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let directory = self
+            .data_plane
+            .as_ref()
+            .and_then(|backend| backend.filesystem_tool_directory())
+            .ok_or_else(|| BackendError::new("filesystem tool execution is unavailable"))?;
+        let launch = self
+            .launches
+            .lock()
+            .map_err(|_| BackendError::new("Launch table poisoned"))?
+            .get(&context.environment_id)
+            .cloned()
+            .ok_or_else(|| BackendError::new("Environment launch context missing"))?;
+        let root = launch
+            .env
+            .get("ASCOUT_PI_ROOT")
+            .cloned()
+            .or_else(|| std::env::var("ASCOUT_PI_ROOT").ok())
+            .ok_or_else(|| BackendError::new("Pi tool adapter requires ASCOUT_PI_ROOT"))?;
+        let mut child = Command::new("node")
+            .arg("--import")
+            .arg(
+                std::path::Path::new(&root)
+                    .join("packages/coding-agent/src/experimental/source-resolver.ts"),
+            )
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/runtime/backends/filesystem/pi-command.ts"
+            ))
+            .arg(directory)
+            .arg(&context.environment_id)
+            .arg(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| BackendError::new(error.to_string()))?;
+        let mut input = child.stdin.take().unwrap();
+        serde_json::to_writer(&mut input, &serde_json::json!({"tool":tool,"arguments":arguments,"cwd":launch.cwd,"operation_id":context.operation_id}))
+            .map_err(|error| BackendError::new(error.to_string()))?;
+        input
+            .flush()
+            .map_err(|error| BackendError::new(error.to_string()))?;
+        drop(input);
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let read = |mut source: Box<dyn std::io::Read + Send>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = source.read_to_end(&mut bytes);
+                bytes
+            })
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let out = std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines() {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let err = read(Box::new(stderr));
+        let mut result = None;
+        let mut stopping = false;
+        let status = loop {
+            for line in receiver.try_iter() {
+                let line = line.map_err(|error| BackendError::new(error.to_string()))?;
+                let value: Value = serde_json::from_str(&line)
+                    .map_err(|error| BackendError::new(error.to_string()))?;
+                if value["event"] == "output" {
+                    cancel.output(value["value"].clone());
+                } else {
+                    result = Some(value);
+                }
+            }
+            if cancel.is_cancelled() && !stopping {
+                unsafe {
+                    libc::kill(child.id() as i32, libc::SIGTERM);
+                }
+                stopping = true;
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| BackendError::new(error.to_string()))?
+            {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let _ = out.join();
+        for line in receiver.try_iter() {
+            let value: Value =
+                serde_json::from_str(&line.map_err(|e| BackendError::new(e.to_string()))?)
+                    .map_err(|e| BackendError::new(e.to_string()))?;
+            if value["event"] == "output" {
+                cancel.output(value["value"].clone());
+            } else {
+                result = Some(value);
+            }
+        }
+        let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
+        if stopping {
+            return Err(BackendError::interrupted());
+        }
+        if !status.success() {
+            return Err(BackendError::new(stderr));
+        }
+        let result = result.ok_or_else(|| BackendError::new("Filesystem tool terminal missing"))?;
+        let stdout = serde_json::to_string(&result["value"])
+            .map_err(|e| BackendError::new(e.to_string()))?;
+        Ok(BackendExecution::single(
+            self.backend_id(),
+            CommandOutput {
+                exit_code: status.code().unwrap_or(1),
+                stdout,
+                stderr,
+            },
+        ))
+    }
     pub fn new(id: impl Into<String>, inner: Arc<dyn Backend>) -> Self {
         Self {
             id: id.into(),
@@ -144,6 +272,45 @@ impl Drop for BaseRuntime {
 }
 
 impl Backend for BaseRuntime {
+    fn cancel_tool_writers(&self, context: &BackendContext) -> Result<(), BackendError> {
+        if !self.requires_holder(&context.environment_id) {
+            return self.inner.cancel_tool_writers(context);
+        }
+        use std::io::{BufRead, Write};
+        use std::os::fd::AsRawFd;
+        let launch = self
+            .launches
+            .lock()
+            .unwrap()
+            .get(&context.environment_id)
+            .cloned()
+            .ok_or_else(|| BackendError::new("Environment launch context missing"))?;
+        let fragment = self.launch_fragment(context, &launch)?;
+        if let Some((directory, _)) = fragment.holder_bind {
+            let directory =
+                std::fs::File::open(directory).map_err(|e| BackendError::new(e.to_string()))?;
+            let mut socket = std::os::unix::net::UnixStream::connect(format!(
+                "/proc/self/fd/{}/cmd.sock",
+                directory.as_raw_fd()
+            ))
+            .map_err(|e| BackendError::new(e.to_string()))?;
+            socket
+                .write_all(b"{\"op\":\"drain\",\"cancel\":true}\n")
+                .map_err(|e| BackendError::new(e.to_string()))?;
+            let mut reply = String::new();
+            std::io::BufReader::new(socket)
+                .read_line(&mut reply)
+                .map_err(|e| BackendError::new(e.to_string()))?;
+            let reply: Value =
+                serde_json::from_str(&reply).map_err(|e| BackendError::new(e.to_string()))?;
+            if reply["exit_code"] != 0 {
+                return Err(BackendError::new(format!(
+                    "Writer cancellation not confirmed: {reply}"
+                )));
+            }
+        }
+        self.inner.cancel_tool_writers(context)
+    }
     fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
         if (self.data_plane.is_some() || self.requires_holder(&context.environment_id))
             && self.process.writer_active(&context.environment_id)?
@@ -386,6 +553,9 @@ impl Backend for BaseRuntime {
         cancel: &CancelHandle,
     ) -> Result<BackendExecution, BackendError> {
         self.ensure_data_plane_available(context)?;
+        if ["read", "bash", "edit", "write"].contains(&tool_name) {
+            return self.execute_filesystem_tool(context, tool_name, arguments, cancel);
+        }
         self.inner
             .invoke_tool_with_context(context, tool_name, arguments, cancel)
     }

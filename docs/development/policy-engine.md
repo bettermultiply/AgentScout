@@ -164,7 +164,7 @@ def extent(data, *, policy_config, capabilities):
 
 `extent` 与 `effect` 由 Instrumentation 的通用层在真实执行边界按同一编译 Policy 求值，并通过 `branch_suspended` 的原因让 control plane 记录 Blocked；`rebalance` 由 control plane 在 Tree 版本变化后求值并下发 pause/resume/preempt。control plane 不重复求值 extent/effect，因此没有其它接入形式的实现时，这两类 Decision 不会在 control plane 侧单独生效。
 
-当前是最小接线：extent 在 Pi 接入的工具执行点按 action 计数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolved_pending` 或取消释放；effect 只处理 Instrumentation 对 candidate 外部工具效果求值的 `block`/`deny` 计划，模型推理作为 PURE 步骤不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。
+当前是最小接线：extent 在 Pi 接入的工具与模型执行点按 action 计数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolve_pending` 或取消释放；effect 对 candidate 工具效果求值，隔离能力与 Policy 同时允许时执行，否则 `block`/`deny`，模型推理不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。
 
 嵌套 Chance 已按 Chance 语义接通：权威等待点只要求父 Branch 仍存活（当前权威或候选），父 Branch 不是全局权威不再使 Chance 失效，候选 Branch 上再次 `admit` 的 Chance 与根 Branch 上的 Chance 一样走 Pending、Running、Resolving、Accepted/Discarded。嵌套候选 Branch 的 `AssumptionSet` 携带祖先未确认的 Proposal；祖先 Chance 未 Accepted 前它没有提交资格，match 成功也停留到可提交时再按同一 Promote 流程处置。父 Branch 进入 Discarding/Discarded 时，其上未收敛的 Chance 以 `Discarded(AncestorInvalidated)` 收敛，这是嵌套失效的唯一传播路径；候选 Branch 的外部效果仍受 effect 闸门约束。尚未覆盖的是 Runtime 侧的嵌套执行承载和候选状态重新挂载，当前只保证 control plane 状态、提交资格与失效传播。
 
@@ -172,3 +172,13 @@ def extent(data, *, policy_config, capabilities):
 
 每次求值新建 namespace 已被否定，替代机制未选，现有 bubblewrap 路径仍是未替换的原型。
 control plane 入口仍内嵌 Pi 启动参数；目标是入口不内嵌产品启动参数，由 UI 提供，通道尚未实现。
+
+## 配置目录与启动检查
+
+control plane 从 `~/.config/ascout/config.toml` 读取 `policy_dir`、`runs_dir`、`default_policy` 与 `log_path`，默认分别为 `~/.local/share/ascout/policies`、`~/.local/share/ascout/runs`、`policy` 与 `~/.local/share/ascout/ascout.log`。仓库开发配置须显式指向本仓库 `assets/policy`。Policy 文件结构保持不变。
+
+入口为 `ascout-control-plane <pi-root> [--policy <name>]`，交互终端启动前允许改选；非交互不等待。新 session 使用 tempfile 的操作系统随机目录名（`session-` 前缀），同一名字用作 session id 和 execution identity；在 `runs_dir` 下原子创建，不接受调用方传入运行目录。结束输出 session id；`sessions` 列出已有目录名，`--resume <session-id>` 恢复并检查保存的身份。
+
+Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Policy 已引用的 Runtime 配置，以单个 `backend` 或 `backends` 数组中各项的 `id` 对照 Runtime hello 的 `capabilities.backends`；没有引用 Runtime 或配置未声明 backend 时不检查。此检查不改变 Policy 摘要或编译产物结构。失败走既有 Adapter teardown。接口解析仍属于 Runtime，不构成环境保证验证。
+
+调用方迁移：主入口、回放入口和五份本地 fixture 已切换到配置/session 路径，fixture 使用私有 HOME 配置、不写用户主目录。fixture 在启动 Runtime 前同步复制 workspace，消除 stderr 通知后的复制竞态。恢复中的 `launch evaluation: Broken pipe` 根因是缓存 worker 的 `--die-with-parent` 随创建线程退出杀死进程；由 Worker 的 Drop 负责清理后，新增线程退出回归测试通过（原实现先复现失败，日志 `/tmp/ascout-worker-before.log`）。最终 `cargo check --all-targets`、`cargo test --lib --bins --test policy` 通过；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 6/6 通过，日志 `/tmp/ascout-recovery-final.log`。回放新 session 必须选 `--policy NAME`，不加载源 session artifact；下游外部脚本仍需按新接口核查。

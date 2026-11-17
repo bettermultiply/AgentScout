@@ -107,6 +107,9 @@ pub struct RuntimeTool {
 /// Runtime 在握手中声明的能力。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCapabilities {
+    /// Backend instance identities reported by Runtime during the existing hello.
+    #[serde(default)]
+    pub backends: Vec<String>,
     #[serde(default)]
     pub tools: Vec<RuntimeTool>,
     /// 能从父环境派生出具有独立身份和生命周期的子环境；不承诺复制内部资源。
@@ -138,6 +141,10 @@ pub struct RuntimeCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
+    /// Control-plane authorization of Instrumentation's Branch access.
+    BindExecution {
+        branch_id: String,
+    },
     MaterializeAuthority,
     SaveRuntime {
         path: std::path::PathBuf,
@@ -298,6 +305,9 @@ pub struct OperationResult {
     /// Establish failures without a created Environment omit this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub environment_id: String,
+    /// Runtime-provided command access for Instrumentation in this Branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_access: Option<ExecutionAccess>,
     pub status: ResultStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_state: Option<EnvironmentState>,
@@ -318,6 +328,15 @@ pub struct OperationResult {
     pub output: Option<CommandOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem: Option<FilesystemResult>,
+}
+
+/// A Runtime-owned command endpoint. Instrumentation treats its address as
+/// opaque and uses the same request lifecycle for every supported tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionAccess {
+    pub transport: String,
+    pub address: String,
+    pub environment_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +376,13 @@ pub enum AdapterMessage {
         /// 本次 Runtime 实例由哪些 Backend 组成的有序标识。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         backend_ids: Vec<String>,
+    },
+    Received {
+        request_id: String,
+    },
+    Rejected {
+        request_id: String,
+        reason: String,
     },
     Result(OperationResult),
     Event(Event),

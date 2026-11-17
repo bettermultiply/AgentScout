@@ -408,11 +408,12 @@ fn privileged_remove(args: &[&str]) -> Result<(), BackendError> {
         } else if args.get(1) == Some(&"link") {
             diagnostic == format!("Cannot find device \"{}\"", args[3])
         } else if args.get(1) == Some(&"netns") {
-            diagnostic
-                == format!(
-                    "Cannot remove namespace file \"/run/netns/{}\": No such file or directory",
+            ["/run/netns", "/var/run/netns"].iter().any(|directory| {
+                diagnostic == format!(
+                    "Cannot remove namespace file \"{directory}/{}\": No such file or directory",
                     args[3]
                 )
+            })
         } else {
             false
         };

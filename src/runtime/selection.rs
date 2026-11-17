@@ -22,6 +22,7 @@ pub struct BackendSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendOperation {
+    BindExecution,
     SaveRuntime,
     LoadRuntime,
     Establish,
@@ -45,6 +46,7 @@ pub enum BackendOperation {
 impl BackendOperation {
     pub fn for_operation(operation: &Operation) -> Self {
         match operation {
+            Operation::BindExecution { .. } => Self::BindExecution,
             Operation::MaterializeAuthority => Self::Materialize,
             Operation::SaveRuntime { .. } => Self::SaveRuntime,
             Operation::LoadRuntime { .. } => Self::LoadRuntime,

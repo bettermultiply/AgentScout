@@ -38,9 +38,21 @@ pub trait Runtime: Sync {
         )
     }
     fn drain_events(&self) -> Vec<Event>;
+    fn drain_delivery_errors(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 impl Runtime for ControlSession {
+    fn drain_delivery_errors(&self) -> Vec<String> {
+        self.results
+            .0
+            .lock()
+            .unwrap()
+            .diagnostics
+            .drain(..)
+            .collect()
+    }
     fn call(&self, environment_id: &str, operation: Operation) -> io::Result<OperationResult> {
         ControlSession::call(self, environment_id, operation)
     }
@@ -74,6 +86,7 @@ impl Drop for ControlSession {
 
 #[derive(Default)]
 struct ResultStore {
+    diagnostics: VecDeque<String>,
     entries: HashMap<String, OperationResult>,
     order: VecDeque<String>,
 }
@@ -84,6 +97,14 @@ impl ResultStore {
     }
 
     fn insert(&mut self, request_id: String, result: OperationResult) {
+        if let Some(previous) = self.entries.get(&request_id) {
+            if previous != &result {
+                self.diagnostics.push_back(format!(
+                    "conflicting Runtime result for request {request_id}"
+                ));
+            }
+            return;
+        }
         if self.entries.insert(request_id.clone(), result).is_none() {
             self.order.push_back(request_id);
         }
@@ -143,6 +164,7 @@ pub struct ControlSession {
     #[allow(clippy::type_complexity)]
     hello: Arc<(Mutex<Option<HelloInfo>>, Condvar)>,
     results: Arc<(Mutex<ResultStore>, Condvar)>,
+    receipts: Arc<(Mutex<HashMap<String, Option<Result<(), String>>>>, Condvar)>,
     events: Arc<(Mutex<VecDeque<Event>>, Condvar)>,
     /// Set when the Adapter socket reaches EOF or its reader fails.  Waiting
     /// callers must not sleep until their full request timeout after the
@@ -178,12 +200,14 @@ impl ControlSession {
         }
     }
     fn start(stream: TcpStream) -> io::Result<Self> {
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut reader = stream.try_clone()?;
         let session = Self {
             writer: Mutex::new(stream),
             next_request: AtomicU64::new(1),
             hello: Arc::new((Mutex::new(None), Condvar::new())),
             results: Arc::new((Mutex::new(ResultStore::default()), Condvar::new())),
+            receipts: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
             events: Arc::new((Mutex::new(VecDeque::new()), Condvar::new())),
             disconnected: Arc::new(AtomicBool::new(false)),
             event_waker: Arc::new(Mutex::new(None)),
@@ -192,6 +216,7 @@ impl ControlSession {
 
         let hello = session.hello.clone();
         let results = session.results.clone();
+        let receipts = session.receipts.clone();
         let events = session.events.clone();
         let disconnected = session.disconnected.clone();
         let event_waker = session.event_waker.clone();
@@ -222,13 +247,48 @@ impl ControlSession {
                             });
                             hello.1.notify_all();
                         }
+                        Some(AdapterMessage::Received { request_id }) => {
+                            if let Some(received) = receipts.0.lock().unwrap().get_mut(&request_id)
+                            {
+                                if received.is_none() {
+                                    *received = Some(Ok(()));
+                                }
+                            }
+                            receipts.1.notify_all();
+                        }
+                        Some(AdapterMessage::Rejected { request_id, reason }) => {
+                            results.0.lock().unwrap().diagnostics.push_back(format!(
+                                "runtime rejected request {request_id}: {reason}"
+                            ));
+                            if let Some(wake) = event_waker.lock().unwrap().as_ref() {
+                                wake();
+                            }
+                            // A rejected reuse is not a business result for the
+                            // accepted request, which may still be running.
+                            if let Some(received) = receipts.0.lock().unwrap().get_mut(&request_id)
+                            {
+                                *received = Some(Err(reason));
+                            }
+                            receipts.1.notify_all();
+                        }
                         Some(AdapterMessage::Result(result)) => {
+                            if let Some(received) =
+                                receipts.0.lock().unwrap().get_mut(&result.request_id)
+                            {
+                                if received.is_none() {
+                                    *received = Some(Ok(()));
+                                }
+                            }
+                            receipts.1.notify_all();
                             results
                                 .0
                                 .lock()
                                 .unwrap()
                                 .insert(result.request_id.clone(), result);
                             results.1.notify_all();
+                            if let Some(wake) = event_waker.lock().unwrap().as_ref() {
+                                wake();
+                            }
                         }
                         Some(AdapterMessage::Event(event)) => {
                             let mut queue = events.0.lock().unwrap();
@@ -294,8 +354,42 @@ impl ControlSession {
             operation,
             task_id: None,
         });
-        let mut writer = self.writer.lock().unwrap();
-        transport::write_message(&mut *writer, &message)
+        self.receipts
+            .0
+            .lock()
+            .unwrap()
+            .insert(request_id.to_owned(), None);
+        for _ in 0..3 {
+            {
+                let mut writer = self.writer.lock().unwrap();
+                if let Err(error) = transport::write_message(&mut *writer, &message) {
+                    let _ = writer.shutdown(std::net::Shutdown::Both);
+                    self.receipts.0.lock().unwrap().remove(request_id);
+                    return Err(error);
+                }
+            }
+            let (mut receipts, _) = self
+                .receipts
+                .1
+                .wait_timeout_while(
+                    self.receipts.0.lock().unwrap(),
+                    Duration::from_millis(200),
+                    |receipts| matches!(receipts.get(request_id), Some(None)),
+                )
+                .unwrap();
+            if let Some(Some(result)) = receipts.get(request_id).cloned() {
+                receipts.remove(request_id);
+                return result.map_err(io::Error::other);
+            }
+            if self.disconnected.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        self.receipts.0.lock().unwrap().remove(request_id);
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("no reception receipt for request {request_id} after at most 3 attempts"),
+        ))
     }
 
     /// 用 control plane 分配的请求标识发请求并等待结果。
@@ -389,6 +483,7 @@ mod tests {
 
     fn result(request_id: &str) -> OperationResult {
         OperationResult {
+            execution_access: None,
             request_id: request_id.to_string(),
             environment_id: "env".to_string(),
             status: ResultStatus::Completed,
@@ -403,6 +498,61 @@ mod tests {
             output: None,
             filesystem: None,
         }
+    }
+
+    #[test]
+    fn receipt_and_business_result_can_arrive_in_either_order() {
+        for result_first in [true, false] {
+            let (session, mut client) = session_pair();
+            let peer = thread::spawn(move || {
+                let _: ControlMessage = transport::read_message(&mut client).unwrap().unwrap();
+                let receipt = AdapterMessage::Received {
+                    request_id: "ordered".into(),
+                };
+                let business = AdapterMessage::Result(result("ordered"));
+                let messages = if result_first {
+                    [business.clone(), receipt, business]
+                } else {
+                    [receipt, business.clone(), business]
+                };
+                for message in messages {
+                    transport::write_message(&mut client, &message).unwrap();
+                }
+            });
+            session
+                .send("ordered", "env", Operation::PromoteEnvironment)
+                .unwrap();
+            assert_eq!(
+                session.wait_result("ordered", Duration::from_secs(1)),
+                Some(result("ordered"))
+            );
+            peer.join().unwrap();
+            assert_eq!(session.results.0.lock().unwrap().entries.len(), 1);
+        }
+    }
+
+    #[test]
+    fn rejected_wakes_delivery_without_waiting_for_retry() {
+        let (session, mut client) = session_pair();
+        let peer = thread::spawn(move || {
+            let _: ControlMessage = transport::read_message(&mut client).unwrap().unwrap();
+            transport::write_message(
+                &mut client,
+                &AdapterMessage::Rejected {
+                    request_id: "reject".into(),
+                    reason: "conflict".into(),
+                },
+            )
+            .unwrap();
+        });
+        let started = Instant::now();
+        let error = session
+            .send("reject", "env", Operation::PromoteEnvironment)
+            .unwrap_err();
+        assert!(error.to_string().contains("conflict"));
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(session.drain_delivery_errors()[0].contains("reject"));
+        peer.join().unwrap();
     }
 
     #[test]

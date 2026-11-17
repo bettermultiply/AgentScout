@@ -97,6 +97,28 @@ impl PolicyEngine {
         })
     }
 
+    /// Admission only confirms backend identity; Runtime owns interface checks.
+    pub fn confirm_backends(
+        &self,
+        policy: &CompiledPolicy,
+        capabilities: &crate::protocol::contract::RuntimeCapabilities,
+    ) -> io::Result<()> {
+        let Some(path) = policy.runtime_config_path() else { return Ok(()); };
+        let config: Value = serde_json::from_slice(&fs::read(path)?).map_err(invalid)?;
+        let identities: Vec<&str> = if let Some(backends) = config.get("backends").and_then(Value::as_array) {
+            backends.iter().filter_map(|backend| backend.get("id").and_then(Value::as_str)).collect()
+        } else {
+            config.get("backend").and_then(Value::as_str).into_iter().collect()
+        };
+        for backend in identities {
+            require(
+                capabilities.backends.iter().any(|id| id == backend),
+                &format!("Policy requires unavailable backend: {backend}"),
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn compile(&self, path: &Path) -> io::Result<CompiledPolicy> {
         let source_cwd = env::current_dir()?;
         let source_path_absolute = if path.is_absolute() {
@@ -239,11 +261,22 @@ impl PolicyEngine {
 
     /// Explicit deployment entry point using a killable IPC provider process.
     pub fn evaluate_with_provider(
-        &self, policy: &CompiledPolicy, decision: Decision, data: &Value,
-        models: &[String], requests: usize, provider: &super::ModelProviderProcess,
+        &self,
+        policy: &CompiledPolicy,
+        decision: Decision,
+        data: &Value,
+        models: &[String],
+        requests: usize,
+        provider: &super::ModelProviderProcess,
     ) -> io::Result<Value> {
-        self.evaluate_with_capabilities(policy, decision, data, models, requests,
-            &mut |request, deadline| provider.complete(request, deadline))
+        self.evaluate_with_capabilities(
+            policy,
+            decision,
+            data,
+            models,
+            requests,
+            &mut |request, deadline| provider.complete(request, deadline),
+        )
     }
 
     /// Explicit host grant; the callback must honor its deadline. The persistent
@@ -263,18 +296,35 @@ impl PolicyEngine {
     /// Cancellation is checked during Python execution and provider IPC. On
     /// cancellation both owned processes are killed and reaped before return.
     pub fn evaluate_with_provider_cancellable(
-        &self, policy: &CompiledPolicy, decision: Decision, data: &Value,
-        models: &[String], requests: usize, provider: &super::ModelProviderProcess,
+        &self,
+        policy: &CompiledPolicy,
+        decision: Decision,
+        data: &Value,
+        models: &[String],
+        requests: usize,
+        provider: &super::ModelProviderProcess,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> io::Result<Value> {
-        self.evaluate_capability_request(policy, decision, data, models, requests,
-            &mut |request, deadline| provider.complete_cancellable(request, deadline, Some(cancelled)),
-            Some(cancelled))
+        self.evaluate_capability_request(
+            policy,
+            decision,
+            data,
+            models,
+            requests,
+            &mut |request, deadline| {
+                provider.complete_cancellable(request, deadline, Some(cancelled))
+            },
+            Some(cancelled),
+        )
     }
 
     fn evaluate_capability_request(
-        &self, policy: &CompiledPolicy, decision: Decision, data: &Value,
-        models: &[String], requests: usize,
+        &self,
+        policy: &CompiledPolicy,
+        decision: Decision,
+        data: &Value,
+        models: &[String],
+        requests: usize,
         complete: &mut dyn FnMut(&Value, Instant) -> io::Result<Value>,
         cancelled: Option<&std::sync::atomic::AtomicBool>,
     ) -> io::Result<Value> {
@@ -287,14 +337,18 @@ impl PolicyEngine {
             .to_string_lossy()
             .into_owned();
         let script = policy.script(decision)?;
-        let mut workers = self.worker.lock().map_err(|_| invalid("Policy worker lock poisoned"))?;
+        let mut workers = self
+            .worker
+            .lock()
+            .map_err(|_| invalid("Policy worker lock poisoned"))?;
         if !workers.contains_key(&script) {
             if workers.len() >= 10 {
                 workers.clear();
             }
-            workers.insert(script.clone(), super::worker::Worker::start(
-                &script, &self.python, &self.bubblewrap,
-            )?);
+            workers.insert(
+                script.clone(),
+                super::worker::Worker::start(&script, &self.python, &self.bubblewrap)?,
+            );
         }
         let result = workers.get_mut(&script).unwrap().evaluate_cancellable(
             &json!({"data":data,"request_id":request_id}),

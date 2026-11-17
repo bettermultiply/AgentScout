@@ -51,9 +51,9 @@ Tree 在 `insert_branch` 收到准入投机的起点时建立内部 `Speculation
 当前数据缺口（因此这些情况不产生伪造值）：
 
 - 未命中的时间项没有可靠测量。已知延迟来源是：权威路径在工具 Hook 处可能多等一次本地 Policy 求值（沙箱内 Python 子进程），以及所有报告共用一条串行发送队列、control plane 读取慢时会拖住后续报告。二者都没有 Instrumentation 时间戳，control plane 也不记录“候选决定丢弃”之外的可靠对照，因此不输出候选存活时长，也不输出 0。
-- “简单校验失败而必须再跑权威模型时，时间为负的估计值（浪费 = 快速模型耗时 + 校验耗时）”尚未实现：校验耗时没有测量，只用快速模型耗时会遗漏一半浪费，也属于本设计明确不统计的“白耗”；并且模型投机当前还没有生产者。接入校验计时后才能实现该规则。
-- 模型投机还没有生产者：Pi 的模型推理前 Hook 只执行本地 Decision，不发送 `SpeculativeAdmissionRequest`，control plane 当前只从工具准入创建候选。上面两条模型命中规则按已有数据结构实现，但暂无运行路径会触发。
-- 模型快速侧与权威侧没有显式的投机关联。“有权威模型校验”只能以父 Branch 是否存在同一 `operation_id` 的 `Usage` 近似判断；候选同时有多条模型用量且无法对应到被投机的 operation 时，快速侧视为无数据。未来接入模型投机时应补显式关联。
+- “简单校验失败而必须再跑权威模型时，时间为负的估计值（浪费 = 快速模型耗时 + 校验耗时）”尚未实现：校验耗时没有测量，只用快速模型耗时会遗漏一半浪费，也属于本设计明确不统计的“白耗”。接入校验计时后才能实现该规则。
+- Pi 的模型推理前 Hook 已按本地 Decision 发送 `SpeculativeAdmissionRequest`，替代模型候选沿既有 Chance／operation 关联运行；不得把机制接通视为所有收益估计均已验证。
+- “有权威模型校验”按父 Branch 同一 `operation_id` 的 `Usage` 判断；候选同时有多条模型用量且无法对应到被投机的 operation 时，快速侧视为无数据。
 - 权威工具的 `ActionFinished` 可能晚于 Promote 到达；此时命中结算已经发出，工具命中时间为 null，不回填。
 - 权威模型的 `Usage` 也可能晚于 Promote 到达；此时按“没有权威模型校验”只写估计部分，之后不回填为实测。
 - 候选的 `Usage` 可能晚于 Discarded 到达；此时未命中结算已经发出，金钱维度为 null，不回填。
@@ -83,7 +83,7 @@ Tree 在 `admit` 通过时创建 Chance；`branch_created` 的 `chance_id` 与 `
 
 Tree 的 insert_branch、change_status、change_authority、record_runtime_state / emit_environment 是创建、生命周期、角色与环境事件入口。入口修改状态时将事实放入 Tree 的 pending_observations，控制循环通过 drain_observations 取走并交给 Ledger，不依赖 HTTP 或文件格式。状态转换入口提供原因；Discard Applied 后依次记录 Discarded、Cleaning，不遗漏同一次处理内的中间状态。对话提示、模型用量、工具完成与 run_status 保持原有来源，通过 Ledger 追加。清理成功来自 Runtime Cleaned；Runtime Failed 只发布失败状态，尚不能从现有状态区分 terminate、cleanup 或其他操作失败，不伪造 environment_cleaned 失败结果。
 
-Ledger 复用 events.jsonl：观察事件记录为 {message: "observation", observation: 公共事件}，与 record 的原始事实和 archive_branch 的归档记录区分。采用同一文件便于一并检查控制事实和观察事实，保留 record / archive_branch 的职责；不逐次保存完整树，不承诺完整 Tree 崩溃恢复。Promote 与消息引用可以提供有限消息定位依据；2026-11-16 确认当前不做 Ledger 历史查询索引、活动状态重建与恢复工具，不影响已有保存及正常 resume。append_observation 在追加时分配连续序号；文件写入失败仍保留内存事件并返回错误，报告历史不完整，不承诺部分文件写入回滚。
+Ledger 复用 events.jsonl：观察事件记录为 {message: "observation", observation: 公共事件}，与 record 的原始事实和 archive_branch 的归档记录区分。采用同一文件便于一并检查控制事实和观察事实，保留 record / archive_branch 的职责；不逐次保存完整树，不承诺完整 Tree 崩溃恢复。Promote 与消息引用可以提供有限消息定位依据；2026-11-16 确认当前不做 Ledger 历史查询索引、活动状态重建与恢复工具，不影响已有保存及正常 resume。append_observation 在追加时分配连续序号；文件写入失败返回错误，不发布内存事件也不推进已保存序号，报告历史不完整。普通观察写入不自动重试；已退出 Tree 的 Branch 归档按 [UI Projection 开发说明](ui-projection.md) 安全恢复追加边界后重试一次，最终失败先报警再释放。
 
 Ledger::reader 返回只读 LedgerReader；Ledger 和句柄均提供 state_event_set、events_after。Gateway HTTP 与 TUI 直接接收该句柄，不经 Interface 转交事件。内存有序历史用不可变 Arc 链保存，读取只在短锁内复制末端句柄和序号，遍历、复制和折叠均在锁外；追加不等待完整历史读取。events_after 在同一个序号锁和 Condvar 上检查并等待新事件，追加和断开事件唤醒所有等待连接。销毁历史采用迭代释放，避免长链递归释放栈溢出。
 

@@ -8,6 +8,11 @@ import { spawn, spawnSync } from 'node:child_process';
 
 const REAL_PI = '/home/betmul/BETMUL/AgentScout-suit/pi';
 
+async function toolDefinitions(root) {
+    await mkdir(join(root,'packages/coding-agent/src/core/tools'),{recursive:true});
+    await writeFile(join(root,'packages/coding-agent/src/core/tools/index.ts'),`export const createToolDefinition=name=>({name,parameters:{type:'object'}});`);
+}
+
 function readTree(file) {
     const script = `import { SessionManager } from '${REAL_PI}/packages/coding-agent/src/core/session-manager.ts'; const m=SessionManager.open(process.argv[1]); console.log(JSON.stringify({entries:m.getEntries(),messages:m.buildSessionContext().messages}));`;
     const result = spawnSync(process.execPath, ['--no-warnings', '--experimental-strip-types', '--import', `${REAL_PI}/packages/coding-agent/src/experimental/source-resolver.ts`, '--input-type=module', '-e', script, file], {encoding:'utf8'});
@@ -20,6 +25,7 @@ test(`runtime result commands and graceful shutdown at ${shutdownAt}`, async t =
     const root = await mkdtemp(join(tmpdir(), 'ascout-pi-'));
     const socketPath = join(root, 'agent.sock');
     await mkdir(join(root, 'packages/coding-agent/src'), { recursive: true });
+    await toolDefinitions(root);
     await mkdir(join(root, 'node_modules/typebox'), { recursive: true });
     await writeFile(join(root, 'package.json'), '{"type":"module"}');
     await writeFile(join(root, 'node_modules/typebox/index.js'), 'exports.Type={Unsafe:x=>x};');
@@ -29,7 +35,7 @@ test(`runtime result commands and graceful shutdown at ${shutdownAt}`, async t =
  export { SessionManager };
  export const ModelRuntime = {}, resolveCliModel = () => ({});
 export async function createAgentSession(options) {
-    const tool = options.customTools[0];
+    const tool = options.customTools.find(tool=>tool.name==='runtime_tool');
     const controller = new AbortController();
     let subscriber = () => {};
     const session = {
@@ -81,6 +87,16 @@ export async function createAgentSession(options) {
         });
     });
     await new Promise(resolve => server.listen(socketPath, resolve));
+    const executionPath=join(root,'execution.sock'),executions=[];
+    const executionServer=createServer(socket=>{
+        let input='';socket.on('data',chunk=>{input+=chunk;const end=input.indexOf('\n');if(end<0)return;
+            const request=JSON.parse(input.slice(0,end));input=input.slice(end+1);executions.push(request);
+            if(request.command==='execute')socket.end(JSON.stringify({event:'accepted'})+'\n'+JSON.stringify({event:'terminal',status:'succeeded',output:{stdout:JSON.stringify({result:{payload:request.branch_id==='authority'?'real-result':'candidate-real-result'},evidence:null})}})+'\n');
+            else socket.end(JSON.stringify({event:request.command==='confirm'?'confirmed':'terminal',status:'cancelled'})+'\n');
+        });
+    });
+    await new Promise(resolve=>executionServer.listen(executionPath,resolve));
+    const execution_access={transport:'unix-json-lines',address:executionPath,environment_id:'environment'};
     const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', '--import', `${REAL_PI}/packages/coding-agent/src/experimental/source-resolver.ts`, resolve('instrumentation/pi/main.ts'), socketPath, 'agent'], {
          env: { ...process.env, ASCOUT_PI_ROOT: root, ASCOUT_SESSION_FILE: join(root, 'session.jsonl'), ASCOUT_RUNTIME_TOOLS: JSON.stringify([
             {name:'runtime_tool',description:'test',parameters:{type:'object'}}
@@ -96,6 +112,7 @@ export async function createAgentSession(options) {
             await exited;
         }
         await new Promise(resolve => server.close(resolve));
+        await new Promise(resolve => executionServer.close(resolve));
         await rm(root, {recursive:true, force:true});
     });
     async function expectMessage(predicate) {
@@ -145,12 +162,12 @@ export async function createAgentSession(options) {
         cancelCompletion: true,
         toolResultInjection: true,
     });
-    if (shutdownAt === 'admission') {
+    {
         const runner = 'import sys,json\nfor line in sys.stdin.buffer:\n payload=json.dumps({"type":"result","request_id":json.loads(line)["request_id"],"result":True}).encode()\n sys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n sys.stdout.buffer.flush()\n';
         send({command:'local_policy',branch_id:'authority',policy_digest:'test-policy',has_predictor:true,decisions:{
             'admit.opportunity_pass':'import json,sys\nfor line in sys.stdin.buffer:\n request=json.loads(line)\n payload=json.dumps({"type":"result","request_id":request["request_id"],"result":request["data"]["op"]["kind"]!="model_inference"}).encode()\n sys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n sys.stdout.buffer.flush()\n','admit.feasibility_pass':runner,'extent':runner,'effect':runner}});
     }
-    send({command:'start_branch',branch_id:'authority',workspace:root,prompt:''});
+    send({command:'start_branch',branch_id:'authority',workspace:root,prompt:'',execution_access});
     await expectMessage(m => m.message === 'branch_started');
     const startup=await expectMessage(m=>m.message==='ui_prompt_requested'&&m.branch_id==='authority');
     assert.equal(messages.some(m=>m.message==='commands_listed'),false);
@@ -172,8 +189,9 @@ export async function createAgentSession(options) {
         assert.equal(typeof admission.timestamp_ms, 'number');
         return finish(['authority']);
     }
-    const pending = await expectMessage(m => m.message === 'action_started' && m.action_kind === 'tool_execution');
-    assert.equal(pending.action_id, 'operation-1');
+    const admission = await expectMessage(m => m.message === 'speculative_admission_request');
+    const pending={...admission,action_id:'operation-1'};
+    assert.equal(executions.length,0,'backend must wait for launch authorization');
     if (shutdownAt === 'eof_tool_wait') return finish([],1);
     if (shutdownAt === 'tool_wait') return finish(['authority']);
     // Rust's JSON encoder sorts object keys; checkpoint identity must not depend
@@ -181,13 +199,13 @@ export async function createAgentSession(options) {
     send({command:'start_candidate',branch_id:'candidate',parent_branch_id:'authority',
         workspace:root,operation_id:'operation-1',tool_name:'runtime_tool',prediction:'guess',
         checkpoint:{adapter:pending.checkpoint.adapter,kind:pending.checkpoint.kind,opaqueId:pending.checkpoint.opaqueId},
-        generation:2,command_id:'start-candidate'});
+        generation:2,command_id:'start-candidate',execution_access});
     await expectMessage(m => m.message === 'branch_started' && m.branch_id === 'candidate');
     const candidateStartup=await expectMessage(m=>m.message==='ui_prompt_requested'&&m.branch_id==='candidate');
     send({command:'ui_prompt_answer',branch_id:'candidate',prompt_id:candidateStartup.prompt_id,answer:true,cancelled:false});
     if (shutdownAt === 'candidate_gate') return finish(['candidate','authority']);
     send({command:'resolve_pending',branch_id:'authority',operation_id:'operation-1',
-        command_id:'resolve-1',generation:1,outcome:{payload:'real-result'}});
+        command_id:'resolve-1',generation:1,outcome:{phase:'execute'}});
     const outcome = await expectMessage(m => m.message === 'action_finished' && m.action_kind === 'tool_execution');
     assert.match(outcome.result.payload, /real-result/);
     assert.equal(outcome.status, 'succeeded');
@@ -195,9 +213,9 @@ export async function createAgentSession(options) {
     await expectMessage(m => m.message === 'turn_completed');
     await expectMessage(m => m.message === 'command_result' && m.status === 'applied');
     send({command:'promote',branch_id:'candidate',command_id:'promote-1',generation:2});
-    await expectMessage(m => m.message === 'action_started' && m.action_kind === 'tool_execution' && m.branch_id === 'candidate');
+    await expectMessage(m => m.message === 'speculative_admission_request' && m.branch_id === 'candidate');
     send({command:'resolve_pending',branch_id:'candidate',operation_id:'operation-2',
-        command_id:'resolve-2',generation:2,outcome:{payload:'candidate-real-result'}});
+        command_id:'resolve-2',generation:2,outcome:{phase:'execute'}});
     await expectMessage(m => m.message === 'action_finished' && m.action_kind === 'tool_execution' && m.branch_id === 'candidate');
     await expectMessage(m => m.message === 'turn_completed' && m.branch_id === 'candidate');
     if (shutdownAt === 'completed') {
@@ -242,6 +260,7 @@ test('model usage survives completion before message_end and reports an unpaired
     const root = await mkdtemp(join(tmpdir(), 'ascout-pi-'));
     const socketPath = join(root, 'agent.sock');
     await mkdir(join(root, 'packages/coding-agent/src'), { recursive: true });
+    await toolDefinitions(root);
     await mkdir(join(root, 'node_modules/typebox'), { recursive: true });
     await writeFile(join(root, 'package.json'), '{"type":"module"}');
     await writeFile(join(root, 'node_modules/typebox/index.js'), 'exports.Type={Unsafe:x=>x};');

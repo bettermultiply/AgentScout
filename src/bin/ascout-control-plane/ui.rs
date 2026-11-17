@@ -3,8 +3,9 @@ use ascout::control_plane::agent_control::{
     ActionKind, AgentMessage, BranchRole, BranchStatus, RuntimeExecutionState,
 };
 pub use ascout::control_plane::gateway::ui::Request;
-use ascout::control_plane::ledger::{Ledger, LedgerReader};
+use ascout::control_plane::ledger::Ledger;
 use ascout::control_plane::observation::{ObservationContent, StateEventSet};
+use ascout::control_plane::ui_projection::UiProjection;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -165,11 +166,11 @@ pub struct Interface {
     /// 每个工具 action 的开始时刻与工具名；工具名来自同一 action 的
     /// `ActionStarted.name`，没有 ActionStarted 时两者都不存在。
     action_starts: Arc<Mutex<BTreeMap<(String, String), (u64, String)>>>,
-    reader: LedgerReader,
+    reader: UiProjection,
 }
 
 impl Interface {
-    pub fn new(task_id: String, reader: LedgerReader) -> Self {
+    pub fn new(task_id: String, reader: UiProjection) -> Self {
         Self {
             input_status: Arc::new(Mutex::new(
                 serde_json::json!({"sequence":0,"ready":false,"error":null}),
@@ -208,15 +209,15 @@ impl Interface {
         running: bool,
         notice: &str,
     ) -> io::Result<()> {
-        let view = run_view(ledger.state_event_set());
-        if (ready, running, notice) != (view.ready, view.running, view.notice.as_str()) {
+        let view = run_view(self.reader.state_event_set());
+        if !view.connected || (ready, running, notice) != (view.ready, view.running, view.notice.as_str()) {
             ledger.append_observation(
                 &self.task_id,
                 ObservationContent::RunStatus {
                     ready,
                     running,
                     notice: notice.into(),
-                    connected: view.connected,
+                    connected: true,
                 },
             )?;
         }

@@ -3,11 +3,11 @@ use super::agent_control::{
     ActionKind, ActionStatus, AuthorityState, BranchRole, BranchStatus, ChanceStage,
     RuntimeExecutionState,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObservationEvent {
     pub sequence: u64,
     pub timestamp_ms: u64,
@@ -16,7 +16,7 @@ pub struct ObservationEvent {
     pub content: ObservationContent,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ObservationContent {
     UiPromptRequested {
@@ -169,7 +169,7 @@ pub enum ObservationContent {
 
 /// 结算的一个维度。实测与估计是两个独立部分：没有可靠测量时 `measured`
 /// 为 null，没有估计依据时 `estimated` 为 null；两者都不与对方相加或互相填充。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObservationAmount {
     /// 实测部分，带符号；没有可靠测量时为 null，不补零。
     pub measured: Option<f64>,
@@ -178,7 +178,7 @@ pub struct ObservationAmount {
 }
 
 /// 状态事件集中一个 Chance 的当前视图，由 Chance 与 Branch 事件折叠得到。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObservedChance {
     pub chance_id: String,
     pub parent_branch_id: String,

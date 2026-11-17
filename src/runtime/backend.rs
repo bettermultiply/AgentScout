@@ -50,9 +50,18 @@ impl BackendContext {
 #[derive(Default)]
 pub struct CancelHandle {
     cancelled: AtomicBool,
+    output: std::sync::Mutex<Option<Box<dyn Fn(Value) + Send + Sync>>>,
 }
 
 impl CancelHandle {
+    pub fn observe_output(&self, observer: impl Fn(Value) + Send + Sync + 'static) {
+        *self.output.lock().unwrap() = Some(Box::new(observer));
+    }
+    pub fn output(&self, value: Value) {
+        if let Some(observer) = self.output.lock().unwrap().as_ref() {
+            observer(value);
+        }
+    }
     /// 每个操作开始前重置。
     pub fn reset(&self) {
         self.cancelled.store(false, Ordering::SeqCst);
@@ -182,6 +191,14 @@ impl BackendExecution {
 
 /// 机制侧的能力。Adapter 只通过这个接口触及环境。
 pub trait Backend: Send + Sync {
+    /// Stop residual tool writers, including descendants of completed calls.
+    fn cancel_tool_writers(&self, _context: &BackendContext) -> Result<(), BackendError> {
+        Ok(())
+    }
+    /// Backend-private execution metadata; never delivered to Instrumentation.
+    fn filesystem_tool_directory(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     /// Runtime creates the identity before composing its internal Backend resources.
     /// The caller supplies operation metadata only; no Branch identity is accepted.
     fn create_environment(&self, context: &BackendContext) -> Result<String, BackendError> {

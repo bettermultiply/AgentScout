@@ -39,7 +39,7 @@ Available 或 Suspended；cleanup 只接受 Terminated。这样 Suspended 环境
 启用它的 BaseRuntime 包装层；未配置 filesystem 时这些检查不改变 inner Backend
 行为。
 
-Adapter 接入工作的对象是 Runtime 环境。所有合格 Adapter 都必须支持 `establish_environment`、`operate_environment`、`promote_environment`、`suspend_environment`、`resume_environment`、`terminate_environment` 和 `cleanup_environment`；`branch_environment` 是可选能力，只表示派生独立子环境。`promote_environment` 没有环境侧语义时也必须接受并成功返回，不能把 no-op 当作不支持。Runtime 也可以声明需要在真实环境中执行的环境工具；control plane 通过 `tool_context` 和 `invoke_tool` 调用，不解释工具的业务语义。能力声明描述这些操作对不同环境内容形成的实际隔离保证，以及 Branch 之间的非干扰保证。
+Adapter 接入工作的对象是 Runtime 环境。所有合格 Adapter 都必须支持 `establish_environment`、`operate_environment`、`promote_environment`、`suspend_environment`、`resume_environment`、`terminate_environment` 和 `cleanup_environment`；`branch_environment` 是可选能力，只表示派生独立子环境。`promote_environment` 没有环境侧语义时也必须接受并成功返回，不能把 no-op 当作不支持。Runtime 也可以声明需要在真实环境中执行的环境工具；control plane 用 `tool_context` 查询预测所需上下文，Instrumentation 经独立执行连接直接调用工具，不由 control plane 中转执行，也不解释工具业务语义。能力声明描述这些操作对不同环境内容形成的实际隔离保证，以及 Branch 之间的非干扰保证。
 
 先确认以下事实：
 

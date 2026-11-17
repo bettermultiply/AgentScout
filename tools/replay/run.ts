@@ -12,15 +12,13 @@ import type { Interface } from 'node:readline';
 import type { AddressInfo } from 'node:net';
 import { isObject } from './types.ts';
 
-const [sourceArg, runArg, piRoot, ...options] = process.argv.slice(2);
-if (!piRoot) throw Error('usage: node tools/replay/run.ts SOURCE_RUN NEW_RUN PI_ROOT POLICY --runtime CONFIG [--web 127.0.0.1:8080]');
-const source = fs.realpathSync(sourceArg), run = fs.realpathSync(runArg);
+const [sourceArg, piRoot, ...options] = process.argv.slice(2);
+if (!piRoot) throw Error('usage: node tools/replay/run.ts SOURCE_RUN PI_ROOT [--policy NAME] --runtime CONFIG [--web 127.0.0.1:8080]');
+const source = fs.realpathSync(sourceArg);
 const insideSource = (file: string) => file === source || file.startsWith(source + path.sep);
-if (insideSource(run)) throw Error('New run must be outside the read-only source');
 if (options.some(x => ['--model','--models','--resume'].includes(x))) throw Error('Replay selects its local model and requires a new run');
-if (options.includes('--policy-artifact')) throw Error('Replay uses the source Policy artifact');
-if (fs.existsSync(path.join(source,'policy.json'))) options.push('--policy-artifact',path.join(source,'policy.json'));
-else if (!options[0] || options[0].startsWith('--')) throw Error('Source Policy artifact missing; supply the original Policy YAML explicitly');
+if (options.includes('--policy-artifact')) throw Error('Policy artifacts are only used to resume their own session');
+if (!options.includes('--policy')) throw Error('Supply --policy NAME for the new replay session');
 const runtimeIndex = options.indexOf('--runtime');
 if (runtimeIndex < 0 || !options[runtimeIndex + 1]) throw Error('Supply --runtime explicitly for the new environment');
 const runtime: unknown = JSON.parse(fs.readFileSync(options[runtimeIndex + 1], 'utf8'));
@@ -93,7 +91,7 @@ function cleanup() {
   fs.rmSync(temporary, {recursive:true,force:true});
 }
 for (const signal of ['SIGINT','SIGTERM']) process.on(signal, shutdown);
-child = spawn(binary, [run,piRoot,...options,'--models',models,'--model','ascout-replay-local/recorded'], {stdio:['ignore','inherit','pipe']});
+child = spawn(binary, [piRoot,...options,'--models',models,'--model','ascout-replay-local/recorded'], {stdio:['ignore','inherit','pipe']});
 child.on('error', error => { fail(`AScout launch: ${error.message}`); childExited = true; resolveEndpoint(); cleanup(); process.exitCode=1; });
 child.on('exit', (code, signal) => { childExited=true; resolveEndpoint(); cleanup(); if(code || signal) {console.error(`AScout exited: ${code ?? signal}`);process.exitCode=1;} });
 let stderr = '';

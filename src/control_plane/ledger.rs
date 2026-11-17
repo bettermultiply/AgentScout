@@ -3,33 +3,15 @@
 //! 只记录已经发生的运行事实，不参与决策，也不从记录里恢复生命周期。
 //! 目标语义见 `docs/design/control-plane.md` §2.6。
 
-use super::observation::{ObservationContent, ObservationEvent, StateEventSet};
-use std::collections::BTreeMap;
+use super::observation::{ObservationContent, ObservationEvent};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// Immutable blocks: readers clone block handles under the lock, then fold/copy
-// outside it. Appending never waits for a reader to process the history.
-struct ObservationBlock {
-    event: ObservationEvent,
-    previous: Option<Arc<ObservationBlock>>,
-}
-impl Drop for ObservationBlock {
-    fn drop(&mut self) {
-        let mut previous = self.previous.take();
-        while let Some(block) = previous {
-            match Arc::try_unwrap(block) {
-                Ok(mut block) => previous = block.previous.take(),
-                Err(_) => break,
-            }
-        }
-    }
-}
 struct ObservationIndex {
-    head: Option<Arc<ObservationBlock>>,
+    path: std::path::PathBuf,
     sequence: u64,
     connected: bool,
 }
@@ -46,24 +28,31 @@ impl LedgerReader {
     pub fn connected(&self) -> bool {
         self.index.0.lock().unwrap().connected
     }
-    pub fn state_event_set(&self) -> StateEventSet {
-        let (sequence, head) = {
+    pub fn read_saved_after(&self, after: u64) -> Result<Vec<ObservationEvent>, String> {
+        use std::io::BufRead;
+        let (path, through) = {
             let index = self.index.0.lock().unwrap();
-            (index.sequence, index.head.clone())
+            (index.path.clone(), index.sequence)
         };
-        StateEventSet::new(sequence, Self::collect(head, 0))
-    }
-    fn collect(mut head: Option<Arc<ObservationBlock>>, after: u64) -> Vec<ObservationEvent> {
-        let mut events = Vec::new();
-        while let Some(block) = head {
-            if block.event.sequence <= after {
-                break;
-            }
-            events.push(block.event.clone());
-            head = block.previous.clone();
+        if through <= after {
+            return Ok(Vec::new());
         }
-        events.reverse();
-        events
+        let file = File::open(path).map_err(|e| e.to_string())?;
+        let mut events = Vec::new();
+        for line in io::BufReader::new(file).split(b'\n') {
+            let line = line.map_err(|e| e.to_string())?;
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if let Some(value) = value.get("observation") {
+                let event: ObservationEvent =
+                    serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+                if event.sequence > after && event.sequence <= through {
+                    events.push(event);
+                }
+            }
+        }
+        Ok(events)
     }
     pub fn events_after(&self, sequence: u64) -> Result<Vec<ObservationEvent>, String> {
         self.events_after_until(sequence, &std::sync::atomic::AtomicBool::new(false))
@@ -79,7 +68,7 @@ impl LedgerReader {
         sequence: u64,
         stopped: &std::sync::atomic::AtomicBool,
     ) -> Result<Vec<ObservationEvent>, String> {
-        let head = {
+        {
             let mut index = self.index.0.lock().unwrap();
             if sequence > index.sequence {
                 return Err("Sequence ahead of this run; reload state event set".into());
@@ -95,12 +84,16 @@ impl LedgerReader {
                     })
                     .unwrap()
                     .0;
+                drop(index);
             }
-            index.head.clone()
-        };
-        Ok(Self::collect(head, sequence))
+        }
+        self.read_saved_after(sequence)
     }
 }
+
+#[cfg(test)]
+#[path = "ledger_tests.rs"]
+mod tests;
 
 use serde_json::Value;
 
@@ -109,43 +102,62 @@ use crate::control_plane::agent_control::BranchRecord;
 /// 一次运行的事件记录。文件由调用方给出，Ledger 只负责追加。
 pub struct Ledger {
     file: File,
+    failed: bool,
+    append_boundary: Option<u64>,
+    #[cfg(test)]
+    write_faults: std::collections::VecDeque<usize>,
     reader: LedgerReader,
-    /// 已经由 Ledger 接管、但尚未写入成功的 Branch。
-    ///
-    /// 写入失败时 Ledger 继续持有这些 Branch；若在错误返回时直接释放，
-    /// 历史就会在没有任何组件负责的情况下消失。
-    unarchived: BTreeMap<String, BranchRecord>,
 }
 
 impl Ledger {
     pub fn open(path: &Path) -> io::Result<Self> {
+        use std::io::BufRead;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)?;
+        let mut sequence = 0;
+        if file.metadata()?.is_file() {
+            for line in io::BufReader::new(File::open(path)?).split(b'\n') {
+                let line = line?;
+                if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                    if let Some(saved) = value["observation"]["sequence"].as_u64() {
+                        sequence = sequence.max(saved);
+                    }
+                }
+            }
+        }
         Ok(Self {
-            file: OpenOptions::new().create(true).append(true).open(path)?,
+            file,
+            failed: false,
+            append_boundary: None,
+            #[cfg(test)]
+            write_faults: Default::default(),
             reader: LedgerReader {
                 index: Arc::new((
                     Mutex::new(ObservationIndex {
-                        head: None,
-                        sequence: 0,
+                        path: path.to_owned(),
+                        sequence,
                         connected: true,
                     }),
                     Condvar::new(),
                 )),
             },
-            unarchived: BTreeMap::new(),
         })
     }
 
+    pub fn disconnect_readers(&self) {
+        self.reader.index.0.lock().unwrap().connected = false;
+        self.reader.index.1.notify_all();
+    }
     pub fn reader(&self) -> LedgerReader {
         self.reader.clone()
-    }
-    pub fn state_event_set(&self) -> StateEventSet {
-        self.reader.state_event_set()
     }
     pub fn events_after(&self, sequence: u64) -> Result<Vec<ObservationEvent>, String> {
         self.reader.events_after(sequence)
     }
-    /// Retain the event in the ordered in-process history even if file append
-    /// fails. The caller must report that error as incomplete durable history.
+    /// Publish only successfully saved observations.
     pub fn append_observation(
         &mut self,
         task_id: &str,
@@ -169,42 +181,90 @@ impl Ledger {
             task_id: task_id.into(),
             content,
         };
-        let written =
-            self.record(serde_json::json!({"message": "observation", "observation": event}));
+        self.record(serde_json::json!({"message": "observation", "observation": event}))?;
         let mut index = self.reader.index.0.lock().unwrap();
-        let previous = index.head.take();
-        index.head = Some(Arc::new(ObservationBlock { event, previous }));
         index.sequence = sequence;
         if let Some(connected) = connected {
             index.connected = connected;
         }
         self.reader.index.1.notify_all();
-        written
+        Ok(())
     }
 
     /// 追加一条记录。记录内容由调用方决定，Ledger 不解释它。
     pub fn record(&mut self, record: Value) -> io::Result<()> {
-        writeln!(self.file, "{}", serde_json::to_string(&record)?)
-    }
-
-    /// 将已经退出活动控制范围的 Branch 交给 Ledger 保存。
-    ///
-    /// `branch` 按值传入，接管后由 Ledger 负责它的去向。写入成功时 Ledger
-    /// 按约定释放这份记录，不把内存释放绑定到 `flush`；写入失败时 Ledger
-    /// 保留该 Branch，并由调用方报告这次运行的历史不完整。失败可能已经写入
-    /// 部分内容，Ledger 不对文件作回滚承诺。
-    pub fn archive_branch(&mut self, branch: BranchRecord) -> io::Result<()> {
-        if let Err(error) = self.write_archive(&branch) {
-            self.unarchived.insert(branch.branch_id.clone(), branch);
-            return Err(error);
+        if self.failed {
+            return Err(io::Error::other("Ledger append previously failed"));
         }
-        self.unarchived.remove(&branch.branch_id);
-        Ok(())
+        self.append_boundary = self
+            .file
+            .metadata()
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.len());
+        #[cfg(test)]
+        if let Some(bytes) = self.write_faults.pop_front() {
+            let encoded = serde_json::to_vec(&record)?;
+            self.file.write_all(&encoded[..bytes.min(encoded.len())])?;
+            self.failed = true;
+            return Err(io::Error::other("injected append failure"));
+        }
+        let result = writeln!(self.file, "{}", serde_json::to_string(&record)?);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
     }
 
-    /// 已经接管但未能写入的 Branch ID。非空表示这次运行的历史不完整。
-    pub fn unarchived(&self) -> impl Iterator<Item = &str> {
-        self.unarchived.keys().map(String::as_str)
+    /// Archive a departed Branch, retry once after restoring the append boundary.
+    /// Final failure is reported before releasing the record; control state is never restored.
+    pub fn archive_branch(
+        &mut self,
+        branch: BranchRecord,
+        session: &str,
+        system_log: &super::system_log::SystemLog,
+    ) -> io::Result<()> {
+        let result = match self.write_archive(&branch) {
+            Ok(()) => Ok(()),
+            Err(first) => match self.restore_append_boundary() {
+                Ok(()) => self.write_archive(&branch).map_err(|retry| {
+                    io::Error::other(format!("first append failed: {first}; retry failed: {retry}"))
+                }),
+                Err(recovery) => Err(io::Error::other(format!(
+                    "first append failed: {first}; append boundary recovery failed: {recovery}; retry could not be completed"
+                ))),
+            },
+        };
+        if let Err(error) = &result {
+            system_log.history_failure(
+                session,
+                &format!(
+                    "branch_id={} branch archive failed: {error}",
+                    branch.branch_id
+                ),
+            );
+        }
+        result
+    }
+
+    fn restore_append_boundary(&mut self) -> io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        let offset = self
+            .append_boundary
+            .ok_or_else(|| io::Error::other("no safe append boundary"))?;
+        let metadata = self.file.metadata()?;
+        if !metadata.is_file() || metadata.len() < offset {
+            return Err(io::Error::other("append boundary unavailable"));
+        }
+        if offset > 0 {
+            let mut byte = [0];
+            if self.file.read_at(&mut byte, offset - 1)? != 1 || byte[0] != b'\n' {
+                return Err(io::Error::other("append boundary is not a complete line"));
+            }
+        }
+        self.file.set_len(offset)?;
+        self.failed = false;
+        Ok(())
     }
 
     fn write_archive(&mut self, branch: &BranchRecord) -> io::Result<()> {

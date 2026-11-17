@@ -1,4 +1,4 @@
-//! Per-Branch tool launch plans. Pi owns sessions, not their overlay mounts.
+//! Private filesystem command metadata used only inside Runtime.
 use super::*;
 use serde_json::json;
 

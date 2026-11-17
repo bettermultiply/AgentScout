@@ -20,18 +20,17 @@ node tools/replay/serve.ts OUTPUT/recording.json 18080
 通用交互回放由外部工具启动普通 AScout，不需要先导出：
 
 ```sh
-mkdir /tmp/opencode/replay-run
-node tools/replay/run.ts /path/to/source-run /tmp/opencode/replay-run ../pi \
+node tools/replay/run.ts /path/to/source-run ../pi \
   --runtime /path/to/runtime.json --web 127.0.0.1:8080
 ```
 
-Policy 首选源 run 的 `policy.json`，否则显式给出原 YAML；Runtime 配置及初始环境也必须来自原配置或显式参数，不能从目录布局猜测。新 run 与源目录必须分开，Runtime 的 control socket 不得写到源目录。回放结束或缺键后 WebUI 保持运行，用户可切到正常配置的 `provider/model` 后继续。
+Policy 必须用 `--policy <name>` 从配置目录选择；源 session 的 `policy.json` 仅用于自身恢复。Runtime 配置及初始环境必须由调用方明确提供，不能从目录布局猜测。回放结束或缺键后 WebUI 保持运行，用户可切到正常配置的 `provider/model` 后继续。
 
 终端命令：`pause` 暂停后续自动输入（在飞轮次继续），`resume` 恢复，`status` 查看进度和错误，`quit` 正常保存并退出两部分。手动输入或切换模型前先 `pause`；工具不检测这些操作。完成时静默停止自动输入，失败报具体原因并停止自动输入；两种情况均继续管理 AScout 和本地服务。AScout 主动退出也关闭工具；SIGINT/SIGTERM 走 AScout 正常 Shutdown。不可捕获的强制杀进程不属于正常退出。
 
-本地服务通过通用 `--models` 追加模型配置，保留 Pi 原配置、认证和扩展；重名 provider 拒绝覆盖。control plane `--policy-artifact` 可加载已编译策略，仍将策略正常保存到新 run。`GET /api/input-status` 返回已处理输入序号 `sequence`、可输入 `ready`、当前输入错误 `error`；HTTP 202 仅表示排队。工具等待序号推进且权威轮次结束、无待确认 Promote 后才提交下一输入，不要求所有候选结束。
+本地服务通过通用 `--models` 追加模型配置，保留 Pi 原配置、认证和扩展；重名 provider 拒绝覆盖。control plane 启动使用配置目录中的 Policy 名称；session 的 `policy.json` 仅供该 session 恢复。`GET /api/input-status` 返回已处理输入序号 `sequence`、可输入 `ready`、当前输入错误 `error`；HTTP 202 仅表示排队。工具等待序号推进且权威轮次结束、无待确认 Promote 后才提交下一输入，不要求所有候选结束。
 
-AScout 保存追加 provider 配置内容，普通恢复不依赖工具临时目录。工具退出后可用普通 `--resume --model provider/model`：先校验并恢复保存的运行，再在空闲权威上切换模型。回放服务和自动输入队列不恢复。
+AScout 保存追加 provider 配置内容，普通恢复不依赖工具临时目录。工具退出后可用普通 `--resume <session-id> --model provider/model`：先校验并恢复保存的运行，再在空闲权威上切换模型。回放服务和自动输入队列不恢复。
 
 只依赖 Node 26。导出只读源文件，在内存中按 transcript 原生 ID、Candidate/Chance 关系和 applied Promote 还原预测批次后的第一条父边（也可能是 custom、摘要或编辑记录）。events 按文件序处理，不按恢复后会重置的 `t_ms` 排序。不解析命名、不比较正文相似度、不按时间猜测；缺引用、批次不完整或关系歧义直接报错。只处理当前 Pi 记录格式。
 

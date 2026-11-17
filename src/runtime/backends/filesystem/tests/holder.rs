@@ -138,6 +138,12 @@ fn namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace() {
         .unwrap();
     success(&socket("candidate"), &format!("kill -0 {pid}"));
 
+    let drained=request(&socket("candidate"),json!({"op":"drain","cancel":true}));
+    assert_eq!(drained["exit_code"],0,"{drained}");
+    let alive=request(&socket("candidate"),json!({"op":"exec","command":format!("test -r /proc/{pid}/stat && test \"$(awk '{{print $3}}' /proc/{pid}/stat)\" != Z"),"cwd":"/app"}));
+    assert_ne!(alive["exit_code"],0,"completed command's background writer must stop before drain confirms");
+    success(&socket("candidate"),"echo holder remains available");
+
     candidate.terminate("candidate").unwrap();
     candidate.stop("candidate").unwrap();
     candidate.cleanup("candidate").unwrap();

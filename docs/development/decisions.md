@@ -1,5 +1,29 @@
 # 开发决策
 
+## 2026-11-17：Instrumentation 最终定向修正
+
+按已授权语义修正，不新增组件或 Policy 名称：Session 管理属于 Product Integration；`createAgentAccess` 对应 Interposer，`AscProxy` 对应 ASC-Proxy。工具／模型 speculative-first 保持父调用执行前等待，候选独立运行，接受后 Promote 候选并取消旧父调用，不向旧父调用填入候选结果；全部拒绝时原调用放行一次，eager 则并行启动权威调用。以手工事件先复现空／失败预测未放行、held 候选无法验证、失败预测后模型结果丢失及等待释放前回收问题，复用现有授权、Policy 裁决和生命周期机制修复。具体证据及测试边界见 [接入实现](agent-access.md#本轮验证与能力边界)。未运行真实模型、Firecracker 或已完成的整组检查；未提交或推送。
+
+## 暂停只能用 `/continue` 解除
+
+2026-11-17 复核收敛：Branch 取消在 Runtime 准入锁内推进 execution generation，等待操作与写者结束后才开放新 generation；drain 失败保持执行关闭，但清理本身可重试。恢复 candidate setup 必须重新绑定当前 Load 下发的执行访问方式。活跃恢复夹具使用真实 checkpoint 后的执行边界，不在生产 backend 固化工具编号顺序；continue 后等任务完成再保存。Firecracker cleanup 成功按 backend 回执返回 Cleaned，不依赖已被删除的状态记录。验证范围见 [Instrumentation 通用层](agent-access.md)。
+
+目标语义已定：暂停期间的普通消息先留着，不解除暂停；`/continue` 之后再按原顺序交给模型。`/continue` 本身不生成模型用户消息。
+
+实现已改为暂停时只排队普通输入；显式 `/continue` 解开暂停后，control plane 依次投递队列内容。`/continue` 自身不作为模型输入。
+
+Runtime 在环境结果中返回命令端点访问信息，由 control plane 随 Branch 启动及恢复命令交给 Instrumentation。Instrumentation 通过统一 JSON-lines 执行/取消/终态确认接口发送 Branch、operation、tool、arguments 和 context；control plane 不再执行 Runtime 工具。Filesystem 命令由 Runtime 内部 Pi 工具适配器经 holder 执行；Pi 辅助进程使用 Pi 的源码解析器。缺少 execution access 时直接失败，不回退为 control-plane 结果注入，也不执行宿主文件工具。取消必须等端点接受命令后发送，并等待 backend 终态才确认。
+
+2026-11-17 实现：ASC-Proxy 统一拥有控制 Gateway socket 与独立执行连接；control plane 用 `BindExecution` 明确建立 Branch→Environment 独占授权。端点复用 `req-N` 有界滑动身份窗口，确认释放正文，窗口外身份拒绝重放；执行连接传递增量 output。NLE 工具模拟延迟在 backend 内可取消等待，以独立动作锁维持共享世界动作串行，不占住 bridge 阻塞候选环境创建；请求进入 bridge 后转发取消并等待终态，已经进入同步游戏调用的动作等待调用返回。Branch abort 在活跃操作终态后执行 holder `drain(cancel:true)`，清理已完成调用留下的写者。恢复重新发布当前连接状态；失败模型的合成消息保留 action 关联。验证过期检查区分模型与真实工具动作；保存时已有 checkpoint 结果的工具不再因 transcript 尚未追加结果而重复登记恢复调用。具体验证及未完成项见 [Instrumentation 通用层](agent-access.md)。
+
+## 异步反馈与 Gateway 接收确认（待复核）
+
+按用户授权补原请求范围校验、第一份终态保护和接收回执。Agent 与 Runtime 发送成功须有对端接收证据，重试复用原标识，写失败关闭可能含残帧的连接。当前取消竞态、Agent 发送失败回 Coordinator、完整冲突日志仍有缺口，详见[实现及未完成范围](feedback-delivery.md)。本轮不改暂停、中断、恢复语义或 Ledger 恢复用途。
+
+## 固定路径与 backend 检查修正
+
+Policy 保持 `policy.yaml` 与 `decisions.py`，所需 backend 身份只来自 Policy 已引用的 Runtime 配置，不新增 Policy 字段或改变摘要。启动只接受配置中的 Policy 名称，session 的 `policy.json` 只用于该 session 恢复。fixture 必须在 Runtime 启动前完成 workspace 复制。Rust 常驻 Policy worker 由所有者 Drop 清理，不能使用随创建线程退出触发的 `--die-with-parent`。线程退出回归先复现 Broken pipe 再修正；指定 Rust 检查和两项恢复脚本均通过，证据见 [Policy Engine](policy-engine.md)。
+
 ## Pi 接入与可信宿主
 
 Agent 与随附 Instrumentation 在 Branch 隔离环境外运行，仍由 Runtime 管理启动、监视和回收。Branch 文件访问、shell、受管子程序和效果留在对应 Environment；挂载切换和物化不重启宿主。Firecracker Guest Agent 继续作为 guest 内 Runtime 命令服务。
@@ -844,9 +868,9 @@ FilesystemBackend 和配置了 filesystem 的 BaseRuntime 中执行。
 
 废弃此前“不新增 Ledger 失败语义、错误直接返回调用方”的表述：它只说明了错误如何传出，没有说明已经移出活动 Tree 的 Branch 由谁保存。按值移交后若追加失败，Branch 会随调用返回被释放，历史在任何组件都不负责的情况下消失。
 
-现行规则：Branch 只有在 `Cleaned`、非当前 Authority、无未完成控制命令且无子 Branch 引用时才从活动 Tree 移交给 Ledger。Ledger 接管后，写入成功才按约定释放记录；写入失败时继续持有该 Branch，并由控制面报告这次运行的历史不完整。写入成功仍不包含强制 `flush`，失败后也不对已写入的部分内容作回滚或去重承诺，不引入自动重试或恢复队列，不把 Branch 放回活动 Tree。
+现行规则：Branch 只有在 `Cleaned`、非当前 Authority、无未完成控制命令且无子 Branch 引用时才从活动 Tree 移交给 Ledger。首次归档写入失败后，在安全恢复完整行追加边界后重试一次（最多两次实际写入）；无法恢复时明确报告恢复失败及重试无法完成。最终失败先写入包含 session id、Branch id、失败原因的系统运行日志，经既有 UI Projection 通道报警，再释放 BranchRecord。不保留 unarchived 集合、不放回 Tree，不恢复已结束的控制状态。系统日志写入失败沿用 stderr 回退并保留身份和原因。
 
-实现：`Ledger` 保留未写入的 Branch，`archive_branch` 失败时不再丢弃记录；控制面退出时列出未能归档的 Branch 并返回错误。
+实现：Ledger 保存失败前的追加边界，仅在确认文件及完整行边界后截除失败尾部并解除 failed 标志，再实际重试。普通观察写入仍不自动重试或发布失败记录；成功不包含强制 `flush`。回归通过注入首次零字节／部分写入失败、连续两次失败及 `/dev/full` 无法恢复，检查成功行、实际写入次数和 Projection 报警。已先确认旧实现首次失败直接返回错误。
 
 ## 2026-11-02：Candidate 最终失败不再等同于立即丢弃
 

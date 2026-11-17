@@ -1,5 +1,7 @@
 # Gateway 实现核查
 
+本轮异步反馈、接收回执、取消与发送失败清理及有界身份窗口见[异步反馈与接收确认](feedback-delivery.md)。Agent send 等待 received，实际 Pi 启动器和公共接入层均已支持 delivery；Runtime 与 Pi 均明确拒绝已退休身份。恢复 retry/continue 两项失败及其证据也记录于该文档，不能视为全部验收通过。下文旧阶段的“发送 5 秒”只描述每次写入超时，不能作为当前交付成功定义。
+
 目标依据：[control plane §2.1](../design/control-plane.md#21-gateway)。Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止；UI 同样由 control plane 启动和停止。Gateway 与 Runtime 网络通信；Agent 与接入进程的实际启动、监视和回收仍由 Runtime 执行。不规定必须同进程或自动打开浏览器，不实现 Registry，不改变投机语义。
 
 ## 2026-11-16：统一启动和停止
@@ -98,3 +100,5 @@ Runtime 仍通过 OperateEnvironment 的 AgentLaunch 实际启动 Agent，负责
 - 独立候选保留 HEAD 的 Shutdown 保存行为及原 Policy 路径，不纳入新的 Pause／物化协议；Gateway 的现有工作区 Request::Pause 属于任务生命周期改动。编译需要既有、未跟踪的本地 Policy YAML 和预构建 `webui/dist`，这些只作为本地验证前提提供，不进入候选提交。没有对其他未提交 Rust 源码的依赖。
 
 当前剩余缺口以本文上方 2026-11-16 小节为准；Branch/task/command 合法性仍由 Tree 校验，Gateway 不复制其控制责任。
+
+当前界面读取经 UI Projection，Gateway 不持有观察缓存；Projection 管理界面连接的读取位置并转发系统运行日志报警，Ledger 只从已保存记录按序号读取。实现与验证见 [UI Projection](ui-projection.md)。

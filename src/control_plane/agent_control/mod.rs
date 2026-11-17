@@ -432,7 +432,15 @@ pub struct SpeculativeTree {
     #[serde(default)]
     pub(crate) workspace_root: PathBuf,
     #[serde(default)]
+    pub(crate) completed_work: BTreeMap<u64, [u8; 32]>,
     pub(crate) pending_work: BTreeMap<u64, crate::control_plane::coordination::ControlOperation>,
+    #[serde(skip)]
+    pub(crate) policy_dependencies: BTreeMap<u64, Value>,
+    pub(crate) capability_revision: u64,
+    pub(crate) policy_chance_revisions: BTreeMap<String, (u64, u64)>,
+    pub(crate) policy_record_revisions: BTreeMap<String, u64>,
+    pub(crate) policy_revisions: BTreeMap<String, u64>,
+    pub(crate) policy_work_context: BTreeMap<u64, BTreeMap<String, Value>>,
     /// 已准入投机的内部事实，按 Branch 保存；不进入 Branch 归档。
     #[serde(default)]
     pub(crate) speculations: BTreeMap<String, SpeculationRecord>,
@@ -478,7 +486,7 @@ pub struct SpeculativeTree {
     #[serde(skip)]
     command_queries: BTreeMap<String, String>,
     #[serde(skip)]
-    pending_records: Vec<Value>,
+    pub(crate) pending_records: Vec<Value>,
     /// The control plane's logical transcript, retained independently of
     /// native Agent session files.
     #[serde(default)]
@@ -506,7 +514,14 @@ impl SpeculativeTree {
             pending_commands: BTreeMap::new(),
             queued_prompts: VecDeque::new(),
             workspace_root: PathBuf::new(),
+            completed_work: BTreeMap::new(),
             pending_work: BTreeMap::new(),
+            policy_dependencies: BTreeMap::new(),
+            capability_revision: 0,
+            policy_chance_revisions: BTreeMap::new(),
+            policy_record_revisions: BTreeMap::new(),
+            policy_revisions: BTreeMap::new(),
+            policy_work_context: BTreeMap::new(),
             speculations: BTreeMap::new(),
             model_usage: BTreeMap::new(),
             tool_finished_at_ms: BTreeMap::new(),
@@ -537,6 +552,7 @@ impl SpeculativeTree {
     pub fn bind_execution(&mut self, policy: Value, runtime: Value, capabilities: Value) {
         self.policy_binding = Some(policy);
         self.runtime_binding = Some(runtime);
+        self.capability_revision = self.capability_revision.checked_add(1).expect("Capability revision exhausted");
         self.capability_view = Some(capabilities);
     }
 
@@ -624,6 +640,8 @@ pub enum AgentCommand {
         branch_id: String,
         path: PathBuf,
         environments: BTreeMap<String, String>,
+        #[serde(default)]
+        execution_accesses: BTreeMap<String, crate::protocol::contract::ExecutionAccess>,
     },
     /// Delivers the compiled local Decision artifact. The adapter may reject
     /// it when it has no real Hook/evaluation seam.
@@ -654,6 +672,8 @@ pub enum AgentCommand {
     StartCandidate {
         branch_id: String,
         environment_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_access: Option<crate::protocol::contract::ExecutionAccess>,
         parent_branch_id: String,
         operation_id: String,
         tool_name: String,
@@ -682,6 +702,8 @@ pub enum AgentCommand {
     StartBranch {
         branch_id: String,
         environment_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_access: Option<crate::protocol::contract::ExecutionAccess>,
         role: BranchRole,
         workspace: PathBuf,
         prompt: String,
@@ -906,6 +928,8 @@ pub enum AgentMessage {
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum AgentWireMessage {
     Command(AgentCommand),
+    Delivery { id: u64, command: AgentCommand },
+    Received { id: u64 },
     Message(AgentMessage),
 }
 

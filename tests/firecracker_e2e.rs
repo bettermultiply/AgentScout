@@ -125,7 +125,11 @@ impl AdapterHarness {
             .unwrap()
             .as_nanos();
         let state_directory = workspace()
-            .join("target/afc")
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("afc")
             .join(format!("{}-{state_nonce}", std::process::id()));
         fs::create_dir_all(&state_directory).unwrap();
         let config_path = directory.join("adapter.json");

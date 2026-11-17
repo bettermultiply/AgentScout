@@ -65,7 +65,7 @@ Runtime 可以在能力声明中登记环境工具及其参数结构。环境工
 - `tool_context`：读取工具当前可用的公开上下文，供 Policy 预测；不得读取隐藏状态；
 - `invoke_tool`：在指定环境执行一次工具调用。结果包含 `result` 和 `evidence`：`result` 进入 Agent 工具通道，`evidence` 交给 Policy 匹配。两者都只能包含 Runtime 愿意公开的事实。
 
-环境工具不创建 Branch。Candidate 的工具调用必须在影响 Environment 前被暂存或阻止；只有 Promote 后的权威 Branch 可以调用 `invoke_tool`。control plane 不能因为工具名而推断 workload 语义或环境形态。
+环境工具不创建 Branch。Candidate 的工具效果必须遵守 Policy 与 Runtime 能力边界：具备独立隔离保证且 Policy 放行时可在自身 Environment 执行，否则在效果发生前暂存或阻止，成为权威后才放行。Instrumentation 经执行连接直接请求 Runtime，control plane 不代为转发工具执行；不能因为工具名而推断 workload 语义或环境形态。
 
 系统外替换模型输出的验证运行仍按以上规则真实重跑工具；模型输出回放不构成工具效果回放，不放宽候选作用前门槛。
 

@@ -25,6 +25,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn worker_survives_creator_thread_exit() {
+        let mut worker = std::thread::spawn(|| {
+            let mut worker = Worker::start(
+                "import sys,json\nfor line in sys.stdin.buffer:\n payload=b'true'\n sys.stdout.buffer.write(len(payload).to_bytes(4,'big')+payload)\n sys.stdout.buffer.flush()\n",
+                Path::new("/usr/bin/python3"),
+                Path::new("/usr/bin/bwrap"),
+            ).unwrap();
+            worker.evaluate(&serde_json::json!({}), Duration::from_secs(5)).unwrap();
+            worker
+        }).join().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(worker.evaluate(&serde_json::json!({}), Duration::from_secs(5)).unwrap(), serde_json::json!(true));
+    }
+
+    #[test]
     fn repeated_requests_share_interpreter_state() {
         let script = "import sys,json\ncount=0\nfor line in sys.stdin.buffer:\n count+=1\n payload=json.dumps(count).encode()\n sys.stdout.buffer.write(len(payload).to_bytes(4,'big')+payload)\n sys.stdout.buffer.flush()\n";
         let mut worker = Worker::start(
@@ -71,8 +86,10 @@ impl Worker {
         pipe.set_nonblocking(true)?;
         let child = Command::new(bwrap)
             .args([
+                // Workers outlive the evaluation thread that creates them.
+                // Ownership and Drop supervise their lifetime; PDEATHSIG would
+                // kill a cached worker when that short-lived thread exits.
                 "--unshare-all",
-                "--die-with-parent",
                 "--new-session",
                 "--cap-drop",
                 "ALL",

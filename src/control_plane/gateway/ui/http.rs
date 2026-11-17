@@ -1,17 +1,17 @@
 //! Loopback-only HTTP/SSE ingress and delivery. Ledger remains the fact owner.
 use super::{Assets, Connection, Presentation, Request};
-use crate::control_plane::ledger::LedgerReader;
+use crate::control_plane::ui_projection::UiProjection;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 /// Control-plane-owned listener and connection workers.
 pub struct Server {
     stopped: Arc<AtomicBool>,
-    reader: LedgerReader,
+    reader: UiProjection,
     worker: Option<JoinHandle<io::Result<()>>>,
 }
 
@@ -38,7 +38,7 @@ pub fn start<P: Presentation + Clone + 'static>(
     address: &str,
     interface: P,
     connection: Connection,
-    reader: LedgerReader,
+    reader: UiProjection,
     assets: Assets,
 ) -> io::Result<Server> {
     let address: std::net::SocketAddr = address
@@ -129,7 +129,7 @@ fn serve<P: Presentation>(
     stream: &mut TcpStream,
     interface: &P,
     connection: &Connection,
-    reader: &LedgerReader,
+    reader: &UiProjection,
     host: &str,
     assets: Assets,
     stopped: &AtomicBool,
@@ -226,7 +226,18 @@ fn serve<P: Presentation>(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
             )?;
+            let reader = reader.clone();
+            let mut warning_count = 0;
             loop {
+                for warning in reader.warnings().into_iter().skip(warning_count) {
+                    writeln!(
+                        stream,
+                        "event: system-warning\ndata: {}\n",
+                        serde_json::to_string(&warning)?
+                    )?;
+                    warning_count += 1;
+                }
+                stream.flush()?;
                 let events = reader
                     .events_after_until(sequence, stopped)
                     .map_err(io::Error::other)?;

@@ -15,6 +15,8 @@ impl SpeculativeTree {
     }
 
     pub(crate) fn chance_mut(&mut self, chance_id: &str) -> io::Result<&mut ChanceRecord> {
+        let revision = self.policy_chance_revisions.entry(chance_id.to_owned()).or_default();
+        revision.0 = revision.0.checked_add(1).expect("Chance revision exhausted");
         self.chances
             .get_mut(chance_id)
             .ok_or_else(|| invalid_input("chance does not exist"))
@@ -84,16 +86,19 @@ impl SpeculativeTree {
         stage: ChanceStage,
         reason: &str,
     ) -> io::Result<()> {
-        let chance = self.chance_mut(chance_id)?;
-        if chance.stage == stage || chance.stage.is_terminal() {
+        let current = self.chance(chance_id)?;
+        if current.stage == stage || current.stage.is_terminal() {
             return Ok(());
         }
+        let chance = self.chance_mut(chance_id)?;
         chance.stage = stage.clone();
         let validation_id = if matches!(stage, ChanceStage::Accepted(_)) {
             chance.validation_id
         } else {
             None
         };
+        let revision = self.policy_chance_revisions.entry(chance_id.to_owned()).or_default();
+        revision.1 = revision.1.checked_add(1).expect("Chance stage revision exhausted");
         self.epoch += 1;
         self.pending_observations
             .push(ObservationContent::ChanceStageChanged {
@@ -110,10 +115,10 @@ impl SpeculativeTree {
         chance_id: &str,
         state: AuthorityState,
     ) -> io::Result<()> {
-        let chance = self.chance_mut(chance_id)?;
-        if chance.authority == state {
+        if self.chance(chance_id)?.authority == state {
             return Ok(());
         }
+        let chance = self.chance_mut(chance_id)?;
         chance.authority = state;
         self.epoch += 1;
         self.pending_observations
@@ -375,6 +380,11 @@ impl SpeculativeTree {
             .filter(|chance| {
                 chance.stage.is_terminal()
                     && chance.authority != AuthorityState::Fetching
+                    // A model result still has an after-model hold to release.
+                    // progress_chances delivers it before completing the action.
+                    && !(chance.speculation_kind == Some(ActionKind::ModelInference)
+                        && chance.authority == AuthorityState::Arrived
+                        && self.chance_waiting_live(chance))
                     && !chance
                         .branch_ids
                         .iter()
@@ -387,6 +397,7 @@ impl SpeculativeTree {
             .map(|chance| chance.chance_id.clone())
             .collect();
         for id in removable {
+            self.policy_chance_revisions.remove(&id);
             self.chances.remove(&id);
         }
         Ok(())

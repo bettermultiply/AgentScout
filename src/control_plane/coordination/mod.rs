@@ -42,7 +42,6 @@ pub enum ControlOperation {
     Select(Vec<String>),
     Predict(ToolPending),
     Launch(ToolPending),
-    Invoke(ToolPending),
     Establish(AgentCommand),
     Validate(String),
     Promote(String, Value),
@@ -60,7 +59,7 @@ impl ControlOperation {
     pub fn branch(&self) -> Option<&str> {
         match self {
             Self::Select(_) | Self::Rebalance => None,
-            Self::Predict(tool) | Self::Launch(tool) | Self::Invoke(tool) => Some(&tool.branch_id),
+            Self::Predict(tool) | Self::Launch(tool) => Some(&tool.branch_id),
             Self::Establish(command) => {
                 let AgentCommand::StartCandidate { branch_id, .. } = command else {
                     unreachable!()
@@ -75,12 +74,13 @@ impl ControlOperation {
 
     pub fn chance_id(&self) -> Option<&str> {
         match self {
-            Self::Predict(tool) | Self::Launch(tool) | Self::Invoke(tool) => Some(&tool.chance_id),
+            Self::Predict(tool) | Self::Launch(tool) => Some(&tool.chance_id),
             _ => None,
         }
     }
 }
 
+#[derive(Serialize)]
 pub enum ControlResult {
     Selected(Vec<String>),
     Predictions(Vec<Value>),
@@ -91,7 +91,7 @@ pub enum ControlResult {
     /// `(branch_id, action)` pairs returned by `rebalance`.
     Rebalance(Vec<(String, String)>),
     Completed,
-    Environment(String),
+    Environment(String, Option<crate::protocol::contract::ExecutionAccess>),
     EnvironmentFailed(String, String),
 }
 

@@ -80,6 +80,10 @@ pub(super) fn merged_capabilities(connections: &[BackendConnection]) -> RuntimeC
         tools.remove(&name);
     }
     RuntimeCapabilities {
+        backends: connections
+            .iter()
+            .map(|connection| connection.id.clone())
+            .collect(),
         tools: tools.into_values().collect(),
         branch_environment,
         filesystem_fast_delete: if fast_delete_conflict {

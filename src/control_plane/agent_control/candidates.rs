@@ -109,6 +109,7 @@ impl SpeculativeTree {
         self.record_runtime_state(&branch_id, RuntimeExecutionState::EnvironmentRequested)?;
         Ok(AgentCommand::StartCandidate {
             environment_id: self.branches[&branch_id].environment_id.clone(),
+            execution_access: None,
             branch_id: branch_id.clone(),
             parent_branch_id: parent.to_string(),
             operation_id: chance.operation_id,
@@ -164,24 +165,27 @@ impl SpeculativeTree {
         {
             return false;
         }
-        // A Candidate is matchable only after the authoritative operation has
-        // produced its real outcome.  In particular, a Candidate deadline is
-        // not a validation result: scheduling Validate without an outcome
-        // would make the pending Proposal look like a failed/empty Proposal
-        // and could discard work merely because the clock advanced.
-        // Match is evaluated for every Candidate once its authoritative
-        // operation produced a real outcome. Commit eligibility is a separate
-        // condition (`can_promote`); an unresolved ancestor keeps a matching
-        // nested Proposal in Resolving instead of suppressing the Match
-        // decision itself.
-        self.candidate_outcome(candidate).is_some() && branch.status.is_decidable()
+        let chance = branch.chance_id.as_ref().and_then(|id| self.chances.get(id));
+        // With the authority held, Policy may judge a real Proposal using its
+        // own acceptance rule. Never fabricate a Proposal for an unfinished
+        // alternate-model inference. An in-flight launch must settle first.
+        let held_proposal = chance.is_some_and(|chance| {
+            chance.authority == AuthorityState::NotRequested
+                && chance.launch_epoch.is_some()
+                && self.branch_proposal(candidate).is_some()
+                && !self.pending_work.values().any(|work| matches!(work,
+                    crate::control_plane::coordination::ControlOperation::Launch(tool)
+                    if tool.chance_id == chance.chance_id))
+        });
+        (self.candidate_outcome(candidate).is_some() || held_proposal)
+            && branch.status.is_decidable()
     }
 
     /// A candidate may only win while the authority is still at the waiting
     /// point the candidate forked from. Once the authority has started another
     /// tool operation, promoting the candidate would roll the authority back
     /// past work that has already been executed.
-    pub(super) fn authority_advanced_past(&self, candidate: &BranchRecord) -> bool {
+    pub(crate) fn authority_advanced_past(&self, candidate: &BranchRecord) -> bool {
         let Some(chance) = candidate
             .chance_id
             .as_ref()
@@ -200,6 +204,9 @@ impl SpeculativeTree {
             operation.kind == OperationKind::Tool
                 && operation.status == OperationStatus::Requested
                 && operation.operation_id != chance.operation_id
+                && self.active_actions.get(&authority.branch_id)
+                    .and_then(|actions| actions.get(&operation.operation_id))
+                    .is_none_or(|action| action.action_kind == ActionKind::ToolExecution)
         })
     }
 
@@ -252,6 +259,8 @@ impl SpeculativeTree {
         if !self.evictable_branches().iter().any(|id| id == branch_id) {
             return Err(invalid_input("branch is not safe to archive"));
         }
+        self.policy_record_revisions.remove(branch_id);
+        self.policy_revisions.remove(branch_id);
         self.active_actions.remove(branch_id);
         self.action_facts.remove(branch_id);
         self.speculations.remove(branch_id);

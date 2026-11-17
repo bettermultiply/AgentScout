@@ -96,12 +96,11 @@ impl Queue {
                     .lock()
                     .unwrap()
                     .insert(request.request_id.clone(), result.clone());
-                if !evicted.is_empty() {
-                    let mut seen = shared.seen.lock().unwrap();
-                    for request_id in evicted {
-                        seen.remove(&request_id);
-                    }
-                }
+                // Execution identities survive eviction of the larger result payload.
+                let _ = evicted;
+            }
+            if let Some((_, completed)) = shared.seen.lock().unwrap().get_mut(&request.request_id) {
+                *completed = true;
             }
             shared.result_signal.notify_all();
             if let Some(state) = result.environment_state {

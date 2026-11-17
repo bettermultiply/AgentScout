@@ -289,7 +289,7 @@ mod queue_panic_tests {
     use crate::runtime::adapter::queue::Queue;
     use crate::runtime::adapter::{ResultCache, Shared};
     use crate::runtime::backend::{Backend, BackendError, CancelHandle};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
     use std::time::Duration;
@@ -371,16 +371,77 @@ mod queue_panic_tests {
     }
 
     #[test]
+    fn reused_request_content_is_rejected_before_receipt_and_never_executed() {
+        let (out, receiver) = mpsc::channel();
+        let backend = Arc::new(PanicOnce { calls: AtomicUsize::new(1) });
+        let shared = Arc::new(Shared {
+            commands: None,
+            preserving: std::sync::atomic::AtomicBool::new(false),
+            runtime: backend.clone(), out,
+            queues: Mutex::new(HashMap::new()),
+            seen: Mutex::new(Default::default()),
+            results: Mutex::new(ResultCache::default()),
+            result_signal: Condvar::new(), known: Mutex::new(HashMap::new()),
+            agent: Mutex::new(None),
+        });
+        shared.dispatch(request("once"));
+        assert_eq!(wait_result(&receiver, "once").status, ResultStatus::Completed);
+        while receiver.try_recv().is_ok() {}
+        let mut conflict = request("once");
+        conflict.generation += 1;
+        shared.dispatch(conflict);
+        let AdapterMessage::Rejected { reason, .. } = receiver.recv().unwrap() else {
+            panic!("conflicting request must not receive a reception receipt")
+        };
+        assert!(reason.contains("different content"));
+        shared.dispatch(request("once"));
+        assert_eq!(wait_result(&receiver, "once").status, ResultStatus::Completed);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        // Simulate eviction of the result payload without dropping its identity.
+        *shared.results.lock().unwrap() = ResultCache::default();
+        shared.dispatch(request("once"));
+        let expired = wait_result(&receiver, "once");
+        assert_eq!(expired.status, ResultStatus::Failed);
+        assert!(expired.reason.unwrap().contains("will not execute again"));
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn expired_numeric_request_never_reaches_backend() {
+        let (out, receiver) = mpsc::channel();
+        let backend = Arc::new(PanicOnce { calls: AtomicUsize::new(1) });
+        let shared = Arc::new(Shared {
+            commands: None,
+            preserving: std::sync::atomic::AtomicBool::new(false),
+            runtime: backend.clone(), out,
+            queues: Mutex::new(HashMap::new()), seen: Mutex::new(Default::default()),
+            results: Mutex::new(ResultCache::default()), result_signal: Condvar::new(),
+            known: Mutex::new(HashMap::new()), agent: Mutex::new(None),
+        });
+        for n in 1..600 {
+            let id = format!("req-{n}");
+            shared.dispatch(request(&id));
+            assert_eq!(wait_result(&receiver, &id).status, ResultStatus::Completed);
+        }
+        while receiver.try_recv().is_ok() {}
+        let before = backend.calls.load(Ordering::SeqCst);
+        shared.dispatch(request("req-1"));
+        assert!(matches!(receiver.recv().unwrap(), AdapterMessage::Rejected { reason, .. } if reason.contains("expired")));
+        assert_eq!(backend.calls.load(Ordering::SeqCst), before);
+    }
+
+    #[test]
     fn panicking_operation_does_not_kill_the_environment_queue() {
         let (out, receiver) = mpsc::channel();
         let shared = Arc::new(Shared {
+            commands: None,
             preserving: std::sync::atomic::AtomicBool::new(false),
             runtime: Arc::new(PanicOnce {
                 calls: AtomicUsize::new(0),
             }),
             out,
             queues: Mutex::new(HashMap::new()),
-            seen: Mutex::new(HashSet::new()),
+            seen: Mutex::new(Default::default()),
             results: Mutex::new(ResultCache::default()),
             result_signal: Condvar::new(),
             known: Mutex::new(HashMap::new()),

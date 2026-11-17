@@ -4,10 +4,12 @@
 //! 多 Adapter 管理不在这一版。
 
 mod agent;
+mod commands;
 mod dispatch;
 mod queue;
 mod result;
 mod result_cache;
+mod seen_requests;
 mod session;
 
 #[cfg(test)]
@@ -15,7 +17,7 @@ mod tests;
 
 pub use session::Adapter;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::process::Child;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
@@ -27,12 +29,13 @@ use queue::Queue;
 use result_cache::ResultCache;
 
 pub(super) struct Shared {
+    pub(super) commands: Option<commands::Commands>,
     pub(super) preserving: std::sync::atomic::AtomicBool,
     pub(super) runtime: Arc<dyn Backend>,
     pub(super) out: Sender<AdapterMessage>,
     pub(super) queues: Mutex<HashMap<String, Arc<Queue>>>,
     /// 已经受理过的请求标识：重发同一标识按重试处理，不重复执行。
-    pub(super) seen: Mutex<HashSet<String>>,
+    pub(super) seen: Mutex<seen_requests::SeenRequests>,
     /// 已经完成的请求结果，按条数有界。重发同一标识时返回同一逻辑结果；
     /// 仍在执行的请求会等待原始结果。
     pub(super) results: Mutex<ResultCache>,

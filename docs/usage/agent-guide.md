@@ -13,7 +13,7 @@ AScout 当前有一个可构建、可运行的原型：Rust control plane 持有
 
 ## 计划中的 Agent Surface
 
-Routine Agent-facing control 计划通过当前执行环境中的 ASC-Proxy 进入 Gateway。现有 Agent socket、UI HTTP/SSE 与 Runtime ControlSession 通信代码已归入 Gateway；这不代表下列计划接口或通用身份／权限检查已完成。ASC-Proxy 隐藏当前 Agent 执行上下文；其具体 transport 和部署形式未定。计划覆盖以下操作：
+Routine Agent-facing control 计划经 Instrumentation 的 ASC-Proxy 进入 Gateway。当前 ASC-Proxy 是 Pi 接入进程内对象，通过 Unix socket 连接控制 Gateway，并通过独立 Unix JSON-lines 连接直接请求 Runtime 执行；不读取 backend 私有工具计划，也不让 control plane 代执行工具。现有 Agent socket、UI HTTP/SSE 与 Runtime ControlSession 通信代码已归入 Gateway；这不代表下列计划接口或通用权限能力已完成。调用方直接传递 Branch 身份，执行端点核对 Branch→Environment 绑定，不补身份。计划覆盖以下操作：
 
 - 查询当前 Branch context；
 - 查询 direct children；

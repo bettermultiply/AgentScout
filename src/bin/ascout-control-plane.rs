@@ -2,7 +2,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -10,6 +10,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "ascout-control-plane/config.rs"]
+mod config;
 #[path = "ascout-control-plane/execution.rs"]
 mod execution;
 #[path = "ascout-control-plane/tui.rs"]
@@ -213,28 +215,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let models = take_option(&mut args, "--models")?
         .map(fs::canonicalize)
         .transpose()?;
-    let policy_artifact =
-        take_option(&mut args, "--policy-artifact")?.map(std::path::PathBuf::from);
     let runtime_option = take_option(&mut args, "--runtime")?;
-    let resume = if let Some(index) = args.iter().position(|value| value == "--resume") {
-        args.remove(index);
-        true
+    let policy_name = take_option(&mut args, "--policy")?;
+    let resume_id = take_option(&mut args, "--resume")?;
+    let resume = resume_id.is_some();
+    let config = config::Config::load()?;
+    let system_log = ascout::control_plane::system_log::SystemLog::open(&config.log_path)?;
+    if args == ["sessions"] {
+        return config.list();
+    }
+    if args.len() != 1 {
+        return Err("usage: ascout-control-plane <pi-root> [--policy <name>] [--resume <session-id>] [--runtime <runtime.json>] [--web <address>] [--model <provider/model>] [--models <file>] [--thinking <level>]; ascout-control-plane sessions".into());
+    }
+    let pi_root = fs::canonicalize(&args[0])?;
+    let selected_policy = if !resume || policy_name.is_some() {
+        Some(config.select_policy(policy_name)?)
     } else {
-        false
+        None
     };
-    if !(2..=3).contains(&args.len())
-        || (web_address.is_none() && (!io::stdin().is_terminal() || !io::stdout().is_terminal()))
-    {
-        return Err(
-            "usage: ascout-control-plane <run-dir> <pi-root> [policy.yaml] [--policy-artifact <policy.json>] [--resume] [--runtime <runtime.json>] [--web 127.0.0.1:8080] [--model <provider/model>] [--models <additional-models.json>] [--thinking <level>]".into(),
-        );
+    let (session_id, run_dir) = config.session(resume_id.as_deref())?;
+    eprintln!("Session id: {session_id}");
+    struct SessionNotice(String);
+    impl Drop for SessionNotice {
+        fn drop(&mut self) {
+            eprintln!("Session id: {}", self.0);
+        }
     }
-    // 运行目录由调用方（实验脚手架）创建，control plane 只使用它。
-    let run_dir = fs::canonicalize(&args[0])?;
-    if !run_dir.is_dir() {
-        return Err(format!("{} is not a run directory", run_dir.display()).into());
-    }
-    let pi_root = fs::canonicalize(&args[1])?;
+    let _session_notice = SessionNotice(session_id.clone());
     let artifact_path = run_dir.join("policy.json");
     if !resume
         && [
@@ -254,20 +261,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (startup_model, resume_model, models) =
         recovery::models(&run_dir, recovery_generation.as_deref(), model, models)?;
     let engine = PolicyEngine::default();
-    let source_artifact = policy_artifact
-        .clone()
-        .unwrap_or_else(|| artifact_path.clone());
-    let artifact_bytes = if !resume && policy_artifact.is_none() {
+    let artifact_bytes = if !resume {
         None
     } else {
-        match fs::read(&source_artifact) {
+        match fs::read(&artifact_path) {
             Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound && policy_artifact.is_none() => {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 None
             }
             Err(error) => {
                 return Err(
-                    format!("Policy artifact {}: {error}", source_artifact.display()).into(),
+                    format!("Policy artifact {}: {error}", artifact_path.display()).into(),
                 );
             }
         }
@@ -278,26 +282,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             recovery::validate_policy_artifact(&tree, bytes)?;
         }
         let saved = CompiledPolicy::from_bytes(bytes)?;
-        if let Some(path) = args.get(2) {
-            let supplied = engine.compile(std::path::Path::new(path))?;
+        if let Some(path) = selected_policy.as_ref() {
+            let supplied = engine.compile(path)?;
             if supplied.digest() != saved.digest() {
                 return Err("Recovery Policy changed".into());
             }
         }
         saved
     } else {
-        let path = args
-            .get(2)
-            .map(String::as_str)
-            .or_else(|| {
-                if resume {
-                    None
-                } else {
-                    Some("assets/policy/policy/policy.yaml")
-                }
-            })
-            .ok_or("Saved Policy artifact missing; supply policy.yaml explicitly")?;
-        engine.compile(std::path::Path::new(path))?
+        let path = selected_policy
+            .as_ref()
+            .ok_or("Saved Policy artifact missing; supply --policy <name> explicitly")?;
+        engine.compile(path)?
     };
     // Policy references a Runtime configuration, not a saved Runtime. Preserve
     // the original cwd resolution even when the artifact lives inside the run.
@@ -317,7 +313,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .or_else(|| policy.runtime_config_path().map(std::path::PathBuf::from))
         .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
-    tree.set_execution_id(run_dir.display().to_string())?;
+    tree.set_execution_id(session_id.clone())?;
     let config_digest = if resume {
         recovery::validate_bindings(&tree, policy.digest(), &config_path)?
     } else {
@@ -333,14 +329,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let policy_binding =
         json!({"source": policy.source(), "artifact": "policy.json", "sha256": artifact_digest});
-    if !resume && policy_artifact.is_some() {
-        policy.save(&artifact_path)?;
-    }
     let socket = run_dir.join("agent.sock");
     let listener = agent::Listener::bind(&socket)?;
     let (mut adapter, session, runtime_capabilities) = start_adapter(&config_path, &run_dir)?;
     // Every fallible assembly step after process launch shares this teardown.
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        engine.confirm_backends(&policy, &runtime_capabilities)?;
         if resume {
             recovery::validate_capabilities(&tree, &runtime_capabilities)?;
         }
@@ -401,15 +395,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         let requests = events.clone();
         let mut ledger = Ledger::open(&run_dir.join("events.jsonl"))?;
-        ledger.record(json!({
+        if let Err(error) = ledger.record(json!({
             "source": "control_plane",
             "message": "session_file",
             "task_id": tree.execution_id(),
             "session_file": session_file,
-        }))?;
-        let interface = ui::Interface::new(tree.execution_id().to_string(), ledger.reader());
+        })) { system_log.history_failure(&session_id, &format!("record append failed: {error}")); }
+        let projection = ascout::control_plane::ui_projection::UiProjection::new(ledger.reader()).with_log(system_log.clone());
+        let interface = ui::Interface::new(tree.execution_id().to_string(), projection.clone());
         let ui_connection =
-            ascout::control_plane::gateway::ui::Connection::new(ledger.reader(), move |request| {
+            ascout::control_plane::gateway::ui::Connection::new(projection.clone(), move |request| {
                 if matches!(
                     request,
                     ascout::control_plane::gateway::ui::Request::UiPromptAnswer { .. }
@@ -438,25 +433,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             let mut connection = listener.accept("agent", Duration::from_secs(30))?;
             let commands = coordination_session::connected(&mut tree, &policy, command)?;
-            for command in commands {
-                connection.send(command)?;
-            }
             let mut observation_error = None;
             for content in tree.drain_observations() {
                 if let Err(error) = ledger.append_observation(tree.execution_id(), content) {
+                    system_log.history_failure(&session_id, &format!("observation append failed: {error}"));
                     observation_error.get_or_insert(error);
                 }
             }
-            if let Some(error) = observation_error {
-                return Err(error.into());
-            }
-            interface.publish(&mut ledger, false, false, "Starting Agent session…")?;
+            let _ = observation_error;
+            if let Err(error) = interface.publish(&mut ledger, false, false, "Starting Agent session…") { system_log.history_failure(&session_id, &format!("observation append failed: {error}")); }
             tui_thread = if let Some(address) = &web_address {
                 web_server = Some(ascout::control_plane::gateway::ui::start(
                     address,
                     interface.clone(),
                     ui_connection.clone(),
-                    ledger.reader(),
+                    projection.clone(),
                     ascout::control_plane::gateway::ui::Assets {
                         index_html: include_bytes!("../../webui/dist/index.html"),
                         app_js: include_bytes!("../../webui/dist/assets/app.js"),
@@ -469,7 +460,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(tui::start(
                     interface.clone(),
                     ui_connection.clone(),
-                    ledger.reader(),
+                    projection.clone(),
                 )?)
             };
             let result = execution::run(
@@ -481,9 +472,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &runtime_capabilities,
                 &interface,
                 &mut ledger,
+                &system_log,
                 (events, receiver),
                 &run_dir,
                 resume_model,
+                commands,
             );
             result
         })();
@@ -493,17 +486,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut failure = None;
             for content in tree.drain_observations() {
                 if let Err(error) = ledger.append_observation(tree.execution_id(), content) {
+                    system_log.history_failure(&session_id, &format!("observation append failed: {error}"));
                     failure.get_or_insert(error);
                 }
             }
             if let Err(error) = interface.publish(&mut ledger, false, false, "Stopped") {
+                system_log.history_failure(&session_id, &format!("observation append failed: {error}"));
                 failure.get_or_insert(error);
             }
             if let Err(error) = interface.disconnect(&mut ledger) {
+                system_log.history_failure(&session_id, &format!("observation append failed: {error}"));
                 failure.get_or_insert(error);
             }
             failure.map_or(Ok(()), Err)
         })();
+        ledger.disconnect_readers();
         if let Some(thread) = tui_thread {
             let _ = thread.join();
         }

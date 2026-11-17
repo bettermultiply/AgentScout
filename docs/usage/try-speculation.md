@@ -14,14 +14,12 @@ cargo build
 
 ## 2. 启动
 
-```sh
-rm -rf /tmp/ascout-demo
-mkdir -p /tmp/ascout-demo
+先在 `~/.config/ascout/config.toml` 中把 `policy_dir` 设置为仓库 `assets/policy` 的绝对路径。运行目录由系统创建，结束输出 session id；`ascout-control-plane sessions` 列出会话。
 
+```sh
 ./target/debug/ascout-control-plane \
-  /tmp/ascout-demo \
   ../pi \
-  assets/policy/nle/policy.yaml \
+  --policy nle \
   --model deepseek/deepseek-flash \
   --thinking low
 ```

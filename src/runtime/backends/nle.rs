@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 
 use serde::Deserialize;
@@ -47,6 +47,62 @@ mod tests {
     };
     use std::sync::Arc;
 
+    #[test]
+    fn inflight_cancel_waits_for_bridge_terminal() {
+        let root = tempfile::tempdir().unwrap();
+        let bridge = root.path().join("bridge.py");
+        std::fs::write(
+            &bridge,
+            r#"
+import json,sys,time
+pending=None
+for line in sys.stdin:
+    r=json.loads(line)
+    if r['op']=='invoke':
+        pending=r['id']
+        print(json.dumps({'id':pending,'ok':True,'started':True}),file=sys.stderr,flush=True)
+        open(__file__+'.started','w').close()
+    elif r['op']=='cancel':
+        assert r['id']==pending
+        time.sleep(0.15)
+        print(json.dumps({'id':pending,'ok':False,'cancelled':True}),flush=True)
+    else: print(json.dumps({'id':r['id'],'ok':True}),flush=True)
+"#,
+        )
+        .unwrap();
+        let backend = Arc::new(
+            NleBackend::new(NleConfig {
+                adapter_instance: "fake".into(),
+                python: "python3".into(),
+                bridge: bridge.clone(),
+                guidebook: root.path().join("guide"),
+                env_id: None,
+                seed: None,
+                action_delay_seconds: None,
+            })
+            .unwrap(),
+        );
+        backend.establish("world").unwrap();
+        let cancel = Arc::new(CancelHandle::default());
+        let task = std::thread::spawn({
+            let backend = backend.clone();
+            let cancel = cancel.clone();
+            move || backend.invoke_tool("world", "nle_action", &json!({"action":1}), &cancel)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !bridge.with_extension("py.started").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        cancel.cancel();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(
+            !task.is_finished(),
+            "cancel receipt must not settle the operation"
+        );
+        assert!(task.join().unwrap().unwrap_err().cancelled);
+    }
+
     // The fake workload deliberately has shared world state. Lifecycle must
     // stay in NleBackend, and single-component recovery must restore bindings.
     #[test]
@@ -58,21 +114,21 @@ import json,sys
 worlds={}
 states={}
 for line in sys.stdin:
- r=json.loads(line); op=r['op']; name=r.get('environment'); reply={'ok':True}
- if op=='establish': worlds[name]=0; states[name]='available'
- elif op=='branch': worlds[r['child']]=worlds[name]; states[r['child']]='available'
- elif op=='suspend': states[name]='suspended'
- elif op=='resume': states[name]='available'
- elif op=='observe':
-   if name not in worlds or states.get(name)!='available': reply={'ok':False,'error':'world unavailable'}
-   else: reply['observation']={'visible':True}
- elif op=='terminate': states[name]='terminated'
- elif op=='cleanup': worlds.pop(name,None); states[name]='cleaned'
- elif op=='save':
-  with open(r['path'],'w') as f: json.dump({'environments':worlds,'environment_states':states},f)
- elif op=='load':
-  with open(r['path']) as f: data=json.load(f); worlds=data['environments']; states=data['environment_states']; reply['states']=states
- print(json.dumps(reply),flush=True)
+    r=json.loads(line); op=r['op']; name=r.get('environment'); reply={'ok':True,'id':r['id']}
+    if op=='establish': worlds[name]=0; states[name]='available'
+    elif op=='branch': worlds[r['child']]=worlds[name]; states[r['child']]='available'
+    elif op=='suspend': states[name]='suspended'
+    elif op=='resume': states[name]='available'
+    elif op=='observe':
+        if name not in worlds or states.get(name)!='available': reply.update(ok=False,error='world unavailable')
+        else: reply['observation']={'visible':True}
+    elif op=='terminate': states[name]='terminated'
+    elif op=='cleanup': worlds.pop(name,None); states[name]='cleaned'
+    elif op=='save':
+        with open(r['path'],'w') as f: json.dump({'environments':worlds,'environment_states':states},f)
+    elif op=='load':
+        with open(r['path']) as f: data=json.load(f); worlds=data['environments']; states=data['environment_states']; reply['states']=states
+    print(json.dumps(reply),flush=True)
 "#).unwrap();
         let config = NleConfig {
             adapter_instance: "nle".into(),
@@ -136,7 +192,7 @@ fn default_guidebook() -> PathBuf {
 struct Bridge {
     child: Child,
     input: ChildStdin,
-    output: BufReader<ChildStdout>,
+    output: std::sync::mpsc::Receiver<std::io::Result<String>>,
     next_id: u64,
 }
 
@@ -151,6 +207,7 @@ pub struct NleBackend {
     config: NleConfig,
     bridge: Mutex<Bridge>,
     states: Mutex<HashMap<String, EnvironmentState>>,
+    actions: Mutex<()>,
 }
 
 impl NleBackend {
@@ -187,35 +244,82 @@ impl NleBackend {
             .stdout
             .take()
             .ok_or_else(|| BackendError::new("NLE bridge stdout unavailable"))?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(output).lines() {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
         Ok(Self {
             config,
             bridge: Mutex::new(Bridge {
                 child,
                 input,
-                output: BufReader::new(output),
+                output: receiver,
                 next_id: 1,
             }),
             states: Mutex::new(HashMap::new()),
+            actions: Mutex::new(()),
         })
     }
 
-    fn request(&self, mut request: Value) -> Result<Value, BackendError> {
-        let mut bridge = self
-            .bridge
-            .lock()
-            .map_err(|_| BackendError::new("NLE bridge lock poisoned"))?;
+    fn request(&self, request: Value) -> Result<Value, BackendError> {
+        self.request_cancellable(request, &CancelHandle::default())
+    }
+
+    fn request_cancellable(
+        &self,
+        mut request: Value,
+        cancel: &CancelHandle,
+    ) -> Result<Value, BackendError> {
+        let mut bridge = loop {
+            if cancel.is_cancelled() {
+                return Err(BackendError::interrupted());
+            }
+            match self.bridge.try_lock() {
+                Ok(bridge) => break bridge,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                Err(_) => return Err(BackendError::new("NLE bridge lock poisoned")),
+            }
+        };
         let id = bridge.next_id.to_string();
         bridge.next_id += 1;
-        request["id"] = Value::String(id);
+        request["id"] = Value::String(id.clone());
         serde_json::to_writer(&mut bridge.input, &request).map_err(error)?;
         bridge.input.write_all(b"\n").map_err(error)?;
         bridge.input.flush().map_err(error)?;
-        let mut line = String::new();
-        bridge.output.read_line(&mut line).map_err(error)?;
+        let mut stopping = false;
+        let line = loop {
+            if cancel.is_cancelled() && !stopping {
+                serde_json::to_writer(&mut bridge.input, &json!({"op":"cancel","id":id}))
+                    .map_err(error)?;
+                bridge.input.write_all(b"\n").map_err(error)?;
+                bridge.input.flush().map_err(error)?;
+                stopping = true;
+            }
+            match bridge
+                .output
+                .recv_timeout(std::time::Duration::from_millis(10))
+            {
+                Ok(line) => break line.map_err(error)?,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => return Err(BackendError::new("NLE bridge closed its output")),
+            }
+        };
         if line.is_empty() {
             return Err(BackendError::new("NLE bridge closed its output"));
         }
         let response: Value = serde_json::from_str(&line).map_err(error)?;
+        if response.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+            return Err(BackendError::new("NLE bridge response identity mismatch"));
+        }
+        if response.get("cancelled") == Some(&Value::Bool(true)) {
+            return Err(BackendError::interrupted());
+        }
         if response.get("ok") != Some(&Value::Bool(true)) {
             return Err(BackendError::new(
                 response["error"]
@@ -272,6 +376,7 @@ impl Backend for NleBackend {
     }
     fn capabilities(&self) -> RuntimeCapabilities {
         RuntimeCapabilities {
+            backends: Vec::new(),
             tools: vec![
                 RuntimeTool {
                     name: "nle_action".into(),
@@ -382,12 +487,49 @@ impl Backend for NleBackend {
         if cancel.is_cancelled() {
             return Err(BackendError::interrupted());
         }
-        let response = self.request(json!({
-            "op": "invoke",
-            "environment": environment_id,
-            "tool": tool_name,
-            "arguments": arguments,
-        }))?;
+        // Serialize actions in the shared world without blocking lifecycle
+        // requests behind their simulated latency.
+        let _action = if tool_name == "nle_action" {
+            Some(loop {
+                if cancel.is_cancelled() {
+                    return Err(BackendError::interrupted());
+                }
+                match self.actions.try_lock() {
+                    Ok(guard) => break guard,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Err(_) => return Err(BackendError::new("NLE action lock poisoned")),
+                }
+            })
+        } else {
+            None
+        };
+        if tool_name == "nle_action" {
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs_f64(
+                    self.config.action_delay_seconds.unwrap_or(0.0).max(0.0),
+                );
+            while std::time::Instant::now() < deadline {
+                if cancel.is_cancelled() {
+                    return Err(BackendError::interrupted());
+                }
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(std::time::Duration::from_millis(10)),
+                );
+            }
+        }
+        let response = self.request_cancellable(
+            json!({
+                "op": "invoke",
+                "environment": environment_id,
+                "tool": tool_name,
+                "arguments": arguments,
+            }),
+            cancel,
+        )?;
         let result = response
             .get("result")
             .cloned()
