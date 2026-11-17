@@ -214,7 +214,7 @@ export interface ModelUsageEvent extends EventBase {
 export interface ToolFinishedEvent extends EventBase {
   event: 'tool_finished'
   branch_id: string
-  /** 接入侧无法配对时仍上报结果，此时为 null，界面不伪造 id。 */
+  /** Instrumentation 无法配对时仍上报结果，此时为 null，界面不伪造 id。 */
   action_id: string | null
   /** 来自同一 action 的 ActionStarted.name；没有 ActionStarted 时为 null。 */
   tool_name: string | null

@@ -1,8 +1,9 @@
-//! AgentController：把控制结果落到 Tree。
+//! SpeculationCoordinator：推动处理、调用 Policy 并发出操作。
+//! 不拥有 Tree 或第二份投机状态，可以服务多棵树。
 
 use super::*;
 
-impl AgentController {
+impl SpeculationCoordinator {
     pub fn perform(
         &self,
         tree: &SpeculativeTree,
@@ -191,9 +192,9 @@ impl AgentController {
 }
 
 #[derive(Default)]
-pub struct AgentController;
+pub struct SpeculationCoordinator;
 
-impl AgentController {
+impl SpeculationCoordinator {
     /// `select` sees every Pending Chance and returns an ordered subset.
     /// Chances it leaves out stay Pending.
     pub fn select(

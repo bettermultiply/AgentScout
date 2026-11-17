@@ -123,7 +123,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 按配置装配多个 Backend 连接，用 CompositeRuntime 组合，并可选地包一层
-/// BaseRuntime 管理单个 Agent 实际执行实例的进程。Agent Session 仍由接入侧管理。
+/// BaseRuntime 管理单个 Agent 实际执行实例的进程。Agent Session 仍由 Instrumentation 管理。
 fn assemble_runtime(
     value: &serde_json::Value,
     filesystem: Option<Arc<FilesystemBackend>>,

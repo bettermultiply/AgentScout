@@ -11,7 +11,7 @@ test('native Pi history preserves compaction/custom/IDs, rewires only final hist
         import assert from 'node:assert/strict';
         import {existsSync} from 'node:fs';
         import {SessionManager} from '${pi}/packages/coding-agent/src/core/session-manager.ts';
-        import {SessionTree} from '${resolve('agent-access/pi/session-tree.ts')}';
+        import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
         const directory=process.argv[1],file=directory+'/session.jsonl';
         const main=SessionManager.open(file),user=main.appendMessage({role:'user',content:'task',timestamp:1});
         const custom=main.appendCustomEntry('fixture',{targetId:user});
@@ -53,7 +53,7 @@ test('installed pi-code-rollback snapshot references survive assembly with their
         import {writeFileSync,readFileSync,existsSync} from 'node:fs';
         import {execFileSync} from 'node:child_process';
         import {SessionManager} from '${pi}/packages/coding-agent/src/core/session-manager.ts';
-        import {SessionTree} from '${resolve('agent-access/pi/session-tree.ts')}';
+        import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
         import rollback,{__testing__} from '${directory}/rollback.ts';
         const directory=process.argv[1];
         execFileSync('git',['init','--quiet',directory]);

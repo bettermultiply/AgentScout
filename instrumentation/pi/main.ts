@@ -6,7 +6,7 @@
 import { connect } from 'node:net';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
-import { evaluatePolicyArtifact } from '../../../pi/packages/ascout-agent-access/src/local-policy.ts';
+import { evaluatePolicyArtifact } from '../../../pi/packages/pi-integration/src/local-policy.ts';
 import { createAgentAccess } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
 import { Notifications } from './notification.ts';
@@ -19,7 +19,24 @@ import { Interaction } from './interaction.ts';
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
 const require = createRequire(resolve(root, 'package.json'));
-const { createAgentSession, SessionManager, ModelRuntime, resolveCliModel } = require(resolve(root, 'packages/coding-agent/src/index.ts'));
+const { createAgentSession: createNativeAgentSession, DefaultResourceLoader, SettingsManager, getAgentDir, SessionManager, ModelRuntime, resolveCliModel } = require(resolve(root, 'packages/coding-agent/src/index.ts'));
+const nativeCommandSources = new WeakMap();
+async function createAgentSession(options) {
+    // Use a native inline extension to obtain the product's command catalogue.
+    // Keep Pi's normal resource loader, including user extensions and resources.
+    if (!DefaultResourceLoader) return createNativeAgentSession(options); // SDK test doubles
+    const agentDir = options.agentDir ?? getAgentDir();
+    const settingsManager = options.settingsManager ?? SettingsManager.create(options.cwd, agentDir);
+    let extension;
+    const resourceLoader = new DefaultResourceLoader({
+        cwd: options.cwd, agentDir, settingsManager,
+        extensionFactories: [api => { extension = api; }],
+    });
+    await resourceLoader.reload();
+    const result = await createNativeAgentSession({...options, agentDir, settingsManager, resourceLoader});
+    nativeCommandSources.set(result.session, () => extension.getCommands());
+    return result;
+}
 const sessionFile = process.env.ASCOUT_SESSION_FILE;
 if (!sessionFile) throw Error('ASCOUT_SESSION_FILE is required');
 let tree = new SessionTree(SessionManager.open(sessionFile));
@@ -110,7 +127,7 @@ function cacheCommands(session, branch) {
     // Publish prompts immediately; a session_start answer must not depend on
     // this catalog becoming available.
     void extensionBindings.get(branch).then(async () => {
-        commandCatalog = typeof session.getCommands === 'function' ? await session.getCommands() : [
+        commandCatalog = nativeCommandSources.has(session) ? await nativeCommandSources.get(session)() : typeof session.getCommands === 'function' ? await session.getCommands() : [
             ...(session.extensionRunner?.getRegisteredCommands() ?? []).map(item => ({name:item.invocationName,description:item.description,source:'extension',sourceInfo:item.sourceInfo})),
             ...(session.promptTemplates ?? []).map(item => ({name:item.name,description:item.description,source:'prompt',sourceInfo:item.sourceInfo})),
             ...(session.resourceLoader?.getSkills().skills ?? []).map(item => ({name:`skill:${item.name}`,description:item.description,source:'skill',sourceInfo:item.sourceInfo})),
@@ -379,7 +396,7 @@ function install(session,branch) {
                 const action=index>=0?pending.splice(index,1)[0]:undefined;
                 if(pending?.length===0)modelActions.delete(branch);
                 if(action&&checkpoints.get(key(branch,action.action_id))?.model)modelResultHolds.set(branch,Promise.withResolvers());
-                if(action)void report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:'model_inference',status:['error','aborted'].includes(event.message.stopReason)?'failed':'succeeded',result:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},evidence:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},timestamp_ms:Date.now()});
+                if(action)void report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:'model_inference',status:event.message.stopReason==='aborted'?'cancelled':event.message.stopReason==='error'?'failed':'succeeded',result:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},evidence:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},timestamp_ms:Date.now()});
                 const fork=modelForks.get(branch);
                 if(fork){modelForks.delete(branch);const restoring=session.setModel(fork.model).then(()=>session.setThinkingLevel(fork.thinkingLevel));modelRestores.set(branch,restoring);void restoring.catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error)}));}
                 const started_at_ms=Number.isFinite(event.message.timestamp)?event.message.timestamp:(action?.started_at_ms??Date.now());

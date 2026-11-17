@@ -29,7 +29,7 @@ Policy 首选源 run 的 `policy.json`，否则显式给出原 YAML；Runtime �
 
 终端命令：`pause` 暂停后续自动输入（在飞轮次继续），`resume` 恢复，`status` 查看进度和错误，`quit` 正常保存并退出两部分。手动输入或切换模型前先 `pause`；工具不检测这些操作。完成时静默停止自动输入，失败报具体原因并停止自动输入；两种情况均继续管理 AScout 和本地服务。AScout 主动退出也关闭工具；SIGINT/SIGTERM 走 AScout 正常 Shutdown。不可捕获的强制杀进程不属于正常退出。
 
-本地服务通过通用 `--models` 追加模型配置，保留 Pi 原配置、认证和扩展；重名 provider 拒绝覆盖。控制面 `--policy-artifact` 可加载已编译策略，仍将策略正常保存到新 run。`GET /api/input-status` 返回已处理输入序号 `sequence`、可输入 `ready`、当前输入错误 `error`；HTTP 202 仅表示排队。工具等待序号推进且权威轮次结束、无待确认 Promote 后才提交下一输入，不要求所有候选结束。
+本地服务通过通用 `--models` 追加模型配置，保留 Pi 原配置、认证和扩展；重名 provider 拒绝覆盖。control plane `--policy-artifact` 可加载已编译策略，仍将策略正常保存到新 run。`GET /api/input-status` 返回已处理输入序号 `sequence`、可输入 `ready`、当前输入错误 `error`；HTTP 202 仅表示排队。工具等待序号推进且权威轮次结束、无待确认 Promote 后才提交下一输入，不要求所有候选结束。
 
 AScout 保存追加 provider 配置内容，普通恢复不依赖工具临时目录。工具退出后可用普通 `--resume --model provider/model`：先校验并恢复保存的运行，再在空闲权威上切换模型。回放服务和自动输入队列不恢复。
 

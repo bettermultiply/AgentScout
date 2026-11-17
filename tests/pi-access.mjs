@@ -81,7 +81,7 @@ export async function createAgentSession(options) {
         });
     });
     await new Promise(resolve => server.listen(socketPath, resolve));
-    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', '--import', `${REAL_PI}/packages/coding-agent/src/experimental/source-resolver.ts`, resolve('agent-access/pi/main.ts'), socketPath, 'agent'], {
+    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', '--import', `${REAL_PI}/packages/coding-agent/src/experimental/source-resolver.ts`, resolve('instrumentation/pi/main.ts'), socketPath, 'agent'], {
          env: { ...process.env, ASCOUT_PI_ROOT: root, ASCOUT_SESSION_FILE: join(root, 'session.jsonl'), ASCOUT_RUNTIME_TOOLS: JSON.stringify([
             {name:'runtime_tool',description:'test',parameters:{type:'object'}}
         ]) }, stdio: ['ignore', 'pipe', 'pipe']
@@ -146,9 +146,9 @@ export async function createAgentSession(options) {
         toolResultInjection: true,
     });
     if (shutdownAt === 'admission') {
-        const runner = 'import sys\npayload=b"true"\nsys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n';
-        send({command:'local_policy',branch_id:'authority',policy_digest:'test-policy',decisions:{
-            'admit.opportunity_pass':'import json,sys\nrequest=json.load(open("/request.json"))\npayload=json.dumps(request["data"]["op"]["kind"]!="model_inference").encode()\nsys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n','admit.feasibility_pass':runner,'extent':runner,'predict':runner}});
+        const runner = 'import sys,json\nfor line in sys.stdin.buffer:\n payload=json.dumps({"type":"result","request_id":json.loads(line)["request_id"],"result":True}).encode()\n sys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n sys.stdout.buffer.flush()\n';
+        send({command:'local_policy',branch_id:'authority',policy_digest:'test-policy',has_predictor:true,decisions:{
+            'admit.opportunity_pass':'import json,sys\nfor line in sys.stdin.buffer:\n request=json.loads(line)\n payload=json.dumps({"type":"result","request_id":request["request_id"],"result":request["data"]["op"]["kind"]!="model_inference"}).encode()\n sys.stdout.buffer.write(len(payload).to_bytes(4,"big")+payload)\n sys.stdout.buffer.flush()\n','admit.feasibility_pass':runner,'extent':runner,'effect':runner}});
     }
     send({command:'start_branch',branch_id:'authority',workspace:root,prompt:''});
     await expectMessage(m => m.message === 'branch_started');
@@ -300,7 +300,7 @@ export async function createAgentSession(options) {
         });
     });
     await new Promise(resolve => server.listen(socketPath, resolve));
-    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', '--import', `${REAL_PI}/packages/coding-agent/src/experimental/source-resolver.ts`, resolve('agent-access/pi/main.ts'), socketPath, 'agent'], {
+    const child = spawn(process.execPath, ['--no-warnings', '--experimental-strip-types', '--import', `${REAL_PI}/packages/coding-agent/src/experimental/source-resolver.ts`, resolve('instrumentation/pi/main.ts'), socketPath, 'agent'], {
          env: { ...process.env, ASCOUT_PI_ROOT: root, ASCOUT_SESSION_FILE: join(root, 'session.jsonl'), ASCOUT_RUNTIME_TOOLS: '[]' }, stdio: ['ignore', 'pipe', 'pipe']
     });
     let stderr = '';

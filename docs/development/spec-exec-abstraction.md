@@ -1,6 +1,6 @@
 # 投机执行论文证据札记
 
-本文保存投机执行相关论文的事实、实验结果和模型适用性审查。审查中的缺口判断与调整建议不是已批准的设计决策；已经收敛的目标语义以 `docs/design/` 为准，系统结构以 [`architecture.md`](../architecture.md) 为准。本文不重新定义 Edge、Branch、AssumptionSet、Policy Decision、Effect、控制面或 Runtime Adapter。
+本文保存投机执行相关论文的事实、实验结果和模型适用性审查。审查中的缺口判断与调整建议不是已批准的设计决策；已经收敛的目标语义以 `docs/design/` 为准，系统结构以 [`architecture.md`](../architecture.md) 为准。本文不重新定义 Edge、Branch、AssumptionSet、Policy Decision、Effect、control plane 或 Runtime Adapter。
 
 ## 1. 论文范围
 
@@ -120,11 +120,11 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 
 本次审查 survey「投机执行算法」中的全部 20 篇论文（ISP、DSP 分别计），另检查 TomasuLLM 的算法／运行时交叉部分及 NVIDIA / LangChain 的路由投机。续查直接读取这 21 篇论文的 arXiv HTML 正文，按预测对象、提前执行的工作、验证依据、采用内容、失败后去向和所需能力核对；原文位置索引见 §8.8。NVIDIA / LangChain 仍以 survey 所链官方公告和代码说明为依据，本轮未重新审查其代码。基础设施、普通异步执行和社区原型不混入算法覆盖率。
 
-基准是 mental-model → design-model → Policy、Branch、效果、接入侧和 Contract 的当前目标设计，而非 Rust 原型完成度。未执行外部实现、未编写或运行测试，也未复现论文的延迟或正确性结果；正文核对不能替代运行验证。
+基准是 mental-model → design-model → Policy、Branch、效果、Instrumentation 和 Contract 的当前目标设计，而非 Rust 原型完成度。未执行外部实现、未编写或运行测试，也未复现论文的延迟或正确性结果；正文核对不能替代运行验证。
 
 审查区分四种情况：现有语义基本能够表达；已有意图但生命周期、事实供给或落实规则未闭合；正式条款相互冲突；能力明确处于当前范围之外。“可以在 match 中写一个函数”不证明机制能够提供该函数需要的事实或安全落实其结果；“有 Reuse/Salvage 意图”也不证明任意状态能够跨 Branch 移交。
 
-总体判断：Edge／Proposal／验证／处置框架能承载这些算法的大部分局部决策，但不能据此声称完整覆盖。最普遍的问题是结果 Reuse 与整 Branch Accept 被混为一谈，术语表的映射和接入侧的结果返回路径之间已有明确冲突；多步算法另有带未决前缀的验证、前缀接受和后缀清理缺口。DynBranch 跨 task 复用、引擎内部优化和投机 UI 是需要明确范围的能力，不能冒充现有覆盖。没有证据要求立即推翻树形结构、single-winner 或效果屏障。
+总体判断：Edge／Proposal／验证／处置框架能承载这些算法的大部分局部决策，但不能据此声称完整覆盖。最普遍的问题是结果 Reuse 与整 Branch Accept 被混为一谈，术语表的映射和 Instrumentation 的结果返回路径之间已有明确冲突；多步算法另有带未决前缀的验证、前缀接受和后缀清理缺口。DynBranch 跨 task 复用、引擎内部优化和投机 UI 是需要明确范围的能力，不能冒充现有覆盖。没有证据要求立即推翻树形结构、single-winner 或效果屏障。
 
 ### 8.2 新增七算法逐项核对
 
@@ -162,7 +162,7 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 
 **建议，尚未批准**：先补齐已有 Reuse 的正式语义，明确其是否允许主执行保留身份、经受控通道只采用已授权的结果。与 Promote/整 Branch replacement 区分，而不立即引入新实体或新 decision。纯结果复用和带状态变更的复用分开要求能力；不能从“返回值匹配”推出“副作用可以转移”。保留 single-winner 对互斥执行延续的约束，不允许多个不兼容世界同时生效。
 
-**受影响文档**：mental-model §2–3、design-model §2.1/§3.1、Policy dispose、Branch resolution/accept、接入侧返回路径与效果约束。Runtime 环境接口是否要变，须在确定具体复用语义后再判断，不先增加私有操作。
+**受影响文档**：mental-model §2–3、design-model §2.1/§3.1、Policy dispose、Branch resolution/accept、Instrumentation 返回路径与效果约束。Runtime 环境接口是否要变，须在确定具体复用语义后再判断，不先增加私有操作。
 
 #### 2. 如何验证并采用一段轨迹的前缀，而不误用后面的结果？
 
@@ -219,7 +219,7 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 | Speculative Tool Calls | client-side 提前调用、精确参数匹配、结果复用的局部流程 | 同 §8.9 第 1 项；engine-side KV 拼接、resident sequence 与提议中的 provider endpoint 明确不在现有范围内 |
 | Skim accelerate | 快路径、`launch=false/lazy`、validator 接受、失败后 URL salvage 与 fallback | 不要求保留失败推理；URL handoff 必须是明确允许的输入，不把被拒答案移入权威 context。独立快路径执行配置尚未具体化 |
 | Skim aggregate | 多候选试验、validator 排序、至多一个最终输出 | 不等于自动支持多 loser 信息汇总；只选择一个经审核结果可映射，预算与快捷执行器能力仍需接入 |
-| SPORK D1/D2 | 流式推理中预测调用、置信度准入、只读提前执行、精确匹配 | 需要流式前缀/logprobs 等实际服务能力；“真实 operation 前 barrier”与中途观测点的关联需接入侧证明。KV fork 加速不由普通 API 保证，结果复用同 §8.9 第 1 项 |
+| SPORK D1/D2 | 流式推理中预测调用、置信度准入、只读提前执行、精确匹配 | 需要流式前缀/logprobs 等实际服务能力；“真实 operation 前 barrier”与中途观测点的关联需 Instrumentation 证明。KV fork 加速不由普通 API 保证，结果复用同 §8.9 第 1 项 |
 | SPORK D3 | dispose 可表达回收部分进展的意图 | 将 token draft 送入引擎验证器是明确排除的 engine plane，不能只因存在 Salvage 就声称完整覆盖 |
 | ISP | 近似步骤连续推进，各步 target 异步验证，前缀匹配后采用，错误后缀丢弃 | 同 §8.9 第 4 项；论文 UI 展示与用户裁决投机结果不符合当前权威主线唯一可见边界，算法核心与完整 UI 必须分列 |
 | DSP | ISP 路线加动态 extent、预算和收益权衡 | 同 §8.9 第 4 项；在线 trainer 与 inference predictor 的权重更新不是 `extent` 自己拥有的状态，需外部学习及版本边界 |
@@ -278,7 +278,7 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 
 这要求检查 mental-model §2–3 与 design-model §2.1／§3.1 的一致性，再同步 Policy dispose、Branch resolution/accept、Outcome 返回路径、效果处理及 glossary 的层间映射。具体状态转换和所需后端能力留到相应下层讨论；不能只修改术语表就宣布问题解决。
 
-当前 Runtime Adapter 固定环境操作没有定义通用状态增量移交／回放。纯结果 Reuse 不一定需要新增环境操作；涉及受管效果时，应先明确接入侧与 Effect Coordinator 的责任，再判断哪些环境能力确实要扩展。Firecracker 能分支和隔离，不自动说明它已能安全拼接任意两个环境的状态。
+当前 Runtime Adapter 固定环境操作没有定义通用状态增量移交／回放。纯结果 Reuse 不一定需要新增环境操作；涉及受管效果时，应先明确 Instrumentation 与 External Effect Coordinator 的责任，再判断哪些环境能力确实要扩展。Firecracker 能分支和隔离，不自动说明它已能安全拼接任意两个环境的状态。
 
 本轮结论仍是待讨论草案，不是新增目标语义，也不是编码授权。
 
@@ -322,11 +322,11 @@ W&D、AsyncFC、Execution Edits 和 Tracking State Footprints 仍按 survey 作�
 
 | # | 具体场景 | 现在哪里对不上 | 性质 | 建议／状态 | 修正后的影响 |
 |---|---|---|---|---|---|
-| 1 | 主 Agent 保留自己的推理，只采用候选提前跑出的工具结果 | `dispose` 已把 Reuse／Promote 分开，接入侧已有跳过原调用并返回结果的路径，`branch-semantics.md` §5.1 已有 command reuse 条件；但 `glossary.md` 把两者都映射为 `accept`，`branch-semantics.md` §4.5 只描述整 Branch 替换 | 正式条款互相矛盾 | 把 `accept` 定义为 resolution 结果；Reuse 只移交已验证结果和按声明需要移交的受管状态，然后清理候选；Promote 才替换主延续。带状态变更的复用继续受 `branch-semantics.md` §5.1／Effect Management 约束 | 不新增实体、Decision 或接口；改 `branch-semantics.md`、`glossary.md`、`policy-decisions.md` §2.7、`agent-integration.md` §2.1／§2.3、`effect-management.md` §1.3 的文字和交接规则。树、single-winner、效果屏障不变 |
+| 1 | 主 Agent 保留自己的推理，只采用候选提前跑出的工具结果 | `dispose` 已把 Reuse／Promote 分开，Instrumentation 已有跳过原调用并返回结果的路径，`branch-semantics.md` §5.1 已有 command reuse 条件；但 `glossary.md` 把两者都映射为 `accept`，`branch-semantics.md` §4.5 只描述整 Branch 替换 | 正式条款互相矛盾 | 把 `accept` 定义为 resolution 结果；Reuse 只移交已验证结果和按声明需要移交的受管状态，然后清理候选；Promote 才替换主延续。带状态变更的复用继续受 `branch-semantics.md` §5.1／Effect Management 约束 | 不新增实体、Decision 或接口；改 `branch-semantics.md`、`glossary.md`、`policy-decisions.md` §2.7、`agent-integration.md` §2.1／§2.3、`effect-management.md` §1.3 的文字和交接规则。树、single-winner、效果屏障不变 |
 | 2 | `j` 时刻提前算 `j+3` 的动作；`j+1` 接受了另一个候选，而 `j+3` 的结果并不依赖被拒 Proposal | §4.5 规定 Accept 后旧 parent 和 candidate 的 sibling subtrees 失效；AOSpec／DynBranch 要让独立提前结果活到自己的 Edge | 正式条款与论文行为冲突，是真正的模型问题 | **暂按 A（不覆盖 independent offer）**：保守，只支持落在被接受路径上的前缀。备选 B：扩展，允许不依赖被拒 Proposal、执行前状态版本仍匹配的候选继续存活，并在自己的 Edge 上重新参与 `match`／`dispose` | A 只改范围和 survey 表述，不改模型。B 会动 Branch 生命周期、sibling 清理、single-winner、AssumptionSet、状态版本和资源所有权，必须单独设计、实现和测试 |
-| 3 | AOSpec 的动作加执行前环境版本；DynBranch 的读集合新鲜度；TomasuLLM 的实际读依赖 | Runtime Adapter 只声明隔离属性，不提供状态版本、读集合或新鲜度；现有 command 粒度语义只有 workspace revision，不是通用状态版本 | 能力契约缺口 | 把状态版本和读集合做成可选能力；Policy 需要时由 Contract 校验，后端没有就拒绝或明确降级；`match` 的 evidence 携带这些事实及其来源 | 改 Runtime Adapter Contract、Capability View 和 `match` 输入；Branch 语义不变。实现需要后端配合，不能只靠控制面推断 |
+| 3 | AOSpec 的动作加执行前环境版本；DynBranch 的读集合新鲜度；TomasuLLM 的实际读依赖 | Runtime Adapter 只声明隔离属性，不提供状态版本、读集合或新鲜度；现有 command 粒度语义只有 workspace revision，不是通用状态版本 | 能力契约缺口 | 把状态版本和读集合做成可选能力；Policy 需要时由 Contract 校验，后端没有就拒绝或明确降级；`match` 的 evidence 携带这些事实及其来源 | 改 Runtime Adapter Contract、Capability View 和 `match` 输入；Branch 语义不变。实现需要后端配合，不能只靠 control plane 推断 |
 | 4 | LEAP 一次验证 `k+1` 个上下文；SpecAgent 返回 `(j, reason, replacement)`；SMC 一次接受宏 | `MatchResult` 是开放的，但没有规定一次批量结果如何拆成每条 Edge 的确认／拒绝，也没有规定验证证据自身携带哪些未决 Proposal 依赖 | 规则缺口，不是结构不支持 | **方向：不新增批量原语**：`match`／`dispose` 保持逐 Edge，由 Policy 在一次审核后把结果分发；机制按前缀顺序逐条确认／拒绝，再采用对应状态。需补修正动作入口和证据依赖；确有必要时再给 evidence 增加结构化前缀字段 | 主要改 `policy-decisions.md` §2.6／§4.2 的说明；可能扩展 `MatchResult`／validator 契约。不改树，不新增 Decision |
-| 5 | SpecAgent／LEAP 的 weak–strong；Skim 的快路径执行器 | `predict` 可以用小模型，但候选 Branch 的执行配置没有声明位置；文档没有说明候选能否使用不同的模型、prompt、工具集或执行器 | 能力契约缺口 | 在 candidate／Instance 上声明执行配置，由 Contract 和 Fidelity 校验；`predict` 仍只负责生成 Proposal | 改 Agent 接入侧、Contract、Instance metadata 和 Fidelity 校验；Edge／Branch／九类 Decision 不变 |
+| 5 | SpecAgent／LEAP 的 weak–strong；Skim 的快路径执行器 | `predict` 可以用小模型，但候选 Branch 的执行配置没有声明位置；文档没有说明候选能否使用不同的模型、prompt、工具集或执行器 | 能力契约缺口 | 在 candidate／Instance 上声明执行配置，由 Contract 和 Fidelity 校验；`predict` 仍只负责生成 Proposal | 改 Instrumentation、Contract、Instance metadata 和 Fidelity 校验；Edge／Branch／九类 Decision 不变 |
 | 6 | DynBranch 跨 task 缓存已确认结果 | Branch identity、handle、capability 和 resolution 限定在一棵 Tree 内，同 session 的多轮 task 共用树；Outcome 跨 task 消费的授权、寿命和失效规则仍待核查 | 结果复用契约缺口 | 核查后续 task 消费已确认结果的依据、授权与有效性，不以共用树代替结果复用保证 | 若要在 AScout 内置，仍需明确结果存储、授权和寿命契约 |
 | 7 | Cost-aware／B-PASTE 的 DAG fan-in、共享子图 | 当前是树；多个消费者共享同一份中间结果需要重复计算，或需要另一套执行模型 | 范围边界 | 明确不覆盖，或以后单独扩展 DAG；不能把 beam 子图共享说成已有能力 | 不改模型；扩 DAG 会改变树、single-winner 和依赖语义，是另一套执行模型 |
 | 8 | ISP 的候选预览、Speculative Interaction Agents 的持续交互；SPORK D3／KV；TomasuLLM 的完全乱序提交 | 当前只向用户呈现权威主线；engine plane 已由 D-013 排除；乱序提交／rebase 超出 Branch replacement 的明确语义 | 范围边界 | 分别保持不覆盖，或用更保守的串行屏障退化；需要时单独设计 | 不改现有模型；不能因论文依赖这些能力就默认扩大 AScout |

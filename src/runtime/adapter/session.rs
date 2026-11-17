@@ -1,4 +1,4 @@
-//! Adapter 会话：连接控制面、收发消息。
+//! Adapter 会话：连接 control plane、收发消息。
 
 use super::*;
 use crate::protocol::contract::*;

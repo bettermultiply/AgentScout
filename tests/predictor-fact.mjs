@@ -2,12 +2,13 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {savedPolicy,runner} from './fixtures/predictor-fact-policy.mjs';
-import {createAgentAccess} from '../agent-access/core/index.ts';
-import {evaluatePolicyArtifact} from '../../pi/packages/ascout-agent-access/src/local-policy.ts';
+import {createAgentAccess} from '../instrumentation/core/index.ts';
+import {evaluatePolicyArtifact} from '../../pi/packages/pi-integration/src/local-policy.ts';
 
 // Frozen real Policy, with provenance paths sanitized; no temporary evidence input.
 const saved=savedPolicy();
-const artifact={digest:saved.digest,decisions:Object.fromEntries(Object.entries(saved.decisions).map(([decision,binding])=>{
+const localDecisions=['admit.opportunity_pass','admit.feasibility_pass','extent','effect'];
+const artifact={digest:saved.digest,has_predictor:Object.hasOwn(saved.decisions,'predict'),decisions:Object.fromEntries(Object.entries(saved.decisions).filter(([decision])=>localDecisions.includes(decision)).map(([decision,binding])=>{
     const manifest={version:saved.version,python:saved.python,files:saved.files,binding,decision,digest:saved.digest};
     return [decision,`import os,json\nos.dup2(1,3)\nos.dup2(2,1)\nMANIFEST = json.loads(${JSON.stringify(JSON.stringify(manifest))})\n${runner}`];
 }))};
@@ -25,21 +26,22 @@ for(const kind of ['model_inference','nle_action'])test(`saved Policy receives p
     assert.equal((await access.beforeAction({branch:'authority',actionId:kind,actionKind:kind==='model_inference'?kind:'tool_execution',name:kind,op,admit:true})).kind,'admit');
     assert.deepEqual(decisions,['admit.opportunity_pass','admit.feasibility_pass','extent']);
     assert.equal(reports.filter(m=>m.message==='speculative_admission_request').length,1);
-    const proposals=await access.predict('authority',{chance_context:{},process_context:{arguments:op.arguments},assumption_set:[],capability_context:{}});
-    assert.deepEqual(proposals,{proposals:[],generation:'batch'},'availability is not a promise of a nonempty prediction');
+    assert.equal(access.predict,undefined,'prediction is evaluated only by the control plane');
+    assert.deepEqual(Object.keys(artifact.decisions),localDecisions);
 });
 
 test('predictor availability follows delivery, inheritance, restore and cleanup; admission remains Policy-owned',async()=>{
     const calls=[];
     const access=createAgentAccess({taskId:'facts',report:async()=>{},evaluate:async(_a,d)=>{calls.push(d);return false}});
     assert.equal(await access.hasPredictor('authority'),false);
-    access.setPolicy('authority',artifact);
+    await access.control({command:'local_policy',branch_id:'authority',policy_digest:artifact.digest,has_predictor:true,decisions:artifact.decisions});
     assert.equal(await access.hasPredictor('authority'),true);
     await access.control({command:'start_candidate',branch_id:'candidate',parent_branch_id:'authority'});
     assert.equal(await access.hasPredictor('candidate'),true);
     const restored=createAgentAccess({taskId:'restore',report:async()=>{},evaluate:async()=>{throw Error('must not evaluate')}});
     restored.restore(access.snapshot());
     assert.equal(await restored.hasPredictor('candidate'),true);
+    assert.deepEqual(calls,[],'availability, inheritance and restore must not execute any Decision');
     assert.equal((await access.beforeAction({branch:'authority',actionId:'deny',actionKind:'model_inference',name:'model',op:{kind:'model_inference',has_predictor:true},admit:true})).kind,'allow');
     assert.deepEqual(calls,['admit.opportunity_pass']);
     await access.control({command:'cleanup',branch_id:'candidate'});

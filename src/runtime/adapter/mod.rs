@@ -1,4 +1,4 @@
-//! Adapter 进程：接入控制面会话，按环境串行执行操作，上报结果和事件。
+//! Adapter 进程：接入 control plane 会话，按环境串行执行操作，上报结果和事件。
 //!
 //! 首版只做一条连接、同步完成、一个状态变化事件类型；能力声明、验证和
 //! 多 Adapter 管理不在这一版。
@@ -39,6 +39,6 @@ pub(super) struct Shared {
     pub(super) result_signal: Condvar,
     /// Adapter 记录的每个环境最近一次报告的状态，用于发现意外变化。
     pub(super) known: Mutex<HashMap<String, EnvironmentState>>,
-    /// 由 Runtime 启动的 Agent 接入侧进程。一个 run 只有一个，服务所有环境。
+    /// 由 Runtime 启动的 Instrumentation 进程。一个 run 只有一个，服务所有环境。
     pub(super) agent: Mutex<Option<Child>>,
 }

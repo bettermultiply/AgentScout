@@ -117,19 +117,25 @@ pub fn connected(
         .clone()
         .ok_or("authority missing")?;
     tree.record_runtime_state(&authority, RuntimeExecutionState::Ready)?;
-    let decisions = Decision::ALL
-        .into_iter()
-        .map(|decision| {
-            Ok((
-                decision.as_str().to_string(),
-                json!(policy.script(decision)?),
-            ))
-        })
-        .collect::<Result<serde_json::Map<_, _>, Box<dyn std::error::Error>>>()?;
+    let decisions = [
+        Decision::OpportunityPass,
+        Decision::FeasibilityPass,
+        Decision::Extent,
+        Decision::Effect,
+    ]
+    .into_iter()
+    .map(|decision| {
+        Ok((
+            decision.as_str().to_string(),
+            json!(policy.script(decision)?),
+        ))
+    })
+    .collect::<Result<serde_json::Map<_, _>, Box<dyn std::error::Error>>>()?;
     Ok(vec![
         AgentCommand::LocalPolicy {
             branch_id: "authority".into(),
             policy_digest: policy.digest().into(),
+            has_predictor: policy.has_decision(Decision::Predict),
             decisions: Value::Object(decisions),
         },
         command,

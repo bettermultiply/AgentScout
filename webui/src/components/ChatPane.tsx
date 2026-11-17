@@ -28,7 +28,7 @@ function connectionLabel(connection: string): string {
     case 'reconnecting':
       return '正在重连…'
     case 'closed':
-      return '控制面已断开'
+      return 'control plane 已断开'
     case 'error':
       return '连接失败'
     default:
@@ -348,7 +348,7 @@ export function ChatPane() {
             A
           </div>
           <h2>等待权威窗口</h2>
-          <p>控制面建立任务后，这里显示当前权威路径的对话。</p>
+          <p>control plane 建立任务后，这里显示当前权威路径的对话。</p>
           <p className="muted">候选内容只出现在右侧投机面板，且始终保持只读。</p>
         </div>
       )}
@@ -365,9 +365,9 @@ export function ChatPane() {
         {!isCurrent && selected ? (
           <div className="composer-hint">历史权威窗口只读；切回当前权威窗口后可继续输入。</div>
         ) : !connected ? (
-          <div className="composer-hint">控制面未连接，输入暂不可用。</div>
+          <div className="composer-hint">control plane 未连接，输入暂不可用。</div>
         ) : !ready ? (
-          <div className="composer-hint">等待控制面就绪。</div>
+          <div className="composer-hint">等待 control plane 就绪。</div>
         ) : null}
         <div className="composer-box">
           <textarea

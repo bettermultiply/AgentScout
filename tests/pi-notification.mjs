@@ -10,8 +10,8 @@ test('native notification waits for the full tool batch, persists once, and neve
         import {mkdirSync,writeFileSync} from 'node:fs';
         import http from 'node:http';
         import {createAgentSession,SessionManager,ModelRuntime,resolveCliModel} from '${pi}/packages/coding-agent/src/index.ts';
-        import {Notifications} from '${resolve('agent-access/pi/notification.ts')}';
-        import {SessionTree} from '${resolve('agent-access/pi/session-tree.ts')}';
+        import {Notifications} from '${resolve('instrumentation/pi/notification.ts')}';
+        import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
         import {requestKey,messageBody} from '${resolve('tools/replay/normalize.ts')}';
         const directory=process.argv[1],agentDir=directory+'/pi';mkdirSync(agentDir);
         const requests=[];let received;const first=new Promise(r=>received=r);let release;

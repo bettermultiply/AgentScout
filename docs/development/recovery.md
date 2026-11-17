@@ -75,9 +75,9 @@ WebUI `npm run build` 通过（`/tmp/opencode/task-entry-web-build.log`）；未
 
 本轮 Runtime 创建身份链路最终验证：`cargo fmt -- --check`、`cargo check --all-targets`、`cargo test --lib`（170/170）通过；先 `cargo build --bins`，再串行执行 `node --test --test-concurrency=1 tests/recovery-active.mjs`，五种模式全部通过，无取消或跳过。证据目录依次为 `/tmp/opencode/recovery-active-cy90lI`、`/tmp/opencode/recovery-active-3LMIAo`、`/tmp/opencode/recovery-active-R2uHDY`、`/tmp/opencode/recovery-active-QfT7ro`、`/tmp/opencode/recovery-active-tns9kK`。使用本地伪模型，保留动态端口、独立目录及原有超时和断言；本轮未单独重跑 `recovery-filesystem.mjs`，五模式脚本包含 filesystem 恢复场景。
 
-Environment id 由 Runtime 在建立或派生时创建并返回，控制面收到后持久化在 BranchRecord；恢复使用保存的绑定并显式加载 Runtime，不重新创建环境或根据恢复目录推导身份。创建中的 Branch 可以无绑定；已有绑定必须非空且不被其他 Branch 共用，存活环境必须存在于保存的 Runtime 状态中。Runtime 请求不传 Branch id，Agent 接入命令单独传递 Branch→Environment 绑定以选择对应文件工具计划。
+Environment id 由 Runtime 在建立或派生时创建并返回，control plane 收到后持久化在 BranchRecord；恢复使用保存的绑定并显式加载 Runtime，不重新创建环境或根据恢复目录推导身份。创建中的 Branch 可以无绑定；已有绑定必须非空且不被其他 Branch 共用，存活环境必须存在于保存的 Runtime 状态中。Runtime 请求不传 Branch id，Agent 接入命令单独传递 Branch→Environment 绑定以选择对应文件工具计划。
 
-Composite 即使只有一个 Backend 也保存和校验参与记录。恢复按存活 Branch 的 Environment 重建 holder；Runtime 事件唤醒控制面，避免 sibling 结果到达后仍等待其他输入。holder socket 经打开目录的 `/proc/self/fd` 路径连接，保留完整 Environment 身份且不受 Unix socket 全路径长度限制。
+Composite 即使只有一个 Backend 也保存和校验参与记录。恢复按存活 Branch 的 Environment 重建 holder；Runtime 事件唤醒 control plane，避免 sibling 结果到达后仍等待其他输入。holder socket 经打开目录的 `/proc/self/fd` 路径连接，保留完整 Environment 身份且不受 Unix socket 全路径长度限制。
 
 最终验收使用本地伪模型，没有真实模型请求：`cargo check --all-targets`、`cargo test --lib`（168/168）、Python bridge 语法检查通过；每个恢复脚本前均执行 `cargo build --bins`，串行运行 `tests/recovery-active.mjs`（5/5）及 `tests/recovery-filesystem.mjs`（1/1）。日志位于 `/tmp/opencode/agent-scout-validation/`，分别为 `check-final.log`、`lib-final.log`、`recovery-active-final.log`、`recovery-filesystem-final.log`。身份唯一性及共享世界生命周期回归均先复现失败再修正；特权项的环境条件与覆盖限制不变。
 
@@ -114,14 +114,14 @@ branch_environment；内部资源可以共享。候选实际建立 Backend 环�
 
 2026-11-16 目标与实现差距：Agent 常用的 Ctrl-C 或退出均终止任务，须结束候选并
 等待任务相关写入完成后物化。Ctrl-C 保留程序和 session，留在对话中，待上述处理
-完成后可接下一轮；Runtime 报告物化失败时须显示失败，控制面不能宣告任务成功。
+完成后可接下一轮；Runtime 报告物化失败时须显示失败，control plane 不能宣告任务成功。
 暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，明确继续命令为 `/continue`，
 恢复原任务执行，保留原树、候选和环境关系；普通消息是否也解除暂停未定。
 它与原 Agent 的 Ctrl-C／退出终止语义分开，暂停不意味着退出程序。独立暂停入口的
 具体 UI 未定。task 是 Agent 的一轮
 工作，Agent 完成本轮工作并开始等待用户输入时完成。
 
-当前 SIGINT 与 TUI Ctrl-C 走 `Interrupt`，终止当前 task 后保留控制面和 session；
+当前 SIGINT 与 TUI Ctrl-C 走 `Interrupt`，终止当前 task 后保留 control plane 和 session；
 SIGTERM 与显式 Shutdown 仍退出。Pause／`/pause` 保存整树；`/continue` 经专用
 控制命令恢复原任务而不新增模型用户消息。普通输入解除暂停兼容现状，不将其提升为
 新的设计决定。保存尚未完成时 `/continue` 不启动工作；终止期间不再允许 Pause
@@ -144,15 +144,15 @@ Pi 源码依据（相邻 ../pi checkout）：
 
 ## 当前实现
 
-控制面的 Pause 请求 Pi 同时 abort 所有 session，停止调度新工作，收齐已发出控制操作和命令的确定回执，然后保存原生消息、原 Branch 源、接入状态和 Tree；NLE 保存完整初始 RNG/configuration、动作序列及逐步校验值。保存使用独立目录，最后发布包含三个组件 SHA-256 的 `recovery.json`。恢复校验组件、Policy digest、Runtime 配置内容和能力后加载，等待用户输入，不自动推理或处置候选。保存失败报告失败并保留状态，原生执行已取消，后续输入重新连接等待；不删除唯一原生源。下方既往验证使用当时的保存入口，不代表当前入口已经通过同样验收。
+control plane 的 Pause 请求 Pi 同时 abort 所有 session，停止调度新工作，收齐已发出控制操作和命令的确定回执，然后保存原生消息、原 Branch 源、接入状态和 Tree；NLE 保存完整初始 RNG/configuration、动作序列及逐步校验值。保存使用独立目录，最后发布包含三个组件 SHA-256 的 `recovery.json`。恢复校验组件、Policy digest、Runtime 配置内容和能力后加载，等待用户输入，不自动推理或处置候选。保存失败报告失败并保留状态，原生执行已取消，后续输入重新连接等待；不删除唯一原生源。下方既往验证使用当时的保存入口，不代表当前入口已经通过同样验收。
 
 ### 活动工具与候选等待（2026-11-13）
 
-`SuspendRecovery` 先令 Pi 原生取消，`RecoverySuspended` 确认后，控制面继续接收既有异步操作结果及 Promote／ResolvePending／Discard／Cleanup 回执；这些动作不盲重做。待 pending work 和 pending commands 均清空才发送 Save。正在执行的真实 Runtime 动作收齐结果再保存，不承诺无限阻塞的 Runtime 能立即退出。尚未发出的动作保存 Chance 后由继续调度启动。
+`SuspendRecovery` 先令 Pi 原生取消，`RecoverySuspended` 确认后，control plane 继续接收既有异步操作结果及 Promote／ResolvePending／Discard／Cleanup 回执；这些动作不盲重做。待 pending work 和 pending commands 均清空才发送 Save。正在执行的真实 Runtime 动作收齐结果再保存，不承诺无限阻塞的 Runtime 能立即退出。尚未发出的动作保存 Chance 后由继续调度启动。
 
-接入侧保存 `suspendedHooks`（Branch、toolCall 身份、原 assistant 与参数、是否已准入）、`candidateSetups`（原 StartCandidate 命令及 sibling 配对关系）、中断中的 Branch 集合，以及原有 checkpoint/results/access holds。没有序列化 Promise。原生工具取消的 toolResult 仍保存在原生记录中；保存期间的取消 ActionFinished 不将控制面工具等待置为 Failed，不丢弃 Chance。已开始的非 Runtime 原生工具遵循 Pi 取消终态，不重放外部副作用；未开始的工具可重新过原 hook。
+Instrumentation 保存 `suspendedHooks`（Branch、toolCall 身份、原 assistant 与参数、是否已准入）、`candidateSetups`（原 StartCandidate 命令及 sibling 配对关系）、中断中的 Branch 集合，以及原有 checkpoint/results/access holds。没有序列化 Promise。原生工具取消的 toolResult 仍保存在原生记录中；保存期间的取消 ActionFinished 不将 control plane 工具等待置为 Failed，不丢弃 Chance。已开始的非 Runtime 原生工具遵循 Pi 取消终态，不重放外部副作用；未开始的工具可重新过原 hook。
 
-用户输入后，接入侧重新建立 Runtime result waiters 与 sibling result waiters，使用 Pi `runToolCall` 接回工具边界；已准入工具保留 effect/pause/extent 等待但不重复准入或计数。Runtime execute 只等待／取已保存结果，不重新发出真实动作。一个 assistant 的未完成工具并行重连，避免“先等待预测工具导致 sibling 永远未启动”的死锁。工具完成后在原生历史追加真实结果，当前模型上下文仅保留该调用最新结果；候选配对完成后原生 continue，所有分支只在用户继续后推进。暂停期间的工具及候选启动截止时间顺延。
+用户输入后，Instrumentation 重新建立 Runtime result waiters 与 sibling result waiters，使用 Pi `runToolCall` 接回工具边界；已准入工具保留 effect/pause/extent 等待但不重复准入或计数。Runtime execute 只等待／取已保存结果，不重新发出真实动作。一个 assistant 的未完成工具并行重连，避免“先等待预测工具导致 sibling 永远未启动”的死锁。工具完成后在原生历史追加真实结果，当前模型上下文仅保留该调用最新结果；候选配对完成后原生 continue，所有分支只在用户继续后推进。暂停期间的工具及候选启动截止时间顺延。
 
 已经释放的 Branch 仍可能被 checkpoint／后代输入引用。保存时若其原生源已由成功汇总清理，则从仍保留的原生 SessionManager 完整 entries/header 生成保存副本；其内容校验仍按保存副本计算，恢复继续复制成独立可写源。
 
@@ -175,7 +175,7 @@ target/debug/ascout-control-plane <run-dir> <pi-root> --resume --web 127.0.0.1:8
 
 本轮最终验收（2026-11-14）：`cargo check --all-targets`、`cargo build --bins`、`git diff --check` 通过；`cargo test --lib` 153/153，Node 联合回归 25/25（命令见文末，增加 `--test-concurrency=1`）通过。日志分别为 `/tmp/opencode/control-plane-refactor-verify-{check-complete,build-latest,lib-complete,node-complete}.log`。所有模型请求均为本地伪模型，没有调用真实模型。
 
-恢复整链现使用 Pause 发布保存代，并断言控制面仍存活；随后仅 SIGKILL 本 fixture 控制面，等待 Adapter EOF 清理其拥有的进程，再以 `--resume` 跨进程恢复。保留候选／sibling、原上下文、绑定拒绝、真实 Runtime 动作恰一次、notification 恰一次、保存源不变及旧代独立恢复断言。四种活动工具流程证据为 `/tmp/opencode/recovery-active-pXQuHa`（正常）、`recovery-active-KQI4sG`（保存失败后重试）、`recovery-active-WnTUS4`（保存失败后继续）、`recovery-active-WnMj2Z`（两个 NLE backend）。FS 完整流程证据为 `/tmp/opencode/recovery-filesystem-gh0VVb`，并独立验证 Shutdown 退出码 0、无任务进程残留且不覆盖已有 recovery manifest。Pause 本身不退出；此验收不声称任意崩溃中的状态均可恢复，也不解决本文开头记录的保存全量 lower 限制。
+恢复整链现使用 Pause 发布保存代，并断言 control plane 仍存活；随后仅 SIGKILL 本 fixture control plane，等待 Adapter EOF 清理其拥有的进程，再以 `--resume` 跨进程恢复。保留候选／sibling、原上下文、绑定拒绝、真实 Runtime 动作恰一次、notification 恰一次、保存源不变及旧代独立恢复断言。四种活动工具流程证据为 `/tmp/opencode/recovery-active-pXQuHa`（正常）、`recovery-active-KQI4sG`（保存失败后重试）、`recovery-active-WnTUS4`（保存失败后继续）、`recovery-active-WnMj2Z`（两个 NLE backend）。FS 完整流程证据为 `/tmp/opencode/recovery-filesystem-gh0VVb`，并独立验证 Shutdown 退出码 0、无任务进程残留且不覆盖已有 recovery manifest。Pause 本身不退出；此验收不声称任意崩溃中的状态均可恢复，也不解决本文开头记录的保存全量 lower 限制。
 
 本轮修复：保存代统一建在原 run-dir 下，避免重复 Pause 嵌套到上一代；恢复后输入先解除恢复状态，再等待上一 task 的物化，避免 `task_finishing` 阻塞继续；取消期间 Promote 选出新权威后由库再次停止写者；关闭期间晚到的 TurnCompleted 不再触发重复物化。错误退出和清理完成判定收在 `coordination/task.rs`，bin 只派发动作并关闭连接；coordination 未引用 UI 类型。
 
@@ -195,7 +195,7 @@ target/debug/ascout-control-plane <run-dir> <pi-root> --resume --web 127.0.0.1:8
 ## 验收与剩余边界
 
 - `node --test tests/recovery-active.mjs` 先在原实现复现 Shutdown 不退出（证据 `/tmp/opencode/recovery-active-8zpJIk`），实现后通过真实 Pi + 真实 NLE + 本地假模型：authority 同一 assistant 发两个工具，两个有效候选等待 sibling，真实 sibling NLE 动作在途时退出，收齐一项动作后保存，所有任务进程关闭；重启不请求模型，用户继续后三个 Branch 实际请求模型、两个候选获得真实 sibling 配对结果，原两个动作最终恰执行两次，再次保存退出且保存源不变。最终联合回归证据 `/tmp/opencode/recovery-active-6rDa6i`。这验证了核心等待恢复，不代表全部 backend／extension 恢复。
-- FS portable overlay 与 btrfs snapshot-copy 保存、独立可写恢复、恢复后 fork 和再次保存已通过真实环境验证；FS + Pi 控制面主入口已通过下述整链。原生 btrfs incremental backend 本机探测失败，不能据 snapshot-copy 结果宣称其验收通过。不保存任意子进程内存。
+- FS portable overlay 与 btrfs snapshot-copy 保存、独立可写恢复、恢复后 fork 和再次保存已通过真实环境验证；FS + Pi control plane 主入口已通过下述整链。原生 btrfs incremental backend 本机探测失败，不能据 snapshot-copy 结果宣称其验收通过。不保存任意子进程内存。
 - 恢复检查 task/authority、存活 Branch 的原生 session、Chance/Proposal 引用、Runtime 参与环境集合和 NLE world 索引；不据此宣称任意复杂部署及深层语义均已验证。无限阻塞 Runtime 或故障导致的回执无法收齐目前不能保存成功；外部原生工具只保留 Pi 取消终态，不承诺恢复子进程内存。
 - Pi 原生源在保存时复制到该代 `sources/`，恢复时再复制为独立可写源，checkpoint 按保存源身份重新关联；继续原运行或恢复运行不会改写该代 Pi 源。package-managed 扩展、glob、配置与代码绑定及外部 Git snapshot 保留见下方。
 - Promote notification 已在真实 main 入口、真实 Pi + NLE + 假模型的保存失败后继续／晋级／再次保存／恢复中验证最终历史恰一次；尚未验证所有通知交付时刻的跨恢复组合。
@@ -212,7 +212,7 @@ target/debug/ascout-control-plane <run-dir> <pi-root> --resume --web 127.0.0.1:8
 
 ## 多组件、失败继续与资源绑定（2026-11-13）
 
-CompositeRuntime 多连接与 BaseRuntime inner/data-plane 分别写入本代私有 `*.components/`；所有子组件成功才写父组件索引，最后控制面发布总 manifest。索引绑定 backend 顺序、身份、组件 SHA-256 与参与环境集合。加载先检查同级所有组件字节，再逐个重建，并核对参与者与实际环境集合；中途失败对所有组件执行 shutdown，错误包含清理失败信息，不启动 Agent 推理。不提供已加载组件的内存事务回滚。
+CompositeRuntime 多连接与 BaseRuntime inner/data-plane 分别写入本代私有 `*.components/`；所有子组件成功才写父组件索引，最后 control plane 发布总 manifest。索引绑定 backend 顺序、身份、组件 SHA-256 与参与环境集合。加载先检查同级所有组件字节，再逐个重建，并核对参与者与实际环境集合；中途失败对所有组件执行 shutdown，错误包含清理失败信息，不启动 Agent 推理。不提供已加载组件的内存事务回滚。
 
 FS 复制存活环境的受管 upper、lower/snapshot 与已执行操作回执；普通宿主 bottom lower 不复制，恢复使用恢复时内容。保存数据树校验文件内容、类型/权限、symlink、OverlayFS opaque/whiteout/redirect/metacopy。OverlayFS 内部 work 目录不复制，恢复重建；btrfs 子卷布局记录后在恢复目录重建。BaseRuntime 复制期间冻结拥有的执行进程，失败也尝试 thaw。每次恢复另建 `restored-*` 可写副本；保存代和旧运行目录均不覆盖。可用 `filesystem.isolated_paths` 显式指定独立工作目录，`passthrough_rw` 为宿主直通，不具有保存独立性。系统只读依赖绑定 pacman/dpkg 的已安装版本列表与 sh/env/bwrap 内容摘要，不复制整个宿主 root；这不是对未受包管理文件或任意系统文件原地篡改的完整证明。
 

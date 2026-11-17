@@ -4,15 +4,15 @@
 
 ## 1. 执行承载
 
-Runtime 为 Branch 的 Instance 提供执行承载。承载可以从 Branch barrier 建立的 execution base 开始，也可以在逻辑 Branch 已登记后按需建立。Runtime 只报告实际建立、运行、暂停、恢复、终止和清理结果；控制面不能把预期状态当作实际状态。
+Runtime 为 Branch 的 Instance 提供执行承载。承载可以从 Branch barrier 建立的 execution base 开始，也可以在逻辑 Branch 已登记后按需建立。Runtime 只报告实际建立、运行、暂停、恢复、终止和清理结果；control plane 不能把预期状态当作实际状态。
 
-完整 Agent execution 的进程树、I/O、资源归属和本地管理上下文需要由接入侧与 Runtime 的组合共同覆盖。具体进程组织、环境布局和承载方式不在本文固定。
+完整 Agent execution 的进程树、I/O、资源归属和本地管理上下文需要由 Instrumentation 与 Runtime 的组合共同覆盖。具体进程组织、环境布局和承载方式不在本文固定。
 
 ## 2. 环境边界
 
 当某类 Branch-local state 要求独立承载时，Runtime 或其他执行承载机制需要从相应 execution base 建立独立环境，使该状态能够按 Branch 继续演化。环境边界的具体内容、保证范围和验证状态由 Runtime Adapter 契约描述。
 
-每个 Branch 必须绑定独占 Environment。Runtime 内部可以让多个 Environment 关联同一个 Backend instance，也可以使用独立实例；该选择由 Runtime 内部负责，控制面不传 `backend_id`。
+每个 Branch 必须绑定独占 Environment。Runtime 内部可以让多个 Environment 关联同一个 Backend instance，也可以使用独立实例；该选择由 Runtime 内部负责，control plane 不传 `backend_id`。
 
 环境边界可以涉及：
 
@@ -37,7 +37,7 @@ Runtime 为 Branch 的 Instance 提供执行承载。承载可以从 Branch barr
 - loser environment 的批量终止与无残留清理；
 - winner continuation 所需的环境复用或状态提升。
 
-如果某项 Policy 或 Contract 需要这些能力，控制面必须根据 Adapter 的能力声明和验证结果选择、拒绝或明确降级，不能把未验证能力当作已满足。
+如果某项 Policy 或 Contract 需要这些能力，control plane 必须根据 Adapter 的能力声明和验证结果选择、拒绝或明确降级，不能把未验证能力当作已满足。
 
 ## 4. 与 Branch 语义的连接
 

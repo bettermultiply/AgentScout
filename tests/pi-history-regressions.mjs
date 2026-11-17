@@ -9,7 +9,7 @@ function check(script) {
     execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',`
         import assert from 'node:assert/strict';
         import {SessionManager} from '${pi}/packages/coding-agent/src/core/session-manager.ts';
-        import {SessionTree} from '${resolve('agent-access/pi/session-tree.ts')}';
+        import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
         const directory=process.argv[1], main=SessionManager.open(directory+'/session.jsonl');
         const call=main.appendMessage({role:'assistant',content:[{type:'toolCall',id:'op',name:'read',arguments:{}}],stopReason:'toolUse',timestamp:1});
         const tree=new SessionTree(main),parent=tree.createBranch('authority',directory,main,call);

@@ -1,4 +1,4 @@
-//! 控制面协调测试。
+//! control plane 协调测试。
 
 use super::*;
 
@@ -611,7 +611,7 @@ def dispose(data, *, policy_config, capabilities):
     else {
         unreachable!()
     };
-    let result = AgentController
+    let result = SpeculationCoordinator
         .disposition(
             &policy,
             &engine,
@@ -782,7 +782,7 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
     let mut scheduled = ControlActions::default();
     tree.schedule(ControlOperation::Establish(command.clone()), &mut scheduled);
     assert!(tree.branches[&child].environment_id.is_none());
-    let result = AgentController
+    let result = SpeculationCoordinator
         .perform(
             &tree,
             &policy,

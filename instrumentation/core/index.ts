@@ -10,6 +10,7 @@
  */
 export type PolicyArtifact = {
     readonly digest: string;
+    readonly has_predictor?: boolean;
     readonly decisions: Readonly<Record<string, string>>;
 };
 
@@ -59,8 +60,7 @@ export type AgentAccess = {
     releaseAll(): void;
     snapshot(): unknown;
     restore(record: any): void;
-    predict(branch: string, data: unknown, signal?: AbortSignal): Promise<any>;
-    /** Availability of the delivered prediction entry, before `admit` runs. */
+    /** Predictor availability reported by the control plane, before `admit` runs. */
     hasPredictor(branch: string): Promise<boolean>;
 };
 
@@ -159,20 +159,14 @@ export function createAgentAccess({ taskId, report, evaluate, now = Date.now }: 
         if (typeof artifact.digest !== 'string' || !artifact.decisions || typeof artifact.decisions !== 'object') {
             throw Error('Invalid local Policy artifact');
         }
-        policies.set(branch, artifact);
+        policies.set(branch, { ...artifact, has_predictor: artifact.has_predictor === true });
     }
 
     return {
         setPolicy,
         async hasPredictor(branch) {
-            // `has_predictor` is an input fact for opportunity_pass, never its
-            // result. The delivered `predict` script is the available means;
-            // Policy still decides admission and may generate zero proposals.
-            return !!policies.get(branch)?.decisions.predict;
-        },
-        async predict(branch, data, signal) {
-            const artifact=policies.get(branch);
-            return artifact?.decisions.predict ? evaluate(artifact,'predict',data,signal) : {proposals:[],generation:'batch'};
+            // Availability is a control-plane fact, never a Decision evaluation.
+            return policies.get(branch)?.has_predictor === true;
         },
 
         snapshot() {
@@ -195,6 +189,7 @@ export function createAgentAccess({ taskId, report, evaluate, now = Date.now }: 
                 case 'local_policy': {
                     setPolicy(branch, {
                         digest: command.policy_digest as string,
+                        has_predictor: command.has_predictor === true,
                         decisions: command.decisions as Record<string, string>,
                     });
                     return;

@@ -40,7 +40,7 @@ admit(op, state, contract_context) = opportunity_pass AND feasibility_pass
 
 `admit` 决定一个机会是否进入 AScout 维护的待选集合，不决定它是否立即启动。其内部按判断成本拆成两级，先廉价后昂贵：先用操作的机会事实（`step`）判断该操作有没有可能成为投机入口，再结合实例事实（`state`）以及 Contract 校验产生的能力与限制事实（`contract_context`），判断这个已识别出的机会是否值得登记和暂存。
 
-一个 `step` 是一个可被控制面观察到、具有明确前后状态的 Agent 继续单元。它可以是一次推理转移、一次用户输入请求、一次工具调用或远程请求，也可以是一次根据已有结果更新计划或生成输出的过程阶段。等待用户输入或工具结果本身不算持续推进；通常由一个 step 产生 pending-result boundary，过程随后暂停。
+一个 `step` 是一个可被 control plane 观察到、具有明确前后状态的 Agent 继续单元。它可以是一次推理转移、一次用户输入请求、一次工具调用或远程请求，也可以是一次根据已有结果更新计划或生成输出的过程阶段。等待用户输入或工具结果本身不算持续推进；通常由一个 step 产生 pending-result boundary，过程随后暂停。
 
 粗筛判断机会是否可能存在，只读操作的可观察事实，不涉及任何预测：
 
@@ -98,7 +98,7 @@ semantic_stop(process_state) -> true | false  # 根据任务或过程语义判�
 三类条件可以组合；任一已声明条件成立，即表示 Policy 期望当前 `extent` 已到达：
 `extent_reached = progress_stop OR utility_stop OR semantic_stop`
 
-`extent` 属于次级指标，当运行被 effect、Runtime、控制面等阻塞时则不再检查，即使停止条件均未到底。而达到 `extent` 边界通常意味着暂停并等待验证或其他裁决，不意味着自动 discard。过程是否继续、转为权威、清理或采用其他路径，由后续验证和 `dispose` 决定。
+`extent` 属于次级指标，当运行被 effect、Runtime、control plane 等阻塞时则不再检查，即使停止条件均未到底。而达到 `extent` 边界通常意味着暂停并等待验证或其他裁决，不意味着自动 discard。过程是否继续、转为权威、清理或采用其他路径，由后续验证和 `dispose` 决定。
 
 ### 2.3 `predict` - 生成哪些 Proposal
 
@@ -182,7 +182,7 @@ effect(effect_descriptor, context) -> EffectPlan
 | 模式 | 含义 |
 |---|---|
 | `default` | 采用服务 Adapter/Contract 声明的默认方案；未声明默认方案时不能静默放行 |
-| `simulate` | 拦截真实请求，不访问真实服务，在 Branch 内生成明确标记为模拟结果并记录来源的模拟响应 |
+| `simulate` | 先暂存真实请求、不让其离开本机，在此基础上返回明确标记来源的临时模拟结果，让 Branch 继续 |
 | `transform` | 将原操作转换为 dry-run、staging 或其他等价的非变异形式 |
 | `stage` | 暂存真实效果，满足提交条件后再释放 |
 | `mediate` | 通过受管代理或 broker 执行 |
@@ -190,7 +190,7 @@ effect(effect_descriptor, context) -> EffectPlan
 | `allow` | 在声明范围内直接执行真实请求 |
 | `deny` | 直接拒绝该效果或拒绝相关投机环节 |
 
-`simulate` 要求存在针对该服务的效果插件，并由插件声明哪些命令或 URL 可以模拟以及模拟响应如何生成。模拟响应不是真实 Authority，必须明确标记为模拟结果、记录生成来源并作为未验证假设处理；后续仍需通过 Authority、validator 或其他明确规则验证。这即正式语义所称的**伪装执行**，其约束与保证见 [效果管理设计](effect-management.md)。`EffectClass` 描述效果可采用的处理纪律，`StateDomain` 描述效果作用的状态域，二者保持正交；Policy 选择的模式必须经过 Effect Management、Contract 和 Runtime capability 校验。
+`simulate` 建立在 `stage` 暂存之上，不是与暂存互斥的替代路径。Branch 被接受后才处理暂存的真实请求，丢弃或前提失效则取消；模拟结果不会自动变成真实调用。Instrumentation 本地求值并落实 `effect`，将模拟操作交给 Runtime 内的 External Effect Coordinator，由它判断能否模拟。不能模拟时，真实请求继续暂存在本机，不离开本机；当前 Branch 不获得模拟结果，在效果边界阻塞并保留已完成进展，不因此直接拒绝整个投机。该 Branch 成为权威后才发出真实请求并继续，丢弃或前提失效则取消请求。可模拟时才返回明确标记来源的临时结果。模拟响应不是真实 Authority，必须明确标记为模拟结果、记录生成来源并作为未验证假设处理；后续仍需通过 Authority、validator 或其他明确规则验证。这即正式语义所称的**伪装执行**，其约束与保证见 [效果管理设计](effect-management.md)。`EffectClass` 描述效果可采用的处理纪律，`StateDomain` 描述效果作用的状态域，二者保持正交；Policy 选择的模式必须经过 Effect Management、Contract 和 Runtime capability 校验。
 
 Policy 可以选择暂存、代理、延迟释放、阻塞、补偿或其他合法处理方式，但不能把效果排除在 AScout 的最低纳管范围之外。Effect Management 必须检查 Adapter 声明的后端能力是否足以落实所选纪律。
 
@@ -331,7 +331,7 @@ AssumptionSet(B2) = {(E1, p1), (E2, p2)}
 
 每个候选 Branch 携带其路径上的未决 Proposal 引用集合：`AssumptionSet = frozenset[(chance_id, proposal_id)]`
 
-`AssumptionSet == ∅` 表示工作单元是权威工作。Proposal 被确认时，从依赖它的工作单元中移除对应引用；集合变空的工作单元才具备提交条件。若父 Proposal 被确认，原父 Branch 结束其投机身份，其执行延续成为权威路径；仍携带其他未决 Proposal 的后代 Branch 保留原有身份、隔离环境和执行进展，仅将结构上的父级改挂到该权威执行延续之下，不创建新的 Branch，也不迁移 Runtime 状态。后代 Branch 仍须等自身 `AssumptionSet` 清空后，才具备将结果和效果纳入权威状态的资格。Proposal 被否定时，依赖它的后续子图失效；控制面向受影响的 Branch 直接发送取消命令，各 Branch 作为独立执行个体停止自身工作并完成本地及受管效果清理，不要求一个集中式机制统一遍历和回收整棵子树。只有父 Branch 进入 `Salvage` 时，后代 Branch 的部分进展才可作为该父 Branch salvage 的输入，不能脱离父 Branch 独立 salvage。非空 `AssumptionSet` 产生的数据只能流向同样携带未决 Proposal ID 的容器，不能直接进入权威上下文。
+`AssumptionSet == ∅` 表示工作单元是权威工作。Proposal 被确认时，从依赖它的工作单元中移除对应引用；集合变空的工作单元才具备提交条件。若父 Proposal 被确认，原父 Branch 结束其投机身份，其执行延续成为权威路径；仍携带其他未决 Proposal 的后代 Branch 保留原有身份、隔离环境和执行进展，仅将结构上的父级改挂到该权威执行延续之下，不创建新的 Branch，也不迁移 Runtime 状态。后代 Branch 仍须等自身 `AssumptionSet` 清空后，才具备将结果和效果纳入权威状态的资格。Proposal 被否定时，依赖它的后续子图失效；control plane 向受影响的 Branch 直接发送取消命令，各 Branch 作为独立执行个体停止自身工作并完成本地及受管效果清理，不要求一个集中式机制统一遍历和回收整棵子树。只有父 Branch 进入 `Salvage` 时，后代 Branch 的部分进展才可作为该父 Branch salvage 的输入，不能脱离父 Branch 独立 salvage。非空 `AssumptionSet` 产生的数据只能流向同样携带未决 Proposal ID 的容器，不能直接进入权威上下文。
 
 组合与嵌套通过四类连接共同实现：树结构归属、假设依赖、用户输入传播和生命周期控制。
 
@@ -350,7 +350,7 @@ Fidelity 不是独立的 Policy Decision，而是由决策组合、Runtime 能�
 - `dispose` 是否允许重执行、补偿或其他有损处置；
 - predictor 或 Agent 本身是否存在声明之外的退化行为。
 
-控制面应先根据这些选择推导可达到的 Fidelity 上界，再将上界与开发者声明进行比较。声明超过上界时，必须拒绝加载或明确降级。运行期间还应通过 shadow 或其他审计手段检查声明是否实际达成；静态检查只能证明上界，不能证明运行结果。
+control plane 应先根据这些选择推导可达到的 Fidelity 上界，再将上界与开发者声明进行比较。声明超过上界时，必须拒绝加载或明确降级。运行期间还应通过 shadow 或其他审计手段检查声明是否实际达成；静态检查只能证明上界，不能证明运行结果。
 
 常用的契约等级包括：
 
@@ -378,7 +378,7 @@ Policy 可以实现或组合九类 decision，但不能拥有待选集合、运�
 
 Policy 决定“希望采用哪种策略”，Mechanism 保证该策略在正确性、隔离、资源、副作用和清理约束内执行。能力不足不能静默改变语义，只能拒绝、明确降级或选择其他合法路径。
 
-尽管控制面为 Policy 的设计保留了最大的灵活性，仍有无法被绕过的边界：以下内容是 Policy Decision 的设计边界，不允许交由 Policy 自定义。
+尽管 control plane 为 Policy 的设计保留了最大的灵活性，仍有无法被绕过的边界：以下内容是 Policy Decision 的设计边界，不允许交由 Policy 自定义。
 
 - Branch 生命周期与候选状态转换；
 - Proposal 依赖与 `AssumptionSet`；
@@ -387,7 +387,7 @@ Policy 决定“希望采用哪种策略”，Mechanism 保证该策略在正确
 - 待选机会的有效性、资源硬约束、预算执行与取消；
 - 非空 `AssumptionSet` 的数据不得进入权威上下文。
 
-这些边界在运行期由控制面（Mechanism）校验并强制落实。
+这些边界在运行期由 control plane（Mechanism）校验并强制落实。
 
 ## 7. 扩展规则
 

@@ -760,7 +760,7 @@ impl Backend for CompositeRuntime {
     }
 
     fn backend_states(&self, environment_id: &str) -> Vec<BackendState> {
-        // 有参与者记录时只返回参与者快照，缺失状态用 None，便于控制面诊断；
+        // 有参与者记录时只返回参与者快照，缺失状态用 None，便于 control plane 诊断；
         // 否则保持返回所有 Backend 的旧行为。
         if let Some(participants) = self.participants_for(environment_id) {
             return self

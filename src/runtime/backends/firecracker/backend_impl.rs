@@ -194,30 +194,30 @@ impl FirecrackerBackend {
             .args(["--reflink=auto", "--sparse=always"])
             .arg(&self.config.rootfs_path)
             .arg(&rootfs))?;
-        let service = directory.join("ascout-agent-access.service");
+        let service = directory.join("ascout-guest-agent.service");
         fs::write(
             &service,
-            "[Unit]\nDescription=AScout Agent access\nAfter=systemd-modules-load.service\n\n[Service]\nExecStart=/usr/local/bin/ascout-agent-access\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n",
+            "[Unit]\nDescription=AScout Guest Agent\nAfter=systemd-modules-load.service\n\n[Service]\nExecStart=/usr/local/bin/ascout-guest-agent\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n",
         )
         .map_err(error)?;
         debugfs_write(
             &rootfs,
             &self.config.guest_access_path,
-            "/usr/local/bin/ascout-agent-access",
+            "/usr/local/bin/ascout-guest-agent",
         )?;
         debugfs_write(
             &rootfs,
             &service,
-            "/etc/systemd/system/ascout-agent-access.service",
+            "/etc/systemd/system/ascout-guest-agent.service",
         )?;
         run(Command::new("debugfs")
             .args(["-w", "-R"])
-            .arg("set_inode_field /usr/local/bin/ascout-agent-access mode 0100755")
+            .arg("set_inode_field /usr/local/bin/ascout-guest-agent mode 0100755")
             .arg(&rootfs))?;
         run(
             Command::new("debugfs")
                 .args(["-w", "-R"])
-                .arg("symlink /etc/systemd/system/multi-user.target.wants/ascout-agent-access.service ../ascout-agent-access.service")
+                .arg("symlink /etc/systemd/system/multi-user.target.wants/ascout-guest-agent.service ../ascout-guest-agent.service")
                 .arg(&rootfs),
         )?;
         Ok(rootfs)

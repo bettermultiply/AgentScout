@@ -15,11 +15,11 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub mod guest_access;
+pub mod guest_agent;
 
 use crate::protocol::contract::{CommandOutput, EnvironmentState, RuntimeCapabilities};
 use crate::runtime::backend::{Backend, BackendError, CancelHandle};
-use crate::runtime::backends::firecracker::guest_access::{GuestRequest, GuestResponse, PORT};
+use crate::runtime::backends::firecracker::guest_agent::{GuestRequest, GuestResponse, PORT};
 
 #[derive(Debug, Deserialize)]
 pub struct FirecrackerConfig {

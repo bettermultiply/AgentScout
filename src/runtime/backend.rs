@@ -17,7 +17,7 @@ use crate::runtime::launch_plan::LaunchFragment;
 
 /// 一次 Runtime 请求传给 Backend 的逻辑上下文。
 ///
-/// Backend 只接收 Environment 和操作上下文，不接收或推导控制面的 Branch 身份。
+/// Backend 只接收 Environment 和操作上下文，不接收或推导 control plane 的 Branch 身份。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackendContext {
     /// Stable identity for an operation. Empty for legacy environment calls.
@@ -223,7 +223,7 @@ pub trait Backend: Send + Sync {
     }
 
     /// 这个 Runtime 实际由哪些 Backend 组成。单 Backend 返回它自己；
-    /// 组合 Runtime 返回底层连接的有序标识。握手上报用它，控制面据此
+    /// 组合 Runtime 返回底层连接的有序标识。握手上报用它，control plane 据此
     /// 知道身份，但 Registry 与能力验证不在这里展开。
     fn backend_ids(&self) -> Vec<String> {
         vec![self.backend_id().to_string()]
@@ -422,7 +422,7 @@ pub trait Backend: Send + Sync {
         false
     }
 
-    /// Base Runtime 覆盖此方法。Agent Session 仍由接入侧管理；这里仅
+    /// Base Runtime 覆盖此方法。Agent Session 仍由 Instrumentation 管理；这里仅
     /// 管理一个实际 Agent 执行实例的启动句柄和进程生命周期。
     fn launch_agent(
         &self,

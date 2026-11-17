@@ -252,7 +252,7 @@ fn mount_target(entry: &super::launch_plan::MountEntry) -> &std::path::Path {
 }
 
 /// 合并多个 Backend 的启动片段。同一个挂载 target 只能由一个 Backend
-/// 提供，否则启动参数会出现两个互相覆盖的挂载，且控制面无法知道谁赢。
+/// 提供，否则启动参数会出现两个互相覆盖的挂载，且 control plane 无法知道谁赢。
 pub(super) fn merge_launch_fragment(
     target: &mut LaunchFragment,
     source: LaunchFragment,

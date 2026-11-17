@@ -1,4 +1,4 @@
-# Runtime Adapter（控制面视角）
+# Runtime Adapter（control plane 视角）
 
 本文件只保留指引，不重复设计内容。
 

@@ -1,4 +1,4 @@
-//! 控制面协调：Tree 动作投影与 AgentController。
+//! control plane 协调：Tree 动作投影与 SpeculationCoordinator。
 
 mod actions;
 mod controller;
@@ -10,7 +10,7 @@ pub mod task;
 #[cfg(test)]
 mod tests;
 
-pub use controller::AgentController;
+pub use controller::SpeculationCoordinator;
 
 use std::io;
 

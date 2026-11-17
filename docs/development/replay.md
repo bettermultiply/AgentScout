@@ -20,13 +20,13 @@
 
 `/tmp/opencode/replay-ts-run1.mjs` 在 `/tmp/opencode/replay-ts-run1-ruRFrZ` 对已有 `/tmp/opencode/run-1` 跑两个全新环境：每轮 40 hits/consumed、23 成功、17 客户端取消、2 输入完成，misses/exhausted/pending/unconsumed/cancel_timeouts 均 0；启动 pause 零输入、resume 后完成，完成后保持交互。一轮工具 quit、另一轮 AScout API shutdown，双方退出 0 且 recovery 文件存在；源 session/events/policy 哈希未变，运行目录相关子进程无残留。只使用本地录制输出，未接触用户 8180 服务或调用真实模型。
 
-此验收不扩大既有保证：任意源的工具环境重建、扩展未持久化改写、非文本输入、同键碰撞与取消调度仍受原限制。run-1 两轮不能替代机制的全部端到端验收。普通模型／恢复仍使用原系统实现，本轮没有修改对应控制面或 Pi 行为。
+此验收不扩大既有保证：任意源的工具环境重建、扩展未持久化改写、非文本输入、同键碰撞与取消调度仍受原限制。run-1 两轮不能替代机制的全部端到端验收。普通模型／恢复仍使用原系统实现，本轮没有修改对应 control plane 或 Pi 行为。
 
 收尾增加 Runtime 配置及 input-status 响应结构检查、B1 动态端口后，再跑严格类型检查、B1 和 run-1 两轮均通过；最终端到端证据为 `/tmp/opencode/replay-ts-run1-REI1bp`。正式引用跨本仓与 `../pi` 搜索无旧 replay 入口；工具源码无 `any`、`@ts-ignore` 或 `@ts-nocheck`；`git diff --check` 通过。
 
 最终将 `run.ts` 的读取校验状态、提交 prompt、推进自动输入分为内部函数，保留 await 后的暂停／关闭／失败检查及跳过本轮延迟的行为；`waitingSequence` 仍在请求发出前设置，仅在请求成功后递增输入下标，等待序号推进与 ready 后才解除等待。重新运行 `npm run check --prefix tools/replay`、`npm test --prefix tools/replay`（14/14）和 `git diff --check` 通过；本次拆分未新增测试或重新执行真实环境端到端验证，未调用真实模型。
 
-本文从[控制面观察接口](observation.md)展开，说明系统外的正确性验证工具，不改变控制面主线。
+本文从[control plane 观察接口](observation.md)展开，说明系统外的正确性验证工具，不改变 control plane 主线。
 
 ## 目标与边界
 
@@ -78,13 +78,13 @@ HTTP 202 只确认排队。通用 `GET /api/input-status` 返回本次进程已�
 
 `events.jsonl` 的 transcript 事实保存 Branch id、`session_entry_id` 与 role；正文从 run 内 `session.jsonl`（权威 session 文件）读取。其余 Policy、操作、状态和清理事实仍由 Ledger 保存。必须先写文件、后写引用；允许文件存在未引用记录，不承诺两边原子提交或从 Ledger 恢复完整 Tree。
 
-当前 Pi 接入由 `agent-access/pi/session-tree.ts` 维护每个 Branch 的原生持久 SessionManager，Candidate 从待决 checkpoint 复制原生记录及 ID，并由接入侧汇总最终文件。文件使用 Pi JSONL 格式，记录 id 与 parentId 表达记录的父子关系，不是第二棵控制 Tree。
+当前 Pi 接入由 `instrumentation/pi/session-tree.ts` 维护每个 Branch 的原生持久 SessionManager，Candidate 从待决 checkpoint 复制原生记录及 ID，并由 Instrumentation 汇总最终文件。文件使用 Pi JSONL 格式，记录 id 与 parentId 表达记录的父子关系，不是第二棵控制 Tree。
 
 文件尾部的 `customType=authority` 自定义记录（authority 标记）只是给 Pi 重开文件的读取位置提示，使 resume 的叶子落在权威路径末端。它不进入模型上下文、不作权威裁决；与 Ledger 最后一次 Promote 不一致时以 Ledger 为准。2026-11-16 确认当前不做基于 Ledger 历史查询、活动状态重建的恢复工具；已有保存及正常 resume 保留。同一文件不等于同一个运行 session，winner 保留自己的 session 和在飞进展；历史整理不能据此直接替换运行上下文。
 
 ### 已确认的历史语义与迁移缺口（2026-11-13）
 
-最终单一权威 session 是经过验证、用真实结果整理后的执行历史，不要求准确复原候选当时收到的预测输入。保留预测输入节点，将候选在该输入之后的第一条后续记录的 `parentId` 改接对应真实结果 ID；原主／丢弃分支继续保留，不额外强制另存完整投机后续路径。运行期采用 Pi 原生完整持久化、多 session 过渡及接入侧汇总；源分支停止写入且成功汇总后才删除临时文件，仍活跃的 Promote winner 不能删除。当前已接通上述路径；整体验收缺口见接入实现 §4。
+最终单一权威 session 是经过验证、用真实结果整理后的执行历史，不要求准确复原候选当时收到的预测输入。保留预测输入节点，将候选在该输入之后的第一条后续记录的 `parentId` 改接对应真实结果 ID；原主／丢弃分支继续保留，不额外强制另存完整投机后续路径。运行期采用 Pi 原生完整持久化、多 session 过渡及 Instrumentation 汇总；源分支停止写入且成功汇总后才删除临时文件，仍活跃的 Promote winner 不能删除。当前已接通上述路径；整体验收缺口见接入实现 §4。
 
 整理后恢复上下文可能不同于原始运行上下文；compaction/custom 必须保存，但引用、摘要、在飞推理与 rollback 外部资源关联仍有未决实现差距，详见 [接入实现](agent-access.md) §4。是否追加真实结果通知由 Policy 决定，默认完全不追加，不是空消息。
 
@@ -171,7 +171,7 @@ explicit core+disp changed byte_equal= False bytes= 49961 51146
 
 每轮 13 条响应均 ok。后两项使用临时 bridge 副本，只把 seed 调用改成显式 core=disp=seed、reseed=False；不是仓库修复。当前序列通过不证明 disp 不影响其他轨迹，也不证明完整游戏确定性。
 
-Candidate 不取得 NLE 快照、不 fork 进程、不重放动作。控制面为每个 Branch 分配独占的 Environment；NLE Backend 的内部世界实现不构成控制面的 Environment 共享契约。候选复制 Agent checkpoint 并注入预测工具结果（main.ts:247-278），推进推理；真实工具在接受前 gate，tools.execute 还有角色检查（main.ts:86-90）。所有 Branch 实际共享一个 NLE 进程和 RNG，没有独立复制的 RNG 状态；bridge 的 branch 操作本身也只是 World 别名（187-194），不是实际隔离能力。
+Candidate 不取得 NLE 快照、不 fork 进程、不重放动作。control plane 为每个 Branch 分配独占的 Environment；NLE Backend 的内部世界实现不构成 control plane 的 Environment 共享契约。候选复制 Agent checkpoint 并注入预测工具结果（main.ts:247-278），推进推理；真实工具在接受前 gate，tools.execute 还有角色检查（main.ts:86-90）。所有 Branch 实际共享一个 NLE 进程和 RNG，没有独立复制的 RNG 状态；bridge 的 branch 操作本身也只是 World 别名（187-194），不是实际隔离能力。
 
 结论：仅替换模型输出在限定动作轨迹上可行，但不能无条件保证旧运行逐字复现。需固定完整 RNG 配置、NLE/NetHack 版本、日期策略、初始状态与动作顺序，并防止候选提前真实动作和重试重复动作。bridge 的运行恢复保存已包含 initial 种子、kwargs、版本和配置，但旧 run 没有这些原生保存资料；不能向 session/events 补写测试专用元数据。异步调度不因模型输出固定就自动稳定。
 
@@ -207,4 +207,4 @@ requests=2
 
 消息不是原样 JSON：Pi provider convertMessages:1184-1220 会解析 transcript、转换消息及工具 id；1350-1370 序列化参数；1400-1430 将工具文本块以换行拼接，空结果变成占位文字，可能加入图片兼容内容。transform-messages.ts 还会处理跨模型 thinking、失败消息与工具配对。导出必须与所选协议的内容转换一致，不能直接哈希整条 session 记录或整个请求。SDK:451-455 允许扩展改写上下文，agent-session.ts:3034-3047 允许自动 compaction/overflow recovery；不保证原始消息不压缩或不截断。当前 system-prompt.ts:182 置入 cwd，但该文件未发现动态日期注入；自定义提示与扩展仍可能加入日期。消息 timestamp 不进入本次请求 messages（实测）；HTTP id、session header、耗时等不纳入内容键。cwd/系统提示不属于已决定的最新内容键，但会影响模型语义，回放只固定刺激，不证明这些环境一致。
 
-重试：provider 内置 SDK maxRetries=0，但外层 retryProviderRequest 可配置重试（openai-completions.ts:376-389；utils/provider-retry.ts:25-36,118-139），408/409/429/5xx、连接异常可再次到达端点；默认 helper 预算为 0，SDK 从 settings 传入配置（sdk.ts:347-357）。Agent 层默认 retry.enabled=true、maxRetries=3（settings-defaults.ts:18-25），按 isRetryableAssistantError 的文本分类处理服务过载、服务器/网络错误（utils/retry.ts:37-80,270-275）；不是所有非 200 都重试。空流缺 finish_reason 明确报错（openai-completions.ts:689），是否 Agent 重试取决于错误文本；带 stop 的空内容也不能当作缺失匹配成功。建议回放专用 settings 禁用 retry、provider retry 与 compaction，并使缺失匹配返回不重试的 4xx；否则同键可能误消费下一条录制。此建议尚非控制面实现变更。
+重试：provider 内置 SDK maxRetries=0，但外层 retryProviderRequest 可配置重试（openai-completions.ts:376-389；utils/provider-retry.ts:25-36,118-139），408/409/429/5xx、连接异常可再次到达端点；默认 helper 预算为 0，SDK 从 settings 传入配置（sdk.ts:347-357）。Agent 层默认 retry.enabled=true、maxRetries=3（settings-defaults.ts:18-25），按 isRetryableAssistantError 的文本分类处理服务过载、服务器/网络错误（utils/retry.ts:37-80,270-275）；不是所有非 200 都重试。空流缺 finish_reason 明确报错（openai-completions.ts:689），是否 Agent 重试取决于错误文本；带 stop 的空内容也不能当作缺失匹配成功。建议回放专用 settings 禁用 retry、provider retry 与 compaction，并使缺失匹配返回不重试的 4xx；否则同键可能误消费下一条录制。此建议尚非 control plane 实现变更。

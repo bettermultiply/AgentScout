@@ -511,7 +511,7 @@ impl Shared {
         can_accept_operations: bool,
     ) -> OperationResult {
         // 环境实际停留在 PartiallyAvailable 时不能报告 Completed：部分
-        // Backend 尚未就绪，控制面据此得到 PartiallyCompleted 与原因。
+        // Backend 尚未就绪，control plane 据此得到 PartiallyCompleted 与原因。
         let status = if state == Some(EnvironmentState::PartiallyAvailable) {
             ResultStatus::PartiallyCompleted
         } else {

@@ -1,6 +1,6 @@
-//! AScout 控制面管理一个 Agent 的最小状态与 Agent 接入协议。
+//! AScout control plane 管理一个 Agent 的最小状态与 Agent 接入协议。
 //!
-//! 这里的状态属于控制面。Pi 接入侧只能报告事实并执行返回的命令，不能以
+//! 这里的状态属于 control plane。Pi integration 只能报告事实并执行返回的命令，不能以
 //! 自己的对象保存或裁决 Speculative Tree。
 
 mod candidates;
@@ -35,7 +35,7 @@ pub enum BlockedReason {
     EffectGate,
 }
 
-/// 控制面已知的 Branch 生命周期与运行状态。`Finished` 表示已经跑完、等待裁决。
+/// control plane 已知的 Branch 生命周期与运行状态。`Finished` 表示已经跑完、等待裁决。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchStatus {
@@ -187,7 +187,7 @@ pub(crate) struct ActionFinishedFact {
     pub tool_calls: Option<Value>,
 }
 
-/// 控制面操作的种类。
+/// control plane 操作的种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
@@ -201,7 +201,7 @@ pub enum OperationKind {
     Cleanup,
 }
 
-/// 控制面操作的落实状态。
+/// control plane 操作的落实状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationStatus {
@@ -211,7 +211,7 @@ pub enum OperationStatus {
     Failed,
 }
 
-/// Agent 接入侧报告的实际状态。
+/// Instrumentation 报告的实际状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentExecutionState {
@@ -240,7 +240,7 @@ pub enum RuntimeExecutionState {
     Failed,
 }
 
-/// 控制面保存的一条 Branch 记录。
+/// control plane 保存的一条 Branch 记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchRecord {
     pub(crate) branch_id: String,
@@ -291,7 +291,7 @@ pub struct ProposalRecord {
     pub payload: Value,
 }
 
-/// 被 `admit` 接纳的投机机会，从创建到收敛一直由控制面持有。
+/// 被 `admit` 接纳的投机机会，从创建到收敛一直由 control plane 持有。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChanceRecord {
     pub chance_id: String,
@@ -350,7 +350,7 @@ pub struct AdapterCapabilities {
     pub tool_result_injection: bool,
 }
 
-/// 控制面希望发生的操作，不代表外部操作已经完成。
+/// control plane 希望发生的操作，不代表外部操作已经完成。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingOperation {
     pub operation_id: String,
@@ -372,11 +372,11 @@ pub(crate) struct SpeculationRecord {
     pub settled: bool,
 }
 
-/// 一次模型调用在控制面侧保留的用量事实。用于结算比较；公共展示仍由
+/// 一次模型调用在 control plane 侧保留的用量事实。用于结算比较；公共展示仍由
 /// `model_usage` 观察事件表达。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ModelUsageFact {
-    /// 这次调用对应的模型 action；接入侧无法配对时为 None，不伪造身份。
+    /// 这次调用对应的模型 action；Instrumentation 无法配对时为 None，不伪造身份。
     #[serde(default)]
     pub action_id: Option<String>,
     pub model: String,
@@ -440,7 +440,7 @@ pub struct SpeculativeTree {
     /// 的调用也保留，不因为缺少 action_id 而丢弃。
     #[serde(default)]
     pub(crate) model_usage: BTreeMap<String, Vec<ModelUsageFact>>,
-    /// 工具 `ActionFinished` 的接入侧时刻，按 Branch 和 action 保存。
+    /// 工具 `ActionFinished` 的 Instrumentation 时刻，按 Branch 和 action 保存。
     #[serde(default)]
     pub(crate) tool_finished_at_ms: BTreeMap<String, BTreeMap<String, u64>>,
     #[serde(default)]
@@ -578,7 +578,7 @@ impl SpeculativeTree {
     }
 }
 
-/// 控制面向 Pi 接入侧发送的命令。
+/// control plane 向 Pi integration 发送的命令。
 fn deserialize_notification<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
@@ -630,6 +630,7 @@ pub enum AgentCommand {
     LocalPolicy {
         branch_id: String,
         policy_digest: String,
+        has_predictor: bool,
         decisions: Value,
     },
     Prompt {
@@ -725,7 +726,7 @@ pub struct UiPrompt {
     pub prefill: Option<String>,
 }
 
-/// Agent Adapter 向控制面报告的事实；不包含 Runtime 或 Tree 完成事实。
+/// Agent Adapter 向 control plane 报告的事实；不包含 Runtime 或 Tree 完成事实。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AgentMessage {
@@ -786,7 +787,7 @@ pub enum AgentMessage {
         arguments: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint: Option<Value>,
-        /// 接入侧测量的事件时刻（Unix 毫秒），不是控制面收到消息的时刻。
+        /// Instrumentation 测量的事件时刻（Unix 毫秒），不是 control plane 收到消息的时刻。
         timestamp_ms: u64,
     },
     /// Explicit request from the adapter's local decision path. An ordinary
@@ -803,7 +804,7 @@ pub enum AgentMessage {
         arguments: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint: Option<Value>,
-        /// 投机开始的接入侧测量时刻（Unix 毫秒）。
+        /// 投机开始的 Instrumentation 测量时刻（Unix 毫秒）。
         timestamp_ms: u64,
     },
     Transcript {
@@ -840,12 +841,12 @@ pub enum AgentMessage {
         result: Value,
         #[serde(default)]
         evidence: Option<Value>,
-        /// 接入侧观察到的结果到达时刻（Unix 毫秒）。
+        /// Instrumentation 观察到的结果到达时刻（Unix 毫秒）。
         timestamp_ms: u64,
     },
     Usage {
         branch_id: String,
-        /// 这次调用对应的模型 action。接入侧确实无法配对时为 None：仍然上报
+        /// 这次调用对应的模型 action。Instrumentation 确实无法配对时为 None：仍然上报
         /// 用量，但不伪造 action 身份。
         #[serde(default)]
         action_id: Option<String>,
@@ -853,7 +854,7 @@ pub enum AgentMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thinking_level: Option<String>,
         usage: Value,
-        /// 接入侧测量的模型请求开始与结束时刻（Unix 毫秒）。
+        /// Instrumentation 测量的模型请求开始与结束时刻（Unix 毫秒）。
         started_at_ms: u64,
         finished_at_ms: u64,
     },
@@ -941,7 +942,7 @@ fn first_id() -> u64 {
     1
 }
 
-pub use crate::control_plane::coordination::AgentController;
+pub use crate::control_plane::coordination::SpeculationCoordinator;
 
 #[cfg(test)]
 mod tests;

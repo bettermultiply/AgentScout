@@ -9,8 +9,8 @@ use std::thread;
 use std::time::Duration;
 
 impl Shared {
-    /// 启动 Agent 接入侧。控制面决定用哪个产品，Runtime 负责启动。
-    /// 一个 run 只有一个接入侧进程，它服务所有环境。
+    /// 启动 Instrumentation。control plane 决定用哪个产品，Runtime 负责启动。
+    /// 一个 run 只有一个 Instrumentation 进程，它服务所有环境。
     pub(super) fn launch_agent(&self, agent: &AgentLaunch) -> io::Result<()> {
         let log = OpenOptions::new()
             .create(true)
@@ -32,7 +32,7 @@ impl Shared {
         Ok(())
     }
 
-    /// 停止 Agent 接入侧。它属于整个 run，不属于单个环境。
+    /// 停止 Instrumentation。它属于整个 run，不属于单个环境。
     pub(super) fn stop_agent(&self) {
         if let Some(mut child) = self.agent.lock().unwrap().take() {
             eprintln!("adapter: stopping agent pid {}", child.id());

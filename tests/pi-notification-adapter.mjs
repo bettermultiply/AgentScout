@@ -55,7 +55,7 @@ export async function createAgentSession(options){
         }
     })});
     await new Promise(r=>server.listen(join(root,'agent.sock'),r));
-    const child=spawn(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,resolve('agent-access/pi/main.ts'),join(root,'agent.sock'),'agent'],{env:{...process.env,ASCOUT_PI_ROOT:root,ASCOUT_SESSION_FILE:join(root,'session.jsonl'),ASCOUT_RUNTIME_TOOLS:JSON.stringify([{name:'runtime_tool',description:'fixture',parameters:{type:'object'}}])},stdio:['ignore','pipe','pipe']});
+    const child=spawn(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,resolve('instrumentation/pi/main.ts'),join(root,'agent.sock'),'agent'],{env:{...process.env,ASCOUT_PI_ROOT:root,ASCOUT_SESSION_FILE:join(root,'session.jsonl'),ASCOUT_RUNTIME_TOOLS:JSON.stringify([{name:'runtime_tool',description:'fixture',parameters:{type:'object'}}])},stdio:['ignore','pipe','pipe']});
     child.stderr.on('data',chunk=>stderr+=chunk);
     const exited=new Promise(r=>child.once('exit',(code,signal)=>r({code,signal})));
     t.after(async()=>{client?.destroy();if(child.exitCode===null){child.kill();await exited}await new Promise(r=>server.close(r))});

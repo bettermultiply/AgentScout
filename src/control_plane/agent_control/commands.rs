@@ -467,7 +467,7 @@ impl SpeculativeTree {
             .and_then(|branch| branch.execution_state.failure.as_deref())
     }
 
-    /// 由控制面登记初始权威 Branch，并要求 Pi 启动它。
+    /// 由 control plane 登记初始权威 Branch，并要求 Pi 启动它。
     pub fn create_authority(
         &mut self,
         branch_id: impl Into<String>,

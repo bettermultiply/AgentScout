@@ -112,7 +112,7 @@ impl AdapterHarness {
     fn start(test_name: &str) -> Self {
         let assets = Assets::locate();
         let adapter_binary = built_binary("ascout-runtime-adapter");
-        let guest_access_binary = built_binary("ascout-agent-access");
+        let guest_access_binary = built_binary("ascout-guest-agent");
         assert_file(&adapter_binary);
         assert_file(&guest_access_binary);
 
@@ -773,8 +773,8 @@ fn built_binary(name: &str) -> PathBuf {
     {
         return PathBuf::from(path);
     }
-    if name == "ascout-agent-access"
-        && let Some(path) = option_env!("CARGO_BIN_EXE_ascout-agent-access")
+    if name == "ascout-guest-agent"
+        && let Some(path) = option_env!("CARGO_BIN_EXE_ascout-guest-agent")
     {
         return PathBuf::from(path);
     }

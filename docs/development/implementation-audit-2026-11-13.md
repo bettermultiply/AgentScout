@@ -9,10 +9,10 @@
 | 20 | `src/runtime/base.rs` 对 FS fork／mark／accept 冻结、操作、解冻，并报告失败；`process/freeze.rs` 有 cgroup 和进程组两种路径。 | 进程组逃逸限制须限定路径；无冻结机制仍可运行操作，不代表已保证所有写者静止。嵌套挂载与真实环境覆盖仍待验证。 |
 | 22 | `src/control_plane/gateway/runtime.rs` 与 `src/runtime/adapter/` 有请求身份、超时、请求去重、有界结果缓存、环境队列和 EOF shutdown。 | 不承诺跨重启幂等、状态恢复或完整 Workspace 并发契约。 |
 | 23 | `src/control_plane/agent_control/mod.rs` 保存 generation、execution_position、chance_id、assumption_set、pending_operations、execution_state；Chance 保存 authority_outcome 与 authority_evidence。 | 后续需审查能力、约束与 Runtime 对齐信息是否满足目标契约。 |
-| 28 | `src/control_plane/coordination/actions.rs` 按 epoch 调度 Rebalance，处理 pause／resume／preempt；`agent-access/core/index.ts` 实现 hold。 | 不能笼统说 rebalance 未实现；效果复用与保留等扩展需分别检查。 |
+| 28 | `src/control_plane/coordination/actions.rs` 按 epoch 调度 Rebalance，处理 pause／resume／preempt；`instrumentation/core/index.ts` 实现 hold。 | 不能笼统说 rebalance 未实现；效果复用与保留等扩展需分别检查。 |
 | 29 | `webui/src/components/ChatPane.tsx` 已有多行 textarea；`MessageView.tsx` 展示文字、思考、工具调用和结果。 | 尚无 Markdown 渲染，图片等仍以未展示内容呈现。 |
 | 33 | `src/control_plane/agent_control/tests/nested.rs` 覆盖活跃祖先假设阻止提交和祖先丢弃失效。 | 单元回归不等于端到端祖先丢弃回放；该端到端覆盖仍为验证缺口。 |
-| 36 | `src/runtime/process/` 有进程身份、冻结、终止与清理，控制面已有 generation。 | 完整资源租约、跨重启恢复及执行延续方式仍不能据此认定完成。 |
+| 36 | `src/runtime/process/` 有进程身份、冻结、终止与清理，control plane 已有 generation。 | 完整资源租约、跨重启恢复及执行延续方式仍不能据此认定完成。 |
 
 2026-11-14 补记：公共 `chance_created` 已有源侧投机开始时间，`proposal_validated` 已提供真实验证时刻，`chance_stage_changed` 的 Accepted 已关联所用验证 id；这两项不再是观察协议缺口。树形几何和 NLE 地图已有实现，完整交付与统计验收仍是单独事项。
 
@@ -21,7 +21,7 @@
 早先关于 session 保存、NLE 种子、恢复与物化的笼统缺口描述未随实现更新，应以如下较具体的范围为准：
 
 - 第 18、30 项：`src/control_plane/coordination/task.rs` 已等待写者结束，调用 `MaterializeAuthority`，只在成功后记录 `task_completed`，失败保留重试状态；`coordination/recovery.rs` 已分开暂停保存与输入继续。`tests/authority-filesystem.mjs` 和恢复测试已有物化、SIGINT、候选晋级后文件写入等断言。剩余是扩展写者、深层候选、存储机制与竞态组合，不能再概称物化或独立 FS 退出未实现。已有执行证据见 [恢复](recovery.md)、[FS 现状](../fs-backend/current-state.md)。
-- 第 27、31 项：`agent-access/pi/session-tree.ts` 已保存完整原生条目并校验已知引用；`tests/pi-standalone-continuation.mjs` 已构造独立 Pi 从最终 session 继续文件任务，`tests/pi-session-history.mjs` 已含实际 `restoreSnapshot` 和 Git 对象断言。剩余是任意 custom 外部引用、跨仓库对象与外部运行资源的交接，不是所有脱离 AScout 续跑和 rollback 均未支持。compaction 摘要保留原文已定；实际验证范围见 [接入实现](agent-access.md#4-session-持久化与状态交接已定方向及实现差距)、[Pi 审查](pi-session-review-2026-11-13.md#实际验证)。
+- 第 27、31 项：`instrumentation/pi/session-tree.ts` 已保存完整原生条目并校验已知引用；`tests/pi-standalone-continuation.mjs` 已构造独立 Pi 从最终 session 继续文件任务，`tests/pi-session-history.mjs` 已含实际 `restoreSnapshot` 和 Git 对象断言。剩余是任意 custom 外部引用、跨仓库对象与外部运行资源的交接，不是所有脱离 AScout 续跑和 rollback 均未支持。compaction 摘要保留原文已定；实际验证范围见 [接入实现](agent-access.md#4-session-持久化与状态交接已定方向及实现差距)、[Pi 审查](pi-session-review-2026-11-13.md#实际验证)。
 - 第 31、34 项：主动保存恢复已覆盖树、原上下文和候选；NLE 恢复已保存初始 RNG／配置、动作序列和校验值。旧 run 的初始环境自动重建、任意外部资源恢复及全部长轨迹仍不保证，见 [恢复](recovery.md)、[回放](replay.md)。
 - 第 32 项：回放已有兼容源的两输入整链验证记录，不能继续笼统写“完整 NLE 回放仍失败”；也不能由该源通过推出任意源或机制整链已验收。匹配碰撞、取消时序、最终回答交付与环境前提仍按 [回放](replay.md) 保留。
 

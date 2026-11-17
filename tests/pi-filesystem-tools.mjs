@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {filesystemTools} from '../agent-access/pi/filesystem-tools.ts';
+import {filesystemTools} from '../instrumentation/pi/filesystem-tools.ts';
 
 function fixture(readDefinition) {
     const root=fs.mkdtempSync('/tmp/opencode/pi-filesystem-tools-');

@@ -10,7 +10,7 @@ test('native recovery sources remain independently restorable after original and
         import assert from 'node:assert/strict';
         import {mkdirSync,readFileSync} from 'node:fs';
         import {SessionManager} from '${pi}/packages/coding-agent/src/core/session-manager.ts';
-        import {SessionTree} from '${resolve('agent-access/pi/session-tree.ts')}';
+        import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
         const directory=process.argv[1],main=SessionManager.open(directory+'/session.jsonl');
         main.appendMessage({role:'user',content:'before save',timestamp:1});
         const tree=new SessionTree(main),branch=tree.createBranch('authority',directory);

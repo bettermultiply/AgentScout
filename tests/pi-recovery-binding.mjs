@@ -9,7 +9,7 @@ test('recovery binds auto-loaded resources and external rollback Git identity wi
  import assert from 'node:assert/strict';
  import {mkdirSync,writeFileSync} from 'node:fs';
  import {execFileSync} from 'node:child_process';
- import {recoveryBinding,snapshotResources} from '${resolve('agent-access/pi/recovery-binding.ts')}';
+ import {recoveryBinding,snapshotResources} from '${resolve('instrumentation/pi/recovery-binding.ts')}';
  const root=process.argv[1],pi=process.argv[2];process.env.PI_CODING_AGENT_DIR=root+'/agent';
  mkdirSync(root+'/agent/extensions',{recursive:true});mkdirSync(root+'/workspace');
  writeFileSync(root+'/agent/extensions/example.ts','export default ()=>{}');

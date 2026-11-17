@@ -1,16 +1,16 @@
 # Gateway 实现核查
 
-目标依据：[控制面 §2.1](../design/control-plane.md#21-gateway)。Gateway 属于控制面，不独立部署，由控制面统一启动和停止；UI 同样由控制面启动和停止。Gateway 与 Runtime 网络通信；Agent 与接入进程的实际启动、监视和回收仍由 Runtime 执行。不规定必须同进程或自动打开浏览器，不实现 Registry，不改变投机语义。
+目标依据：[control plane §2.1](../design/control-plane.md#21-gateway)。Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止；UI 同样由 control plane 启动和停止。Gateway 与 Runtime 网络通信；Agent 与接入进程的实际启动、监视和回收仍由 Runtime 执行。不规定必须同进程或自动打开浏览器，不实现 Registry，不改变投机语义。
 
 ## 2026-11-16：统一启动和停止
 
 当前实现仍由 `src/bin/ascout-control-plane.rs` 装配三侧通信，不增加统一总对象或重写协议：
 
-- `gateway::ui::start` 返回 `Server`，控制面持有并显式 `stop`；Drop 也停止。停止标志唤醒 SSE 的 Ledger 等待，不产生观察事件、不改变 Ledger 的 connected 事实。listener 释放后，中断空闲／不完整 HTTP 读取，再等待全部连接线程；已完成线程在运行期回收，不积累到退出。写入仍保留两秒超时。正常观察断开后仍交付末尾事件；运行中直接停止只结束通信，不伪造业务完成。
+- `gateway::ui::start` 返回 `Server`，control plane 持有并显式 `stop`；Drop 也停止。停止标志唤醒 SSE 的 Ledger 等待，不产生观察事件、不改变 Ledger 的 connected 事实。listener 释放后，中断空闲／不完整 HTTP 读取，再等待全部连接线程；已完成线程在运行期回收，不积累到退出。写入仍保留两秒超时。正常观察断开后仍交付末尾事件；运行中直接停止只结束通信，不伪造业务完成。
 - listener 使用 nonblocking accept，每 20ms 检查停止标志；这是通信停止检查，不驱动 Tree／Policy。Ledger 增加内部可取消等待及唤醒入口，原 `events_after` 的序号、补发与 15 秒等待不变。
 - `ControlSession` 保存 Runtime 读线程句柄；shutdown 关闭 cloned socket 两侧并 join，重复 shutdown 和 Drop 可重复调用。EOF／读错误唤醒等待者的逻辑在本轮编辑前已存在，不计作本轮新增能力。
 - Agent Connection 原已有双向关闭、读线程 join，以及 finish 写侧半关闭／stop_receiving 的分离，本轮沿用。Agent listener 由作用域释放；运行目录及 socket 路径仍留给调用方检查，不扩展为目录清理。
-- Adapter 接入等待发生 accept／try_wait 错误时 kill/wait 自己启动的进程；握手失败仍按既有路径清理。成功握手后的能力检查、Agent 路径解析、日志打开等全部 fallible 装配步骤纳入同一退出路径，先关闭 Runtime 会话并 join，再等待 Adapter 自行退出，五秒未退出则强制回收。运行阶段继续先请求 Runtime 清理环境、发布断开事实、停止 UI，再关闭 Runtime 会话。没有把 Agent 进程所有权移给控制面。
+- Adapter 接入等待发生 accept／try_wait 错误时 kill/wait 自己启动的进程；握手失败仍按既有路径清理。成功握手后的能力检查、Agent 路径解析、日志打开等全部 fallible 装配步骤纳入同一退出路径，先关闭 Runtime 会话并 join，再等待 Adapter 自行退出，五秒未退出则强制回收。运行阶段继续先请求 Runtime 清理环境、发布断开事实、停止 UI，再关闭 Runtime 会话。没有把 Agent 进程所有权移给 control plane。
 
 编辑前快照及基线：`/tmp/opencode/gateway-lifecycle-20261116-214948/`，`before/` 保存相关文件，`baseline.diff`、`baseline-staged.diff`、`baseline-status.txt` 记录已有工作。该工作区同时有其他修改，当前总 diff 不等于本轮增量；该目录的 `incremental.diff` 及 `incremental-stat.txt` 是快照至结束的文件差异，也含期间并行修改，须结合 `scope.txt` 审查，不能整体归功或整体应用。不提交、不切分支、不还原其他改动。
 
@@ -23,9 +23,9 @@
 | `cargo test --lib control_plane::gateway` | 2 通过，`gateway-lifecycle-tests-final.log`。 |
 | `cargo test --lib` | 172 通过，`gateway-lifecycle-lib-tests.log`；不归功于本轮新增测试。 |
 | Pi 既有接入测试 | `node --test tests/pi-access.mjs tests/pi-notification-adapter.mjs`，15 通过，`gateway-lifecycle-pi.log`。 |
-| 既有恢复测试 | `node --test tests/recovery-active.mjs`，5 通过，本地伪模型／真实 Pi、Runtime 和 NLE，含文件系统组合、保存重试及恢复清理；`gateway-lifecycle-recovery.log`。这些测试用 SIGKILL 结束暂停后的控制面，不代替 graceful Shutdown 验证。 |
+| 既有恢复测试 | `node --test tests/recovery-active.mjs`，5 通过，本地伪模型／真实 Pi、Runtime 和 NLE，含文件系统组合、保存重试及恢复清理；`gateway-lifecycle-recovery.log`。这些测试用 SIGKILL 结束暂停后的 control plane，不代替 graceful Shutdown 验证。 |
 | HTTP/SSE／Runtime 手构造通信 | `gateway-lifecycle-probe.log`：活 SSE、空闲 HTTP 下显式 stop、重复 stop、Drop 均退出约 10ms，UI 端口可立即重新 bind；Runtime 显式 shutdown、重复 shutdown、Drop 均 join 返回且对端收到 EOF。源码 `gateway-lifecycle-probe.rs`，临时 Cargo 工程 `gateway-lifecycle-probe/`。未改 HTTP 校验、状态码和正常 SSE 补发循环。 |
-| 正常 main 退出 | 快照目录 `normal-exit/result.txt`、`stderr.log`：无模型请求的空闲会话，HTTP Shutdown 返回 202，控制面退出 0，所属进程消失，UI 端口重新 bind 成功。 |
+| 正常 main 退出 | 快照目录 `normal-exit/result.txt`、`stderr.log`：无模型请求的空闲会话，HTTP Shutdown 返回 202，control plane 退出 0，所属进程消失，UI 端口重新 bind 成功。 |
 | main 装配错误退出 | 快照目录 `early-error/`：假 Adapter 完成 hello 后，缺失 ASCOUT_AGENT_ENTRY 导致非零退出；Adapter 收到 EOF，PID 已回收。Runtime 端口的立即 bind 检查遇到 Address already in use，不据此宣称立即复用通过（TCP 连接关闭状态未排除）。该例不建立 Agent 或环境。 |
 | 格式检查 | `gateway-lifecycle-local-fmt.log`：main、Runtime／HTTP／Ledger 使用 skip_children 的定向 rustfmt 检查通过；全仓 `cargo fmt --all -- --check` 仍失败，`gateway-lifecycle-fmt-final.log`，差异来自并行交互工作涉及的 tui、agent_control、coordination/session、gateway/ui.rs、observation 等，本轮不批量格式化它们。 |
 
@@ -38,20 +38,20 @@
 | 当前调用链 | 保留在控制／展示侧的责任 |
 |---|---|
 | main 装配 `gateway::agent::Listener` → accept → `Connection`；execution 通过 receive 接收类型化 AgentMessage、send 交付 AgentCommand、finish 半关闭、stop_receiving 回收读线程 | Tree 身份／Branch／task／命令关联和合法转换；LocalPolicy 的生成；恢复保存顺序；错误后的关闭与清理决策 |
-| `gateway::runtime::{ControlServer, ControlSession}`；AgentController.perform 与运行循环依赖 `&dyn Runtime` 的 Operation / OperationResult / Event | 环境选择、结果 Completed 判定、运行状态映射、Policy、Promote／Discard、预算与调度 |
+| `gateway::runtime::{ControlServer, ControlSession}`；SpeculationCoordinator.perform 与运行循环依赖 `&dyn Runtime` 的 Operation / OperationResult / Event | 环境选择、结果 Completed 判定、运行状态映射、Policy、Promote／Discard、预算与调度 |
 | main 装配共享 UI Connection、嵌入静态资源及只读 Presentation；HTTP 和 TUI 直接调用 Connection.request → execution 事件 | `ui.rs` 对话／输入状态读取和展示折叠；TUI 绘制与终端输入；Ledger 原始事实保存、序号和补发读取 |
 
 Runtime 通信调用统一使用 `gateway::runtime`。三侧统一的是源码通信责任边界，不增加一个无业务作用的总对象，也不统一三侧线协议。Gateway 不持有 Tree、Branch 生命周期、Policy、调度预算或 Runtime 执行状态。
 
 `Presentation` 仅提供 `input_status` 与 `conversation` 展示查询，`Interface` 不持有请求连接。Runtime 请求统一由 `send` 构造，保留 `call_with_id`、`wait_event` 等既有测试调用入口。`Runtime::establish()` 不传预定身份，`Runtime::branch(parent_environment_id, agent)` 只传父环境和启动参数，创建结果返回新环境身份。后续 `Runtime::call(environment_id, operation)` 使用已保存的绑定，不接收逻辑 `branch_id`；不能用 `environment_id` 代填任何 Branch 字段。结果缓存读取仅克隆一次。
 
-Runtime 仍通过 OperateEnvironment 的 AgentLaunch 实际启动 Agent，负责监视和回收。控制面负责启动协调，main 保持 Adapter 进程启动／退出协调与配置装配；启动协调不移入 Gateway。部署与统一启停见[控制面 §2.1](../design/control-plane.md#21-gateway)。
+Runtime 仍通过 OperateEnvironment 的 AgentLaunch 实际启动 Agent，负责监视和回收。control plane 负责启动协调，main 保持 Adapter 进程启动／退出协调与配置装配；启动协调不移入 Gateway。部署与统一启停见[control plane §2.1](../design/control-plane.md#21-gateway)。
 
 ## 失败与关闭路径
 
 - Agent：连接等待 30 秒、握手读取 10 秒、发送 5 秒；握手消息类型、agent_id 和六项既有能力检查在 Gateway。错误直接返回，局部 stream 释放。运行期非法方向的 wire Command 在 Gateway 拒绝；EOF／读错误作为事件送入控制逻辑。控制逻辑只在 draining 时接受 EOF 为正常结束，其他 EOF 不声称 cleanup 已确认。发送失败向上传播，不冒充命令执行成功。finish 仅半关闭写侧；读线程继续收取末尾事实，退出时 Read shutdown＋join，Connection Drop 关闭两侧。
 - Runtime：ControlSession 保持原请求 ID、30 秒结果等待、有界结果缓存和事件队列；send 失败返回 io error，未完成结果不转换为成功。正常关闭 cloned socket 并 join 读线程，Runtime 自行 shutdown，main 等待／回收 Adapter。握手超时分支关闭会话并 kill/wait 自己启动的 Adapter。EOF／读错误会设置 disconnected 并唤醒 hello、result 和 event 等待者。
-- UI：保留 loopback、Host、同源 Origin、JSON 类型、请求体大小和格式、空 prompt、SSE 序号检查与原状态码。Gateway Connection 拒绝已断开的控制面请求；202 仅表示排队，业务完成结果仍由控制逻辑产生。HTTP 读取／写入各 2 秒超时；SSE 写失败结束该连接，正常断开后交付剩余事件再结束。listener 和连接线程的受管停止见上方当前实现。
+- UI：保留 loopback、Host、同源 Origin、JSON 类型、请求体大小和格式、空 prompt、SSE 序号检查与原状态码。Gateway Connection 拒绝已断开的 control plane 请求；202 仅表示排队，业务完成结果仍由控制逻辑产生。HTTP 读取／写入各 2 秒超时；SSE 写失败结束该连接，正常断开后交付剩余事件再结束。listener 和连接线程的受管停止见上方当前实现。
 - 恢复：仍经同样 Agent handshake、LocalPolicy、Load/RecoveryLoaded、Suspend/Save/CancelSave、Runtime LoadRuntime/SaveRuntime 通道；Gateway 不解释恢复资料、不改变保存发布顺序。
 
 ## 验证与证据
@@ -68,11 +68,11 @@ Runtime 仍通过 OperateEnvironment 的 AgentLaunch 实际启动 Agent，负责
 | `node /tmp/opencode/replay-ts-run1.mjs` | 已有兼容 run-1 两轮各 40/40 hits/consumed、misses/exhausted/unconsumed/cancel_timeouts=0；两输入完成、23 成功/17 取消；正常退出码 0。`/tmp/opencode/gateway-compatible-replay-final.log`，产物 `/tmp/opencode/replay-ts-run1-oxCwIm`。本验证说明 Gateway 与已兼容请求格式的输入通信正常，不替代机制的全部端到端验收。 |
 | `cargo test --test policy` | 1 通过；`/tmp/opencode/gateway-rust-policy.log` |
 | `cargo build --bins` | 通过；`/tmp/opencode/gateway-build-final.log` |
-| `node --test tests/pi-access.mjs tests/pi-notification.mjs tests/pi-notification-adapter.mjs tests/pi-recovery-binding.mjs tests/pi-recovery-sources.mjs` | 18 通过；`/tmp/opencode/gateway-pi.log`，包括接入侧 EOF／写失败，不等于控制面 Gateway 的全部故障注入 |
+| `node --test tests/pi-access.mjs tests/pi-notification.mjs tests/pi-notification-adapter.mjs tests/pi-recovery-binding.mjs tests/pi-recovery-sources.mjs` | 18 通过；`/tmp/opencode/gateway-pi.log`，包括 Instrumentation EOF／写失败，不等于 control plane Gateway 的全部故障注入 |
 | `node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` | 5 通过，最终代码重跑仍 5 通过；`/tmp/opencode/gateway-recovery-final.log`，本地伪模型、真实 Pi／Runtime、保存重试与恢复、进程清理 |
 | `node tools/replay/verify/b1-pi.ts /tmp/opencode/ascout-replay-b1-pi-hyZBIv` | 通过；`/tmp/opencode/gateway-replay-pi.log`；产物 `ascout-replay-b1-pi-sh5No7`，4 子进程及动态端口清理通过 |
 
-产物名称均位于 `/tmp/opencode/`。完整回放失败保留，不修改源记录、不 fallback 模型、不把既往通过报告当本轮通过。Gateway 三侧正常通信与恢复已有上述覆盖，握手超时／错误身份、控制面侧发送失败、Runtime 运行中断线及 SSE 重连的完整专项故障注入未在本轮完成。
+产物名称均位于 `/tmp/opencode/`。完整回放失败保留，不修改源记录、不 fallback 模型、不把既往通过报告当本轮通过。Gateway 三侧正常通信与恢复已有上述覆盖，握手超时／错误身份、control plane 侧发送失败、Runtime 运行中断线及 SSE 重连的完整专项故障注入未在本轮完成。
 
 ## 收尾审查与首错归因
 

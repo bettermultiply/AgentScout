@@ -170,7 +170,7 @@ export function BranchDetails({
           </Field>
           <Field
             label="存活时长"
-            title="按接入侧投机起点与观察事件时刻计算，不表示精确执行耗时"
+            title="按 Instrumentation 投机起点与观察事件时刻计算，不表示精确执行耗时"
           >
             {survival === null ? (
               <span className="muted">未上报</span>

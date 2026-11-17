@@ -1,6 +1,6 @@
-//! microVM 内的 Agent 接入侧。
+//! microVM 内的 Guest Agent。
 //!
-//! 接入侧监听固定的 vsock 端口，接收 argv，直接在 guest 内启动进程并返回输出。
+//! Guest Agent 监听固定的 vsock 端口，接收 argv，直接在 guest 内启动进程并返回输出。
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
@@ -18,7 +18,7 @@ pub const PORT: u32 = 52;
 
 /// 首行请求（argv JSON）上限。
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-/// 单条流（stdout 或 stderr）保留给控制面的上限；超出时终止命令并返回错误。
+/// 单条流（stdout 或 stderr）保留给control plane的上限；超出时终止命令并返回错误。
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 /// 同时执行的 guest 连接上限。
 const MAX_CONNECTIONS: usize = 64;

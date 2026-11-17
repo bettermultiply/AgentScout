@@ -1,4 +1,4 @@
-//! Ledger：控制面的异步旁路记录。
+//! Ledger：control plane 的异步旁路记录。
 //!
 //! 只记录已经发生的运行事实，不参与决策，也不从记录里恢复生命周期。
 //! 目标语义见 `docs/design/control-plane.md` §2.6。

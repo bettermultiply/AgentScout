@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Interaction } from '../agent-access/pi/interaction.ts';
+import { Interaction } from '../instrumentation/pi/interaction.ts';
 
 test('answers and explicit cancellation settle text prompts; silence stays pending', async () => {
     const events = [];

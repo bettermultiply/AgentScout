@@ -8,7 +8,7 @@
 
 ## 创建 candidates 后 parent 还能运行吗？
 
-Speculative Tree 中的关系与 Agent execution activity 相互独立。Speculation window 内，parent 可以按 Agent/控制面 Policy 执行真实 operation、等待、suspend 或 resume；AScout 不强制 parent 长期阻塞。
+Speculative Tree 中的关系与 Agent execution activity 相互独立。Speculation window 内，parent 可以按 Agent/control plane Policy 执行真实 operation、等待、suspend 或 resume；AScout 不强制 parent 长期阻塞。
 
 ## Parent 的内存修改会自动进入 child 吗？
 
@@ -32,7 +32,7 @@ Speculative Tree 中的关系与 Agent execution activity 相互独立。Specula
 
 ## Child 可以自行成为 winner 吗？
 
-不能。默认由 direct parent Agent 持有 resolver capability，并可以显式委托给控制面。Runtime 的 validation 和 Accept gate 始终是机制强制边界。
+不能。默认由 direct parent Agent 持有 resolver capability，并可以显式委托给 control plane。Runtime 的 validation 和 Accept gate 始终是机制强制边界。
 
 ## 计划提供哪些 Agent-facing operations？
 
@@ -48,7 +48,7 @@ Context、direct children、candidate 创建、commit、accept、discard 和 eve
 
 ## Loser 的进程和资源会怎样？
 
-AScout 只接受能够通过 Adapter 证明其 Runtime 能提供隔离执行环境、环境级资源边界、停止和 cleanup 的接入；Agent 接入侧负责管理完整 Agent process tree 及其 Branch context。Accept 或 discard 的整体结果仍必须表明相关 Agent 执行活动、环境资源和受管 effect obligations 已按各自责任边界收敛，不能只依赖 Agent 自愿合作。
+AScout 只接受能够通过 Adapter 证明其 Runtime 能提供隔离执行环境、环境级资源边界、停止和 cleanup 的接入；Instrumentation 负责管理完整 Agent process tree 及其 Branch context。Accept 或 discard 的整体结果仍必须表明相关 Agent 执行活动、环境资源和受管 effect obligations 已按各自责任边界收敛，不能只依赖 Agent 自愿合作。
 
 ## External effects 会自动回滚吗？
 
@@ -56,8 +56,8 @@ AScout 只接受能够通过 Adapter 证明其 Runtime 能提供隔离执行环�
 
 ## 默认 Runtime 会 sandbox 恶意 Child 吗？
 
-不会。默认 Runtime 面向可信 Child Agent 和高效环境隔离。环境边界、资源归属、停止和 cleanup 仍是强制环境要求；Branch identity、capability validation 和投机 lifecycle 由 Agent 接入侧与控制面负责。对抗恶意 workload 的宿主 containment 需要另行选择 sandbox/hardened Runtime。
+不会。默认 Runtime 面向可信 Child Agent 和高效环境隔离。环境边界、资源归属、停止和 cleanup 仍是强制环境要求；Branch identity、capability validation 和投机 lifecycle 由 Instrumentation 与 control plane 负责。对抗恶意 workload 的宿主 containment 需要另行选择 sandbox/hardened Runtime。
 
 ## 当前有可运行实现吗？
 
-已有可运行的原型：Rust 控制面、Pi 接入、Runtime Adapter，以及文件系统/进程 Backend 已实现，并完成过 Pi/NLE 投机执行验证。它仍不是完整通用实现：完整 Runtime Registry 与能力验证、稳定对外 API、通用 Agent-facing 命令语法和对抗性 sandbox 仍未提供。当前实现状态见 [README](../../README.md)、[当前实现与验证边界](../development/reference-workload.md) 与 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
+已有可运行的原型：Rust control plane、Pi 接入、Runtime Adapter，以及文件系统/进程 Backend 已实现，并完成过 Pi/NLE 投机执行验证。它仍不是完整通用实现：完整 Runtime Registry 与能力验证、稳定对外 API、通用 Agent-facing 命令语法和对抗性 sandbox 仍未提供。当前实现状态见 [README](../../README.md)、[当前实现与验证边界](../development/reference-workload.md) 与 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。

@@ -10,7 +10,7 @@ test('standalone real Pi resumes assembled history and completes a built-in writ
         import http from 'node:http';
         import {writeFileSync,readFileSync,mkdirSync} from 'node:fs';
         import {createAgentSession,SessionManager,ModelRuntime,resolveCliModel} from '${pi}/packages/coding-agent/src/index.ts';
-        import {SessionTree} from '${resolve('agent-access/pi/session-tree.ts')}';
+        import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
         const directory=process.argv[1],agentDir=directory+'/pi';mkdirSync(agentDir);
         const requests=[];
         const server=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{

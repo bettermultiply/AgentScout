@@ -66,19 +66,12 @@ impl BaseRuntime {
         if let Some(data_plane) = &self.data_plane {
             merge_launch_fragment(&mut fragment, data_plane.launch_fragment(context, launch)?)?;
         }
-        // Filesystem environments use a run-scoped Pi host plus a branch-only
-        // namespace holder.  A Runtime without a data-plane namespace keeps
-        // its historical direct process path; it has no branch namespace to
-        // hold and must not silently lose its writer lifecycle semantics.
+        // The Agent and Instrumentation always remain outside Branch isolation.
+        // Only the namespace holder and managed commands enter the environment.
         let holder = fragment.holder_bind.is_some();
+        self.process.launch_host(launch, &fragment.env)?;
         if holder {
-            self.process.launch_host(launch, &fragment.env)?;
-            // The holder belongs to this Branch; the Pi host belongs to the run
-            // and still serves every other Branch. A Branch that cannot get its
-            // namespace holder fails on its own instead of taking the host down.
             self.process.launch_holder(context, &fragment)?;
-        } else {
-            self.process.launch(context, launch, &fragment)?;
         }
         self.launches
             .lock()

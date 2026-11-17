@@ -98,7 +98,7 @@ fn resolve_agent_entry() -> Result<std::path::PathBuf, Box<dyn std::error::Error
     let path = env::var_os("ASCOUT_AGENT_ENTRY")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agent-access/pi/main.ts")
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("instrumentation/pi/main.ts")
         });
     if !path.is_file() {
         return Err(format!(
@@ -110,7 +110,7 @@ fn resolve_agent_entry() -> Result<std::path::PathBuf, Box<dyn std::error::Error
     Ok(path)
 }
 
-/// 启动 Runtime Adapter 并完成握手。控制面只持有连接和进程句柄，
+/// 启动 Runtime Adapter 并完成握手。control plane 只持有连接和进程句柄，
 /// 不保存任何环境状态。
 fn start_adapter(
     config_path: &std::path::Path,
@@ -229,7 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "usage: ascout-control-plane <run-dir> <pi-root> [policy.yaml] [--policy-artifact <policy.json>] [--resume] [--runtime <runtime.json>] [--web 127.0.0.1:8080] [--model <provider/model>] [--models <additional-models.json>] [--thinking <level>]".into(),
         );
     }
-    // 运行目录由调用方（实验脚手架）创建，控制面只使用它。
+    // 运行目录由调用方（实验脚手架）创建，control plane 只使用它。
     let run_dir = fs::canonicalize(&args[0])?;
     if !run_dir.is_dir() {
         return Err(format!("{} is not a run directory", run_dir.display()).into());
@@ -351,7 +351,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         tree.bind_local_policy(policy.digest());
         let runtime_tools = serde_json::to_string(&runtime_capabilities.tools)?;
-        // 用哪个 Agent 产品、哪个版本由控制面决定；启动它由 Runtime 完成。
+        // 用哪个 Agent 产品、哪个版本由 control plane 决定；启动它由 Runtime 完成。
         let agent_entry = resolve_agent_entry()?;
         let mut agent_args = vec![
             "--import=".to_string()

@@ -95,7 +95,7 @@ impl ResultStore {
     }
 }
 
-/// 监听 Adapter 连入的控制面入口。
+/// 监听 Adapter 连入的 control plane 入口。
 pub struct ControlServer {
     listener: TcpListener,
 }
@@ -298,7 +298,7 @@ impl ControlSession {
         transport::write_message(&mut *writer, &message)
     }
 
-    /// 用控制面分配的请求标识发请求并等待结果。
+    /// 用 control plane 分配的请求标识发请求并等待结果。
     pub fn call_with_id(
         &self,
         request_id: &str,

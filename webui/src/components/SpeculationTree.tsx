@@ -120,7 +120,7 @@ export function SpeculationTree({ task }: { task: TaskState | null }) {
     return (
       <div className="tree-empty">
         <h3>还没有 Branch 事件</h3>
-        <p>控制面创建 Branch 后，投机树会在这里自上而下生长。</p>
+        <p>control plane 创建 Branch 后，投机树会在这里自上而下生长。</p>
         <p className="muted">枝头、模型叶茎和工具叶片可以点击进入该 Branch 的只读详情。</p>
       </div>
     )

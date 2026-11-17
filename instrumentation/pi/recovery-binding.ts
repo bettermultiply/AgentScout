@@ -62,7 +62,7 @@ export async function recoveryBinding(piRoot,workspaces) {
             const parent=dirname(current);if(parent===current)break;current=parent;
         }
     }
-    for(const name of ['package.json','packages/coding-agent/src','packages/agent/src','packages/ai/src','packages/ascout-agent-access/src'])fingerprint(join(piRoot,name),true);
+    for(const name of ['package.json','packages/coding-agent/src','packages/agent/src','packages/ai/src','packages/pi-integration/src'])fingerprint(join(piRoot,name),true);
     fingerprint(new URL('../core',import.meta.url).pathname,true);
     fingerprint(dirname(new URL(import.meta.url).pathname),true);
     return {node:process.version,resolved,resources:[...resources].sort(([a],[b])=>a.localeCompare(b))};

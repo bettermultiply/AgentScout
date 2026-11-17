@@ -5,7 +5,7 @@ use std::io::{self, Read, Write};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// 单条控制面消息的上限。长度头来自对端，不能在验证前直接用来分配内存。
+/// 单条 control plane 消息的上限。长度头来自对端，不能在验证前直接用来分配内存。
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn write_message<W: Write, T: Serialize>(writer: &mut W, message: &T) -> io::Result<()> {

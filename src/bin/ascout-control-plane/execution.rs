@@ -1,5 +1,5 @@
 use super::*;
-use ascout::control_plane::agent_control::AgentController;
+use ascout::control_plane::agent_control::SpeculationCoordinator;
 use ascout::control_plane::coordination::session::Session;
 use ascout::control_plane::coordination::{ControlActions, ControlResult};
 use std::io::{Read, Write};
@@ -267,7 +267,7 @@ pub fn run(
                     let sender = events.clone();
                     scope.spawn(move || {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            AgentController.perform(
+                            SpeculationCoordinator.perform(
                                 &tree_state,
                                 policy,
                                 engine,

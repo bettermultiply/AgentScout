@@ -1,11 +1,24 @@
-# Agent 接入侧通用层
+# Instrumentation 通用层
 
-本文记录 Agent 接入侧通用层的当前实现、接口与限制；目标语义见 [Agent 接入侧设计](../design/agent-integration.md)。
+Pi 目前保留 SDK 宿主，不启动原生 CLI：原生 RPC 的 fork/clone 切换单一当前 session，缺少并行候选、待决工具恢复与当前 continue 的对应命令。原生 `context` 可等待并用 `ctx.abort()` 在 fake transport 前取消；`before_provider_request` 的取消仍可能进入 provider，不能把它当作请求前强制阻止保证。生产命令发现已通过原生 inline extension 的公开 `getCommands()` 实现，保留默认资源加载。集成参数 `--models` 继续解释为 provider JSON，不等同于原生 CLI 模型列表。
+
+Agent 与 Instrumentation 宿主在所有 BaseRuntime 路径都位于 Branch 隔离外，由 Runtime 启停；有 holder 的文件系统路径仅把 holder 和受管命令放进环境。Adapter 的直接启动路径（包括 Firecracker）同样在宿主运行；Guest Agent 留在 guest 提供 Runtime 命令服务。扩展直接使用 Node 的工作区读写、进程启动或直接 shell 不会自动得到 Branch 视图；只有已适配的文件工具和 Runtime 工具受到当前环境约束。内建文件工具的覆盖不等于任意自定义工具已隔离。所有网络无需统一绕行 Runtime。
+
+
+本文记录 Instrumentation 通用层的当前实现、接口与限制；目标语义见 [Instrumentation 设计](../design/agent-integration.md)。
+
+## 本轮验证与能力边界
+
+`cargo check --all-targets`、`cargo test --lib`（178 项）、`node --test tests/pi*.mjs`（32 项）、`tests/predictor-fact-e2e.mjs`（2 项，正常单步及 Promote 后五步）、相邻 Pi 原生边界与摘要验证（20 项）、Pi `npm run check` 通过。端到端仅使用 loopback fake SSE；证据目录为 `/tmp/opencode/predictor-fact-e2e-CAb2ux` 和 `/tmp/opencode/predictor-fact-e2e-FtNgKj`。本轮无真实模型请求。Firecracker 实机和不受本机支持的隔离 backend 未做端到端验收，不由库测试通过推定全部 backend 已验证。
+
+新增可信宿主回归验证无 holder 的 BaseRuntime 不将宿主登记为 Environment writer，物化后仍能复用宿主；旧冻结/物化写者 fixture 改为显式 Environment 进程，保留写者清理语义。已有 FS holder 回归覆盖 Branch 视图及物化轮换。模型完成回归验证完成回调等待期间不能交付 `result()`；摘要 OAuth 验证保留。
+
+工具 checkpoint 仍仅支持进入 transcript 的顶层调用。Pi 原生扩展 `tool_call` 能观察 `ctx.executeTool()` 嵌套调用，而当前 Agent hook 包装不能据此为嵌套调用建立独立投机 checkpoint；本轮未宣称该能力已等价替换。任意插件自带 shell、Node 文件访问及自定义工具的宿主副作用仍属可信扩展的限制，不能将正常资源加载说成全面隔离。
 
 ## 1. 分层
 
-- `agent-access/core/`：与具体 Agent product 无关的通用接入逻辑，包括本地 Policy 求值调用、`extent` 的 step 计数与求值、`effect` 闸门、Blocked/Resumed 上报，以及等待控制面处置的 hold。
-- `agent-access/pi/main.ts`：Pi 的 Product Integration，只负责把 Pi 的工具执行前、模型推理前等执行点转成通用层的执行点事件，执行返回的处置，并上报 Pi 专有的消息、checkpoint、session 与用量事实。
+- `instrumentation/core/`：与具体 Agent product 无关的通用接入逻辑，包括本地 Policy 求值调用、`extent` 的 step 计数与求值、`effect` 闸门、Blocked/Resumed 上报，以及等待 control plane 处置的 hold。
+- `instrumentation/pi/main.ts`：Pi integration，只负责把 Pi 的工具执行前、模型推理前等执行点转成通用层的执行点事件，执行返回的处置，并上报 Pi 专有的消息、checkpoint、session 与用量事实。
 
 通用层不读取 Pi 的消息结构、checkpoint、session、SDK、模型对象，也不读取 NLE 专有字段。Pi 把 `checkpoint` 作为不透明的 admission fact 交给通用层，通用层只把它原样放进 `speculative_admission_request`，不解释其内容。
 
@@ -14,23 +27,23 @@
 这条路径与工具等待路径不同，但已经有明确的接入顺序：
 
 1. Pi 在真正调用 `streamSimple` 前执行模型推理前 Hook，登记模型 action、checkpoint 和模型上下文；`message_start` 只是 SDK 的消息边界，不能替代这个 Hook。
-2. Hook 通过当前 Policy 的 `admit.opportunity_pass`／`admit.feasibility_pass` 判断是否有机会。Policy 的 `predict` 返回 `branch_model` 及候选模型（当前实现从 Policy artifact 的场景选择该模型），而不是由控制面或 Pi 硬编码模型选择。
-3. 控制面先按该等待点建立候选 Branch，再让候选使用指定模型继续推理；候选模型产生的 assistant 结果中，完整的 `tool_calls` 列表是比较输入。当前语义不是先创建一个只作占位的 Proposal 再补候选产出：候选先启动，模型完成后才以完整调用列表形成可比较的结果。
+2. Hook 通过当前 Policy 的 `admit.opportunity_pass`／`admit.feasibility_pass` 判断是否有机会。Policy 的 `predict` 返回 `branch_model` 及候选模型（当前实现从 Policy artifact 的场景选择该模型），而不是由 control plane 或 Pi 硬编码模型选择。
+3. control plane 先按该等待点建立候选 Branch，再让候选使用指定模型继续推理；候选模型产生的 assistant 结果中，完整的 `tool_calls` 列表是比较输入。当前语义不是先创建一个只作占位的 Proposal 再补候选产出：候选先启动，模型完成后才以完整调用列表形成可比较的结果。
 4. 完整列表参与匹配：调用名称、参数以及调用数量／顺序均属于候选与权威模型调用列表的比较范围；不能只比较第一个调用，也不能用普通文本、思考文本或其他 assistant 输出判定命中。未满足确定等价规则的调用列表不能 Promote。
 5. 候选的模型推理和工具调用在 Promote 前仍受候选生命周期约束。候选不能把工具效果写入权威路径；Promote 只保留一个胜者并切换后续权威会话，旧 Parent 与其他候选按既有清理流程处置；Discard 取消并清理该候选，未验证输出不进入主对话。
 
 上述语义只说明当前已接通的模型投机接缝，不表示已经解决所有模型投机策略问题。调用列表等价的规范化／语义相似规则、多模型成本与失败回退仍由 `Discussion.md` 第 40 项保留为未决问题。
 
-当前实现中 Pi 是宿主上的单一进程，Authority 与全部 Candidate session 都由它托管；每个 Branch 的 Runtime 环境另外持有一个常驻 namespace-holder，文件工具通过该 Branch 专属 socket 在已有 mount namespace 中执行，Pi 不进入 Branch namespace。控制面持有逻辑 transcript，并在创建 Candidate 时继承父 Branch 的逻辑 transcript；Pi 的 Branch session 继续保留原生记录，以便最终汇总和从原生 checkpoint 续跑。`/app` 这类 workload 路径由 FilesystemBackend 的 `isolated_paths: [{path, target}]` 映射，host 目录仍是 overlay lower 与 publication 目标。holder 的命令各自独立执行，直接 shell 退出即返回，后台后代留在 Branch namespace 直到环境结束；物化轮换 execution generation 时旧 holder 结束，发布后建立新 holder。
+当前实现中 Pi 是宿主上的单一进程，Authority 与全部 Candidate session 都由它托管；每个 Branch 的 Runtime 环境另外持有一个常驻 namespace-holder，文件工具通过该 Branch 专属 socket 在已有 mount namespace 中执行，Pi 不进入 Branch namespace。control plane 持有逻辑 transcript，并在创建 Candidate 时继承父 Branch 的逻辑 transcript；Pi 的 Branch session 继续保留原生记录，以便最终汇总和从原生 checkpoint 续跑。`/app` 这类 workload 路径由 FilesystemBackend 的 `isolated_paths: [{path, target}]` 映射，host 目录仍是 overlay lower 与 publication 目标。holder 的命令各自独立执行，直接 shell 退出即返回，后台后代留在 Branch namespace 直到环境结束；物化轮换 execution generation 时旧 holder 结束，发布后建立新 holder。
 
 ## 2. 接口
 
-`agent-access/core/index.ts` 导出 `createAgentAccess(options)`。调用方提供：
+`instrumentation/core/index.ts` 导出 `createAgentAccess(options)`。调用方提供：
 
 | 选项 | 含义 |
 | --- | --- |
 | `taskId` | 上报事实中的 task 身份 |
-| `report(message)` | 向控制面发送一条已构造好的消息 |
+| `report(message)` | 向 control plane 发送一条已构造好的消息 |
 | `evaluate(artifact, decision, data, signal)` | 执行一次编译 Policy 的 Decision 求值；由接入进程注入，通用层不绑定具体 runner 位置 |
 
 返回的接口：
@@ -38,7 +51,7 @@
 | 方法 | 用途 |
 | --- | --- |
 | `beforeAction(point)` | 产品在真实执行前调用。执行 effect 闸门、rebalance pause、`admit`、`extent` 与相应上报，最后返回 `allow` 或 `admit` 处置 |
-| `control(command)` | 按控制面命令维护 hold、本地 Policy 和 extent 计数；产品适配在命令处理入口调用 |
+| `control(command)` | 按 control plane 命令维护 hold、本地 Policy 和 extent 计数；产品适配在命令处理入口调用 |
 | `releaseAll()` | 进程退出时释放全部 hold |
 
 `ExecutionPoint` 只承载通用事实：`branch`、`actionId`、`actionKind`、`name`、`arguments`、Policy 的 `op` 与 `contractContext`、是否允许准入、附加的 admission facts、取消信号。产品用函数形式的 `admit` / `admissionFacts` 表达“等到闸门放行后再判断是否是权威路径”和“准入成立时才生成产品事实”。
@@ -49,15 +62,15 @@
 - `extent` 按 Branch 和 action identity 计数，只在工具执行点求值；结果为 `stop` 时上报 `branch_suspended(extent_reached)` 并等待 `resolve_pending` 或取消释放。
 - `effect` 只对 `tool_execution` 执行点求值；`deny` 直接抛错，`block` 上报 `branch_suspended(effect_gate)` 并等待 Promote、Discard 或清理释放。模型推理是 PURE 步骤，不经过 effect 闸门。
 - `rebalance` 的 pause/resume 与 extent/effect hold 都由通用层保存和释放；`branch_suspended` / `branch_resumed` 由通用层上报。
-- 控制面命令的 hold 生命周：`start_candidate` 建立 effect hold，`promote` 释放 effect/extent，`discard`、`cleanup` 释放全部 hold 并清理本地状态，`resolve_pending` 释放 extent。
+- control plane 命令的 hold 生命周：`start_candidate` 建立 effect hold，`promote` 释放 effect/extent，`discard`、`cleanup` 释放全部 hold 并清理本地状态，`resolve_pending` 释放 extent。
 
 ### 3.1 交互接口（2026-11-16）
 
-目标语义见 [Agent 接入设计](../design/agent-integration.md) §3.1。2026-11-16 已实现：`agent-access/pi/main.ts` 四处创建 session 后通过共同的 `bindInteraction` 调用 `session.bindExtensions({ uiContext })`，上下文由 `interaction.ts` 提供。`confirm/select/input/editor` 生成 `prompt_id` 并等待控制面的回答；AbortSignal、取消、Branch discard/cleanup/abort、恢复暂停及连接退出都结束等待。结束等待一律 resolve 而不 reject：取消、中止、断开都按 Pi RPC 宿主同样的默认答案收尾（`confirm` 为 `false`，其余为 `undefined`），只有不支持的 `custom` 直接 reject。这样扩展拿到的是“未确认／未作答”而非异常，避免未捕获 rejection 终止 Pi 进程；取消之后的结果如何处理仍归 Agent。绑定本身可能触发 `session_start` 提示，因此不占住命令队列；执行等待绑定完成，回答和取消能够独立送达。提示只传文字，答案原样交回 Pi，不增加 Policy Decision 或修改 extent/effect。
+目标语义见 [Agent 接入设计](../design/agent-integration.md) §3.1。2026-11-16 已实现：`instrumentation/pi/main.ts` 四处创建 session 后通过共同的 `bindInteraction` 调用 `session.bindExtensions({ uiContext })`，上下文由 `interaction.ts` 提供。`confirm/select/input/editor` 生成 `prompt_id` 并等待 control plane 的回答；AbortSignal、取消、Branch discard/cleanup/abort、恢复暂停及连接退出都结束等待。结束等待一律 resolve 而不 reject：取消、中止、断开都按 Pi RPC 宿主同样的默认答案收尾（`confirm` 为 `false`，其余为 `undefined`），只有不支持的 `custom` 直接 reject。这样扩展拿到的是“未确认／未作答”而非异常，避免未捕获 rejection 终止 Pi 进程；取消之后的结果如何处理仍归 Agent。绑定本身可能触发 `session_start` 提示，因此不占住命令队列；执行等待绑定完成，回答和取消能够独立送达。提示只传文字，答案原样交回 Pi，不增加 Policy Decision 或修改 extent/effect。
 
-命令清单在初始权威 session 的 `bindExtensions` 完成后读取一次：这包括 `session_start` 和随后的 `resources_discover` 资源加载。启动提示先独立发布、可立即回答，不等待清单；执行等待绑定完成，但命令队列不等待提示。清单保存在 Pi 接入进程的 `commandCatalog`，控制面 `command_catalog` 保存已发布清单，Ledger 保存 `commands_listed` 供 WebUI/TUI 重连折叠；权威切换不清空、不重取，输入 `/` 只筛选缓存。旧 `get_commands` 入口仅返回缓存，不触发 Pi 资源读取；不引入自动过期或轮询。项保留 `name/description/source/sourceInfo`；接入优先使用公开 `session.getCommands()`，当前相邻 Pi 使用其 RPC 同样采用的公开来源 `extensionRunner.getRegisteredCommands()`、`promptTemplates`、`resourceLoader.getSkills()`。没有硬编码命令表或修改 Pi。选中命令原文交给 session.prompt；Pi 原生终端内建命令不另行复制。
+命令清单在初始权威 session 的 `bindExtensions` 完成后读取一次：这包括 `session_start` 和随后的 `resources_discover` 资源加载。启动提示先独立发布、可立即回答，不等待清单；执行等待绑定完成，但命令队列不等待提示。清单保存在 Pi 接入进程的 `commandCatalog`，control plane `command_catalog` 保存已发布清单，Ledger 保存 `commands_listed` 供 WebUI/TUI 重连折叠；权威切换不清空、不重取，输入 `/` 只筛选缓存。旧 `get_commands` 入口仅返回缓存，不触发 Pi 资源读取；不引入自动过期或轮询。项保留 `name/description/source/sourceInfo`；生产接入使用原生 inline extension 的公开 `getCommands()`，在绑定与资源发现完成后读取；SDK double 仍可提供 `session.getCommands()` 或原有资源来源。没有硬编码命令表或修改 Pi。选中命令原文交给 session.prompt；Pi 原生终端内建命令不另行复制。
 
-协议：Agent 消息 `ui_prompt_requested(branch_id,prompt_id,kind,title,message_text,options,placeholder,prefill)`、`ui_prompt_cancelled(branch_id,prompt_id)`、`ui_notification(branch_id,text,level)`、`commands_listed(branch_id,request_id,commands)`；命令 `ui_prompt_answer(branch_id,prompt_id,answer,cancelled,reason)`、`get_commands(branch_id,request_id)`。HTTP action 为 `ui_prompt_answer(prompt_id,answer,cancelled?)` 和 `get_commands(request_id)`。回答在控制面事件循环同步校验当前权威与未回答状态，未知、重复、迟到回答返回明确错误（HTTP 409）；不为提示增加超时或默认答案。
+协议：Agent 消息 `ui_prompt_requested(branch_id,prompt_id,kind,title,message_text,options,placeholder,prefill)`、`ui_prompt_cancelled(branch_id,prompt_id)`、`ui_notification(branch_id,text,level)`、`commands_listed(branch_id,request_id,commands)`；命令 `ui_prompt_answer(branch_id,prompt_id,answer,cancelled,reason)`、`get_commands(branch_id,request_id)`。HTTP action 为 `ui_prompt_answer(prompt_id,answer,cancelled?)` 和 `get_commands(request_id)`。回答在 control plane 事件循环同步校验当前权威与未回答状态，未知、重复、迟到回答返回明确错误（HTTP 409）；不为提示增加超时或默认答案。
 
 `SpeculativeTree.ui_prompts` 按 Branch 保存提示，候选内容不进入观察事件。`change_authority` 在确认 Promote 后发布该 Branch 的挂起提示，同时取消换出权威的未答提示：提示已经展示过，但换出后任何回答都会被拒绝，继续显示只会留下无法操作的控件。`change_status` 进入丢弃／清理、interrupt、shutdown、失败及释放时关闭提示并排队取消命令。未知 Branch 或重复 `prompt_id` 也回一条取消命令，不把 Agent 的提示错误升级为连接失败。执行循环先发送这些取消，再发送原有生命周期命令。WebUI 仍通过原有 SSE 读取 `ui_prompt_requested/ui_prompt_resolved/ui_notification/commands_listed`，无第二条推送通道。
 
@@ -69,9 +82,9 @@
 
 ## 4. session 持久化与状态交接：已定方向及实现差距
 
-2026-11-13 确认：运行分支采用 Pi 原生完整持久化，允许多 session 作为过渡，由接入侧汇总为单一最终权威 session。源分支停止写入且成功汇总后，才可删除对应临时文件；Promote 后仍活跃的 winner 不能删除。compaction、custom 等记录必须保存，不只保存 `message_end`。这些是已定实现方向，不表示当前适配器已经完成。
+2026-11-13 确认：运行分支采用 Pi 原生完整持久化，允许多 session 作为过渡，由 Instrumentation 汇总为单一最终权威 session。源分支停止写入且成功汇总后，才可删除对应临时文件；Promote 后仍活跃的 winner 不能删除。compaction、custom 等记录必须保存，不只保存 `message_end`。这些是已定实现方向，不表示当前适配器已经完成。
 
-实现入口为 `agent-access/pi/main.ts` 与 `session-tree.ts`；当前原生持久化、真实结果父链整理和停止写入后的汇总删除进展及验证范围见本节末。
+实现入口为 `instrumentation/pi/main.ts` 与 `session-tree.ts`；当前原生持久化、真实结果父链整理和停止写入后的汇总删除进展及验证范围见本节末。
 
 必要状态交接的正确性由机制保证。文件系统可讨论以共同快照为基准，将真实执行的差异合入获胜候选；这只是讨论方向，不是已实现 Backend，也不是通用状态 merge 的授权。
 
@@ -85,7 +98,7 @@
 
 原始运行上下文与整理后恢复上下文可能不同，是用户接受的历史含义变化，不把二者相同列为验收承诺。是否向 winner 追加真实结果通知交由 Policy，默认完全不追加，不发送空消息；既有 dispose／Promote 承载可选 `notification`，不新增 Policy 名称或类别。
 
-2026-11-13 实现进展：Pi 分支现在由独立的原生持久 `SessionManager` 文件承载，复制原生 entry 后在独立 manager 选择 checkpoint，保留原生 entry ID 及 compaction/custom 等非 message entry。Pi 的 `createBranchedSession` 会修改 receiver 并重建 label ID，不能在活跃 manager 上调用；此处保留完整索引以免丢失旁支引用。候选在待决工具 checkpoint 建立，不等待整个 turn。`message_end` 只在 Pi 已落盘后读取对应 native entry，避免重复写入 message。接入侧先校验父引用，再写入临时汇总文件并替换最终文件；源分支失败时保留，活跃 winner 不删除。回放导出不能直接使用重挂后的父链。
+2026-11-13 实现进展：Pi 分支现在由独立的原生持久 `SessionManager` 文件承载，复制原生 entry 后在独立 manager 选择 checkpoint，保留原生 entry ID 及 compaction/custom 等非 message entry。Pi 的 `createBranchedSession` 会修改 receiver 并重建 label ID，不能在活跃 manager 上调用；此处保留完整索引以免丢失旁支引用。候选在待决工具 checkpoint 建立，不等待整个 turn。`message_end` 只在 Pi 已落盘后读取对应 native entry，避免重复写入 message。Instrumentation 先校验父引用，再写入临时汇总文件并替换最终文件；源分支失败时保留，活跃 winner 不删除。回放导出不能直接使用重挂后的父链。
 
 验证：`node --test tests/pi-access.mjs tests/pi-session-history.mjs` 共 7 项通过，覆盖 checkpoint 原生记录、原生 ID、真实结果重挂、运行 manager 不变、活跃源保留、停止后清理、失败保留和已安装 `pi-code-rollback` 的同仓库快照关联。快照在 `/tmp/opencode` 临时 Git 仓库生成，核对 `targetId`、`repoRoot`、`ref^{tree}`、Git blob 可读及重开后的启动 GC；没有执行用户仓库恢复。`node tools/replay/verify/b1-pi.ts` 通过，使用本地回放服务，产物 `/tmp/opencode/ascout-replay-b1-pi-ENK910`。
 
@@ -109,6 +122,6 @@
 - 只有 Pi 一个 Product Integration；sub-agent 启动前仍无统一 Hook。
 - effect 只实现 `block` / `deny` 两种最小计划，没有 Reuse、Salvage 或更多效果模式。
 - extent 计数的是工具执行点的 action 次数，不是模型语义上已完成步骤数；子 Chance 的计数独立于父 Chance。
-- hold 的 Promise 只存在于接入进程内；主动退出保存 hold 所属 Branch 与工具／候选配对描述，跨进程重新建立等待，用户继续后才推进。控制面仍是 Tree、Chance 和提交资格的唯一权威。实际验收与 backend 边界见 [恢复](recovery.md)。
-- 通用层不等待“控制面返回的任意处置”；它只把控制面命令落实为 hold 的释放，真正的继续/阻止/使用结果仍由 Product Integration 在本次调用返回路径上完成。
+- hold 的 Promise 只存在于接入进程内；主动退出保存 hold 所属 Branch 与工具／候选配对描述，跨进程重新建立等待，用户继续后才推进。control plane 仍是 Tree、Chance 和提交资格的唯一权威。实际验收与 backend 边界见 [恢复](recovery.md)。
+- 通用层不等待“control plane 返回的任意处置”；它只把 control plane 命令落实为 hold 的释放，真正的继续/阻止/使用结果仍由 Product Integration 在本次调用返回路径上完成。
 - `node --test tests/pi-access.mjs` 覆盖 Pi 接入行为，使用伪造 SDK 与手工事件，不调用真实模型；本轮没有新增测试。

@@ -1,21 +1,21 @@
-# 控制面 WebUI（2026-11-10）
+# control plane WebUI（2026-11-10）
 
 2026-11-13 根部连接采用实际可见父边界位置映射与有限子侧过渡，直接构造两条三次曲线和闭合填充，保留 React Flow + SVG；连接与 bounds 共用控制点。子枝起点在父中心线、Chance 在父外沿，叶茎 placement 不变。用户已检查并接受当前画面，尚未穷举极端参数；公式与限制见 [连接状态](tree-connection-repair.md)、[投机树绘制参数](tree-parameters.md#固定分叉平滑连接2026-11-13)。
 
-控制面 WebUI 是 `--web` 模式下的正式浏览器界面。它只读取控制面已经发布的观察事实与按 Branch 的对话接口，不接触 Speculative Tree、控制命令或 Runtime 内部对象；输入仍走 `POST /api/request`。
+control plane WebUI 是 `--web` 模式下的正式浏览器界面。它只读取 control plane 已经发布的观察事实与按 Branch 的对话接口，不接触 Speculative Tree、控制命令或 Runtime 内部对象；输入仍走 `POST /api/request`。
 
-Gateway 属于控制面，与 UI 均不独立部署，由控制面统一启动和停止；这不规定必须同进程，也不要求自动打开浏览器。当前 HTTP listener、连接和 SSE 工作线程由控制面持有停止句柄并等待回收，细节及验证范围见 [Gateway 实现核查](gateway.md)。目标语义见 [控制面 §2.1](../design/control-plane.md#21-gateway)。
+Gateway 属于 control plane，与 UI 均不独立部署，由 control plane 统一启动和停止；这不规定必须同进程，也不要求自动打开浏览器。当前 HTTP listener、连接和 SSE 工作线程由 control plane 持有停止句柄并等待回收，细节及验证范围见 [Gateway 实现核查](gateway.md)。目标语义见 [control plane §2.1](../design/control-plane.md#21-gateway)。
 
 ## 技术组成
 
 - React 19 + TypeScript，React Flow 绘制投机树，Zustand 保存观察状态。
 - Vite 构建；源码位于仓库根目录 `webui/`。前端构建需要 Node 22.12 或更新的版本（当前验证使用 Node 26）。
 - 构建产物位于 `webui/dist/`，不提交到仓库，由 `src/bin/ascout-control-plane.rs` 用 `include_bytes!` 嵌入 Rust 二进制，交给 Gateway HTTP 入口提供。根目录 `make` 统一构建前端和 Rust；直接运行 `cargo build` 不会启动前端工具链。
-- `webui/dist/index.html`、`webui/dist/assets/app.js`、`webui/dist/assets/app.css` 与 `webui/dist/favicon.svg` 是嵌入入口；控制面按固定路径提供它们。
+- `webui/dist/index.html`、`webui/dist/assets/app.js`、`webui/dist/assets/app.css` 与 `webui/dist/favicon.svg` 是嵌入入口；control plane 按固定路径提供它们。
 
 ### 生产构建
 
-当前使用方式是在本机运行控制面，用本机浏览器访问 loopback 地址。准备 Make、Rust 和上述 Node 环境后，在仓库根目录运行：
+当前使用方式是在本机运行 control plane，用本机浏览器访问 loopback 地址。准备 Make、Rust 和上述 Node 环境后，在仓库根目录运行：
 
 ```sh
 make
@@ -50,7 +50,7 @@ RangeError: Maximum call stack size exceeded
 
 已审查 `count`、`place`、`branchDepth`：它们按 Branch 父子层级递归，复现样例只有一根无父枝，不存在递归深度或循环数据；当前故障链上没有 `push(...array)`。本次不扩展循环或极深树处理。最终提交因 geometry/treeGraph 等依赖尚未跟踪、SpeculationTree/开发文档/dist 含大量既有未提交工作而无法安全隔离，保留工作区等待整轮审查。
 
-先以 Web 模式启动控制面（绑定的地址会打印在控制面输出中）：
+先以 Web 模式启动 control plane（绑定的地址会打印在 control plane 输出中）：
 
 ```sh
 cargo run --bin ascout-control-plane -- /path/to/run-dir ../pi --web 127.0.0.1:8080
@@ -64,13 +64,13 @@ npm ci
 npm run dev
 ```
 
-默认代理目标是 `http://127.0.0.1:8080`；控制面使用其他地址或端口时：
+默认代理目标是 `http://127.0.0.1:8080`；control plane 使用其他地址或端口时：
 
 ```sh
 ASCOUT_WEB_TARGET=http://127.0.0.1:8099 npm run dev
 ```
 
-代理必须把 Host 和 `POST /api/request` 的 Origin 改写成控制面的值，因为控制面只接受 loopback、校验 Host，并要求同源 JSON 请求。开发服务器本身不实现观察接口，它只转发 `/api`。
+代理必须把 Host 和 `POST /api/request` 的 Origin 改写成 control plane 的值，因为 control plane 只接受 loopback、校验 Host，并要求同源 JSON 请求。开发服务器本身不实现观察接口，它只转发 `/api`。
 
 其他命令：
 
@@ -85,7 +85,7 @@ npm run typecheck  # 只做 TypeScript 工程检查
 
 2026-11-16 实现记录：`AgentPrompt.tsx` 提供是／否、选项、单行输入及多行编辑；明确取消时按 Pi 的取消值结束（确认 false，其余 undefined），无人回答则保持等待，不补默认答案或提示超时。`store.ts` 从状态事件集及现有 SSE 折叠未关闭提示、通知与启动命令清单，刷新／重连恢复当前已发布提示和缓存清单。输入 `/` 只筛选启动资源加载完成后取得的清单，不发 `get_commands`；换权威不清空清单。选中后通过普通 prompt action 发送命令原文；提示答案走独立回答入口，`/pause` 保持既有控制语义。断开时关闭提示控件。消息正文沿用 React 文本节点，未引入 HTML、Markdown 或图片渲染。`custom` 不支持；AScout TUI 也提供文字提示回答入口，操作见 [TUI 使用说明](reference-workload.md)。尚未做浏览器人工全链路验收。
 
-左侧默认显示独立的“权威窗口”用户视图，跟随当前权威 Branch，展示从任务开始到当前的 `inherited`、消息与流式内容连续阅读流；它不显示 Branch 生命周期状态并允许输入。也可以切换到具体 Branch 窗口：继承自父 Branch 的消息与当前 Branch 的消息按先后顺序连续渲染，不折叠、不插入分隔线，当前权威 Branch 显示“当前权威窗口 · id”，历史权威 Branch 显示“id · 状态”，并在窗口标识中显示角色与状态徽标；历史 Branch 只读。发送后消息立即以“发送中”状态显示，服务器回显同一用户消息后移除临时条目，失败时显示错误。第一个版本从观察事件推导任务列表，控制面没有单独的任务列表接口。
+左侧默认显示独立的“权威窗口”用户视图，跟随当前权威 Branch，展示从任务开始到当前的 `inherited`、消息与流式内容连续阅读流；它不显示 Branch 生命周期状态并允许输入。也可以切换到具体 Branch 窗口：继承自父 Branch 的消息与当前 Branch 的消息按先后顺序连续渲染，不折叠、不插入分隔线，当前权威 Branch 显示“当前权威窗口 · id”，历史权威 Branch 显示“id · 状态”，并在窗口标识中显示角色与状态徽标；历史 Branch 只读。发送后消息立即以“发送中”状态显示，服务器回显同一用户消息后移除临时条目，失败时显示错误。第一个版本从观察事件推导任务列表，control plane 没有单独的任务列表接口。
 
 右侧是可隐藏的投机面板，默认显示投机树；点击顶部种子、工具叶片或模型叶茎进入该 Branch 的只读详情，可以返回树。树上不显示分支名，子枝不重复绘制枝头；悬停显示 Branch id、模型、token、Chance 字段、结算与调用/事件摘要。候选未采纳使用中性状态文字，不把用户视图描述为已清理。
 
@@ -97,7 +97,7 @@ npm run typecheck  # 只做 TypeScript 工程检查
 
 此前无模型 Chromium 验收已通过：1440px 窗口初始约 489.59px，拖动后约 689.59px，极限范围 410–952px，最大时主面板 480px；释放、取消、键盘及 ARIA 值一致，窄屏抽屉、跨入窄屏和关闭面板均正常，无文档横向溢出。交接报告 `/tmp/opencode/panel-resize-report.md`、数据 `/tmp/opencode/panel-resize-validation.json` 和脚本 `/tmp/opencode/panel-resize-check.mjs` 为临时验收材料。本轮核对实现后不重复广泛浏览器测试，只从已完成树形回退的当前源码统一重建 `webui/dist` 并检查类型与 diff 空白；构建结果不能替代浏览器验收。
 
-收尾构建：`npm run build`（含 `tsc -b`）通过，统一生成当前树形与面板拖动的 `dist/assets/app.js`、`app.css`；`cargo build --bin ascout-control-plane` 通过，确认产物可嵌入控制面；`git diff --check` 通过。未调用真实模型、未新增测试，未暂存或提交；源码、文档与 dist 的混合修改保留待整轮审查。
+收尾构建：`npm run build`（含 `tsc -b`）通过，统一生成当前树形与面板拖动的 `dist/assets/app.js`、`app.css`；`cargo build --bin ascout-control-plane` 通过，确认产物可嵌入 control plane；`git diff --check` 通过。未调用真实模型、未新增测试，未暂存或提交；源码、文档与 dist 的混合修改保留待整轮审查。
 
 ### 投机树与统计
 
@@ -173,9 +173,9 @@ webui/
 
 ### 源侧起点与父枝截止（2026-11-14）
 
-`chance_created.speculation_started_at_ms` 来自接入侧本地 `admit` 通过后发送准入请求时的 `Date.now()`；无候选的 Chance 也从该字段定位。它是约定的投机起点，不是候选启动的证明。记录追加时刻只表示 Ledger 写入时刻，不用于定位。
+`chance_created.speculation_started_at_ms` 来自 Instrumentation 本地 `admit` 通过后发送准入请求时的 `Date.now()`；无候选的 Chance 也从该字段定位。它是约定的投机起点，不是候选启动的证明。记录追加时刻只表示 Ledger 写入时刻，不用于定位。
 
-控制面在对应 Proposal 的 `match` 求值完成后、`dispose` 之前记录验证时间；公共 `proposal_validated` 绑定 Chance、Proposal 与该次验证工作 id。只有 Agent 确认 Promote 后的 `accepted` 引用用于那次 Promote 的 id；重复验证、等待祖先和 Promote 失败不会将较早或其他 Proposal 的验证冒充最终依据。接受前保留完整父枝；接受后父枝沿原调用时间映射最多画到验证时间，不延长到最后调用之后，端点显示短横线及悬停说明。验证点之后开始的父枝调用不在树上绘制，仍属于原父枝并保留在详情中；之前开始但完成较晚的模型调用保留，叶茎锚点限制在截止范围。
+control plane 在对应 Proposal 的 `match` 求值完成后、`dispose` 之前记录验证时间；公共 `proposal_validated` 绑定 Chance、Proposal 与该次验证工作 id。只有 Agent 确认 Promote 后的 `accepted` 引用用于那次 Promote 的 id；重复验证、等待祖先和 Promote 失败不会将较早或其他 Proposal 的验证冒充最终依据。接受前保留完整父枝；接受后父枝沿原调用时间映射最多画到验证时间，不延长到最后调用之后，端点显示短横线及悬停说明。验证点之后开始的父枝调用不在树上绘制，仍属于原父枝并保留在详情中；之前开始但完成较晚的模型调用保留，叶茎锚点限制在截止范围。
 
 源时间或已接受 Proposal 对应验证时间缺失、不匹配时显示明确绘制错误，并清除缓存，不用记录、Promote 或旧的成功结果替代。旧记录中未携带这些字段时同样如此。无候选机会、时间修正、隐藏和详情期间接收验证、缓存与全量结果一致及错误清除已用手工事件检查；真实模型和浏览器画面尚未验收。
 
@@ -187,13 +187,13 @@ webui/
 
 树上 Chance 的圆半径等于对应子枝实际根宽乘 `chanceRadiusRatio`（默认 0.05）；缺少对应 Branch 时使用父枝采样宽度，也显示圆点，不冒充 Branch。空 Branch 由自己的节点画出实心椭圆芽。
 
-- 枝段长度按相邻调用开始时间差逐截计算；缺少 `started_at_ms` 时整棵树报错。Chance 按接入侧准入时间在相邻两截之间插值并限制在枝端范围内；缺少源时间时不猜测。
+- 枝段长度按相邻调用开始时间差逐截计算；缺少 `started_at_ms` 时整棵树报错。Chance 按 Instrumentation 准入时间在相邻两截之间插值并限制在枝端范围内；缺少源时间时不猜测。
 - 树的横向位置由逐截随机行走与回中概率决定；还没有按整棵树的墨迹质量做配平，长枝多的一侧可能更宽。
 - 历史聊天浏览的需求是像普通 chatbot 一样，通过列表回看以前聊天（2026-11-16 确认），不是事件级回放。当前没有任务列表接口；任务从事件中的 `task_id` 推导，首个事件到达后才会出现，任务切换状态保留在客户端；这些实现事实不等于已支持上述历史聊天浏览。
 - NLE 地图浏览位于独立的 `/map` 入口；它读取同一 task 的真实 Runtime `nle_map_action` 公开观察事件，作为跨 Promote 的权威窗口历史；Branch 只显示为动作来源，不按单 Branch 筛选。没有事件时才使用明确标注的演示序列；不同 task、乱序或无效事件仍不会被伪造为同一条完整时间线，详见 `docs/development/nle-map.md`。
 - 对话正文仍按需读取；权威窗口按 `authorityHistory` 依次读取并连续展示已成为权威路径的内容，按 Branch 查看仍是独立窗口。消息组件使用稳定身份和 memo，观察事件只使末尾数据刷新，滚动仅在用户仍贴近底部时跟随；Ledger 的 transcript 保存权威 session 文件的消息引用，正文存于该文件，继承由记录父链表达；这些内部引用没有进入公共观察事件，不能把文件中的全部候选旁支当作已生效对话。
 - 模型投机当前没有生产路径；面板按事件结构显示，不假设模型投机一定发生。
-- `tool_finished.tool_name` 只在接入侧报告过同一 action 的 `ActionStarted` 时存在；只有准入请求时该字段为 null，界面显示“未上报”。
+- `tool_finished.tool_name` 只在 Instrumentation 报告过同一 action 的 `ActionStarted` 时存在；只有准入请求时该字段为 null，界面显示“未上报”。
 - 统计只累加已上报事实。`model_usage` 缺 token 或费用时不补零；结算的实测/估计部分缺失时对应项显示“暂无”。
 
 ## 调参关系静态审查（2026-11-14）
@@ -259,7 +259,7 @@ webui/
 
 - 2026-11-14 调参本地保存：`cd webui && npm run build`（含 `tsc -b`）、`node --test tests/tree-layout.mjs`（现有 8 项）与 `git diff --check` 通过。现有大采样用例改为直接构造参数，无新增测试。一次性纯数据检查覆盖所有已知 URL 键及重复键清理、其它查询参数/`tune`/hash/history state 保留、本地值不被 URL 覆盖、再次恢复及损坏/不可用存储回退；未使用浏览器或模型。
 - 2026-11-14 固定绘制值与调参入口精简：`cd webui && npm run build`（含 `tsc -b`）和 `git diff --check` 通过；构建提示压缩后的 JS 块略超过 500 kB。未新增测试、未启动浏览器、未进行截图或真实模型验证。
-- `cd webui && npm run build`（含 `tsc -b`）通过，`webui/dist` 用同一份源码重建。本轮未提交、未启动控制面、未调用真实模型、没有新增自动化测试。
+- `cd webui && npm run build`（含 `tsc -b`）通过，`webui/dist` 用同一份源码重建。本轮未提交、未启动 control plane、未调用真实模型、没有新增自动化测试。
 - 2026-11-12 使用临时只读 Python 服务提供 dist、假观察事件与 SSE，fixture 入口为 `/tmp/opencode/mock-tree7.py`，不入仓库；另用 `/tmp/opencode/mock-tree10.py` 把工具状态轮换成成功、失败、取消、超时四种，只验证颜色与空心样式。
 - 实测（1800×1200、DPR2、fixture 原时钟）：9 个 Branch、66 根叶茎、66 片叶、9 个 Chance 圆点、1 个空 Branch 芽。这些数量记录不替代完成位置与填充连接验收。
 - 本次枝长与 Chance 尺寸调整后，先前 fixture 的枝长数值和圆点尺寸不作为当前几何的验证依据；本次仅运行类型检查与生产构建，未重新进行浏览器测量。

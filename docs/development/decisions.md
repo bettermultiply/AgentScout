@@ -1,5 +1,20 @@
 # 开发决策
 
+## Pi 接入与可信宿主
+
+Agent 与随附 Instrumentation 在 Branch 隔离环境外运行，仍由 Runtime 管理启动、监视和回收。Branch 文件访问、shell、受管子程序和效果留在对应 Environment；挂载切换和物化不重启宿主。Firecracker Guest Agent 继续作为 guest 内 Runtime 命令服务。
+
+本轮保留 SDK 宿主：原生 RPC `fork`/`clone` 切换当前 session，没有在同一宿主并行管理独立候选和恢复待决工具的协议，也没有当前 `AgentSession.continue` 的对应控制命令。扩展 `context` 能等待并调用 `ctx.abort()` 取消，但不提供 Agent 或候选 session 控制接口；不以扩展吞异常作为否定依据。原生 inline extension 的公开 `getCommands()` 已替代生产命令发现对 runner 的直接读取，正常资源加载保留。`--models` 仍为当前集成的 provider JSON 参数，不宣称原生 CLI 模型列表兼容。
+
+SDK 模型完成回调现在在终态事件及 `result()` 交付前等待，避免原先 detached Promise 的完成顺序缺陷；保留 SDK 原有认证路由及 stream 身份，不使用外部 `markRuntimeStreamFunction` 包装。fake OAuth 摘要、取消与完成等待由相邻 Pi 的 native verification 测试覆盖。产品扩展的任意 Node 文件/进程访问无法自动改写成 Branch 视图；隔离保证只适用于已经适配的文件工具和 Runtime 工具，不声称所有插件都被自动隔离。
+
+
+## Policy 常驻求值：已确认边界与当前差距
+
+已确认每个 worker 启动时建立一次 bwrap namespace 并持续复用，不能移除文件、网络、环境和 fd 隔离。`model_complete` 必须由宿主按当前请求身份、Decision、模型允许列表、额度和取消状态校验，凭证留在宿主；终态撤销授权，真实模型请求不自动重试。Node 显式授权入口已接 Pi `Models.complete`，实际 runner 假 provider 往返和一次 deepseek/deepseek-flash 请求通过；Rust 新增显式 grant 回调入口。跨 Branch 恶意模块状态隔离、Rust 同步 provider 强制取消及正常启动配置的 grant 接线仍有差距，不能宣称完整验收。细节与验证记录见 `docs/development/policy-engine.md`。
+
+Rust 和 Pi 本地均已接入有界常驻 worker 池，同一编译脚本的请求通过 IPC 串行求值；超时及协议失败后杀死并回收，后续重建。Python 每次重新导入声明模块，不把命名空间当安全边界。删除会跨请求累计的 CPU 限额，保留逐次 wall deadline。Pi 保留原监督修复并提供显式释放和空闲回收。没有发出真实模型请求，不能宣称完整任务或 capability 验收已完成。验证与具体限制见 [Policy Engine](policy-engine.md)。
+
 ## 2026-11-16：信号唤醒与物化错误补验
 
 信号 socket 只承担唤醒提示，线程每 20ms 重新检查 release/acquire pending 标志，避免字节已消费或非阻塞写入失败后标志无人处理；退出关闭写半部，不依赖可能丢失的结束字节。同类标准信号可以合并，不引入信号次数语义，SIGINT 仍终止 task 并留 session，SIGTERM 仍请求 Shutdown。Authority 验收不再通过外部 release 结束待取消写者，改用无限 heartbeat 写者并检查停止。加强测试在已有停止路径上即通过，本轮不冒认该路径为新修复。缺失 authority／Branch／Environment 进入已有可见、可重试的物化失败状态，不伪造成功，不自动重建损坏状态。实际失败→通过证据、并发挂载用例的未定位失败与剩余限制见[恢复](recovery.md)。

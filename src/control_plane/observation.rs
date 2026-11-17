@@ -48,7 +48,7 @@ pub enum ObservationContent {
         /// 这个 Branch 所属的 Chance；初始权威为 null。
         chance_id: Option<String>,
         speculation_kind: Option<ActionKind>,
-        /// 被准入投机的起点（准入请求的接入侧时刻）；非投机候选为 null。
+        /// 被准入投机的起点（准入请求的 Instrumentation 时刻）；非投机候选为 null。
         speculation_started_at_ms: Option<u64>,
     },
     /// `admit` 通过：Chance 获得 id，处于 `pending`。
@@ -60,7 +60,7 @@ pub enum ObservationContent {
         tool_name: String,
         stage: ChanceStage,
         authority_state: AuthorityState,
-        /// 接入侧准入请求时刻，可早于 select 和候选启动。
+        /// Instrumentation 准入请求时刻，可早于 select 和候选启动。
         speculation_started_at_ms: Option<u64>,
     },
     ChanceStageChanged {
@@ -113,7 +113,7 @@ pub enum ObservationContent {
     },
     ModelUsage {
         branch_id: String,
-        /// 这次调用对应的模型 action；接入侧无法配对时为 null，不伪造身份，
+        /// 这次调用对应的模型 action；Instrumentation 无法配对时为 null，不伪造身份，
         /// 也不会因此丢弃这次用量。
         action_id: Option<String>,
         model: String,
@@ -123,7 +123,7 @@ pub enum ObservationContent {
         cache_write_tokens: Option<u64>,
         total_tokens: Option<u64>,
         cost: Option<f64>,
-        /// 接入侧测量的模型请求开始与结束时刻，数据不可得时为 null。
+        /// Instrumentation 测量的模型请求开始与结束时刻，数据不可得时为 null。
         started_at_ms: Option<u64>,
         finished_at_ms: Option<u64>,
         duration_ms: Option<u64>,

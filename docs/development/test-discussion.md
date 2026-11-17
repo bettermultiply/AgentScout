@@ -28,13 +28,13 @@
 - `node --test tests/pi-*.mjs tests/predictor-fact.mjs`：35/35，`/tmp/opencode/closeout-pi-core-20261116.log`，含取消、超时、失败写入恢复、EPIPE/早关管道和 setsid 后代等待；全部原断言保留。
 - `node --test tests/predictor-fact-e2e.mjs`：1/1，`/tmp/opencode/closeout-local-e2e-20261116.log`；run `/tmp/opencode/predictor-fact-e2e-afEJS9`，3 次 loopback 伪模型请求、3 个模型 action、4 次准入、1 个 Candidate、真实西移动作成功、退出码 0。
 - `cargo test --offline --lib --bins`：首次 lib 为 169/170，btrfs snapshot-copy 子环境 overlay mount 报 `Device or resource busy`，完整失败证据 `/tmp/opencode/closeout-rust-core-20261116.log`。单项复跑 1/1，`/tmp/opencode/closeout-rust-btrfs-rerun-20261116.log`；不据此抹去首次失败，也未在本轮修改 Rust 挂载逻辑。bin 单独运行通过，日志 `/tmp/opencode/closeout-rust-bins-20261116.log`。
-- `node --check agent-access/pi/filesystem-tools.ts`、`git diff --check` 通过。
+- `node --check instrumentation/pi/filesystem-tools.ts`、`git diff --check` 通过。
 
 没有调用真实模型、没有再启动 subagent、没有提交，原有共享修改均保留。**真实模型 E2E 仍未通过，未重跑付费验证。**
 
 ## 首次模型请求失败的必要回归（2026-11-16）
 
-本次仅因已发生且可稳定复现的 `has_predictor` 循环依赖新增测试，遵守先红后绿：`tests/predictor-fact.mjs` 以真实失败 session 保存的 Policy 和手工事件复现模型/工具两路，`tests/predictor-fact-e2e.mjs` 以同份 Policy、正常控制面/真实 Runtime/Pi 和本地 SSE 验证首次请求通过。两个脚本的留档依赖、日志、误断言修正及未通过的已有文件工具测试，均记于 [验证记录](reference-workload.md)。没有引入真实模型调用或通用测试框架，没有改动既有文件工具的并行工作；原真实 E2E 仍未通过，保留原失败证据待主审复核。
+本次仅因已发生且可稳定复现的 `has_predictor` 循环依赖新增测试，遵守先红后绿：`tests/predictor-fact.mjs` 以真实失败 session 保存的 Policy 和手工事件复现模型/工具两路，`tests/predictor-fact-e2e.mjs` 以同份 Policy、正常 control plane/真实 Runtime/Pi 和本地 SSE 验证首次请求通过。两个脚本的留档依赖、日志、误断言修正及未通过的已有文件工具测试，均记于 [验证记录](reference-workload.md)。没有引入真实模型调用或通用测试框架，没有改动既有文件工具的并行工作；原真实 E2E 仍未通过，保留原失败证据待主审复核。
 
 ## 范围与执行约定
 
@@ -79,7 +79,7 @@
 
 原实现把整个 write/edit 内容 base64 编码后加入 `bash -c` 的单一参数。先新增回归再运行 `node --test tests/pi-filesystem-tools.mjs`：write、edit 均在 `filesystem-tools.ts:37` 抛 `spawn E2BIG`，证据目录 `/tmp/opencode/pi-filesystem-tools-3j6LwD`。修复为原始 Buffer 通过 stdin 管道传入隔离进程，不创建宿主临时内容文件。stdin 错误只记录，仍等待进程 close 后释放串行队列，以保留 namespace supervisor 等待全部后代结束的协议。
 
-回归覆盖大 UTF-8 内容 write/edit/read 往返、宿主文件保持不变、取消与超时的大输入、失败写入后的队列恢复，以及关闭 stdio 并 setsid 的后台后代等待；取消也检查另一个进程组的后代不会继续写入。针对性命令为 `node --test tests/pi-filesystem-tools.mjs`；语法检查为 `node --check agent-access/pi/filesystem-tools.ts` 和 `node --check tests/pi-filesystem-tools.mjs`。
+回归覆盖大 UTF-8 内容 write/edit/read 往返、宿主文件保持不变、取消与超时的大输入、失败写入后的队列恢复，以及关闭 stdio 并 setsid 的后台后代等待；取消也检查另一个进程组的后代不会继续写入。针对性命令为 `node --test tests/pi-filesystem-tools.mjs`；语法检查为 `node --check instrumentation/pi/filesystem-tools.ts` 和 `node --check tests/pi-filesystem-tools.mjs`。
 
 后续修复（2026-11-14）：
 

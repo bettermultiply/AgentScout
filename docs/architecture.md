@@ -1,42 +1,42 @@
 # AScout 架构
 
-本文只定义 AScout 的一级分层、各侧责任与跨侧调用方向。Runtime 是 AScout 支持的一套完整执行与效果承载系统；Runtime Adapter 是它与控制面之间的接入边界，不是与 Runtime 平级的另一侧。Mechanism 不是额外的一侧，而是横跨 Agent 接入侧、控制面与 Runtime 的抽象实现责任。
+本文只定义 AScout 的一级分层、各侧责任与跨侧调用方向。Runtime 是 AScout 支持的一套完整执行与效果承载系统；Runtime Adapter 是它与 control plane 之间的接入边界，不是与 Runtime 平级的另一侧。Mechanism 不是额外的一侧，而是横跨 Instrumentation、control plane 与 Runtime 的抽象实现责任。
 
 ## 1. 架构总览
 
-Agent 接入侧上报通用 action 生命周期及 Agent/Branch 元事件，控制命令回执只确认接入侧落实；Runtime 独立报告操作、环境及资源结果。Authority/Candidate 是 Tree 的角色，不是两种 Agent 事件协议。具体边界见 [Agent 接入](design/agent-integration.md)。
+Instrumentation 上报通用 action 生命周期及 Agent/Branch 元事件，控制命令回执只确认 Instrumentation 落实；Runtime 独立报告操作、环境及资源结果。Authority/Candidate 是 Tree 的角色，不是两种 Agent 事件协议。具体边界见 [Agent 接入](design/agent-integration.md)。
 
-用户端呈现稳定的 AScoutAgent 视图，与具体 Agent 执行实体分离。控制面确认合法 Promote 后，接入实现更新该视图对应的权威执行及输入、输出和中断路由；不通过切换或重建用户会话完成接替。用户端不新增一级架构侧面，也不拥有 Branch 接受裁决权。
+用户端呈现稳定的 AScoutAgent 视图，与具体 Agent 执行实体分离。control plane 确认合法 Promote 后，接入实现更新该视图对应的权威执行及输入、输出和中断路由；不通过切换或重建用户会话完成接替。用户端不新增一级架构侧面，也不拥有 Branch 接受裁决权。
 
-候选承接后续执行时继续使用候选环境；接入侧与 Runtime 保持执行、环境及必要状态交接的一致性，嵌套接受仍受祖先约束。Agent 常用 Ctrl-C 或退出终止任务；Ctrl-C 保留程序和 session，结束候选并等待相关写入及物化处理后，在同一对话中接下一轮。AScout 的独立暂停接口保留树、候选和环境；具体边界见 [Agent 接入设计](design/agent-integration.md) §5。
+候选承接后续执行时继续使用候选环境；Instrumentation 与 Runtime 保持执行、环境及必要状态交接的一致性，嵌套接受仍受祖先约束。Agent 常用 Ctrl-C 或退出终止任务；Ctrl-C 保留程序和 session，结束候选并等待相关写入及物化处理后，在同一对话中接下一轮。AScout 的独立暂停接口保留树、候选和环境；具体边界见 [Agent 接入设计](design/agent-integration.md) §5。
 
 Parent 取得真实 operation 结果后可以立即继续，候选验证并行进行，不以验证结束阻塞真实结果交付；合法 Promote 才使旧 Parent 失去权威并受管停止。工具准入与结果兼容性由 Policy 结合接入能力判断，operation 归属与结果配对由 Mechanism 保证。
 
-用户端还可提供独立于主对话的只读候选观察，显示候选运行事实和内容；候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份。观察不改变权威输出路由，不给候选建立用户输入通道，也不将观察内容反馈给其他 Branch。生命周期状态取自控制面，实际执行活动由接入侧报告，环境操作完成与否依据实际返回结果展示，不以命令已发出代替完成。
+用户端还可提供独立于主对话的只读候选观察，显示候选运行事实和内容；候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份。观察不改变权威输出路由，不给候选建立用户输入通道，也不将观察内容反馈给其他 Branch。生命周期状态取自 control plane，实际执行活动由 Instrumentation 报告，环境操作完成与否依据实际返回结果展示，不以命令已发出代替完成。
 
-AScout 的用户界面接收并呈现 Agent 输出与运行事件，不依赖某个 Agent 产品的原生界面；产品差异由对应 Agent 接入实现处理。UI 不独立部署，由控制面启动，边界见 [控制面 §2.1](design/control-plane.md#21-gateway)。观察覆盖当前 AScoutAgent 的完整 Tree，支持从 Branch 关系与状态进入具体 Branch 的只读详情，不提供跨 Tree 查询或生命周期裁决权限。
+AScout 的用户界面接收并呈现 Agent 输出与运行事件，不依赖某个 Agent 产品的原生界面；产品差异由对应 Agent 接入实现处理。UI 不独立部署，由 control plane 启动，边界见 [control plane §2.1](design/control-plane.md#21-gateway)。观察覆盖当前 AScoutAgent 的完整 Tree，支持从 Branch 关系与状态进入具体 Branch 的只读详情，不提供跨 Tree 查询或生命周期裁决权限。
 
-AScout 的完整调用路径涉及 Agent 接入侧、控制面和 Runtime。控制面一侧通过 Agent 接入边界接收 Agent 行为，另一侧通过 Runtime Adapter 使用 Runtime。Agent 接入侧与控制面是 AScout 自身可以定义和实现的系统部分；Runtime 是 AScout 支持的完整承载系统；Runtime Adapter 负责把 Runtime 接入控制面。
+AScout 的完整调用路径涉及 Instrumentation、control plane 和 Runtime。control plane 一侧通过 Agent 接入边界接收 Agent 行为，另一侧通过 Runtime Adapter 使用 Runtime。Instrumentation 与 control plane 是 AScout 自身可以定义和实现的系统部分；Runtime 是 AScout 支持的完整承载系统；Runtime Adapter 负责把 Runtime 接入 control plane。
 
-Agent 接入侧围绕一组 Agent 进程及其执行活动提供本地管理。Branch 为执行活动提供逻辑归属，Agent 接入侧为每个 Branch 承载独立的本地管理上下文；控制面通过接入侧获取 Agent 行为事实、发出控制命令，并协调 Branch 与 Instance 的全局状态。多个 Branch 共用 Backend 内部资源，但 Environment 身份按 Branch 独占；Branch 建立独立环境后，其管理上下文随执行活动进入相应环境。
+Instrumentation 围绕一组 Agent 进程及其执行活动提供本地管理。Branch 为执行活动提供逻辑归属，Instrumentation 为每个 Branch 承载独立的本地管理上下文；control plane 通过 Instrumentation 获取 Agent 行为事实、发出控制命令，并协调 Branch 与 Instance 的全局状态。多个 Branch 共用 Backend 内部资源，但 Environment 身份按 Branch 独占；Branch 建立独立环境后，其工作区访问、shell、受管子程序及效果进入相应环境；Agent 与随附 Instrumentation 留在环境外的可信宿主，由 Runtime 管理启动、监视和回收。
 
 完整执行须先建立受管 Runtime 边界，再创建 root Agent；launcher frontend 可由 CLI、IDE、daemon 或 Agent platform 等价提供，不影响受管范围。
 
-控制面负责维护投机执行过程当中 Agent 的控制状态，特别是由多次投机执行组合嵌套形成的拓扑结构。同时还负责执行过程中的决策和检查，Policy 和 Adapter 都以可插拔的形式与该结构连接。Runtime 内的 Adapter Registry 负责登记、契约兼容性与能力声明校验、主动验证及独立验证证据；控制面使用其能力视图加载与校验 Policy，并解析回传事件、检查请求和实际结果是否符合控制语义。逻辑 Branch 可以先进入控制面视图，独立 Runtime 环境按需建立，不要求每次投机执行都立即 fork。
+control plane 负责维护投机执行过程当中 Agent 的控制状态，特别是由多次投机执行组合嵌套形成的拓扑结构。同时还负责执行过程中的决策和检查，Policy 和 Adapter 都以可插拔的形式与该结构连接。Runtime 内的 Adapter Registry 负责登记、契约兼容性与能力声明校验、主动验证及独立验证证据；control plane 使用其能力视图加载与校验 Policy，并解析回传事件、检查请求和实际结果是否符合控制语义。逻辑 Branch 可以先进入 control plane 视图，独立 Runtime 环境按需建立，不要求每次投机执行都立即 fork。
 
-控制面定义自己接受的稳定 operation/event 边界和接入条件。Gateway 属于控制面，不独立部署，由控制面统一启动和停止；UI 同样由控制面启动和停止。该归属不规定必须同进程，也不要求自动打开浏览器。Gateway 负责 Agent 接入侧、UI、控制面与 Runtime 之间的通信接入、消息分发和送达，与 Runtime 采用网络通信；对应侧的控制逻辑决定消息如何影响自身状态。Runtime Adapter 依据控制面边界，把 Runtime 的能力映射成控制面可以使用的能力，并规范化结果与事件。Runtime 内部可以组合 Overlay、进程、容器、Firecracker、效果协调等能力；AScout 不规定这些内部模块如何组织或选择 transport，但要求接入边界如实呈现能力和限制。
+control plane 定义自己接受的稳定 operation/event 边界和接入条件。Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止；UI 同样由 control plane 启动和停止。该归属不规定必须同进程，也不要求自动打开浏览器。Gateway 负责 Instrumentation、UI、control plane 与 Runtime 之间的通信接入、消息分发和送达，与 Runtime 采用网络通信；对应侧的控制逻辑决定消息如何影响自身状态。Runtime Adapter 依据 control plane 边界，把 Runtime 的能力映射成 control plane 可以使用的能力，并规范化结果与事件。Runtime 内部可以组合 Overlay、进程、容器、Firecracker 等能力；External Effect Coordinator 属于 Runtime，处理本机隔离覆盖不到的外部 API，与 network backend 协同。它无需为跨 Branch 命令去重掌握整棵树，control plane 只在 Branch 被接受、丢弃或前提失效时通知相应暂存请求释放或取消。不能模拟时，请求仍暂存在本机，Branch 在效果边界阻塞并保留进展，待成为权威后发送真实请求并继续；可模拟时才提供明确标记来源的临时结果。AScout 不规定这些内部模块如何组织或选择 transport，但要求接入边界如实呈现能力和限制。
 
-Runtime 承载 Agent 的一步动作，使动作能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 负责动作所需的环境、状态派生、隔离、资源、进程和效果边界；这些能力可以按任务需要共享、复制、写时复制、重建或恢复。Agent Session 的内部管理由 Agent 接入侧负责。Agent-facing integration 组件可以部署在 Runtime 提供的环境内，其运行生命周期随该环境管理。
+Runtime 承载 Agent 的一步动作，使动作能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 负责动作所需的环境、状态派生、隔离、资源、进程和效果边界；这些能力可以按任务需要共享、复制、写时复制、重建或恢复。Agent Session 的内部管理由 Instrumentation 负责。Agent 与随附 Instrumentation 运行在 Branch 隔离环境外的可信宿主，其生命周期仍由 Runtime 管理；模型、内存和控制通信直接使用宿主路径，工作区访问及受管进程必须使用对应 Branch 的 Runtime 环境。Branch 挂载切换和物化不要求重启 Agent 宿主。
 
-每个 session 对应一个 AScoutAgent 和一棵 Speculative Tree，具体投机状态集中在树中。task 是 Agent 的一轮工作，完成本轮工作并开始等待用户输入时结束。Controller 负责树、Policy 函数和外部操作之间的协调，不持有 session 的第二份投机状态，可以供多棵树使用。消息与到期检查按树顺序处理；Runtime 操作和 Policy 求值异步返回，由树校验并应用。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。事件等待和通信入口不承担投机策略或状态转换职责。
+每个 session 对应一个 AScoutAgent 和一棵 Speculative Tree，具体投机状态集中在树中。task 是 Agent 的一轮工作，完成本轮工作并开始等待用户输入时结束。Speculation Coordinator 负责树、Policy 函数和外部操作之间的协调，不持有 session 的第二份投机状态，可以供多棵树使用。消息与到期检查按树顺序处理；Runtime 操作和 Policy 求值异步返回，由树校验并应用。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。事件等待和通信入口不承担投机策略或状态转换职责。
 
-Runtime 通过接入边界报告物化完成或失败；物化失败按操作失败处理。控制面必须等待物化成功后才能宣告任务成功，具体条件见 [Runtime 设计](design/runtime.md)。
+Runtime 通过接入边界报告物化完成或失败；物化失败按操作失败处理。control plane 必须等待物化成功后才能宣告任务成功，具体条件见 [Runtime 设计](design/runtime.md)。
 
 ### 1.1 架构边界
 
 - 所有跨边界的操作都必须遵守路径。跨侧可以传输受契约约束的请求、命令、结果和事件，但不能越过相邻边界直接控制其他侧，也不共享跨侧可变状态；调用方不能仅凭发送请求或更新自身状态伪造目标侧已完成的状态。
-- 控制面不接受会放宽 AScout 基本语义的 Adapter 结果；策略需求与 Adapter 声明或实际兑现的能力不匹配时，由控制面拒绝或明确降级。
-- 所需 OS privilege 留在 Runtime 实现一侧，Agent 接入侧、控制面与 Runtime Adapter 不持有这些特权。Runtime 的特权只用于其声明的环境、进程、资源、隔离和效果边界；接入侧不能绕过 Runtime 或控制面直接扩大动作影响范围。
+- control plane 不接受会放宽 AScout 基本语义的 Adapter 结果；策略需求与 Adapter 声明或实际兑现的能力不匹配时，由 control plane 拒绝或明确降级。
+- 所需 OS privilege 留在 Runtime 实现一侧，Instrumentation、control plane 与 Runtime Adapter 不持有这些特权。Runtime 的特权只用于其声明的环境、进程、资源、隔离和效果边界；Instrumentation 不能绕过 Runtime 或 control plane 直接扩大动作影响范围。
 
 ## 2. 控制闭环
 
@@ -44,8 +44,8 @@ Runtime 通过接入边界报告物化完成或失败；物化失败按操作失
 
 ```mermaid
 sequenceDiagram
-    participant A as Agent 接入侧
-    participant C as 控制面
+    participant A as Instrumentation
+    participant C as control plane
     participant R as Runtime
 
     A->>C: captured Agent step
@@ -56,19 +56,19 @@ sequenceDiagram
     C-->>A: Agent-facing result / event
 ```
 
-控制面是整体 Speculative Tree 和控制语义的权威来源。Runtime 内部的执行、资源、环境和效果状态由 Runtime 管理；控制面通过 Runtime Adapter 接收能力、结果与事件，不直接读取 Runtime 内部状态。
+control plane 是整体 Speculative Tree 和控制语义的权威来源。Runtime 内部的执行、资源、环境和效果状态由 Runtime 管理；control plane 通过 Runtime Adapter 接收能力、结果与事件，不直接读取 Runtime 内部状态。
 
 ## 3. 责任与状态边界
 
-各责任边界如下（控制面各组件的职责与协作见 [控制面设计](design/control-plane.md)）：
+各责任边界如下（control plane 各组件的职责与协作见 [control plane 设计](design/control-plane.md)）：
 
 | 侧面 | 组件 | 状态 |
 |---|---|---|
-| Agent 接入侧 | Interposer（拦截与操作集成）、ASC-Proxy（受管控制通信）、Product Integration（产品接入） | 当前 Agent 与 Branch 的本地执行上下文 |
-| 控制面 | Gateway、Policy Engine、Speculation Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、请求校验与投机编排；Gateway 只持有通信所需状态 |
+| Instrumentation | Interposer（拦截与操作集成）、ASC-Proxy（受管控制通信）、Product Integration（产品接入） | 当前 Agent 与 Branch 的本地执行上下文 |
+| control plane | Gateway、Policy Engine、Speculation Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、请求校验与投机编排；Gateway 只持有通信所需状态 |
 | Runtime | 包含 Runtime Adapter 接入边界及所需的执行、状态派生、进程、资源、隔离和效果管理能力；Registry 属于 Runtime | 管理实际承载、能力声明校验与效果状态；不决定 Speculative Tree 的全局裁决，不呈现第二份 Tree 权威状态 |
 
-特别的，ASC-Proxy、Interposer 等 Agent 接入侧组件运行在 Agent 执行实体当前使用的执行环境内；Environment 身份按 Branch 独占，多个 Branch 只共用 Backend 内部资源。
+ASC-Proxy、Interposer 等 Instrumentation 组件随 Agent 留在 Branch 隔离环境外的可信宿主，由 Runtime 管理。Environment 身份按 Branch 独占；候选 session 保持独立，不因共用宿主进程而合并上下文。环境内受管子程序仍须按环境归属取消和清理。
 
 ## 3.1 代码模块结构
 
@@ -79,10 +79,10 @@ src/
   lib.rs
   protocol/                    线上契约与传输编解码
     mod.rs  contract.rs  transport.rs
-  control_plane/               控制面
+  control_plane/               control plane
     mod.rs
     agent_control/             Tree、Branch、命令/事件与协议消息
-    coordination/              动作投影、AgentController、session 启动与请求协调
+    coordination/              动作投影、SpeculationCoordinator、session 启动与请求协调
     ledger.rs
     policy/                    YAML 编译、Python 求值、Decision、校验
     gateway/                   Agent、UI 与 Runtime 通信接入
@@ -100,7 +100,7 @@ src/
     backends/
       mod.rs
       filesystem/              文件系统 Backend
-      firecracker/             Firecracker Backend 与 guest_access
+      firecracker/             Firecracker Backend 与 guest_agent
       nle.rs                   NLE Backend
   bin/                         可执行入口，仅做装配与 import
 ```
@@ -116,10 +116,10 @@ src/
 - `control_plane` 依赖 `protocol`；当前不依赖 `runtime`。
 - `runtime` 依赖 `protocol` 与具体 Backend；Backend 实现依赖 `runtime::backend`
   的 trait 和 `runtime::process` 的启动片段，不反向把 workload 语义加入通用
-  Adapter 或控制面。
+  Adapter 或 control plane。
 - `bin/` 依赖库的公开装配 API，不承载实现逻辑。
 
-控制面入口通过 `coordination::session` 的公开接口完成 root 建立／恢复、Agent
+control plane 入口通过 `coordination::session` 的公开接口完成 root 建立／恢复、Agent
 启动、本地 Policy 交付及控制请求协调；模型切换、保存与物化前提也由库接口
 处理。入口保留参数、配置、装配、呈现及事件驱动。Tree／BranchRecord 领域字段
 不向二进制或外部调用方公开写入，只读访问与受控转换分离；实现与验证范围见
@@ -130,10 +130,10 @@ src/
 
 ## 4. 相关文档
 
-- [Agent 接入侧设计](design/agent-integration.md)：直接子文档，展开 Agent 接入组件与受控路径
-- [控制面设计](design/control-plane.md)：直接子文档，展开控制面内部职责
-- [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)：Adapter 面向控制面的具体接入契约
-- [Runtime Adapter 接入指南](development/runtime-adapter.md)：Adapter 作者的实现建议与控制面接入方法
+- [Instrumentation 设计](design/agent-integration.md)：直接子文档，展开 Agent 接入组件与受控路径
+- [control plane 设计](design/control-plane.md)：直接子文档，展开 control plane 内部职责
+- [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)：Adapter 面向 control plane 的具体接入契约
+- [Runtime Adapter 接入指南](development/runtime-adapter.md)：Adapter 作者的实现建议与 control plane 接入方法
 - [Runtime 设计](design/runtime.md)：动作承载、状态与可插拔能力；首阶段范围见开发文档。
 - [设计决策](design/decisions.md)：核心 Speculative Tree 语义选择速查
 - [投机执行底座设计决策](design/speculation-decisions.md)：投机执行底座的设计选择与理由速查

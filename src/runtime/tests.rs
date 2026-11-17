@@ -307,7 +307,7 @@ fn base_runtime_freezes_and_marks_writers_quiesced() {
         instance_id: Some("test-agent".into()),
         env: BTreeMap::new(),
     };
-    runtime.launch_agent(&context, &launch).unwrap();
+    runtime.process.launch(&context, &launch, &Default::default()).unwrap();
     let operation = Operation::FilesystemFork {
         parent_snapshot_id: "env".into(),
         child_snapshot_id: "child".into(),
@@ -353,7 +353,7 @@ fn materialization_refuses_active_managed_writer_without_stopping_it() {
         instance_id: None,
         env: BTreeMap::new(),
     };
-    runtime.launch_agent(&context, &launch).unwrap();
+    runtime.process.launch(&context, &launch, &Default::default()).unwrap();
     let failure = runtime.materialize(&context).unwrap_err();
     assert!(
         failure
@@ -363,6 +363,27 @@ fn materialization_refuses_active_managed_writer_without_stopping_it() {
     assert!(runtime.process.is_running(&context.environment_id).unwrap());
     runtime.process.cleanup(&context.environment_id).unwrap();
 }
+
+    #[test]
+    fn trusted_host_does_not_become_an_environment_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
+        let context = BackendContext::new("trusted-host");
+        let launch = AgentLaunch {
+            command: "/bin/sleep".into(),
+            args: vec!["30".into()],
+            cwd: root.path().into(),
+            log: root.path().join("host.log"),
+            instance_id: None,
+            env: BTreeMap::new(),
+        };
+        runtime.launch_agent(&context, &launch).unwrap();
+        assert!(runtime.process_handle(&context.environment_id).is_none());
+        runtime.materialize(&context).unwrap();
+        // Reusing the run host after publication must succeed without restart.
+        runtime.launch_agent(&context, &launch).unwrap();
+        runtime.stop_agents().unwrap();
+    }
 
 fn launch_test_agent(
     runtime: &BaseRuntime,
@@ -380,7 +401,8 @@ fn launch_test_agent(
         instance_id: Some("test-agent".into()),
         env: BTreeMap::new(),
     };
-    runtime.launch_agent(&context, &launch).unwrap();
+    // This fixture represents an environment writer, not the trusted Agent host.
+    runtime.process.launch(&context, &launch, &Default::default()).unwrap();
     (context, log_dir)
 }
 

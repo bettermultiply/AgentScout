@@ -1,4 +1,4 @@
-//! 控制面与 Runtime Adapter 之间交换的契约数据。
+//! control plane 与 Runtime Adapter 之间交换的契约数据。
 //!
 //! 语义以 `docs/design/runtime-adapter-contract.md` 为准；这里只定义线上的类型、
 //! 字段和枚举，不包含行为。
@@ -78,9 +78,9 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
-/// Agent 接入侧的启动参数。
+/// Instrumentation 的启动参数。
 ///
-/// 用哪个 Agent 产品、哪个版本由控制面（用户）决定；真正启动它属于 Runtime。
+/// 用哪个 Agent 产品、哪个版本由 control plane（用户）决定；真正启动它属于 Runtime。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentLaunch {
     pub command: String,
@@ -96,7 +96,7 @@ pub struct AgentLaunch {
 }
 
 /// 固定环境操作。
-/// Runtime 可执行的环境工具。控制面只按声明调用，不解释具体 workload。
+/// Runtime 可执行的环境工具。control plane 只按声明调用，不解释具体 workload。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeTool {
     pub name: String,
@@ -146,7 +146,7 @@ pub enum Operation {
         path: std::path::PathBuf,
     },
     EstablishEnvironment,
-    /// 环境内操作。`agent` 在场时表示在环境内建立 Agent 接入侧。
+    /// 环境内操作。`agent` 在场时表示在环境内建立 Instrumentation。
     OperateEnvironment {
         command: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,7 +266,7 @@ pub struct OperationRequest {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub environment_id: String,
     pub operation: Operation,
-    /// Policy 用于选择 Runtime 的任务上下文。旧控制面不发送时保持为空。
+    /// Policy 用于选择 Runtime 的任务上下文。旧 control plane 不发送时保持为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
 }
@@ -305,7 +305,7 @@ pub struct OperationResult {
     pub follow_up: Vec<FollowUp>,
     pub resources: Vec<ResourceNote>,
     pub remaining: Vec<ResourceNote>,
-    /// 每个参与 Backend 的状态，供控制面处理部分失败和状态不一致。
+    /// 每个参与 Backend 的状态，供 control plane 处理部分失败和状态不一致。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub backend_states: Vec<BackendState>,
     /// 组合 Runtime 的全部可见输出。不会因为 `output` 只有一个字段而
@@ -345,7 +345,7 @@ pub enum EventPayload {
     },
 }
 
-/// Adapter 发给控制面的消息。
+/// Adapter 发给 control plane 的消息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AdapterMessage {
@@ -362,7 +362,7 @@ pub enum AdapterMessage {
     Event(Event),
 }
 
-/// 控制面发给 Adapter 的消息。
+/// control plane 发给 Adapter 的消息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum ControlMessage {

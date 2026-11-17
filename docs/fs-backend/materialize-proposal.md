@@ -22,10 +22,10 @@ Agent 常用的 Ctrl-C 或退出均终止任务；Ctrl-C 保留程序和 session
 输入时，task 完成。一个 session 对应一个 AScoutAgent 和一棵投机树，task 完成
 不意味着 session 或树结束。一次操作结束本身不等于本轮工作完成。
 
-Runtime 负责内部整理，并通过接入边界向控制面报告物化完成或失败。物化失败
-等同操作失败；控制面负责对外宣告任务成功，必须等待物化成功，不能仅凭 Agent
+Runtime 负责内部整理，并通过接入边界向 control plane 报告物化完成或失败。物化失败
+等同操作失败；control plane 负责对外宣告任务成功，必须等待物化成功，不能仅凭 Agent
 开始等待输入便报告成功。当前通过 Runtime 的 `MaterializeAuthority` 返回结果，
-控制面收到成功后记录 task 完成；失败保留发布资料并等待重试。
+control plane 收到成功后记录 task 完成；失败保留发布资料并等待重试。
 
 ## 写入与引用前提
 

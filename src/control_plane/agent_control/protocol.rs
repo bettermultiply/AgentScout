@@ -499,7 +499,7 @@ impl SpeculativeTree {
             }
             return Ok(vec![]);
         }
-        // 命中结算需要权威侧工具结果真实的接入侧到达时刻。这里只保留
+        // 命中结算需要权威侧工具结果真实的 Instrumentation 到达时刻。这里只保留
         // 已完成 action 的时刻，不改变 action 的生命周期。
         self.tool_finished_at_ms
             .entry(branch_id.to_string())
@@ -828,7 +828,7 @@ impl SpeculativeTree {
         Ok(vec![])
     }
 
-    /// 只有控制面可以接受 Candidate；接受后旧权威失去权威身份。
+    /// 只有 control plane 可以接受 Candidate；接受后旧权威失去权威身份。
     pub(crate) fn finish_runtime_promotion(
         &mut self,
         candidate: &str,

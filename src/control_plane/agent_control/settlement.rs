@@ -1,8 +1,8 @@
 //! 一次投机的结算：在 Branch 的统一状态转换入口排队，由协调循环写入 Ledger。
 //!
 //! 目标语义见 `docs/design/control-plane.md` §5；实现与数据缺口见
-//! `docs/development/observation.md`。这里只使用控制面已经收到的接入侧时间戳
-//! 和用量事实，不根据控制面收到消息的时刻合成执行耗时。
+//! `docs/development/observation.md`。这里只使用 control plane 已经收到的 Instrumentation 时间戳
+//! 和用量事实，不根据 control plane 收到消息的时刻合成执行耗时。
 //!
 //! 实测与估计是两个独立部分：同一维度要么只填实测、要么只填估计，没有数据时
 //! 两者都是 null。它们永远不相加，也不互相填充。
@@ -101,7 +101,7 @@ impl SpeculativeTree {
                     }
                     (Some(fast), None) => {
                         // 没有权威模型可比：简单校验通过后被避免的权威调用，
-                        // 只能以同一快速调用的接入侧耗时和费用作为估计依据。
+                        // 只能以同一快速调用的 Instrumentation 耗时和费用作为估计依据。
                         let time = fast
                             .duration_ms
                             .map(|duration| estimated(duration as f64))
