@@ -24,9 +24,9 @@ Agent 的首批命令、控制动作及 settle 命令统一进入每连接一个
 
 2026-11-17 补齐验证：标准 Runtime 请求连续执行 599 次后重放 req-1，明确 rejected/expired，后端调用数不变；窗口测试以 req-2 先于 req-1 的顺序受理，并验证约 2000 个请求后身份表仍有界。TypeScript 窗口同样覆盖乱序、过期及非序号身份容量耗尽。已有重复内容冲突、结果缓存淘汰、取消等待确认、断线清理测试继续通过。真实 Pi 启动器原先收到 delivery 会报 Unexpected message direction；已补齐接收及 received，并用伪模型单步和五步 E2E 验证。
 
-仍失败的现有恢复用例已实际复现，不能宣称全流程验证全部通过：`recovery-active.mjs` 的 retry 在恢复加载后等待 branches advance 超时（证据 `/tmp/opencode/recovery-active-8ywNrn`）；continue 在保存的 Branch 数量上断言失败，实际 3、预期 1。普通 active/sibling 恢复、多 backend 恢复、filesystem 恢复通过。曾试验让 turn finalizer 不提前终结待恢复工具钩子，但 retry/continue 仍失败，已撤回该试验，保留原暂停/恢复业务语义。该处后续需结合单独授权的恢复工作继续定位，不将它记为已经修复。
+整合提交 `1c6eec7` 的恢复回归已完成验证：重建实际 bins 后串行运行 `tests/recovery-active.mjs` 与 `tests/recovery-filesystem.mjs`，6 项全部通过。retry 恢复后全部 Branch 继续推进；continue 成功收尾后保存且恢复的树仅保留一个权威 Branch。暂停期间普通 Prompt 仅入队，必须显式 `/continue`。Pi turn finalizer 保留 saving 期间 suspendedHooks 对应的动作，不提前报告取消；恢复后接回原工具等待。证据：`/tmp/ascout-recovery.log`，retry `/tmp/opencode/recovery-active-ZcUSAK`，continue `/tmp/opencode/recovery-active-mGEbBQ`。
 
-最终检查：`cargo check --all-targets` 通过（已有 IsTerminal 未使用警告）；串行 `cargo test --lib --bins` 为 197 个库测试、4 个 control-plane 测试通过；`policy_provider` 与 `filesystem_backend_identity` 各 1 项通过；Node 接入/窗口/通知/恢复资料测试 16 项通过；Pi adapter Promote 测试 4 项通过；Pi 全仓 `tsc --noEmit` 通过；重建实际二进制后的伪模型 E2E 单步、五步共 2 项通过。并行全库第一次运行曾遇到 overlay mount busy，串行全库复跑通过。恢复场景通过/失败仍按上段逐项报告。未调用真实模型、未提交，未改变 Ledger 恢复用途及 run 目录。
+本次整合验收：`cargo check --all-targets`、`cargo build --bins` 通过；串行 `cargo test --lib --bins -- --test-threads=1` 为 205 个库测试、4 个 control-plane 测试通过；Gateway delivery、身份窗口、Pi access、通知适配、恢复绑定与恢复源、ASC proxy 共 23 项 Node 测试通过；相邻 Pi checkout 的 `tsc --noEmit` 通过。日志分别为 `/tmp/ascout-check.log`、`/tmp/ascout-build.log`、`/tmp/ascout-tests.log`、`/tmp/ascout-node.log`、`/tmp/ascout-pi-tsc.log`。使用伪模型和伪连接，真实模型调用为 0；未改变 Ledger 恢复用途及 Pi session 目录。
 
 本聚焦步骤验证：用伪 UnixStream 验证确认等待中取消会停止启动重试且 Cleanup 仍可交付；关闭取消检查时该回归失败。用伪 TCP 连接验证 rejected 立即返回对应错误；恢复旧的忽略 rejected 行为时该回归失败。另覆盖接收确认/业务 Result 两种顺序、重复 Result、队列等待中仍可处理取消、迟到创建资源保留以及 Branch 发送失败入口。最终 `cargo test --lib` 195 项、control-plane binary 4 项、Gateway/Pi 接入与通知 Node 测试 12 项全部通过，`cargo check --all-targets` 通过（已有 IsTerminal 未使用警告）。该聚焦步骤当时未修改 TS。当前补齐实际 Pi 启动器 delivery 接收，并运行 Pi 全仓 tsc --noEmit；上述队列与连接回归仍不等于完整进程故障组合测试。
 

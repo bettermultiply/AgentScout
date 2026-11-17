@@ -123,8 +123,7 @@ branch_environment；内部资源可以共享。候选实际建立 Backend 环�
 
 当前 SIGINT 与 TUI Ctrl-C 走 `Interrupt`，终止当前 task 后保留 control plane 和 session；
 SIGTERM 与显式 Shutdown 仍退出。Pause／`/pause` 保存整树；`/continue` 经专用
-控制命令恢复原任务而不新增模型用户消息。目标语义已定：暂停期间的普通消息先留着，不解除暂停；`/continue` 之后再按原顺序交给模型。
-当前代码尚未按此修改。保存完成后，`Request::Prompt` 仍会先解除暂停，再把这句话排进模型输入。保存未完成时这句话会被丢掉，而不是留着。保存尚未完成时 `/continue` 不启动工作；终止期间不再允许 Pause
+控制命令恢复原任务而不新增模型用户消息。暂停期间（包括保存尚未完成时）的普通消息进入待处理队列，不解除暂停；`/continue` 之后再按原顺序交给模型。保存尚未完成时 `/continue` 不启动工作；终止期间不再允许 Pause
 阻塞物化，重复取消不重复发出中断。物化失败保留重试状态且不报告 task 成功。
 已有保存不构成物化完成，候选被接受后继续使用候选环境的关联与交接仍需核查，
 不能以能恢复环境证明接受路径已对齐。见
@@ -152,7 +151,7 @@ control plane 的 Pause 请求 Pi 同时 abort 所有 session，停止调度新�
 
 Instrumentation 保存 `suspendedHooks`（Branch、toolCall 身份、原 assistant 与参数、是否已准入）、`candidateSetups`（原 StartCandidate 命令及 sibling 配对关系）、中断中的 Branch 集合，以及原有 checkpoint/results/access holds。没有序列化 Promise。原生工具取消的 toolResult 仍保存在原生记录中；保存期间的取消 ActionFinished 不将 control plane 工具等待置为 Failed，不丢弃 Chance。已开始的非 Runtime 原生工具遵循 Pi 取消终态，不重放外部副作用；未开始的工具可重新过原 hook。
 
-用户输入后，Instrumentation 重新建立 Runtime result waiters 与 sibling result waiters，使用 Pi `runToolCall` 接回工具边界；已准入工具保留 effect/pause/extent 等待但不重复准入或计数。Runtime execute 只等待／取已保存结果，不重新发出真实动作。一个 assistant 的未完成工具并行重连，避免“先等待预测工具导致 sibling 永远未启动”的死锁。工具完成后在原生历史追加真实结果，当前模型上下文仅保留该调用最新结果；候选配对完成后原生 continue，所有分支只在用户继续后推进。暂停期间的工具及候选启动截止时间顺延。
+用户显式继续后，Instrumentation 重新建立 Runtime result waiters 与 sibling result waiters，使用 Pi `runToolCall` 接回工具边界；已准入工具保留 effect/pause/extent 等待但不重复准入或计数。Runtime execute 只等待／取已保存结果，不重新发出真实动作。一个 assistant 的未完成工具并行重连，避免“先等待预测工具导致 sibling 永远未启动”的死锁。工具完成后在原生历史追加真实结果，当前模型上下文仅保留该调用最新结果；候选配对完成后原生 continue，所有分支只在用户继续后推进。暂停期间的工具及候选启动截止时间顺延。
 
 已经释放的 Branch 仍可能被 checkpoint／后代输入引用。保存时若其原生源已由成功汇总清理，则从仍保留的原生 SessionManager 完整 entries/header 生成保存副本；其内容校验仍按保存副本计算，恢复继续复制成独立可写源。
 
