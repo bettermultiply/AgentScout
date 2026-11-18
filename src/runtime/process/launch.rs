@@ -12,7 +12,8 @@ use crate::runtime::launch_plan::*;
 const MOUNT_INFO_ATTEMPTS: usize = 400;
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
-impl ProcessBackend {
+impl Processes {
+    #[cfg(test)]
     pub fn launch(
         &self,
         context: &BackendContext,
@@ -37,13 +38,13 @@ impl ProcessBackend {
             let processes = self
                 .processes
                 .lock()
-                .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?;
+                .map_err(|_| BackendError::new("Processes lock poisoned"))?;
             if let Some(process) = processes.get(&context.environment_id) {
                 if process.instance_id == instance_id {
                     return Ok(());
                 }
                 return Err(BackendError::new(format!(
-                    "ProcessBackend already owns Agent instance {} for environment {}",
+                    "Processes already owns execution instance {} for environment {}",
                     process.instance_id, context.environment_id
                 )));
             }
@@ -79,7 +80,7 @@ impl ProcessBackend {
                     Ok(pending) => pending,
                     Err(_) => {
                         remove_cgroup(&cgroup_path);
-                        return Err(BackendError::new("ProcessBackend status lock poisoned"));
+                        return Err(BackendError::new("Processes status lock poisoned"));
                     }
                 };
                 pending.insert(
@@ -264,7 +265,7 @@ impl ProcessBackend {
                     &process.cgroup_path,
                     self,
                 );
-                return Err(BackendError::new("ProcessBackend lock poisoned"));
+                return Err(BackendError::new("Processes lock poisoned"));
             }
         };
         processes.insert(context.environment_id.clone(), process);
@@ -282,7 +283,7 @@ impl ProcessBackend {
             let mut pending = self
                 .pending_status
                 .lock()
-                .map_err(|_| BackendError::new("ProcessBackend status lock poisoned"))?;
+                .map_err(|_| BackendError::new("Processes status lock poisoned"))?;
             pending.remove(environment_id)
         };
         let Some(PendingStatus { read, write }) = pending else {
@@ -332,7 +333,7 @@ fn abort_launch(
     child: &mut std::process::Child,
     process_group: libc::pid_t,
     cgroup_path: &Option<PathBuf>,
-    backend: &ProcessBackend,
+    backend: &Processes,
 ) {
     if let Some(path) = cgroup_path {
         let kill = path.join("cgroup.kill");

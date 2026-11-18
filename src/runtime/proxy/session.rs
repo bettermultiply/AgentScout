@@ -1,4 +1,4 @@
-//! Adapter 会话：连接 control plane、收发消息。
+//! Runtime proxy 会话：连接 control plane、收发消息。
 
 use super::*;
 use crate::protocol::contract::*;
@@ -9,13 +9,21 @@ use std::net::TcpStream;
 use std::sync::mpsc;
 use std::thread;
 
-pub struct Adapter {
+pub struct RuntimeProxy {
     pub adapter_instance: String,
-    pub runtime: Arc<dyn Backend>,
+    pub runtime: Arc<BaseRuntime>,
 }
 
-impl Adapter {
+impl RuntimeProxy {
     pub fn run(self, address: &str) -> io::Result<()> {
+        let result = self.serve(address);
+        if let Err(error) = self.runtime.shutdown() {
+            eprintln!("runtime proxy: Runtime shutdown incomplete: {error}");
+        }
+        result
+    }
+
+    fn serve(&self, address: &str) -> io::Result<()> {
         let stream = TcpStream::connect(address)?;
         let mut reader = stream.try_clone()?;
         let (out, out_rx) = mpsc::channel::<AdapterMessage>();
@@ -31,22 +39,20 @@ impl Adapter {
 
         let _ = out.send(AdapterMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
-            adapter_instance: self.adapter_instance,
+            adapter_instance: self.adapter_instance.clone(),
             capabilities: self.runtime.capabilities(),
             backend_ids: self.runtime.backend_ids(),
         });
 
         let shared = Arc::new(Shared {
             commands: Some(commands::Commands::start(self.runtime.clone())?),
-            preserving: std::sync::atomic::AtomicBool::new(false),
-            runtime: self.runtime,
+            runtime: self.runtime.clone(),
             out,
             queues: Mutex::new(HashMap::new()),
             seen: Mutex::new(Default::default()),
             results: Mutex::new(ResultCache::default()),
             result_signal: Condvar::new(),
             known: Mutex::new(HashMap::new()),
-            agent: Mutex::new(None),
         });
         shared.clone().start_state_watcher();
 
@@ -63,7 +69,12 @@ impl Adapter {
                 }
             }
         }
-        shared.shutdown();
+        for queue in shared.queues.lock().unwrap().values() {
+            queue.close();
+        }
+        if let Some(commands) = &shared.commands {
+            commands.stop();
+        }
         Ok(())
     }
 }

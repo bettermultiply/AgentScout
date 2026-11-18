@@ -1,7 +1,4 @@
-//! Neutral launch-plan types shared by Backend composition and ProcessBackend.
-//!
-//! Backends contribute mount entries; ProcessBackend is the only component
-//! that translates them into bubblewrap arguments.
+//! Launch environment and mount descriptions shared by the environment backends.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;

@@ -61,7 +61,7 @@ test('immediate cancellation waits for acceptance and backend terminal before co
     const server=createServer(socket=>{
         receive(socket,request=>{
             events.push(request.command);
-            assert.equal(request.branch_id,'branch');assert.equal(request.operation_id,'operation');
+            assert.equal(request.environment_id,'environment');assert.equal('branch_id' in request,false);assert.equal(request.operation_id,'operation');
             if(request.command==='execute'){
                 execution=socket;
                 setImmediate(()=>socket.write('{"event":"accepted"}\n'));
@@ -106,7 +106,7 @@ test('control framing and execution output use independent ASC-Proxy connections
             await writeExecution(socket,{event:'terminal',status:'succeeded',body_kind:'business_output',stdout_length:stdout.length,exit_code:0},[stdout]);
             socket.end();
         }
-        else if(request.command==='cancel_branch'){cancelled=true;socket.end('{"event":"terminal","status":"cancelled"}\n')}
+        else if(request.command==='cancel_environment'){cancelled=true;socket.end('{"event":"terminal","status":"cancelled"}\n')}
         else socket.end('{"event":"confirmed"}\n');
     }));
     const proxy=new AscProxy();await proxy.open(control);
@@ -124,7 +124,7 @@ test('branch drain follows an active-operation cancel rejection',async t=>{
         commands.push(request.command);
         if(request.command==='execute'){active=socket;socket.write('{"event":"accepted"}\n');}
         else if(request.command==='cancel'){active.end('{"event":"rejected","reason":"cancelled during admission"}\n');socket.end('{"event":"rejected","reason":"operation already removed"}\n');}
-        else if(request.command==='cancel_branch')socket.end('{"event":"terminal","status":"cancelled","generation":1}\n');
+        else if(request.command==='cancel_environment')socket.end('{"event":"terminal","status":"cancelled","generation":1}\n');
         else socket.end('{"event":"terminal","status":"cancelled"}\n');
     }));
     await new Promise(resolve=>server.listen(root+'/execution.sock',resolve));
@@ -134,5 +134,5 @@ test('branch drain follows an active-operation cancel rejection',async t=>{
     const rejected=assert.rejects(execution,/cancelled during admission/);
     await proxy.cancel('branch');
     await rejected;
-    assert.deepEqual(commands,['execute','cancel','cancel_branch']);
+    assert.deepEqual(commands,['execute','cancel','cancel_environment']);
 });

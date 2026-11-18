@@ -10,7 +10,7 @@ Runtime 为 Branch 的 Instance 提供执行承载。承载可以从 Branch barr
 
 ## 2. 环境边界
 
-当某类 Branch-local state 要求独立承载时，Runtime 或其他执行承载机制需要从相应 execution base 建立独立环境，使该状态能够按 Branch 继续演化。环境边界的具体内容、保证范围和验证状态由 Runtime Adapter 契约描述。
+当某类 Branch-local state 要求独立承载时，Runtime 或其他执行承载机制需要从相应 execution base 建立独立环境，使该状态能够按 Branch 继续演化。环境边界的具体内容、保证范围和验证状态由 runtime proxy 契约描述。
 
 每个 Branch 必须绑定独占 Environment。Runtime 内部可以让多个 Environment 关联同一个 Backend instance，也可以使用独立实例；该选择由 Runtime 内部负责，control plane 不传 `backend_id`。
 
@@ -48,5 +48,5 @@ Branch 之间的业务信息通过 Branch 语义规定的 outcome、输入和其
 ## 相关文档
 
 - [Branch 语义设计](../design/branch-semantics.md)：Branch 结构、生命周期、依赖、状态可见性和 resolution
-- [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)：Adapter 的正式能力声明、验证和环境操作契约
-- [Runtime Adapter 接入指南](runtime-adapter.md)：Adapter 实现与接入方法
+- [runtime proxy 契约设计](../design/runtime-adapter-contract.md)：Adapter 的正式能力声明、验证和环境操作契约
+- [runtime proxy 接入指南](runtime-adapter.md)：Adapter 实现与接入方法

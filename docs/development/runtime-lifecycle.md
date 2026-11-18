@@ -14,21 +14,21 @@ Gateway 提供 `establish()` 和 `branch(parent_environment_id, agent)`；协议
 
 `BranchRecord.environment_id` 和待交付的启动命令使用可选绑定；协调完成事件收到 Runtime 返回值后绑定 Branch 并填入启动命令。创建失败已产生环境时，返回该身份并保留实际 Backend 参与者供清理；没有环境时不发终止或清理调用。保存恢复校验非空、唯一绑定，区分创建中、已绑定和已释放记录，恢复显式 load 后沿用原身份。
 
-无模型回归覆盖重复 establish、独立 sibling、后续操作定位、拒绝预定身份、组合 Runtime 部分失败后的身份和清理，以及 control plane 失败绑定的保存恢复。`cargo test --lib` 为 170/170；`cargo fmt -- --check`、`cargo check --all-targets`、`cargo build --bins` 通过。真实 Firecracker 集成调用方已对齐返回身份，本轮未运行真实 VM 或真实模型集成测试。协议版本仍为原型版本 1，升级时 control plane 和 Adapter 必须一起更新，不保证混用旧二进制。
+无模型回归覆盖重复 establish、独立 sibling、后续操作定位、拒绝预定身份、组合 Runtime 部分失败后的身份和清理，以及 control plane 失败绑定的保存恢复。`cargo test --lib` 为 170/170；`cargo fmt -- --check`、`cargo check --all-targets`、`cargo build --bins` 通过。真实 Firecracker 集成调用方已对齐返回身份，本轮未运行真实 VM 或真实模型集成测试。协议版本仍为原型版本 1，升级时 control plane 和 runtime proxy 必须一起更新，不保证混用旧二进制。
 
-本文集中说明一个 Runtime 实例在运行期如何建立、操作、派生、提升、静止、恢复、终止和清理环境，以及多 Backend 组合下这些操作如何按固定顺序执行、如何暴露部分失败、如何聚合状态和如何划分清理责任。它是开发阶段的实现说明，对应代码 `src/runtime/`、`src/runtime/backend.rs`、`src/runtime/adapter/`、`src/runtime/process/` 和 `src/bin/ascout-runtime-adapter.rs` 的当前语义；正式接入契约见 [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)，Branch 的树结构与裁决语义见 [Branch 语义设计](../design/branch-semantics.md)。
+本文集中说明一个 Runtime 实例在运行期如何建立、操作、派生、提升、静止、恢复、终止和清理环境，以及多 Backend 组合下这些操作如何按固定顺序执行、如何暴露部分失败、如何聚合状态和如何划分清理责任。它是开发阶段的实现说明，对应代码 `src/runtime/`、`src/runtime/backend.rs`、`src/runtime/proxy/`、`src/runtime/agent_supervisor.rs`、`src/runtime/backends/filesystem/` 和 `src/bin/ascout-runtime-adapter.rs` 的当前语义；正式接入契约见 [runtime proxy 契约设计](../design/runtime-adapter-contract.md)，Branch 的树结构与裁决语义见 [Branch 语义设计](../design/branch-semantics.md)。
 
-## 1. Runtime 的定义与三层边界
+## 1. 当前 Runtime 的责任边界
 
-先厘清 Runtime 的定义，再区分三个容易被混为一谈的概念，它们分别属于不同层级：
+`src/bin/ascout-runtime-adapter/config.rs` 读取 Runtime JSON，将旧顶层 `backend` 和 `filesystem` 配置规范化为登记项及有序路由，再用独立的连接配置装配 `RuntimeProxy`。`BackendRegistry` 保存实现入口、接口和能力声明，`BaseRuntime::from_registry` 接收 Runtime 身份及路由策略，检查路由后创建并持有实例。直接提供实例和路由策略的 Rust 调用方使用 `BaseRuntime::with_policy`。`RuntimeProxy` 直接使用 `Arc<BaseRuntime>`，负责连接、请求身份、队列、输出、取消和回执。具体 backend 管理自己的执行资源。节点配置支持内置实现与[独立可执行程序](executable-backend.md)。热加载、多节点接口及独立能力验证仍待实现。
 
-**Runtime 指一个 Adapter 实例及其组合的 Backend 的整体，不是 Backend 之上再套一个空接口或标记 trait。** 代码里没有独立的 `Runtime` 类型或标记 trait；`Adapter` 直接持有 `Arc<dyn Backend>`。单一 Backend、`CompositeRuntime`、`BaseRuntime` 都实现 `Backend`，Adapter 一视同仁地把它们当作执行接口调用。
+`AgentSupervisor` 为整个 run 启动、检查并回收唯一的 Agent 与 Instrumentation 宿主。Runtime 先准备启动参数并请求 supervisor 启动或复用宿主，再通过 backend 接口启动目标环境的执行资源。宿主句柄锁在调用环境后端之前释放。环境启动失败时保留仍存活的宿主，允许新的操作重试环境启动。同一 `request_id` 重发仍由请求缓存返回原来的结果。
 
-- **Runtime Adapter 是一个 Runtime 实例的接入边界。** Adapter 进程只做一件事：接入 control plane 会话，把一次操作请求翻译成对 Backend 的调用，并把结果与事件上报。它不实现环境隔离，也不替 Agent 决定运行策略。一个 Adapter 进程运行一个 Runtime 实例。
-- **Backend 是 Runtime 内部可组合的执行机制。** Backend 是 Adapter 使用的最小执行接口（`trait Backend`）。NLE、Firecracker、本地进程都可以是一个 Backend；`CompositeRuntime` 把多个 Backend 按显式 Policy 组合成一个整体。组合层本身不发明选择，只按给定规则选、按固定顺序执行、如实汇报。
-- **Base Runtime 对应一个 Agent 实际执行实例的进程。** `BaseRuntime` 是包装在另一个 Backend（通常是组合 Backend）之外、可选的一层，只管理一个 Agent 实际执行实例的启动句柄和进程生命周期（启动、停止、回收）。它不承载多个 Agent；Agent Session 的复制、恢复、切点由 Instrumentation 管理，Runtime 只负责让这个实例在受约束环境里跑起来和停干净。
+EOF 时 runtime proxy 关闭队列和 Instrumentation 执行接入并发送取消。`BaseRuntime` 关闭操作受理、回收宿主，再等受理中的操作结束后处理环境。环境执行启动在 Runtime 内受理，已经受理而在关闭中才完成的启动仍进入回收范围。保存和载入在尝试前即设置保留模式，失败后退出也只停止执行资源。载入要求无其他在飞操作。恢复文件的预检查失败保留当前环境，载入或参与者校验失败仍走恢复自身的回滚。关闭等待后端返回，耗时取决于后端能否及时响应取消。
 
-这三个概念不是平级系统，而是同一 Runtime 实例内的组合层次。Instrumentation 与 Runtime 必须关联到同一 Branch 和动作上下文。
+Agent Session 的复制、恢复和切点由 Instrumentation 管理。`FilesystemBackend` 管理文件视图、namespace holder、冻结与恢复、挂载轮换和清理。
+
+本轮验证覆盖宿主复用、环境启动失败后重试、关闭中晚到资源的回收、接入取消和请求去重。Pi 接入及保存恢复使用本地伪模型，包含保存失败重试、继续、多个 backend、文件系统恢复和打开已结束会话。Firecracker 集成沿用此前验证，本轮未重跑。
 
 ## 2. 请求身份与环境身份
 
@@ -37,7 +37,7 @@ Gateway 提供 `establish()` 和 `branch(parent_environment_id, agent)`；协议
 - **请求身份**：`OperationRequest` 里的 `request_id`、`task_id`。`request_id` 用于幂等；Runtime 普通操作只接收 `environment_id` 与 operation，不接收 Branch 身份。
 - **环境身份**：`environment_id` 由 Runtime 创建并返回，control plane 按 Branch 保存独占绑定。Runtime 不接收 Branch id，也不从环境推导 Branch；内部 Backend 使用 Runtime 交付的环境身份组织资源。
 
-`BackendContext` 传递 `task_id`、`environment_id`、`parent_environment_id` 及操作身份；Backend 只使用 Adapter 明确传入的局部身份，不自行推断全局结构。Runtime 内部以独立 `backend_id` 标识 Backend instance，并维护 Environment 与 Backend instance 的关联；control plane 不传该 id。
+`BackendContext` 传递 `task_id`、`environment_id`、`parent_environment_id` 及操作身份；Backend 只使用 runtime proxy 明确传入的局部身份，不自行推断全局结构。Runtime 内部以独立 `backend_id` 标识 Backend instance，并维护 Environment 与 Backend instance 的关联；control plane 不传该 id。
 
 ## 3. 生命周期操作
 
@@ -46,7 +46,7 @@ Gateway 提供 `establish()` 和 `branch(parent_environment_id, agent)`；协议
 | 操作 | 完成条件 |
 |---|---|
 | `establish`（建立） | 环境已经可用才返回完成；多个 Backend 共同建立时按固定顺序逐个建立，失败时回滚已建立的 Backend 并上报 |
-| `operate`（环境内操作） | 返回实际执行的结果；可携带 `agent` 在环境内建立 Instrumentation |
+| `operate`（环境内操作） | 返回实际执行的结果；可携带 `agent` 请求启动或复用可信宿主，并启动对应环境的执行资源 |
 | `branch`（派生） | 派生出与父环境、与其他 sibling 互不影响的子环境；失败时回滚已派生的 Backend |
 | `promote`（提升） | 环境成为权威环境；没有环境侧语义的 Backend 可 no-op，但失败必须如实返回 |
 | `suspend`（静止） | 阻止新的环境操作，并说明未完成工作 |
@@ -54,7 +54,7 @@ Gateway 提供 `establish()` 和 `branch(parent_environment_id, agent)`；协议
 | `terminate`（终止） | 不可恢复地停止 Runtime 管理的执行 |
 | `cleanup`（清理） | 回收进程、资源、临时状态、句柄和租约 |
 
-Backend 接口同时提供不带上下文的旧方法和带 `BackendContext` 的新方法；旧方法默认委托到带上下文方法（反向也是），因此既有单 Backend 实现不需要重写。Adapter 一律调用带上下文的方法，把请求身份透传下去。
+Backend 接口同时提供不带上下文的旧方法和带 `BackendContext` 的新方法；旧方法默认委托到带上下文方法（反向也是），因此既有单 Backend 实现不需要重写。runtime proxy 一律调用带上下文的方法，把请求身份透传下去。
 
 ## 4. 顺序与中断
 
@@ -65,7 +65,7 @@ Backend 接口同时提供不带上下文的旧方法和带 `BackendContext` 的
 ## 5. 超时与重试
 
 - control plane 侧 `call_with_context` 等待结果有 30 秒超时；超时返回错误，不假装已完成。
-- 同一 `request_id` 重发按重试处理：Adapter 用 `seen` 集合去重，不重复执行。
+- 同一 `request_id` 重发按重试处理：runtime proxy 用 `seen` 集合去重，不重复执行。
 - 本文不规定 Backend 内部的超时；是否支持超时、如何收敛由具体 Backend 实现承担，未完成就不能返回完成。
 
 ## 6. 结果与事件
@@ -100,7 +100,7 @@ Runtime 只按给定规则选择、按明确顺序执行、如实汇报。它不
 
 control plane 独占绑定 `Branch -> Environment`，因此不同 Branch 不能共享 Environment。Runtime 对外只接受 Environment identity；内部每个 `BackendConnection.id` 标识一个独立 Backend instance，且每个 Environment 记录实际参与建立或派生的 Backend instance 集合。不同 Environment 可以选择不同组合，例如 `env1` 使用 `fs1/process1`，`env2` 使用 `fs1/process2/network1`；这种共享只表示 Backend 内部资源可以共享，不表示 Environment 生命周期共享。
 
-建立或派生成功后，操作只能使用 Policy 选出的、且属于该 Environment 参与集合的 Backend；缺少参与记录、选出未绑定 instance 或清理未参与 instance 都必须失败。Runtime 保存并恢复参与集合元数据，并由 Runtime 校验 Backend instance 与 Environment 的实际组合；control plane 恢复只验证每个存活 Environment 至少存在于一个保存组件，不要求所有 Backend 都含有它。
+内置和外部 backend 走同一条登记和参与路径。建立或派生成功后，操作只能使用 Policy 选出的、且属于该 Environment 参与集合的 Backend；缺少参与记录、选出未绑定 instance 或清理未参与 instance 都必须失败。Runtime 保存并恢复有序参与者记录，并由 Runtime 校验 Backend instance 与 Environment 的实际组合；control plane 恢复只验证每个存活 Environment 至少存在于一个保存组件，不要求所有 Backend 都含有它。
 
 ### 7.4 状态聚合
 
@@ -120,8 +120,10 @@ control plane 独占绑定 `Branch -> Environment`，因此不同 Branch 不能�
 
 ## 相关文档
 
-- [Runtime Adapter 契约设计](../design/runtime-adapter-contract.md)：正式接入契约与验证要求
-- [Runtime Adapter 接入指南](runtime-adapter.md)：Adapter 实现与接入方法
+- [runtime proxy 契约设计](../design/runtime-adapter-contract.md)：正式接入契约与验证要求
+- [runtime proxy 接入指南](runtime-adapter.md)：runtime proxy 实现与接入方法
 - [Runtime 语义整理](default-runtime-semantics.md)：Runtime 执行承载的方向性语义
 - [Branch 语义设计](../design/branch-semantics.md)：Branch 结构、生命周期与 resolution
 - [Runtime 设计](../design/runtime.md)：Runtime 的动作承载、状态边界与可插拔能力
+
+执行地址随创建或恢复后的环境启动结果交付。Instrumentation 按其 Branch 映射选择 Environment。执行代理按 Environment 与 operation 关联终态和单操作取消，Environment drain 的 generation 和请求去重窗口也各自独立。

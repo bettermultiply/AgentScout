@@ -87,8 +87,7 @@ pub struct AgentLaunch {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub log: PathBuf,
-    /// Agent 实际执行实例的稳定标识。旧配置省略时由 Adapter 使用环境
-    /// 标识作为兼容性的默认值。
+    /// Optional execution identity supplied by the caller. The host belongs to the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -96,7 +95,7 @@ pub struct AgentLaunch {
 }
 
 /// 固定环境操作。
-/// Runtime 可执行的环境工具。control plane 只按声明调用，不解释具体 workload。
+/// Runtime 声明的环境工具。Instrumentation 经授权后执行，control plane 可查询上下文。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeTool {
     pub name: String,
@@ -141,10 +140,6 @@ pub struct RuntimeCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum Operation {
-    /// Control-plane authorization of Instrumentation's Branch access.
-    BindExecution {
-        branch_id: String,
-    },
     MaterializeAuthority,
     SaveRuntime {
         path: std::path::PathBuf,
@@ -173,11 +168,7 @@ pub enum Operation {
     ToolContext {
         tool_name: String,
     },
-    /// 在权威环境中执行一次工具调用，返回结果与可供匹配的证据。
-    InvokeTool {
-        tool_name: String,
-        arguments: Value,
-    },
+    /// 从既有文件系统快照派生新的快照。
     FilesystemFork {
         parent_snapshot_id: String,
         child_snapshot_id: String,
@@ -305,7 +296,7 @@ pub struct OperationResult {
     /// Establish failures without a created Environment omit this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub environment_id: String,
-    /// Runtime-provided command access for Instrumentation in this Branch.
+    /// Runtime-provided command access for the result Environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_access: Option<ExecutionAccess>,
     pub status: ResultStatus,

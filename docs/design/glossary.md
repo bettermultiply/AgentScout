@@ -37,12 +37,14 @@
 - **交互接口**：Agent 侧声明并提供、AScout 只发现并转发的一组输入能力与提示，其中输入能力包括命令清单、编辑器能力与特殊输入模式，提示包括确认、选择、输入和编辑器等对话式提示；AScout 不硬编码 Agent 的命令表，不嵌入也不复制 Agent 的原生界面或终端画面，不解释 Agent 语义，只转发。（`agent-integration.md` §3.1；`../development/agent-access.md` §3.1）
 - **`/ascout`**：AScout TUI 内打开当前 AScoutAgent 整棵 Speculative Tree 的只读观察操作，可从 Branch 关系与投机状态选择具体 Branch 深入查看；选择仅改变观察对象，不切换主对话、不向候选发送对话，也不接受或丢弃 Branch。它不是 Agent 产品自身的命令，不查询其他 Tree。（用户确认：2026-10-25；`../../Discussion.md`；`../development/decisions.md`）
 - **Instrumentation**：接到已有 Agent 上的一侧；报告动作事实，求值不改写全局控制状态、也不在多个 Chance、Branch、Proposal 之间协调的 Decision，并落实 control plane 返回的处置。AScout 本身不是 Agent。（`../architecture.md` §1；`agent-integration.md`）
+- **agent supervisor**：Runtime 中负责启动、监视和回收 run 唯一 Agent 与 Instrumentation 宿主的部分。宿主位于 Branch 环境外。（`runtime.md`）
 - **Guest Agent**：Runtime 在 guest 内执行宿主交来的命令的服务；不是 Instrumentation，也不是本系统所说的 Agent。可执行文件名为 `ascout-guest-agent`。（`../development/runtime-adapter.md`）
 - **Pi integration**：Pi 的 Product Integration 实现；Product Integration 仍是通用角色名。（`agent-integration.md`；`../development/agent-access.md`）
 - **control plane**：一个 session 的投机控制状态、Policy 绑定、校验和编排的所有者。Gateway 属于它；包含 UI Projection、Policy Engine、Speculation Coordinator 与 Ledger。Registry 属于 Runtime。（`../architecture.md` §1；`control-plane.md`）
 
-- **Runtime Adapter**：Runtime 与 control plane 之间的接入边界；按 control plane 的接入约定声明并呈现能力、operation result 与 event，并负责能力映射、transport 和事件规范化。（`../architecture.md` §1；`../development/runtime-adapter.md`）
-- **Adapter Registry**（Registry）：Runtime 内负责 Adapter 登记、契约兼容性检查、能力声明校验、主动验证及独立验证证据的组件，发布带验证状态的能力信息；不拥有 Speculative Tree 或 Runtime 的执行状态，Adapter 不得自行填写验证状态或验证证据。（`runtime.md`；`runtime-adapter-contract.md`）
+- **runtime proxy**：Runtime 与 control plane 之间的接入边界；按 control plane 的接入约定声明并呈现能力、operation result 与 event，并负责能力映射、transport 和事件规范化。（`../architecture.md` §1；`../development/runtime-adapter.md`）
+- **backend registry**：Runtime 内读取节点配置并登记可用 backend 实现、入口、接口及能力声明的组件，负责核对所需标准接口。实例生命周期由 base runtime 管理。（`runtime.md`）
+- **base runtime**：管理 Environment、实际参与的 backend 及操作结果的 Runtime 组件。（`runtime.md`）
 - **Runtime**：AScout 支持的完整执行与效果承载系统；承载 Agent 一步动作，提供环境、资源、状态派生、隔离和外部效果边界。其内部架构不由 AScout 预先固定，具体能力可以通过进程、Overlay、容器或虚拟机组合。（`../architecture.md` §1；`runtime.md`）
 
 ## 实体
@@ -96,7 +98,7 @@
 - **Speculation Coordinator**：control plane 中推动处理、调用 Policy 并发出操作的协调角色；不拥有 Tree，不保存第二份投机状态，可以服务多棵树。Chance、Branch、Proposal、`AssumptionSet`、待选机会和调度状态由每个 session 的 AScoutAgent 所拥有的 Speculative Tree 保存。（`control-plane.md` §2.4）
 - **External Effect Coordinator**：Runtime 的组件，处理本机隔离覆盖不到、需通过网络访问环境之外的 API 操作，与 network backend 协同，不负责本地文件和进程隔离。Policy 的 `effect` 决定处理方式，Instrumentation 本地落实并将模拟操作交给它。真实请求先暂存在本机；可模拟时才返回明确标记来源的临时结果，不能模拟时在效果边界阻塞当前 Branch，保留已完成进展且不提供模拟结果，待该 Branch 成为权威后发出真实请求并继续，丢弃或前提失效则取消。它无需为跨 Branch 命令去重掌握整棵树；control plane 只在接受、丢弃或前提失效时通知相应暂存请求释放或取消。（`effect-management.md`）
 - **Ledger**：异步旁路记录 control plane 运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），只追加并保存记录，读取只从已保存记录按序号取出，用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期，不要求据观察日志恢复整棵树。已退出 Tree 的 Branch 归档首次失败后安全恢复追加边界并重试一次，最终失败先以 run id、Branch id 和原因通过系统运行日志及 UI Projection 报警，再释放记录，不永久保留未归档 Branch。（`control-plane.md` §2.6；`speculation-contract.md` §3）
-- **ASC-Proxy**：Instrumentation 进程内的受管 Unix socket 客户端，同时管理经 Gateway 接入 control plane 的控制连接及不依赖具体 backend 的独立 Runtime 执行连接，负责会话、身份与授权上下文的传递以及 request、fact、result 和 event 的双向传递；不拥有全局控制状态，也不是独立代理进程。（`agent-integration.md` §2.2）
+- **ASC-Proxy**：Instrumentation 进程内的受管 Unix socket 客户端，同时管理经 Gateway 接入 control plane 的控制连接及不依赖具体 backend 的独立 Runtime 执行连接，在控制连接上关联 Agent 和 Branch，在执行连接上使用 Environment 和 operation 身份；不拥有全局控制状态，也不是独立代理进程。（`agent-integration.md` §2.2）
 - **Interposer**：Instrumentation 统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 求值和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）
 - **Gateway**：control plane 面向 Instrumentation、UI 与 Runtime 的统一受管通信边界；负责连接／会话管理、入口格式／身份／上下文／权限检查、消息转交和交付。不拥有 Tree、Policy 或投机编排；消息对投机执行的变化由相应控制逻辑决定。（`control-plane.md` §2.1）
 

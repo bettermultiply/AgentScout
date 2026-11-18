@@ -6,7 +6,6 @@ const RESULT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 use super::result::{can_accept, filesystem_failure_reason, result as make_result};
 use crate::protocol::contract::*;
 use crate::runtime::backend::*;
-use serde_json::Value;
 
 fn operation_context(environment_id: &str, request: &OperationRequest) -> BackendContext {
     BackendContext {
@@ -109,25 +108,21 @@ impl Shared {
         request: &OperationRequest,
         cancel: &CancelHandle,
     ) -> OperationResult {
+        // Recovery owns its admission in BaseRuntime, including exclusive restore.
+        let _operation = if matches!(
+            request.operation,
+            Operation::SaveRuntime { .. } | Operation::LoadRuntime { .. }
+        ) {
+            None
+        } else {
+            match self.runtime.enter_operation() {
+                Ok(operation) => Some(operation),
+                Err(reason) => return self.reasoned_failure(request, None, reason),
+            }
+        };
         let state = self.runtime.state(environment_id);
         let context = operation_context(environment_id, request);
         match &request.operation {
-            Operation::BindExecution { branch_id } => {
-                if state != Some(EnvironmentState::Available) || branch_id.is_empty() {
-                    return self.reasoned_failure(
-                        request,
-                        state,
-                        "Branch binding requires an available Environment",
-                    );
-                }
-                let Some(commands) = &self.commands else {
-                    return self.reasoned_failure(request, state, "execution endpoint unavailable");
-                };
-                if let Err(reason) = commands.bind(branch_id, environment_id) {
-                    return self.reasoned_failure(request, state, reason);
-                }
-                self.success(request, state, true)
-            }
             Operation::MaterializeAuthority => match self.runtime.materialize(&context) {
                 Ok(filesystem) => {
                     let mut result = self.success(request, state, can_accept(state));
@@ -136,28 +131,11 @@ impl Shared {
                 }
                 Err(error) => self.backend_error(request, environment_id, error),
             },
-            Operation::SaveRuntime { path } | Operation::LoadRuntime { path } => {
-                // Even a failed save/load must not fall through to destructive EOF cleanup.
-                self.preserving
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                let result = if matches!(request.operation, Operation::SaveRuntime { .. }) {
-                    self.runtime.save_runtime(path)
-                } else {
-                    let result = self.runtime.load_runtime(path);
-                    if result.is_err() {
-                        let _ = self.runtime.shutdown();
-                    }
-                    result
-                };
-                match result {
-                    Ok(()) => make_result(
-                        request,
-                        ResultStatus::Completed,
-                        self.runtime.state(environment_id),
-                        false,
-                    ),
-                    Err(error) => self.reasoned_failure(request, state, &error.to_string()),
-                }
+            Operation::SaveRuntime { path } => {
+                self.recovery_result(request, state, self.runtime.save_runtime(path))
+            }
+            Operation::LoadRuntime { path } => {
+                self.recovery_result(request, state, self.runtime.load_runtime(path))
             }
             Operation::EstablishEnvironment => {
                 self.execute_establish(environment_id, request, state, &context)
@@ -197,18 +175,6 @@ impl Shared {
                 tool_name,
                 cancel,
             ),
-            Operation::InvokeTool {
-                tool_name,
-                arguments,
-            } => self.execute_invoke_tool(
-                environment_id,
-                request,
-                state,
-                &context,
-                tool_name,
-                arguments,
-                cancel,
-            ),
             Operation::FilesystemFork { .. }
             | Operation::FilesystemMark { .. }
             | Operation::FilesystemDiff { .. }
@@ -216,6 +182,23 @@ impl Shared {
             | Operation::FilesystemDiscard { .. } => {
                 self.execute_filesystem(environment_id, request, state, &context, cancel)
             }
+        }
+    }
+
+    fn recovery_result(
+        &self,
+        request: &OperationRequest,
+        state: Option<EnvironmentState>,
+        result: Result<(), BackendError>,
+    ) -> OperationResult {
+        match result {
+            Ok(()) => make_result(
+                request,
+                ResultStatus::Completed,
+                self.runtime.state(&request.environment_id),
+                false,
+            ),
+            Err(error) => self.reasoned_failure(request, state, &error.to_string()),
         }
     }
 
@@ -280,20 +263,15 @@ impl Shared {
             None => return self.unknown_environment(request),
         }
         if let Some(agent) = agent {
-            let launch = if self.runtime.manages_agent_process() {
-                self.runtime
-                    .launch_agent(context, agent)
-                    .map_err(|error| error.to_string())
-            } else {
-                self.launch_agent(agent).map_err(|error| error.to_string())
-            };
+            let launch = self.runtime.launch_agent(context, agent);
             return match launch {
                 Ok(()) => {
                     let actual = self.runtime.state(environment_id);
                     self.success(request, actual, can_accept(actual))
                 }
-                Err(error) => {
-                    self.reasoned_failure(request, state, format!("agent launch failed: {error}"))
+                Err(mut error) => {
+                    error.message = format!("agent launch failed: {}", error.message);
+                    self.backend_error(request, environment_id, error)
                 }
             };
         }
@@ -318,29 +296,8 @@ impl Shared {
             }
             None => return self.unknown_environment(request),
         }
-        match self.runtime.create_child_environment(context) {
+        match self.runtime.branch_environment(context, agent) {
             Ok(child_environment_id) => {
-                if let Some(agent) = agent {
-                    let child_context = BackendContext {
-                        operation_id: request.request_id.clone(),
-                        generation: request.generation,
-                        task_id: request.task_id.clone(),
-                        environment_id: child_environment_id.to_string(),
-                        parent_environment_id: Some(environment_id.to_string()),
-                        ..context.clone()
-                    };
-                    let launch = if self.runtime.manages_agent_process() {
-                        self.runtime.launch_agent(&child_context, agent)
-                    } else {
-                        self.launch_agent(agent)
-                            .map_err(|error| BackendError::new(error.to_string()))
-                    };
-                    if let Err(error) = launch {
-                        let mut error = error;
-                        error.created_environment_id = Some(child_environment_id);
-                        return self.backend_error(request, environment_id, error);
-                    }
-                }
                 let actual = self.runtime.state(&child_environment_id);
                 let mut result = self.success_for_environment(
                     request,
@@ -420,7 +377,10 @@ impl Shared {
         state: Option<EnvironmentState>,
         context: &BackendContext,
     ) -> OperationResult {
-        if state == Some(EnvironmentState::Terminated) {
+        if matches!(
+            state,
+            Some(EnvironmentState::Terminated | EnvironmentState::Cleaned)
+        ) {
             let mut result = self.success(request, state, false);
             result.follow_up = vec![FollowUp::Cleanup];
             return result;
@@ -430,7 +390,11 @@ impl Shared {
         }
         if !matches!(
             state,
-            Some(EnvironmentState::Available | EnvironmentState::Suspended)
+            Some(
+                EnvironmentState::Available
+                    | EnvironmentState::Suspended
+                    | EnvironmentState::PartiallyAvailable
+            )
         ) {
             return self.not_applicable(request, state, "environment cannot be terminated");
         }
@@ -453,6 +417,9 @@ impl Shared {
     ) -> OperationResult {
         if state.is_none() {
             return self.not_applicable(request, None, "unknown environment");
+        }
+        if state == Some(EnvironmentState::Cleaned) {
+            return self.success(request, state, false);
         }
         if state != Some(EnvironmentState::Terminated) {
             return self.not_applicable(
@@ -489,32 +456,6 @@ impl Shared {
         match self
             .runtime
             .tool_context_with_context(context, tool_name, cancel)
-        {
-            Ok(execution) => self.execution_result(request, environment_id, execution, true),
-            Err(error) => self.backend_error(request, environment_id, error),
-        }
-    }
-
-    fn execute_invoke_tool(
-        &self,
-        environment_id: &str,
-        request: &OperationRequest,
-        state: Option<EnvironmentState>,
-        context: &BackendContext,
-        tool_name: &str,
-        arguments: &Value,
-        cancel: &CancelHandle,
-    ) -> OperationResult {
-        if !self.tool_declared(tool_name) {
-            return self.unsupported(
-                request,
-                state,
-                format!("runtime does not declare tool {tool_name}"),
-            );
-        }
-        match self
-            .runtime
-            .invoke_tool_with_context(context, tool_name, arguments, cancel)
         {
             Ok(execution) => self.execution_result(request, environment_id, execution, true),
             Err(error) => self.backend_error(request, environment_id, error),

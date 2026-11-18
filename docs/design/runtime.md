@@ -4,23 +4,29 @@
 
 Runtime 是 AScout 用来承载 Agent 一步动作的受约束执行系统。一步动作可以是一次模型推理或一次工具调用。它不是替 Agent 决定如何推理，也不只是把命令运行起来，而是提供动作正常、正确运行所需的条件，并把动作对真实世界或 Authority 的影响限制在允许范围内。投机动作通常不应直接影响真实世界；具体允许哪些影响，必须遵守任务要求和既定的效果约束。
 
-Runtime 面向一般投机执行，不专门为 NLE 或某个 Agent 产品设计，也不等同于虚拟机。AScout 自身支持一套 Runtime；Runtime Adapter、Adapter Registry、环境、进程与资源管理都属于这个整体中的接入或实现职责，而不是几套平级系统。适配外部执行机制是为了便于接入，不意味着 AScout 只有适配器而没有自己的 Runtime。Runtime 经 Gateway 与 control plane 通信，语义边界仍由 Runtime Adapter 契约规定；实际启动、监视和回收 Agent 与接入进程由 Runtime 负责。
+Runtime 面向一般投机执行，不专门为 NLE 或某个 Agent 产品设计，也不等同于虚拟机。AScout 自身支持一套 Runtime；runtime proxy、backend registry、环境、进程与资源管理都属于这个整体中的接入或实现职责，而不是几套平级系统。适配外部执行机制是为了便于接入，不意味着 AScout 只有适配器而没有自己的 Runtime。Runtime 经 Gateway 与 control plane 通信，语义边界仍由 runtime proxy 契约规定；实际启动、监视和回收 Agent 与接入进程由 Runtime 负责。
 
-默认 Runtime 面向可信 workload；对抗性 containment 由部署方选择 hardened Runtime 与 Adapter 提供，不能改变 AScout 的生命周期语义。
+默认 Runtime 面向可信 workload；对抗性 containment 由部署方选择 hardened Runtime 与 runtime proxy 提供，不能改变 AScout 的生命周期语义。
 
-## Adapter Registry
+## Runtime 的组件职责
 
-Adapter Registry（简称 Registry）属于 Runtime，负责 Adapter 登记、契约兼容性和能力声明校验，维护接入状态、契约版本和声明快照。首期只检查 control plane 需要的 API 是否存在并可解析，不主动建立验证环境或执行验证场景；因此首期不产生环境保证已验证的结论。Adapter 提供接入信息，不得自行填写验证状态、验证证据，或以自测结果代替未来的 Registry 验证。
+- **runtime proxy** 是 control plane 的统一接入点。它维护连接、请求身份、队列与输出，通过 Gateway 呈现 Runtime 能力、操作结果与事件。接入终止时停止接收并取消在飞请求。
+- **backend registry** 登记本节点可用的 backend 实现、入口、接口与能力声明，并核对需要的标准接口。独立验证结果由 registry 汇集，backend 自报声明与接口检查各自保留来源。启动入口读取并规范化节点配置，分别装配 runtime proxy、backend registry 与 base runtime。
+- **base runtime** 根据登记项和自身路由配置创建并管理 backend 实例，为每个 Environment 关联实际参与的实例。它负责操作受理、宿主与环境资源的启动和停止顺序，以及保存后退出与恢复。它汇总实际完成、失败与剩余资源。内置和外部 backend 共用这套参与和路由规则。具体 backend 管理它自身的执行资源。Tree 和 Branch 的全局裁决仍归 control plane。
+- **agent supervisor** 管理整个 run 唯一的 Agent 与 Instrumentation 宿主。它在管理宿主时持有进程锁，环境操作由 base runtime 调用 backend 完成。
+- **External Effect Coordinator** 与 network backend 协同管理本机隔离覆盖不到的外部 API 效果，处理暂存、模拟、释放和取消。
 
-Runtime 通过现有 hello 向 control plane 报告 backend 身份，Policy Engine 只在启动握手后确认 Policy 要求的 backend 存在，不解析接口；没有要求则不检查，缺少则拒绝启动。进一步验证以后再加。Registry 的接口检查是 Runtime 内部职责；Registry 不拥有 Tree、Branch 生命周期或 Runtime 执行状态，也不编排投机活动。能力降级、未验证范围与验证失败的处理遵守 [Runtime Adapter 契约](runtime-adapter-contract.md)，不因 Registry 属于 Runtime 而放宽证明要求。
+关闭时 base runtime 停止受理操作并回收宿主，等待已受理操作结束后回收环境资源，包括关闭期间才完成启动的资源。保存或恢复尝试进入保留模式，退出时停止执行资源并保留环境状态。恢复过程中已变更的状态仍按恢复流程回滚。
+
+接口存在、签名可解析和声明一致性只证明接口可接入。对环境保证的结论需要独立验证，能力降级和验证失败遵守 [runtime proxy 契约](runtime-adapter-contract.md)。
 
 ## 状态与 Instrumentation
 
-Agent 与随附 Instrumentation 在 Branch 隔离环境外的可信宿主运行，Runtime 仍负责宿主的启动、监视和回收。工作区读写、shell、受管子程序与效果使用对应 Branch 的 Environment；模型、内存和控制通信无需绕经文件系统隔离。宿主不随 Branch 挂载切换或物化重启，环境内子程序仍按 Environment 归属取消和清理。Firecracker Guest Agent 是 guest 内的 Runtime 命令服务，继续留在 guest。产品扩展的直接宿主文件和进程访问不自动获得 Branch 隔离保证。
+Agent 与随附 Instrumentation 在 Branch 隔离环境外的可信宿主运行，agent supervisor 负责整个 run 唯一宿主的启动、监视和回收。Runtime 通过 Backend 接口建立、派生、暂停、恢复和清理环境。环境专用资源由所属 Backend 管理，文件视图、namespace holder 和挂载轮换归 `FilesystemBackend`。工作区读写、shell、受管子程序与效果使用对应 Branch 的 Environment；模型、内存和控制通信无需绕经文件系统隔离。宿主不随 Branch 挂载切换或物化重启，环境内子程序仍按 Environment 归属取消和清理。Firecracker Guest Agent 是 guest 内的 Runtime 命令服务，继续留在 guest。产品扩展的直接宿主文件和进程访问不自动获得 Branch 隔离保证。
 
 Environment 的身份由 Runtime 创建并随建立或派生结果返回；control plane 持久化 Branch 与该身份的独占绑定。初始 Authority 同样先请求 Runtime 建立环境；Candidate 派生只指定父 Environment。创建前 Branch 可无绑定，后续操作与恢复一律使用已返回的身份，不用 Branch 名称、authority 或工作区路径代替。内部 workload 可共享，但各 Environment 的生命周期独立；Backend 组合及其身份不交给 control plane 决定。
 
-control plane 与 Adapter 的 `ControlSession` 只承担网络连接、握手和请求/结果关联；单个 Runtime 对 control plane 表现为统一身份和统一入口，内部节点、进程及路由不暴露，hello 仅报告 backend 身份供存在检查。control plane 为每个 Branch 显式维护独占的 `environment_id`，Runtime 普通请求只接收 `environment_id` 与 operation，不能从环境推导 Branch。Runtime 内部维护 Environment 与 Backend instance 的多对多组合，并以 `backend_id` 区分实例；control plane 不传 `backend_id`。Adapter Registry 首期的 API 存在性/可解析检查也不等于环境保证已验证，Agent 接入验证与 Runtime 能力验证保持独立边界。
+control plane 与 runtime proxy 的 `ControlSession` 只承担网络连接、握手和请求/结果关联；单个 Runtime 对 control plane 表现为统一身份和统一入口，内部节点、进程及路由不暴露，control plane 可以检查握手报告的 backend 身份。control plane 为每个 Branch 显式维护独占的 `environment_id`，Runtime 普通请求只接收 `environment_id` 与 operation，不能从环境推导 Branch。Runtime 内部维护 Environment 与 Backend instance 的多对多组合，并以 `backend_id` 区分实例；control plane 不传 `backend_id`。Agent 接入验证与 Runtime 能力验证保持独立边界。
 
 系统最终必须把 Authority 的结果物化到现实。Agent 完成本轮工作、开始等待用户输入时，task 完成；正常完成时，在没有存活候选且任务相关写入完成后物化并重置基准，不为物化暂停执行。取消、失败或终止任务立即进入物化处理，先结束候选并等待任务相关写入完成，再实际写回。Agent 常用的 Ctrl-C 或退出均表示终止任务；Ctrl-C 不关闭程序，保留 session 并留在对话中，待候选结束、相关写入及物化处理完成后可接下一轮。暂停任务由 AScout 提供独立于原 Agent 的 `/pause` 入口，明确继续命令为 `/continue`，恢复原任务执行，保留原树、候选和环境关系。暂停期间的普通消息先留着，不解除暂停，也不在暂停期间交给模型；必须先 `/continue`，之后再按原顺序交给模型。它与原 Agent 的 Ctrl-C／退出终止语义分开，暂停不意味着退出程序。Runtime 经接入边界向 control plane 报告物化完成或失败，物化失败等同操作失败，须向用户显示失败；control plane 必须等物化成功后才能宣告任务成功。旧环境及基准在无人引用时释放。
 
@@ -49,7 +55,7 @@ Runtime 的具体能力都可以插拔和组合，包括文件系统隔离、进
 ## 相关文档
 
 - [架构](../architecture.md)：Instrumentation、control plane 和 Runtime 的职责。
-- [Runtime Adapter 契约](runtime-adapter-contract.md)：Runtime 的可观察接入边界。
+- [runtime proxy 契约](runtime-adapter-contract.md)：Runtime 的可观察接入边界。
 - [Instrumentation](agent-integration.md)：Session 和执行切点。
 - [效果管理](effect-management.md)：状态变化与效果处理纪律。
 - [Branch 语义](branch-semantics.md)：接受、丢弃和状态可见性。

@@ -192,7 +192,7 @@ effect(effect_descriptor, context) -> EffectPlan
 
 `simulate` 建立在 `stage` 暂存之上，不是与暂存互斥的替代路径。Branch 被接受后才处理暂存的真实请求，丢弃或前提失效则取消；模拟结果不会自动变成真实调用。Instrumentation 本地求值并落实 `effect`，将模拟操作交给 Runtime 内的 External Effect Coordinator，由它判断能否模拟。不能模拟时，真实请求继续暂存在本机，不离开本机；当前 Branch 不获得模拟结果，在效果边界阻塞并保留已完成进展，不因此直接拒绝整个投机。该 Branch 成为权威后才发出真实请求并继续，丢弃或前提失效则取消请求。可模拟时才返回明确标记来源的临时结果。模拟响应不是真实 Authority，必须明确标记为模拟结果、记录生成来源并作为未验证假设处理；后续仍需通过 Authority、validator 或其他明确规则验证。这即正式语义所称的**伪装执行**，其约束与保证见 [效果管理设计](effect-management.md)。`EffectClass` 描述效果可采用的处理纪律，`StateDomain` 描述效果作用的状态域，二者保持正交；Policy 选择的模式必须经过 Effect Management、Contract 和 Runtime capability 校验。
 
-Policy 可以选择暂存、代理、延迟释放、阻塞、补偿或其他合法处理方式，但不能把效果排除在 AScout 的最低纳管范围之外。Effect Management 必须检查 Adapter 声明的后端能力是否足以落实所选纪律。
+Policy 可以选择暂存、代理、延迟释放、阻塞、补偿或其他合法处理方式，但不能把效果排除在 AScout 的最低纳管范围之外。Effect Management 必须检查 Runtime 声明的后端能力是否足以落实所选纪律。
 
 如果某个效果暂时无法安全提前处理，系统可以在该效果边界阻塞当前 Branch，同时保留已经安全完成的前置进展；验证接受后继续，验证拒绝或过程取消后清理、补偿或回收。只有无法安全阻塞、无法在接受后继续、也无法在淘汰后清理时，才应拒绝相关投机环节或明确降级。
 
@@ -251,7 +251,7 @@ dispose(branch, resolution, context) -> DispositionPlan
 
 这些意图可以组合。例如，`Salvage + Discard` 表示先移交可保留的部分进展，再丢弃剩余候选工作；`Compensate + Discard` 表示先处理已发生效果，再清理分支。`Promote` 表示身份转换后继续执行，`Reuse` 表示采用候选结果并清理其他候选。`dispose` 不重新判断 `match`，也不决定过程是否还能继续推进；它只根据已有裁决选择后续处置。
 
-这些是 Policy 的处置意图，不是对 Runtime 生命周期的直接调用。实际的 Branch 转换、状态回收、效果清理、资源释放和 commit/discard 由 Mechanism 编排，并由 Adapter 所接后端的实际结果确认。未命中的候选路径不能通过逐个修补绕过其携带的错误前提；依赖被否定时，相关子图应整体进入回收或丢弃流程。
+这些是 Policy 的处置意图，不是对 Runtime 生命周期的直接调用。实际的 Branch 转换、状态回收、效果清理、资源释放和 commit/discard 由 Mechanism 编排，并由 Runtime 的实际操作结果确认。未命中的候选路径不能通过逐个修补绕过其携带的错误前提；依赖被否定时，相关子图应整体进入回收或丢弃流程。
 
 ### 2.8 `select` - 从待选集合中选择启动机会
 
@@ -276,7 +276,7 @@ rebalance(active_view, paused_view, scheduling_context)
 
 `rebalance` 面向同一 AScoutAgent 中已经运行或暂停的投机 Branch。Policy 可以要求暂时停止某项工作并保留其执行状态（`pause`）、恢复此前暂停的工作（`resume`），或者终止不再值得继续占用资源的工作（`preempt`）。它不接收尚未启动的机会，也不代替 `select`。
 
-`rebalance` 与 `extent` 回答不同问题：`extent` 决定单个投机过程基于自身进展应推进到哪里并等待裁决；`rebalance` 在多个已经启动的工作之间，根据当前资源和相对价值重新分配运行机会。暂停和恢复必须在 Runtime Adapter 声明支持的安全边界上执行。
+`rebalance` 与 `extent` 回答不同问题：`extent` 决定单个投机过程基于自身进展应推进到哪里并等待裁决；`rebalance` 在多个已经启动的工作之间，根据当前资源和相对价值重新分配运行机会。暂停和恢复必须在 runtime proxy 声明支持的安全边界上执行。
 
 `preempt` 只决定终止运行；它使目标 Branch 以 `resolution = preempted` 进入现有 `dispose`，由 `dispose` 决定丢弃、残值回收、补偿和清理。Policy 不能通过 `rebalance` 绕过 Branch 生命周期、single-winner、效果纪律或资源硬约束，Speculation Coordinator 负责复核并执行这些动作。
 
@@ -361,20 +361,20 @@ control plane 应先根据这些选择推导可达到的 Fidelity 上界，再�
 | **Bounded-degradation** | 明确允许有损，但退化受到声明的边界约束 |
 | **Best-effort** | 不提供严格的等价或退化保证 |
 
-具体的 Fidelity 字段、Contract 校验和运行期校验见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
+具体的 Fidelity 字段、Contract 校验和运行期校验见 [runtime proxy 契约设计](runtime-adapter-contract.md)。
 
 ## 6. Policy 与 Mechanism 的边界
 
 每类 decision 只允许读取系统按该类输入约定提供的数据，并在明确授权范围内使用外部能力，不获得任意访问系统状态的入口。算法可以对允许的数据使用自定义计算逻辑，但不能通过共享算法、内部对象或可变引用扩大数据可见范围和权限。数据的提供、求值与结果检查见 [Policy Engine 设计](control-plane/policy-engine.md)。
 
-Policy 可以实现或组合九类 decision，但不能拥有待选集合、运行队列或后端 mutable state，也不能把策略意图伪造成已经完成的后端操作。以下内容必须由 Mechanism 或经 Adapter 验证的后端能力落实：
+Policy 可以实现或组合九类 decision，但不能拥有待选集合、运行队列或后端 mutable state，也不能把策略意图伪造成已经完成的后端操作。以下内容必须由 Mechanism 或经验证的 Runtime 后端能力落实：
 
 - candidate Branch 的创建、隔离、暂停、恢复、接受、丢弃和清理；
 - 待选机会的暂存、有效性维护，以及 `select`、`rebalance` 结果的硬约束复核与执行；
 - `AssumptionSet` 的传播、确认/否定和非空假设数据的信息流约束；
 - single-winner、共享验证依据、commit barrier 和效果阻塞；
 - 资源所有权、预算执行、抢占、取消和运行期成本记账；
-- Policy 声明与 Adapter 所呈现后端能力之间的 Speculation Contract 校验，以及 Fidelity 的加载期检查和运行期校验。
+- Policy 声明与 runtime proxy 呈现的后端能力之间的 Speculation Contract 校验，以及 Fidelity 的加载期检查和运行期校验。
 
 Policy 决定“希望采用哪种策略”，Mechanism 保证该策略在正确性、隔离、资源、副作用和清理约束内执行。能力不足不能静默改变语义，只能拒绝、明确降级或选择其他合法路径。
 

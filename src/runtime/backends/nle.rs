@@ -41,10 +41,7 @@ pub struct NleConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{
-        composite::CompositeRuntime,
-        selection::{BackendConnection, BackendPolicy},
-    };
+    use crate::runtime::{BackendConnection, BackendPolicy, BaseRuntime};
     use std::sync::Arc;
 
     #[test]
@@ -106,7 +103,7 @@ for line in sys.stdin:
     // The fake workload deliberately has shared world state. Lifecycle must
     // stay in NleBackend, and single-component recovery must restore bindings.
     #[test]
-    fn shared_world_lifecycles_and_single_composite_participants_survive_recovery() {
+    fn shared_world_lifecycles_and_single_backend_participants_survive_recovery() {
         let root = tempfile::tempdir().unwrap();
         let bridge = root.path().join("bridge.py");
         std::fs::write(&bridge, r#"
@@ -141,7 +138,7 @@ for line in sys.stdin:
         };
         let make = || {
             let backend = Arc::new(NleBackend::new(config.clone()).unwrap());
-            CompositeRuntime::new(
+            BaseRuntime::with_policy(
                 "runtime",
                 vec![BackendConnection::new("nle", backend).unwrap()],
                 BackendPolicy::single("nle"),
@@ -211,6 +208,39 @@ pub struct NleBackend {
 }
 
 impl NleBackend {
+    pub(super) fn capability_declaration() -> RuntimeCapabilities {
+        RuntimeCapabilities {
+            backends: Vec::new(),
+            tools: vec![
+                RuntimeTool {
+                    name: "nle_action".into(),
+                    description: "Perform one visible NetHack action through AScout. The action must be an integer in the game's action space. Action 0 only confirms an active --More-- or confirmation prompt; using it in a normal turn returns an unknown-command message.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"action": {"type": "integer"}},
+                        "required": ["action"]
+                    }),
+                },
+                RuntimeTool {
+                    name: "nethack_guide".into(),
+                    description: "Read the official NetHack 3.6 Guidebook. Call with no section for the table of contents, or with a numbered section such as '3.3' for map symbols or '4' for commands.".into(),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"section": {"type": "string"}},
+                        "required": []
+                    }),
+                },
+            ],
+            branch_environment: true,
+            filesystem_fast_delete: None,
+            filesystem_fork_cost: None,
+            filesystem_btrfs_incremental_diff: None,
+            freeze_mechanism: None,
+            filesystem_passthrough: None,
+            state_directory_overlaps_mount: None,
+        }
+    }
+
     pub fn new(config: NleConfig) -> Result<Self, BackendError> {
         let mut command = Command::new(&config.python);
         command
@@ -375,36 +405,7 @@ impl Backend for NleBackend {
         Ok(())
     }
     fn capabilities(&self) -> RuntimeCapabilities {
-        RuntimeCapabilities {
-            backends: Vec::new(),
-            tools: vec![
-                RuntimeTool {
-                    name: "nle_action".into(),
-                    description: "Perform one visible NetHack action through AScout. The action must be an integer in the game's action space. Action 0 only confirms an active --More-- or confirmation prompt; using it in a normal turn returns an unknown-command message.".into(),
-                    parameters: json!({
-                        "type": "object",
-                        "properties": {"action": {"type": "integer"}},
-                        "required": ["action"]
-                    }),
-                },
-                RuntimeTool {
-                    name: "nethack_guide".into(),
-                    description: "Read the official NetHack 3.6 Guidebook. Call with no section for the table of contents, or with a numbered section such as '3.3' for map symbols or '4' for commands.".into(),
-                    parameters: json!({
-                        "type": "object",
-                        "properties": {"section": {"type": "string"}},
-                        "required": []
-                    }),
-                },
-            ],
-            branch_environment: true,
-            filesystem_fast_delete: None,
-            filesystem_fork_cost: None,
-            filesystem_btrfs_incremental_diff: None,
-            freeze_mechanism: None,
-            filesystem_passthrough: None,
-            state_directory_overlaps_mount: None,
-        }
+        Self::capability_declaration()
     }
 
     fn establish(&self, environment_id: &str) -> Result<(), BackendError> {

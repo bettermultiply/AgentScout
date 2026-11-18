@@ -1,9 +1,7 @@
 //! Runtime 组合层与 BaseRuntime 生命周期测试。
 
 use super::base::BaseRuntime;
-use super::composite::CompositeRuntime;
 use super::launch_plan::{LaunchFragment, MountEntry};
-use super::process::{FreezeMechanism, ProcessBackend};
 use super::selection::{BackendConnection, BackendOperation, BackendPolicy, BackendRoute};
 use crate::protocol::contract::{
     AgentLaunch, CommandOutput, EnvironmentState, FilesystemConfirmation, FilesystemResult,
@@ -16,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[test]
-fn base_runtime_cleanup_accepts_removed_data_plane_and_retained_cleaned_inner() {
+fn cleanup_accepts_a_removed_participant_and_a_retained_cleaned_participant() {
     struct Lifecycle(Mutex<Option<EnvironmentState>>, bool);
     impl Backend for Lifecycle {
         fn establish(&self, _: &str) -> Result<(), BackendError> {
@@ -66,7 +64,19 @@ fn base_runtime_cleanup_accepts_removed_data_plane_and_retained_cleaned_inner() 
         Mutex::new(Some(EnvironmentState::Available)),
         true,
     ));
-    let runtime = BaseRuntime::new("runtime", inner).with_data_plane(plane.clone());
+    let runtime = BaseRuntime::with_policy(
+        "runtime",
+        vec![
+            BackendConnection::new("inner", inner).unwrap(),
+            BackendConnection::new("plane", plane.clone()).unwrap(),
+        ],
+        BackendPolicy {
+            default: vec!["inner".into(), "plane".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    runtime.establish("env").unwrap();
     assert_eq!(runtime.state("env"), Some(EnvironmentState::Available));
     runtime.terminate("env").unwrap();
     assert_eq!(runtime.state("env"), Some(EnvironmentState::Terminated));
@@ -171,7 +181,7 @@ fn fork_operation() -> Operation {
 fn environment_participants_are_scoped_and_cleanup_does_not_touch_other_backend() {
     let fs1 = MockBackend::new("fs1");
     let process1 = MockBackend::new("process1");
-    let runtime = CompositeRuntime::new(
+    let runtime = BaseRuntime::with_policy(
         "runtime",
         vec![
             BackendConnection::new("fs1", fs1.clone()).unwrap(),
@@ -217,7 +227,7 @@ fn environment_participants_are_scoped_and_cleanup_does_not_touch_other_backend(
 fn filesystem_policy_selects_backend_and_forwards_context_and_operation() {
     let left = MockBackend::new("left");
     let right = MockBackend::new("right");
-    let runtime = CompositeRuntime::new(
+    let runtime = BaseRuntime::with_policy(
         "runtime",
         vec![
             BackendConnection::new("left", left.clone()).unwrap(),
@@ -263,7 +273,7 @@ fn filesystem_policy_selects_backend_and_forwards_context_and_operation() {
 fn filesystem_multiple_selection_and_cancellation_make_no_calls() {
     let left = MockBackend::new("left");
     let right = MockBackend::new("right");
-    let runtime = CompositeRuntime::new(
+    let runtime = BaseRuntime::with_policy(
         "runtime",
         vec![
             BackendConnection::new("left", left.clone()).unwrap(),
@@ -293,117 +303,25 @@ fn filesystem_multiple_selection_and_cancellation_make_no_calls() {
 }
 
 #[test]
-fn base_runtime_freezes_and_marks_writers_quiesced() {
-    let backend = MockBackend::new("mock");
-    let runtime = BaseRuntime::new("runtime", backend);
-    let context = BackendContext::new("env");
-    let log_dir = tempfile::tempdir().unwrap();
-    let log = log_dir.path().join("agent.log");
-    let launch = AgentLaunch {
-        command: "/bin/sleep".into(),
-        args: vec!["5".into()],
-        cwd: PathBuf::from("/tmp"),
-        log: log.clone(),
-        instance_id: Some("test-agent".into()),
-        env: BTreeMap::new(),
-    };
-    runtime.process.launch(&context, &launch, &Default::default()).unwrap();
-    let operation = Operation::FilesystemFork {
-        parent_snapshot_id: "env".into(),
-        child_snapshot_id: "child".into(),
-        path_scope: vec![],
-    };
-    let result = runtime
-        .filesystem_operation(&context, &operation, &CancelHandle::default())
-        .unwrap();
-    assert!(
-        result.confirmation.writers_quiesced,
-        "freeze must be reflected in writers_quiesced"
-    );
-    runtime.stop_agents().unwrap();
-
-    let result = runtime
-        .filesystem_operation(
-            &BackendContext::new("missing"),
-            &Operation::FilesystemFork {
-                parent_snapshot_id: "missing".into(),
-                child_snapshot_id: "child".into(),
-                path_scope: vec![],
-            },
-            &CancelHandle::default(),
-        )
-        .unwrap();
-    assert!(!result.confirmation.writers_quiesced);
-}
-
-#[test]
-fn materialization_refuses_active_managed_writer_without_stopping_it() {
-    let root = tempfile::Builder::new()
-        .prefix("materialize-writer-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
-    let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"))
-        .with_data_plane(MockBackend::new("plane"));
-    let context = BackendContext::new("materialize-active");
+fn trusted_host_does_not_become_an_environment_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
+    let backend = super::agent_supervisor::AgentSupervisor::default();
+    let context = BackendContext::new("trusted-host");
+    runtime.establish_with_context(&context).unwrap();
     let launch = AgentLaunch {
         command: "/bin/sleep".into(),
         args: vec!["30".into()],
         cwd: root.path().into(),
-        log: root.path().join("agent.log"),
+        log: root.path().join("host.log"),
         instance_id: None,
         env: BTreeMap::new(),
     };
-    runtime.process.launch(&context, &launch, &Default::default()).unwrap();
-    let failure = runtime.materialize(&context).unwrap_err();
-    assert!(
-        failure
-            .to_string()
-            .contains("writers have not been confirmed drained")
-    );
-    assert!(runtime.process.is_running(&context.environment_id).unwrap());
-    runtime.process.cleanup(&context.environment_id).unwrap();
-}
-
-    #[test]
-    fn trusted_host_does_not_become_an_environment_writer() {
-        let root = tempfile::tempdir().unwrap();
-        let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
-        let context = BackendContext::new("trusted-host");
-        let launch = AgentLaunch {
-            command: "/bin/sleep".into(),
-            args: vec!["30".into()],
-            cwd: root.path().into(),
-            log: root.path().join("host.log"),
-            instance_id: None,
-            env: BTreeMap::new(),
-        };
-        runtime.launch_agent(&context, &launch).unwrap();
-        assert!(runtime.process_handle(&context.environment_id).is_none());
-        runtime.materialize(&context).unwrap();
-        // Reusing the run host after publication must succeed without restart.
-        runtime.launch_agent(&context, &launch).unwrap();
-        runtime.stop_agents().unwrap();
-    }
-
-fn launch_test_agent(
-    runtime: &BaseRuntime,
-    command: &str,
-    args: Vec<String>,
-) -> (BackendContext, tempfile::TempDir) {
-    let context = BackendContext::new("env");
-    let log_dir = tempfile::tempdir().unwrap();
-    let log = log_dir.path().join("agent.log");
-    let launch = AgentLaunch {
-        command: command.to_string(),
-        args,
-        cwd: PathBuf::from("/tmp"),
-        log,
-        instance_id: Some("test-agent".into()),
-        env: BTreeMap::new(),
-    };
-    // This fixture represents an environment writer, not the trusted Agent host.
-    runtime.process.launch(&context, &launch, &Default::default()).unwrap();
-    (context, log_dir)
+    backend.launch(&launch, &BTreeMap::new()).unwrap();
+    runtime.materialize(&context).unwrap();
+    // Reusing the run host after publication must succeed without restart.
+    backend.launch(&launch, &BTreeMap::new()).unwrap();
+    backend.stop().unwrap();
 }
 
 fn env_fork_operation() -> Operation {
@@ -415,78 +333,24 @@ fn env_fork_operation() -> Operation {
 }
 
 #[test]
-fn base_runtime_without_freeze_mechanism_still_runs_operations() {
-    let mut runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
-    runtime.process = ProcessBackend::with_mechanism("process", "bwrap", FreezeMechanism::None);
-    let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
-    let result = runtime
-        .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
-        .unwrap();
-    assert!(!result.confirmation.writers_quiesced);
-    runtime.stop_agents().unwrap();
-}
-
-#[test]
-fn freeze_failure_fails_before_filesystem_operation() {
-    let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
-    let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
-    runtime.process.inject_freeze_failure(true);
-    let error = runtime
-        .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
-        .unwrap_err();
-    assert!(
-        error.message.contains("injected freeze failure"),
-        "{}",
-        error.message
-    );
-    runtime.process.inject_freeze_failure(false);
-    runtime.stop_agents().unwrap();
-}
-
-#[test]
-fn thaw_failure_is_reported_as_cleanup_failure() {
-    let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
-    let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
-    runtime.process.inject_thaw_failure(true);
-    let error = runtime
-        .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
-        .unwrap_err();
-    assert!(error.message.contains("thaw"), "{}", error.message);
-    assert!(
-        error
-            .cleanup_failures
-            .iter()
-            .any(|value| value.contains("thaw")),
-        "missing thaw cleanup failure: {:?}",
-        error.cleanup_failures
-    );
-    runtime.process.inject_thaw_failure(false);
-    runtime.stop_agents().unwrap();
-}
-
-#[test]
-fn exited_process_does_not_block_filesystem_operation() {
-    let runtime = BaseRuntime::new("runtime", MockBackend::new("mock"));
-    let (context, _log_dir) = launch_test_agent(&runtime, "/bin/true", Vec::new());
-    for _ in 0..3000 {
-        if !runtime.process.is_running("env").unwrap() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert!(!runtime.process.is_running("env").unwrap());
-    assert!(runtime.process.process_handle("env").is_some());
-    let result = runtime
-        .filesystem_operation(&context, &env_fork_operation(), &CancelHandle::default())
-        .unwrap();
-    assert!(!result.confirmation.writers_quiesced);
-    runtime.stop_agents().unwrap();
-}
-
-#[test]
-fn base_runtime_accepts_any_backend_as_data_plane() {
-    let runtime = BaseRuntime::new("runtime", MockBackend::new("inner"))
-        .with_data_plane(MockBackend::new("plane"));
+fn filesystem_interface_routes_to_an_ordinary_registered_backend() {
+    let runtime = BaseRuntime::with_policy(
+        "runtime",
+        vec![
+            BackendConnection::new("inner", MockBackend::new("inner")).unwrap(),
+            BackendConnection::new("plane", MockBackend::new("plane")).unwrap(),
+        ],
+        BackendPolicy {
+            default: vec!["inner".into(), "plane".into()],
+            routes: vec![BackendRoute {
+                operation: Some(BackendOperation::FilesystemFork),
+                backends: vec!["plane".into()],
+                ..Default::default()
+            }],
+        },
+    )
+    .unwrap();
+    runtime.establish("env").unwrap();
     let ids = runtime.backend_ids();
     assert!(ids.iter().any(|id| id == "plane"));
     assert!(!ids.iter().any(|id| id == "filesystem"));
@@ -496,110 +360,6 @@ fn base_runtime_accepts_any_backend_as_data_plane() {
         .filesystem_operation(&context, &operation, &CancelHandle::default())
         .unwrap();
     assert!(result.confirmation.snapshot_created);
-}
-
-struct FailLifecycle {
-    suspend: bool,
-    resume: bool,
-}
-
-impl Backend for FailLifecycle {
-    fn establish(&self, _: &str) -> Result<(), BackendError> {
-        Ok(())
-    }
-    fn operate(
-        &self,
-        _: &str,
-        _: &[String],
-        _: &CancelHandle,
-    ) -> Result<CommandOutput, BackendError> {
-        Err(BackendError::new("unused"))
-    }
-    fn branch(&self, _: &str, _: &str) -> Result<(), BackendError> {
-        Ok(())
-    }
-    fn suspend(&self, _: &str) -> Result<(), BackendError> {
-        if self.suspend {
-            Err(BackendError::new("inner suspend failed"))
-        } else {
-            Ok(())
-        }
-    }
-    fn resume(&self, _: &str) -> Result<(), BackendError> {
-        if self.resume {
-            Err(BackendError::new("inner resume failed"))
-        } else {
-            Ok(())
-        }
-    }
-    fn terminate(&self, _: &str) -> Result<(), BackendError> {
-        Ok(())
-    }
-    fn cleanup(&self, _: &str) -> Result<(), BackendError> {
-        Ok(())
-    }
-    fn state(&self, _: &str) -> Option<EnvironmentState> {
-        Some(EnvironmentState::Available)
-    }
-    fn environments(&self) -> Vec<String> {
-        vec!["env".into()]
-    }
-}
-
-#[test]
-fn suspend_rollback_thaw_failure_is_reported() {
-    let runtime = BaseRuntime::new(
-        "runtime",
-        Arc::new(FailLifecycle {
-            suspend: true,
-            resume: false,
-        }),
-    );
-    if runtime.process.freeze_mechanism() == FreezeMechanism::None {
-        eprintln!("SKIP suspend_rollback_thaw_failure_is_reported: no freeze mechanism");
-        return;
-    }
-    let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["30".into()]);
-    runtime.process.inject_thaw_failure(true);
-    let error = runtime
-        .suspend(context.environment_id.as_str())
-        .unwrap_err();
-    assert!(error.message.contains("inner suspend failed"), "{error}");
-    assert!(
-        error
-            .cleanup_failures
-            .iter()
-            .any(|failure| failure.contains("thaw")),
-        "{error:?}"
-    );
-    runtime.stop_agents().unwrap();
-}
-
-#[test]
-fn resume_rollback_freeze_failure_is_reported() {
-    let runtime = BaseRuntime::new(
-        "runtime",
-        Arc::new(FailLifecycle {
-            suspend: false,
-            resume: true,
-        }),
-    );
-    if runtime.process.freeze_mechanism() == FreezeMechanism::None {
-        eprintln!("SKIP resume_rollback_freeze_failure_is_reported: no freeze mechanism");
-        return;
-    }
-    let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["30".into()]);
-    runtime.process.inject_freeze_failure(true);
-    let error = runtime.resume(context.environment_id.as_str()).unwrap_err();
-    assert!(error.message.contains("inner resume failed"), "{error}");
-    assert!(
-        error
-            .cleanup_failures
-            .iter()
-            .any(|failure| failure.contains("freeze")),
-        "{error:?}"
-    );
-    runtime.stop_agents().unwrap();
 }
 
 #[test]
@@ -734,9 +494,18 @@ fn materialization_restarts_the_namespace_holder_on_the_new_generation() {
     config.isolated_paths = Some(vec![workspace.clone()]);
     config.isolated_targets = vec![(workspace.clone(), PathBuf::from("/app"))];
     let plane = Arc::new(FilesystemBackend::new(config).unwrap());
-    let runtime = BaseRuntime::new("runtime", MockBackend::new("inner"))
-        .with_data_plane(plane.clone())
-        .with_bubblewrap(plane.bubblewrap_path());
+    let runtime = BaseRuntime::with_policy(
+        "runtime",
+        vec![
+            BackendConnection::new("inner", MockBackend::new("inner")).unwrap(),
+            BackendConnection::new("filesystem", plane.clone()).unwrap(),
+        ],
+        BackendPolicy {
+            default: vec!["inner".into(), "filesystem".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let context = BackendContext::new("authority");
     runtime.establish_with_context(&context).unwrap();
     let launch = AgentLaunch {
@@ -747,14 +516,15 @@ fn materialization_restarts_the_namespace_holder_on_the_new_generation() {
         instance_id: Some("host".into()),
         env: BTreeMap::new(),
     };
-    runtime.launch_agent(&context, &launch).unwrap();
+    runtime
+        .start_environment_execution(&context, &launch)
+        .unwrap();
     let socket = root.path().join("state/holder-sockets/authority/cmd.sock");
     assert_eq!(
         holder_request(&socket, "printf before > /app/before")["exit_code"],
         0
     );
     assert!(!workspace.join("before").exists());
-    assert!(runtime.process.is_holder("authority").unwrap());
 
     let materialized = runtime.materialize(&context).unwrap();
     assert!(materialized.confirmation.published);
@@ -762,7 +532,6 @@ fn materialization_restarts_the_namespace_holder_on_the_new_generation() {
         std::fs::read_to_string(workspace.join("before")).unwrap(),
         "before"
     );
-    assert!(runtime.process.is_holder("authority").unwrap());
     assert_eq!(
         holder_request(&socket, "test \"$(cat /app/before)\" = before")["exit_code"],
         0,
@@ -770,4 +539,212 @@ fn materialization_restarts_the_namespace_holder_on_the_new_generation() {
     );
     runtime.terminate("authority").unwrap();
     runtime.cleanup("authority").unwrap();
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use crate::protocol::contract::AgentLaunch;
+    use crate::protocol::contract::{CommandOutput, EnvironmentState, RuntimeCapabilities};
+    use crate::runtime::BaseRuntime;
+    use crate::runtime::backend::BackendContext;
+    use crate::runtime::backend::{Backend, BackendError, CancelHandle};
+    use crate::runtime::proxy::RuntimeProxy;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::{Duration, Instant};
+
+    struct ShutdownBackend {
+        environments: Mutex<Vec<String>>,
+        start: Option<StartExecution>,
+        terminated: Mutex<Vec<String>>,
+        cleaned: Mutex<Vec<String>>,
+        fail_terminate: Option<String>,
+    }
+
+    struct StartExecution {
+        blocked: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+        retry_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Backend for ShutdownBackend {
+        fn start_environment_execution(
+            &self,
+            context: &BackendContext,
+            _: &AgentLaunch,
+        ) -> Result<(), BackendError> {
+            use std::sync::atomic::Ordering;
+            let start = self.start.as_ref().unwrap();
+            match context.environment_id.as_str() {
+                "blocked" => {
+                    start.blocked.send(()).unwrap();
+                    start
+                        .release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+                "retry" if start.retry_calls.fetch_add(1, Ordering::SeqCst) == 0 => {
+                    return Err(BackendError::new("injected retryable startup failure"));
+                }
+                "retry" => {}
+                id => panic!("unexpected environment start: {id}"),
+            }
+            self.environments
+                .lock()
+                .unwrap()
+                .push(context.environment_id.clone());
+            Ok(())
+        }
+        fn capabilities(&self) -> RuntimeCapabilities {
+            RuntimeCapabilities {
+                branch_environment: true,
+                ..RuntimeCapabilities::default()
+            }
+        }
+        fn establish(&self, _: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn operate(
+            &self,
+            _: &str,
+            _: &[String],
+            _: &CancelHandle,
+        ) -> Result<CommandOutput, BackendError> {
+            Err(BackendError::new("unused"))
+        }
+        fn branch(&self, _: &str, _: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn suspend(&self, _: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn resume(&self, _: &str) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn terminate(&self, environment_id: &str) -> Result<(), BackendError> {
+            self.terminated
+                .lock()
+                .unwrap()
+                .push(environment_id.to_string());
+            if self.fail_terminate.as_deref() == Some(environment_id) {
+                return Err(BackendError::new("injected terminate failure"));
+            }
+            Ok(())
+        }
+        fn cleanup(&self, environment_id: &str) -> Result<(), BackendError> {
+            self.cleaned
+                .lock()
+                .unwrap()
+                .push(environment_id.to_string());
+            Ok(())
+        }
+        fn state(&self, _: &str) -> Option<EnvironmentState> {
+            Some(EnvironmentState::Available)
+        }
+        fn environments(&self) -> Vec<String> {
+            self.environments.lock().unwrap().clone()
+        }
+    }
+
+    #[test]
+    fn concurrent_launch_and_retry_finish_before_shutdown_reclaims_late_resources() {
+        let (entered, blocked) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let backend = Arc::new(ShutdownBackend {
+            environments: Mutex::new(Vec::new()),
+            start: Some(StartExecution {
+                blocked: entered,
+                release: Mutex::new(resume),
+                retry_calls: Default::default(),
+            }),
+            terminated: Default::default(),
+            cleaned: Default::default(),
+            fail_terminate: None,
+        });
+        let runtime = BaseRuntime::new("test", backend.clone());
+        runtime.establish("blocked").unwrap();
+        runtime.establish("retry").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let launch = AgentLaunch {
+            command: "/bin/sleep".into(),
+            args: vec!["30".into()],
+            cwd: dir.path().into(),
+            log: dir.path().join("host.log"),
+            instance_id: None,
+            env: Default::default(),
+        };
+        let blocked_context = BackendContext::new("blocked");
+        let retry_context = BackendContext::new("retry");
+        std::thread::scope(|scope| {
+            let launch_thread = scope.spawn(|| runtime.launch_agent(&blocked_context, &launch));
+            blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+
+            // Reusing the host must not try to spawn this nonexistent executable.
+            let retry_launch = AgentLaunch {
+                command: dir.path().join("nonexistent").display().to_string(),
+                ..launch.clone()
+            };
+            let failure = runtime
+                .launch_agent(&retry_context, &retry_launch)
+                .unwrap_err();
+            assert!(
+                failure
+                    .message
+                    .contains("injected retryable startup failure")
+            );
+            runtime.launch_agent(&retry_context, &retry_launch).unwrap();
+
+            let shutdown = scope.spawn(|| runtime.shutdown());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !runtime.is_closing() {
+                assert!(Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            let failure = runtime.launch_agent(&retry_context, &launch).unwrap_err();
+            assert!(failure.message.contains("shutting down"));
+            assert!(backend.cleaned.lock().unwrap().is_empty());
+            release.send(()).unwrap();
+            launch_thread.join().unwrap().unwrap();
+            shutdown.join().unwrap().unwrap();
+        });
+        assert_eq!(*backend.cleaned.lock().unwrap(), ["retry", "blocked"]);
+    }
+
+    #[test]
+    fn proxy_disconnect_terminates_and_cleans_every_environment() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let backend = Arc::new(ShutdownBackend {
+            environments: Mutex::new(vec!["one".into(), "two".into(), "three".into()]),
+            start: None,
+            terminated: Mutex::new(Vec::new()),
+            cleaned: Mutex::new(Vec::new()),
+            fail_terminate: Some("two".into()),
+        });
+        let adapter_backend = backend.clone();
+        let adapter = std::thread::spawn(move || {
+            RuntimeProxy {
+                adapter_instance: "test".into(),
+                runtime: Arc::new(BaseRuntime::new("test", adapter_backend)),
+            }
+            .run(&address.to_string())
+            .unwrap();
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        // Read the hello so the runtime proxy is fully running before disconnect.
+        let _: Option<crate::protocol::contract::AdapterMessage> =
+            crate::protocol::transport::read_message(&mut stream).unwrap();
+        drop(stream);
+        adapter.join().unwrap();
+
+        assert_eq!(
+            *backend.terminated.lock().unwrap(),
+            vec!["one".to_string(), "two".to_string(), "three".to_string()]
+        );
+        assert_eq!(
+            *backend.cleaned.lock().unwrap(),
+            vec!["one".to_string(), "two".to_string(), "three".to_string()]
+        );
+    }
 }

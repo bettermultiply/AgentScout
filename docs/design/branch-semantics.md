@@ -65,7 +65,7 @@ Branch 的 capabilities 规定 control plane 可以代表哪些主体执行相�
 
 Child 从 Branch barrier 上的 parent execution base 开始继续运行。Branch barrier 首先登记逻辑 Branch，不要求立即建立独立执行承载。当当前 Policy、Contract 或状态处理要求独立承载时，control plane 通过可用的执行承载请求相应环境；承载结果决定该 Branch 能否沿该路径继续推进。环境建立和执行活动的具体承载方式见 [Runtime 语义整理](../development/default-runtime-semantics.md)。
 
-Branch 的固定要求是**不影响权威路径和其他 Branch**。独立执行环境只是满足该要求的一种方式；Branch 可以在共享执行视图中推进，只要其可能改变环境或影响其他 Branch 的操作在作用前被阻止、暂存或以其他方式受控。具体采用哪种方式、覆盖哪些状态类别和效果，由 Runtime／Adapter 的能力声明和验证结果决定，不由 Branch 结构本身固定。
+Branch 的固定要求是**不影响权威路径和其他 Branch**。独立执行环境只是满足该要求的一种方式；Branch 可以在共享执行视图中推进，只要其可能改变环境或影响其他 Branch 的操作在作用前被阻止、暂存或以其他方式受控。具体采用哪种方式、覆盖哪些状态类别和效果，由 Runtime 的能力声明和验证结果决定，不由 Branch 结构本身固定。
 
 当 Branch 的执行承载从 execution base 分离后，Branch 按自身的状态和依赖继续演化；parent 后续状态变化是否对 child 可见，遵循相应状态类别的规则。需要同步的真实步骤结果通过显式 outcome event 交付。
 
@@ -176,7 +176,7 @@ Instrumentation 负责从产品执行接缝中识别并规范化 operation 及�
 
 本节保留显式 Agent 感知的设计位置。它描述未来若允许协作型 Agent 读取或参与 Branch 生命周期时需要满足的语义，不是当前 Agent 接入能力，也不是 Branch 正确性的前提。
 
-在这一未来设计中，direct children 的 evaluator／resolver capability 默认由 parent Branch 中的 Agent 持有，可显式委托给 control plane；Runtime 不内建评价世界，也不固定评价策略，只验证授权并执行决定。
+在这一未来设计中，direct children 的 evaluator／resolver capability 默认由 parent Branch 中的 Agent 持有，可显式委托给 control plane。control plane 校验裁决权限，Runtime 执行收到的 Environment 操作。
 
 Resolver delegation 作为 AScoutAgent 创建或 Branch 创建配置表达，不提供日常 `delegate-resolver` 命令。
 
@@ -186,7 +186,7 @@ Resolver delegation 作为 AScoutAgent 创建或 Branch 创建配置表达，不
 
 显式 Agent 感知不向端用户扩展独立用户会话。端用户始终通过 AScoutAgent 主对话直接操作当前有效的权威执行主线；携带未决 Proposal 的投机 Branch 不能作为正式回复向端用户输出或提问。独立的只读候选观察允许展示候选状态与内容；候选内容与主对话分开，并随 Branch 的角色与状态显示其投机身份。它不建立候选用户对话，不将其内容注入其他 Branch 上下文，也不表示 commit、Accept 或效果提交。Branch 接受、丢弃、重新挂载和清理仍由 Policy、授权 resolver 与 control plane 机制在内部完成，Accept 改变权威路径后，用户继续操作更新后的有效主线。
 
-未来的 Agent-facing context 不要求暴露 Runtime 内部的裸 Branch ID。若获得相应 capability，Agent 可以查询当前 depth、lifecycle state、Proposal 和 capabilities，也可以获取 direct children 的受控 metadata view；depth 是 Accept 后树位置的派生信息，不能代替稳定 identity 或用于推导权限。Direct-child 操作使用 session-scoped opaque candidate handle，不能借此读取不属于授权视图范围的 Branch 状态。
+未来的 Agent-facing context 可通过相应 capability 查询当前 depth、lifecycle state、Proposal 和 capabilities，也可以获取 direct children 的受控 metadata view。depth 是 Accept 后树位置的派生信息，权限判断使用稳定 identity。Direct-child 操作使用 session-scoped opaque candidate handle，查询范围受授权视图限制。
 
 默认 context 只返回紧凑统计；详细查询返回 session-scoped opaque candidate handle、state、Proposal 和显式 commit summary。Handle 只授权 direct-child 操作，不提供 sibling、transitive descendant 或 child local state 的读取能力。
 

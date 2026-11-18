@@ -31,6 +31,7 @@ use crate::runtime::backend::{Backend, BackendContext, BackendError, CancelHandl
 use crate::runtime::launch_plan::{LaunchFragment, MountEntry, MountSpec};
 
 mod backend_impl;
+mod execution;
 mod btrfs;
 mod config;
 mod copy;
@@ -85,6 +86,8 @@ use state::{
 /// A Backend whose sole responsibility is the Agent-visible filesystem.
 pub struct FilesystemBackend {
     config: FilesystemConfig,
+    process: crate::runtime::process::Processes,
+    launches: Mutex<HashMap<String, crate::protocol::contract::AgentLaunch>>,
     mechanism: FilesystemMechanism,
     /// Strict `btrfs subvolume delete` ioctl succeeded during the probe.
     /// False means discard falls back to an O(file count) background removal.
@@ -120,6 +123,8 @@ impl FilesystemBackend {
         };
         let probe = Self {
             config: config.clone(),
+            process: crate::runtime::process::Processes::new("filesystem", &config.bubblewrap_path),
+            launches: Mutex::default(),
             mechanism: FilesystemMechanism::Overlay,
             fast_delete: false,
             btrfs_incremental_diff: false,
@@ -192,6 +197,8 @@ impl FilesystemBackend {
             mechanism == FilesystemMechanism::Btrfs || fork_cost == ForkCost::BtrfsSnapshot;
         let delete_worker = Arc::new(DeleteWorker::new(&config, use_btrfs, fast_delete));
         let backend = Self {
+            process: crate::runtime::process::Processes::new("filesystem", &config.bubblewrap_path),
+            launches: Mutex::default(),
             config,
             mechanism,
             fast_delete,

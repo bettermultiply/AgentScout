@@ -38,16 +38,15 @@ export class AscProxy {
     async close(){await this.outgoing;const socket=this.control;if(socket&&!socket.destroyed)await new Promise<void>(resolve=>socket.end(resolve))}
     private accesses=new Map<string,Access>();
     private active=new Map<string,{accepted:Promise<void>;cancel?:Promise<unknown>}>();
-    private sequence=0;
+    private sequences=new Map<string,number>();
     private operationSequence=0;
     private generations=new Map<string,number>();
     private cancelling=new Map<string,Promise<void>>();
     bind(branch:string,access:Access|undefined){if(access)this.accesses.set(branch,access)}
     has(branch:string){return this.accesses.has(branch)}
-    private async request(branch: string, operation: string, command: string, extra: Record<string, unknown> = {}, accepted?: () => void, output?: (value: any) => void): Promise<any> {
-        const access = this.accesses.get(branch);
-        if (!access || access.transport !== 'unix-json-lines') throw Error('Branch execution access missing or unsupported');
-        const request = { ...extra, command, branch_id: branch, operation_id: operation, environment_id: access.environment_id };
+    private async request(access: Access, operation: string, command: string, extra: Record<string, unknown> = {}, accepted?: () => void, output?: (value: any) => void): Promise<any> {
+        if (access.transport !== 'unix-json-lines') throw Error('Branch execution access missing or unsupported');
+        const request = { ...extra, command, operation_id: operation, environment_id: access.environment_id };
         let parts: Uint8Array[] | undefined;
         if (typeof extra.operation === 'string') {
             const body = operationBody(extra.operation, extra.arguments as Record<string, unknown>);
@@ -80,22 +79,27 @@ export class AscProxy {
     }
     async execute(branch:string,operation:string,tool:string,args:unknown,context:unknown,signal?:AbortSignal,output?:(value:any)=>void,environmentOperation?:string){
         if(signal?.aborted)throw Error('Tool cancelled before execution');
-        if(this.cancelling.has(branch))throw Error('Branch cancellation in progress');
-        const identity=JSON.stringify([branch,operation]);
+        const access = this.accesses.get(branch);
+        if (!access) throw Error('Branch execution access missing');
+        const environment = access.environment_id;
+        if(this.cancelling.has(environment))throw Error('Environment cancellation in progress');
+        const identity=JSON.stringify([environment,operation]);
         if(this.active.has(identity))throw Error('Operation is already executing');
         let accept!:()=>void,failAcceptance!:(error:unknown)=>void;
         const active={accepted:new Promise<void>((resolve,reject)=>{accept=resolve;failAcceptance=reject}),cancel:undefined as Promise<unknown>|undefined};
         void active.accepted.catch(()=>{});
         this.active.set(identity,active);
-        const result=this.request(branch,operation,'execute',{request_id:`req-${++this.sequence}`,generation:this.generations.get(branch)??0,...(environmentOperation?{operation:environmentOperation}:{tool}),arguments:args,context},accept,output);
+        const sequence=(this.sequences.get(environment)??0)+1;
+        this.sequences.set(environment,sequence);
+        const result=this.request(access,operation,'execute',{request_id:`req-${sequence}`,generation:this.generations.get(environment)??0,...(environmentOperation?{operation:environmentOperation}:{tool}),arguments:args,context},accept,output);
         void result.catch(failAcceptance);
-        const abort=()=>{active.cancel??=active.accepted.then(()=>this.request(branch,operation,'cancel'));void active.cancel.catch(()=>{})};
+        const abort=()=>{active.cancel??=active.accepted.then(()=>this.request(access,operation,'cancel'));void active.cancel.catch(()=>{})};
         signal?.addEventListener('abort',abort,{once:true});
         if(signal?.aborted)abort();
         try {
             const {event, body}=await result;
             try { await active.cancel; }
-            finally { await this.request(branch,operation,'confirm'); }
+            finally { await this.request(access,operation,'confirm'); }
             if(event.status!=='succeeded')throw Error(event.reason??event.status);
             if (environmentOperation) {
                 const {value, exit_code} = event;
@@ -119,15 +123,27 @@ export class AscProxy {
         return this.execute(branch,identity,'',args,{...(context as object),tool_call_id:toolCall},signal,output,operation);
     }
     async cancel(branch:string){
-        const pending=this.cancelling.get(branch);if(pending)return pending;
-        const cancellation=this.cancelBranch(branch);this.cancelling.set(branch,cancellation);
-        try{await cancellation}finally{this.cancelling.delete(branch)}
+        const access=this.accesses.get(branch);
+        if(!access)return;
+        const environment=access.environment_id;
+        const pending=this.cancelling.get(environment);
+        if(pending)return pending;
+        const cancellation=this.cancelEnvironment(access);
+        this.cancelling.set(environment,cancellation);
+        try{await cancellation}finally{this.cancelling.delete(environment)}
     }
-    private async cancelBranch(branch:string){
-        // A rejected execution has no backend entry to cancel. The branch
-        // drain must still run, including when an earlier execute failed
-        // admission or its cancellation connection failed.
-        await Promise.allSettled([...this.active].map(async([identity,active])=>{const [owner,operation]=JSON.parse(identity);if(owner===branch){active.cancel??=active.accepted.then(()=>this.request(branch,operation,'cancel'));await active.cancel}}));
-        if(this.has(branch)){const terminal=await this.request(branch,'branch-cancellation','cancel_branch');this.generations.set(branch,terminal.event.generation)}
+    private async cancelEnvironment(access:Access){
+        const environment=access.environment_id;
+        // Wait for admission before sending per-operation cancellation. The
+        // Environment drain also covers interrupted cancellation connections.
+        await Promise.allSettled([...this.active].map(async([identity,active])=>{
+            const [owner,operation]=JSON.parse(identity);
+            if(owner===environment){
+                active.cancel??=active.accepted.then(()=>this.request(access,operation,'cancel'));
+                await active.cancel;
+            }
+        }));
+        const terminal=await this.request(access,'environment-cancellation','cancel_environment');
+        this.generations.set(environment,terminal.event.generation);
     }
 }

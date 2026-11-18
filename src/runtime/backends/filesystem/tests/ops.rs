@@ -110,13 +110,13 @@ fn filesystem_operation_replays_same_generation_and_rejects_stale_generation() {
 }
 
 #[test]
-fn composite_runtime_reaches_the_filesystem_data_plane() {
-    use crate::runtime::{BackendConnection, BackendPolicy, CompositeRuntime};
+fn base_runtime_reaches_the_filesystem_data_plane() {
+    use crate::runtime::{BackendConnection, BackendPolicy, BaseRuntime};
     use std::sync::Arc;
 
     let root = temp();
     let filesystem = Arc::new(new_backend(root.path()));
-    let runtime = CompositeRuntime::new(
+    let runtime = BaseRuntime::with_policy(
         "runtime",
         vec![BackendConnection::new("filesystem", filesystem).unwrap()],
         BackendPolicy::single("filesystem"),
@@ -129,7 +129,7 @@ fn composite_runtime_reaches_the_filesystem_data_plane() {
         path_scope: vec![PathScope::Workspace],
     };
     let context = BackendContext {
-        operation_id: "composite-fork".into(),
+        operation_id: "runtime-fork".into(),
         generation: 1,
         environment_id: "root".into(),
         ..BackendContext::default()

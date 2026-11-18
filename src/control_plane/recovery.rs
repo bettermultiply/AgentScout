@@ -474,9 +474,8 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
             }
             return Err(fail("live Branch environment missing"));
         };
-        // A CompositeRuntime may legitimately associate an environment with
-        // only the Backend instances selected for that environment. The
-        // Runtime has already validated the concrete participant metadata;
+        // An Environment can be associated with multiple Backend instances.
+        // The Runtime has already validated the concrete participant metadata;
         // recovery only requires the environment to exist in at least one
         // saved component, not in every component.
         if sets.is_empty() || !sets.iter().any(|s| s.contains(env)) {

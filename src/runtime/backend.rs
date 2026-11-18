@@ -32,7 +32,7 @@ pub struct BackendContext {
     /// Filesystem-only optional access point to a target environment's merged
     /// mount view, for example `/proc/<pid>/root`.  Other Backends ignore it.
     pub target_mount_pid: Option<u32>,
-    /// Mount namespace inode recorded by ProcessBackend for the target pid.
+    /// Mount namespace inode recorded by Processes for the target pid.
     /// FilesystemBackend validates it before replaying into `/proc/<pid>/root`.
     pub target_mount_namespace: Option<u64>,
 }
@@ -220,10 +220,7 @@ pub trait Backend: Send + Sync {
     fn cancel_tool_writers(&self, _context: &BackendContext) -> Result<(), BackendError> {
         Ok(())
     }
-    /// Backend-private execution metadata; never delivered to Instrumentation.
-    fn filesystem_tool_directory(&self) -> Option<std::path::PathBuf> {
-        None
-    }
+
     /// Runtime creates the identity before composing its internal Backend resources.
     /// The caller supplies operation metadata only; no Branch identity is accepted.
     fn create_environment(&self, context: &BackendContext) -> Result<String, BackendError> {
@@ -258,6 +255,17 @@ pub trait Backend: Send + Sync {
     /// backends already own their authoritative state and need no host copy.
     fn materialize(&self, _context: &BackendContext) -> Result<FilesystemResult, BackendError> {
         Ok(FilesystemResult::default())
+    }
+    fn materialize_after(
+        &self,
+        context: &BackendContext,
+        previous: &mut dyn FnMut() -> Result<FilesystemResult, BackendError>,
+    ) -> Result<FilesystemResult, BackendError> {
+        let mut result = previous()?;
+        let publication = self.materialize(context)?;
+        result.confirmation.published |= publication.confirmation.published;
+        result.conflicts.extend(publication.conflicts);
+        Ok(result)
     }
     /// 配置中用于 Policy 路由和结果关联的稳定标识。
     fn backend_id(&self) -> &str {
@@ -430,6 +438,17 @@ pub trait Backend: Send + Sync {
         ))
     }
 
+    /// Save after earlier components. Backends may quiesce their execution
+    /// across the preceding saves as well as their own capture.
+    fn save_runtime_after(
+        &self,
+        path: &std::path::Path,
+        previous: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        previous()?;
+        self.save_runtime(path)
+    }
+
     fn load_runtime(&self, _path: &std::path::Path) -> Result<(), BackendError> {
         Err(BackendError::new(
             "Runtime does not support restart recovery",
@@ -461,7 +480,8 @@ pub trait Backend: Send + Sync {
         }
     }
 
-    /// 统一启动包装：各 Backend 只贡献挂载/环境片段，由 ProcessBackend 汇总。
+    /// Collect environment variables for the run host. Mounts remain owned by
+    /// the backend that starts environment execution.
     fn launch_fragment(
         &self,
         _context: &BackendContext,
@@ -470,24 +490,49 @@ pub trait Backend: Send + Sync {
         Ok(LaunchFragment::default())
     }
 
-    /// 是否由这个 Runtime 负责 Agent 实际执行实例的进程生命周期。
-    fn manages_agent_process(&self) -> bool {
-        false
-    }
-
-    /// Base Runtime 覆盖此方法。Agent Session 仍由 Instrumentation 管理；这里仅
-    /// 管理一个实际 Agent 执行实例的启动句柄和进程生命周期。
-    fn launch_agent(
+    /// Start execution for an existing Environment, independently of the run host.
+    /// A new operation may retry after partial startup, so an already running
+    /// resource for this Environment must be reused.
+    fn start_environment_execution(
         &self,
         _context: &BackendContext,
         _launch: &crate::protocol::contract::AgentLaunch,
     ) -> Result<(), BackendError> {
-        Err(BackendError::new(
-            "Runtime does not manage an Agent process",
-        ))
-    }
-
-    fn stop_agents(&self) -> Result<(), BackendError> {
         Ok(())
     }
+
+    /// Release live execution resources while retaining saved environment state.
+    fn stop_environment_execution(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    // A backend can prepare its execution before a preceding lifecycle step,
+    // then publish its own transition once the preceding step succeeds.
+    fn suspend_after(
+        &self,
+        context: &BackendContext,
+        previous: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        previous()?;
+        self.suspend_with_context(context)
+    }
+
+    fn resume_after(
+        &self,
+        context: &BackendContext,
+        previous: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        previous()?;
+        self.resume_with_context(context)
+    }
+
+    fn terminate_after(
+        &self,
+        context: &BackendContext,
+        previous: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        previous()?;
+        self.terminate_with_context(context)
+    }
+
 }

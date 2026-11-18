@@ -5,13 +5,10 @@
 ## 已知问题（只记录，未修改）
 
 1. **`BaseRuntime` 依赖已解决（第七轮）**
-   `BaseRuntime` 现在持有 `Option<Arc<dyn Backend>>` 作为 data plane，不再引用
-   具体 `FilesystemBackend`。`with_data_plane` 接受任意 Backend trait 对象。
+   `BaseRuntime` 为每个 Environment 记录实际参与的普通 Backend 实例。
 2. **个别文件略超 600 行**
    - `src/control_plane/agent_control/mod.rs` 约 628 行：主要是类型定义和模块声明，
      按职责继续拆会把紧密相关的状态类型拆散，暂保留。
-   - `src/runtime/composite.rs` 约 647 行：`CompositeRuntime` 的 Backend 实现较长，
-     但每个方法都是同一职责；未按行数硬切。
    - `src/runtime/backends/filesystem/tests/ops.rs` 约 561 行，仍在限制内。
 3. **内部类型可见性为 `pub(crate)`**
    `filesystem::state` 的 `Environment`、`MountUnit`、`BackendState` 等被
@@ -48,7 +45,6 @@
 ## 第七轮补充
 
 - 任务 A 已消除 `BaseRuntime` 对具体 `FilesystemBackend` 的编译期依赖；Backend
-  trait 现有接口已足够，未新增 data-plane trait 方法。
 - 任务 B 清理了测试中的本机用户名/绝对路径；依赖特定挂载的测试现在先检查
   `overlayable_mounts()`，不满足时打印 `SKIP <原因>`。
 - 任务 C 增加 `state_directory_overlaps_mount` 能力字段和启动日志；重叠挂载仍使用
@@ -112,7 +108,7 @@
   `runtime/backend.rs` 与 filesystem 不再依赖 `runtime::process` 的挂载计划类型。
   （第十轮已删除 `process` 的 re-export 垫片，所有引用改到 `runtime::launch_plan`。）
 - 删除恒为 true 的 `BTRFS_INCREMENTAL_DIFF_IMPLEMENTED` 及对应注释/不可达分支。
-- `ProcessBackend` 的三个构造器提取共享 `empty` 初始化；仅测试使用的
+- 环境进程实现的三个构造器提取共享 `empty` 初始化；仅测试使用的
   `with_mechanism/new_process_group/capabilities` 加 `#[cfg(test)]`，删除无用的
   `id` 字段/方法。
 - `BaseRuntime` 的 operate/tool_context/invoke_tool 三个单输出包装提取

@@ -1,4 +1,4 @@
-//! Adapter 结果确认与结果窗口测试。
+//! Runtime proxy 结果确认与结果窗口测试。
 
 #[cfg(test)]
 mod identity_tests {
@@ -85,7 +85,7 @@ mod identity_tests {
         let address = server.local_addr().unwrap().to_string();
         let backend = Arc::new(FakeBackend::default());
         let adapter_backend = Arc::new(
-            crate::runtime::CompositeRuntime::new(
+            crate::runtime::BaseRuntime::with_policy(
                 "fake-runtime",
                 vec![
                     crate::runtime::selection::BackendConnection::new(
@@ -99,7 +99,7 @@ mod identity_tests {
             .unwrap(),
         );
         let adapter = std::thread::spawn(move || {
-            Adapter {
+            RuntimeProxy {
                 adapter_instance: "fake".into(),
                 runtime: adapter_backend,
             }
@@ -156,18 +156,18 @@ mod identity_tests {
         assert_ne!(failed.environment_id, parent.environment_id);
         assert_eq!(
             backend.state(&failed.environment_id),
-            Some(EnvironmentState::Available)
+            Some(EnvironmentState::Cleaned),
+            "creation rollback must stop and clean the failing participant before replying"
         );
-        session
+        let terminated = session
             .call(&failed.environment_id, Operation::TerminateEnvironment)
             .unwrap();
-        session
+        assert_eq!(terminated.status, ResultStatus::Completed);
+        let cleaned = session
             .call(&failed.environment_id, Operation::CleanupEnvironment)
             .unwrap();
-        assert_eq!(
-            backend.state(&failed.environment_id),
-            Some(EnvironmentState::Cleaned)
-        );
+        assert_eq!(cleaned.status, ResultStatus::Completed);
+        assert_eq!(cleaned.environment_state, Some(EnvironmentState::Cleaned));
         assert_eq!(
             backend.state(&parent.environment_id),
             Some(EnvironmentState::Available)
@@ -178,117 +178,15 @@ mod identity_tests {
 }
 
 #[cfg(test)]
-mod shutdown_tests {
-    use crate::protocol::contract::{CommandOutput, EnvironmentState, RuntimeCapabilities};
-    use crate::runtime::adapter::Adapter;
-    use crate::runtime::backend::{Backend, BackendError, CancelHandle};
-    use std::sync::{Arc, Mutex};
-
-    struct ShutdownBackend {
-        environments: Vec<String>,
-        terminated: Mutex<Vec<String>>,
-        cleaned: Mutex<Vec<String>>,
-        fail_terminate: Option<String>,
-    }
-
-    impl Backend for ShutdownBackend {
-        fn capabilities(&self) -> RuntimeCapabilities {
-            RuntimeCapabilities {
-                branch_environment: true,
-                ..RuntimeCapabilities::default()
-            }
-        }
-        fn establish(&self, _: &str) -> Result<(), BackendError> {
-            Ok(())
-        }
-        fn operate(
-            &self,
-            _: &str,
-            _: &[String],
-            _: &CancelHandle,
-        ) -> Result<CommandOutput, BackendError> {
-            Err(BackendError::new("unused"))
-        }
-        fn branch(&self, _: &str, _: &str) -> Result<(), BackendError> {
-            Ok(())
-        }
-        fn suspend(&self, _: &str) -> Result<(), BackendError> {
-            Ok(())
-        }
-        fn resume(&self, _: &str) -> Result<(), BackendError> {
-            Ok(())
-        }
-        fn terminate(&self, environment_id: &str) -> Result<(), BackendError> {
-            self.terminated
-                .lock()
-                .unwrap()
-                .push(environment_id.to_string());
-            if self.fail_terminate.as_deref() == Some(environment_id) {
-                return Err(BackendError::new("injected terminate failure"));
-            }
-            Ok(())
-        }
-        fn cleanup(&self, environment_id: &str) -> Result<(), BackendError> {
-            self.cleaned
-                .lock()
-                .unwrap()
-                .push(environment_id.to_string());
-            Ok(())
-        }
-        fn state(&self, _: &str) -> Option<EnvironmentState> {
-            Some(EnvironmentState::Available)
-        }
-        fn environments(&self) -> Vec<String> {
-            self.environments.clone()
-        }
-    }
-
-    #[test]
-    fn adapter_disconnect_terminates_and_cleans_every_environment() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let backend = Arc::new(ShutdownBackend {
-            environments: vec!["one".into(), "two".into(), "three".into()],
-            terminated: Mutex::new(Vec::new()),
-            cleaned: Mutex::new(Vec::new()),
-            fail_terminate: Some("two".into()),
-        });
-        let adapter_backend = backend.clone();
-        let adapter = std::thread::spawn(move || {
-            Adapter {
-                adapter_instance: "test".into(),
-                runtime: adapter_backend,
-            }
-            .run(&address.to_string())
-            .unwrap();
-        });
-        let (mut stream, _) = listener.accept().unwrap();
-        // Read the hello so the Adapter is fully running before disconnect.
-        let _: Option<crate::protocol::contract::AdapterMessage> =
-            crate::protocol::transport::read_message(&mut stream).unwrap();
-        drop(stream);
-        adapter.join().unwrap();
-
-        assert_eq!(
-            *backend.terminated.lock().unwrap(),
-            vec!["one".to_string(), "two".to_string(), "three".to_string()]
-        );
-        assert_eq!(
-            *backend.cleaned.lock().unwrap(),
-            vec!["one".to_string(), "two".to_string(), "three".to_string()]
-        );
-    }
-}
-
-#[cfg(test)]
 mod queue_panic_tests {
     use crate::protocol::contract::{
         AdapterMessage, CommandOutput, EnvironmentState, Operation, OperationRequest, ResultStatus,
         RuntimeCapabilities,
     };
-    use crate::runtime::adapter::queue::Queue;
-    use crate::runtime::adapter::{ResultCache, Shared};
+    use crate::runtime::BaseRuntime;
     use crate::runtime::backend::{Backend, BackendError, CancelHandle};
+    use crate::runtime::proxy::queue::Queue;
+    use crate::runtime::proxy::{ResultCache, Shared};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -376,18 +274,23 @@ mod queue_panic_tests {
         let backend = Arc::new(PanicOnce {
             calls: AtomicUsize::new(1),
         });
+        let runtime = Arc::new(BaseRuntime::new("test", backend.clone()));
+        runtime.establish("env").unwrap();
         let shared = Arc::new(Shared {
             commands: None,
-            preserving: std::sync::atomic::AtomicBool::new(false),
-            runtime: backend.clone(), out,
+            runtime,
+            out,
             queues: Mutex::new(HashMap::new()),
             seen: Mutex::new(Default::default()),
             results: Mutex::new(ResultCache::default()),
-            result_signal: Condvar::new(), known: Mutex::new(HashMap::new()),
-            agent: Mutex::new(None),
+            result_signal: Condvar::new(),
+            known: Mutex::new(HashMap::new()),
         });
         shared.dispatch(request("once"));
-        assert_eq!(wait_result(&receiver, "once").status, ResultStatus::Completed);
+        assert_eq!(
+            wait_result(&receiver, "once").status,
+            ResultStatus::Completed
+        );
         while receiver.try_recv().is_ok() {}
         let mut conflict = request("once");
         conflict.generation += 1;
@@ -397,7 +300,10 @@ mod queue_panic_tests {
         };
         assert!(reason.contains("different content"));
         shared.dispatch(request("once"));
-        assert_eq!(wait_result(&receiver, "once").status, ResultStatus::Completed);
+        assert_eq!(
+            wait_result(&receiver, "once").status,
+            ResultStatus::Completed
+        );
         assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
         // Simulate eviction of the result payload without dropping its identity.
         *shared.results.lock().unwrap() = ResultCache::default();
@@ -414,13 +320,17 @@ mod queue_panic_tests {
         let backend = Arc::new(PanicOnce {
             calls: AtomicUsize::new(1),
         });
+        let runtime = Arc::new(BaseRuntime::new("test", backend.clone()));
+        runtime.establish("env").unwrap();
         let shared = Arc::new(Shared {
             commands: None,
-            preserving: std::sync::atomic::AtomicBool::new(false),
-            runtime: backend.clone(), out,
-            queues: Mutex::new(HashMap::new()), seen: Mutex::new(Default::default()),
-            results: Mutex::new(ResultCache::default()), result_signal: Condvar::new(),
-            known: Mutex::new(HashMap::new()), agent: Mutex::new(None),
+            runtime,
+            out,
+            queues: Mutex::new(HashMap::new()),
+            seen: Mutex::new(Default::default()),
+            results: Mutex::new(ResultCache::default()),
+            result_signal: Condvar::new(),
+            known: Mutex::new(HashMap::new()),
         });
         for n in 1..600 {
             let id = format!("req-{n}");
@@ -430,26 +340,29 @@ mod queue_panic_tests {
         while receiver.try_recv().is_ok() {}
         let before = backend.calls.load(Ordering::SeqCst);
         shared.dispatch(request("req-1"));
-        assert!(matches!(receiver.recv().unwrap(), AdapterMessage::Rejected { reason, .. } if reason.contains("expired")));
+        assert!(
+            matches!(receiver.recv().unwrap(), AdapterMessage::Rejected { reason, .. } if reason.contains("expired"))
+        );
         assert_eq!(backend.calls.load(Ordering::SeqCst), before);
     }
 
     #[test]
     fn panicking_operation_does_not_kill_the_environment_queue() {
         let (out, receiver) = mpsc::channel();
+        let backend = Arc::new(PanicOnce {
+            calls: AtomicUsize::new(0),
+        });
+        let runtime = Arc::new(BaseRuntime::new("test", backend.clone()));
+        runtime.establish("env").unwrap();
         let shared = Arc::new(Shared {
             commands: None,
-            preserving: std::sync::atomic::AtomicBool::new(false),
-            runtime: Arc::new(PanicOnce {
-                calls: AtomicUsize::new(0),
-            }),
+            runtime,
             out,
             queues: Mutex::new(HashMap::new()),
             seen: Mutex::new(Default::default()),
             results: Mutex::new(ResultCache::default()),
             result_signal: Condvar::new(),
             known: Mutex::new(HashMap::new()),
-            agent: Mutex::new(None),
         });
         let queue = Queue::start(shared.clone(), "env".into());
         queue.enqueue(request("first"), false);
@@ -467,8 +380,8 @@ mod queue_panic_tests {
 mod filesystem_confirmation_tests {
 
     use crate::protocol::contract::*;
-    use crate::runtime::adapter::result::{filesystem_failure_reason, result};
-    use crate::runtime::adapter::result_cache::{RESULT_CACHE_LIMIT, ResultCache};
+    use crate::runtime::proxy::result::{filesystem_failure_reason, result};
+    use crate::runtime::proxy::result_cache::{RESULT_CACHE_LIMIT, ResultCache};
 
     use crate::protocol::contract::{FilesystemConflict, PathScope};
 

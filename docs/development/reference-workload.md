@@ -95,7 +95,7 @@
 
 Pi 握手中的能力字段是接入原语声明，不是模型推理或 sub-agent Hook 的证明。当前值为：工具执行前 Hook、模型推理前 Hook、local Decision evaluation、checkpoint continuation、independent candidate session、cancel completion、tool result injection 为 `true`；sub-agent 前 Hook 为 `false`。模型 action 由真实 `streamSimple` 请求前的 Hook 创建，普通 action 仍发送 `action_started` 事实；工具 Hook 按下发 Policy 的 `admit` 结果决定是否发送 `speculative_admission_request`。不要把 `message_start` 当作模型推理前 Hook。
 
-Rust 协议、控制循环与 Pi 接入使用 `ActionStarted` / `ActionFinished`。action 包含 task/Branch/action identity、类型、可选父 action、结果终态和 evidence，并携带 Instrumentation 测量的 `timestamp_ms`；`SpeculativeAdmissionRequest` 登记执行前的等待身份和准入时刻，不伪造实际开始。`Usage` 关联模型 `action_id` 并提供 Instrumentation 起止时间。Tree 保存活动 action，完成事实进入 Ledger。Pi 从真实请求前 Hook 报告模型开始，从工具 Hook 报告工具 action，输出与使用量可关联模型 action。Candidate 推理不使用角色专用完成事件。Agent session 与 Branch 执行释放分开报告；命令接收/开始回执不提前完成 Tree 操作。Runtime Adapter 独立报告操作开始/结果及环境事件，环境建立失败不伪装成 Agent 失败。
+Rust 协议、控制循环与 Pi 接入使用 `ActionStarted` / `ActionFinished`。action 包含 task/Branch/action identity、类型、可选父 action、结果终态和 evidence，并携带 Instrumentation 测量的 `timestamp_ms`；`SpeculativeAdmissionRequest` 登记执行前的等待身份和准入时刻，不伪造实际开始。`Usage` 关联模型 `action_id` 并提供 Instrumentation 起止时间。Tree 保存活动 action，完成事实进入 Ledger。Pi 从真实请求前 Hook 报告模型开始，从工具 Hook 报告工具 action，输出与使用量可关联模型 action。Candidate 推理不使用角色专用完成事件。Agent session 与 Branch 执行释放分开报告；命令接收/开始回执不提前完成 Tree 操作。runtime proxy 独立报告操作开始/结果及环境事件，环境建立失败不伪装成 Agent 失败。
 
 能力边界：通用协议可表达 sub-agent 等 action，但 Pi 当前只采集模型推理与工具执行；二者的真实执行前 Hook 均执行下发的本地 Decision，Policy 允许时产生 `speculative_admission_request`，通过既有 launch 控制 eager／speculative-first。sub-agent 启动前 Hook 仍为 false；不要把 `message_start` 当作模型推理前 Hook，也不宣称任意 action 均可投机。空预测或预测失败放行原权威调用一次，不保留挂起的 Proposal。模型开始时间来自真实请求前 Hook，而非首次 assistant message。extent stop 支持工具与模型边界；discard、cleanup、取消和合法恢复释放等待，断线不伪造完成。Agent 自身超时须实际观察后报告。分阶段回执覆盖已有身份管理的 Promote、ResolvePending、Discard、Cleanup；其他命令依其 Branch／回合事实。Runtime 资源清单随 OperationResult 返回，独立资源／效果事件尚未接通。
 
@@ -292,7 +292,7 @@ cargo run --bin ascout-control-plane -- ../pi --policy pi-tool
 
 完整多行编辑、Markdown 和工具专门排版、宽字符排版、产品特有交互、断线恢复、资源硬限制与确认式退出清理尚未实现。当前是简单终端原型，不宣称已达到原 Agent 全部交互能力。
 
-环境管理已由 Runtime Adapter 接通文件系统与进程 Backend；NLE 路径的不同 Environment 引用同一 workload 世界，各自生命周期独立。目录不代表任意 shell 或外部效果已隔离，尤其不隔离扩展自身的代码及网络行为。环境结束时 holder 会按 cgroup/process group 和 mount namespace 结束工具后代，但退出另一个 namespace、改变 cgroup 或依赖外部服务的进程不在该保证内；接入进程退出也不证明任意外部效果已撤回。文件系统 Backend 的覆盖范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
+环境管理已由 runtime proxy 接通文件系统与进程 Backend；NLE 路径的不同 Environment 引用同一 workload 世界，各自生命周期独立。目录不代表任意 shell 或外部效果已隔离，尤其不隔离扩展自身的代码及网络行为。环境结束时 holder 会按 cgroup/process group 和 mount namespace 结束工具后代，但退出另一个 namespace、改变 cgroup 或依赖外部服务的进程不在该保证内；接入进程退出也不证明任意外部效果已撤回。文件系统 Backend 的覆盖范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
 
 ## 真实游戏端到端验证方向（2026-10-28）
 
@@ -334,7 +334,7 @@ EOF
 
 实测：分支出 `candidate` 后在它上面执行的动作，`parent` 的 `observe` 立即看到同一位置，确认是同一个世界；一次动作耗时约 2 秒；暂停期间的动作被拒绝，恢复后才可继续。同一 `seed` 的两次独立建立都从 `(26,5)` 开始，确认种子生效。
 
-### AScout Runtime Adapter 接入
+### AScout runtime proxy 接入
 
 `src/runtime/backends/nle.rs` 通过既有 `Backend` 接口调用该 bridge，`src/bin/ascout-runtime-adapter.rs` 根据配置中的 `"backend": "nle"` 选择它；Firecracker 配置路径保持不变。每个 Branch 独占一个 Environment，不同 Environment 在 NLE backend 内引用同一个游戏世界，派生不复制世界。候选动作由 Instrumentation 的 effect 闸门阻塞，Promote 前不进入游戏调用。Adapter 退出时会主动终止 bridge 子进程。
 
@@ -407,7 +407,7 @@ NLE 专用 Policy 当前本地路径为 `assets/policy/nle/policy.yaml`：`predi
 
 ```text
 ../.venv-nle        NLE 1.3.0 虚拟环境，依赖见 requirements-nle.txt
-nle-runtime.json    Runtime Adapter 配置
+nle-runtime.json    runtime proxy 配置
 ```
 
 Node 使用系统 `/usr/bin/node`（v26.12.1，满足 Pi 要求的 ≥22.19），不再需要单独下载 Node。若 shell 里 nvm 默认是旧版本，启动时把 `/usr/bin` 放到 PATH 前面。

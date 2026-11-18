@@ -1245,7 +1245,11 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
                         .unwrap()
                         .push((request.environment_id.clone(), request.operation.clone()));
                     let result = OperationResult {
-                        execution_access: None,
+                        execution_access: Some(crate::protocol::contract::ExecutionAccess {
+                            transport: "unix-json-lines".into(),
+                            address: "/fixture/runtime-command.sock".into(),
+                            environment_id: "runtime-returned-child".into(),
+                        }),
                         request_id: request.request_id.clone(),
                         environment_id: "runtime-returned-child".into(),
                         status: ResultStatus::Completed,
@@ -1293,17 +1297,16 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
         Some("runtime-returned-child")
     );
     assert!(
-        matches!(&actions.commands[0], AgentCommand::StartCandidate { environment_id: Some(id), .. } if id == "runtime-returned-child")
+        matches!(&actions.commands[0], AgentCommand::StartCandidate { environment_id: Some(id), execution_access: Some(access), .. }
+            if id == "runtime-returned-child" && &access.environment_id == id && access.address == "/fixture/runtime-command.sock")
     );
     let calls = recorded.lock().unwrap();
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 1);
     assert_eq!(
         Some(calls[0].0.as_str()),
         tree.branches["authority"].environment_id.as_deref()
     );
     assert_eq!(calls[0].1, Operation::BranchEnvironment { agent: None });
-    assert_eq!(calls[1].0, "runtime-returned-child");
-    assert_eq!(calls[1].1, Operation::BindExecution { branch_id: child });
     session.shutdown().unwrap();
     client.join().unwrap();
 }

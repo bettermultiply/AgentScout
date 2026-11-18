@@ -1,6 +1,6 @@
 # Instrumentation 通用层
 
-Product Integration 对应 `instrumentation/pi/`，Interposer 对应 `instrumentation/core/` 的 `createInterposer`，导出类型为 `Interposer`。`instrumentation/pi/asc-proxy.ts` 的进程内 ASC-Proxy 同时管理控制 Gateway Unix socket 和独立的 Runtime 执行连接。Branch 直接传入，control plane 通过 `BindExecution` 明确建立 Branch→Environment 独占绑定，端点校验绑定后才接受执行、取消与确认。`instrumentation/pi/tools.ts` 独立适配 Pi 参数、schema 和格式，一次完整工具调用对应一次 Runtime read_file/write_file/replace_text/list_directory/exec；完整编辑和 canonical path 队列由目标 backend 执行。NLE 等声明工具保留相同生命周期。
+Product Integration 对应 `instrumentation/pi/`，Interposer 对应 `instrumentation/core/` 的 `createInterposer`，导出类型为 `Interposer`。`instrumentation/pi/asc-proxy.ts` 的进程内 ASC-Proxy 同时管理控制 Gateway Unix socket 和独立的 Runtime 执行连接。control plane 从 Environment 建立、派生和恢复启动结果取得访问地址。Instrumentation 保留 Branch 到 Environment 的映射，执行端点按 Environment 与 operation 关联执行、取消与确认。`instrumentation/pi/tools.ts` 独立适配 Pi 参数、schema 和格式，一次完整工具调用对应一次 Runtime read_file/write_file/replace_text/list_directory/exec；完整编辑和 canonical path 队列由目标 backend 执行。NLE 等声明工具保留相同生命周期。
 
 Runtime 仍在状态目录写入 `tool-plans/<environment>.json`，BaseRuntime 读取内部 holder 地址及 workspace host/target 映射，连接当前环境 holder；不存在逐工具 Node 进程或 Runtime 内的 Pi SDK 依赖。Firecracker 通过已有 vsock guest agent 原生处理同一组文件／命令请求，guest 不需要 Node 或 Pi。执行访问方式沿 Runtime → control plane → Instrumentation 交付，ASC-Proxy 不读取计划或直接连接 holder。每次完整工具操作有独立身份，保留 tool_call_id 与取消归属。
 
@@ -12,9 +12,9 @@ Runtime 仍在状态目录写入 `tool-plans/<environment>.json`，BaseRuntime �
 - 重建后 `node --test --test-concurrency=1 tests/authority-filesystem.mjs tests/recovery-filesystem.mjs tests/recovery-active.mjs`：8/8 通过。最终证据为 `/tmp/opencode/authority-filesystem-e6R7R4`、`/tmp/opencode/recovery-filesystem-Wca7Bk`、`/tmp/opencode/recovery-active-1SafyW`（filesystem）。全部模型响应为本地 fixture。
 - `cargo test --test firecracker_e2e real_microvm_completes_the_full_lifecycle_over_vsock -- --exact --nocapture`：真实 VM 1/1 通过，增加统一执行接收端 write/read/exec 检查。未运行整个 Firecracker 组或模型服务测试。guest 本地回归同时验证二进制文件、2 MiB 流输出和 detached writer 取消。
 
-验证边界：完整操作传输与取消限制见 [Runtime 开发文档](runtime-adapter.md)。单操作取消为尽力终止进程组，脱离进程组的后代可能存活。旧 SDK 注入实现的通过记录不作为当前实现验收。
+验证边界见 [Runtime 开发文档](runtime-adapter.md)。内置 FS／Firecracker 尽力终止该操作的进程组，脱离进程组的后代可能存活。独立可执行 backend 由程序接收单操作取消并报告实际终态。旧 SDK 注入实现的通过记录不作为当前实现验收。
 
-当前控制握手核对 `agent_id` 与能力，Tree 校验 Branch/task/action 归属，执行端点校验显式 Branch→Environment 绑定、generation 和请求身份窗口。Agent session 是 Product Integration 管理的执行上下文，不是另一个通信对端。这些检查不等于通信凭证认证：当前 ASC-Proxy 没有完整的双向凭证认证或防伪机制，不能以 Unix socket、本地握手或身份窗口推定通用认证授权已完成；相关缺口见 [Gateway 实现核查](gateway.md)。
+当前控制握手核对 `agent_id` 与能力，Tree 校验 Branch/task/action 归属，执行端点检查 Environment 状态、generation 和请求身份窗口。Agent session 是 Product Integration 管理的执行上下文，不是另一个通信对端。这些检查不等于通信凭证认证：当前 ASC-Proxy 没有完整的双向凭证认证或防伪机制，不能以 Unix socket、本地握手或身份窗口推定通用认证授权已完成；相关缺口见 [Gateway 实现核查](gateway.md)。
 
 2026-11-17：完整脚本模型 benchmark 的 match、mismatch、authority_first、fast_failure 均通过；证据分别为 `/tmp/opencode/benchmark-task-gT3UtV`、`/tmp/opencode/benchmark-task-y4bhE3`、`/tmp/opencode/benchmark-task-JaHLiL`、`/tmp/opencode/benchmark-task-JaZYQN`。恢复文件场景通过，证据 `/tmp/opencode/recovery-filesystem-f2BUCi`。provider 在首个流事件前失败时保留 action 身份，供 Pi 随后生成的失败消息关联 Usage；恢复后的运行重新发布当前连接状态，避免历史断开事件阻止 `/continue`。未调用真实模型。
 
@@ -37,7 +37,7 @@ Agent 与 Instrumentation 宿主在所有 BaseRuntime 路径都位于 Branch 隔
 
 speculative-first 在已有 Proposal、launch 已决定且没有在飞 launch 时进入现有 Policy `match/dispose`；没有权威结果时输入为 null，由 Policy 的明确可接受性规则裁决。默认需要真实比较的 Policy 不因此自动具备独立 validator；`Indeterminate` 会保留等待，是否转为 eager 仍由 `launch` 决定。未完成替代模型不伪造 Proposal，候选失败沿 BranchFailed／Discard 收敛并放行父调用。
 
-暂停普通输入只入队，不自动恢复；`/continue` 先恢复原任务，原轮结束后按队列顺序交付消息。恢复时以当前 `execution_accesses` 覆盖 session 和待启动 candidate setup 的旧访问地址；ASC-Proxy 的执行 generation 属于当前 Runtime 端点，重建端点后从其初始 generation 开始，不从保存文件复用。Branch 命令 generation 和执行 generation 是不同协议字段，前者随 Tree 恢复，后者由 cancel_branch 的 Runtime 回执更新。
+暂停普通输入只入队，不自动恢复；`/continue` 先恢复原任务，原轮结束后按队列顺序交付消息。恢复时以当前 `execution_accesses` 覆盖 session 和待启动 candidate setup 的旧访问地址；ASC-Proxy 的执行 generation 属于当前 Runtime 端点，重建端点后从其初始 generation 开始，不从保存文件复用。Branch 命令 generation 和执行 generation 是不同协议字段，前者随 Tree 恢复，后者由 `cancel_environment` 的 Runtime 回执更新。
 
 2026-11-17 最终定向复核：`cargo check --all-targets` 无警告通过；`cargo test --lib -- --test-threads=1` 202/202 通过。`cargo test --test firecracker_e2e -- --test-threads=1 --skip codex_starts_and_reaches_the_model_service` 真实 VM 6/6 通过，覆盖生命周期、独立 sibling 快照、退出事件、重试、SSH 和在飞操作中断。模型服务用例排除，因为本轮禁止真实模型请求；早先未排除的整组运行在该用例超时，不能宣称 7/7。fixture 状态目录使用工作区祖先的短 `afc/` 路径，既避开 Unix socket 长度上限，也不把内存快照放入容量不足的 `/tmp` tmpfs。namespace 清理严格接受 `/run/netns` 和 `/var/run/netns` 的缺资源诊断；成功 cleanup 用 backend 回执报告 Cleaned，不依赖可能已移除的 backend 记录。
 

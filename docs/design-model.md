@@ -24,11 +24,11 @@ Runtime（动作承载、状态和效果边界）
 
 **Mechanism：把抽象落实为执行。** Mechanism 不是额外的一侧，而是横跨 Instrumentation、control plane 与 Runtime 的实现责任：Instrumentation 通过 Interposer 拦截命令与推理调用等环节，control plane 组织执行、验证与调度，Runtime 承载动作并落实环境、资源和效果边界。它不一定只是组合 Runtime 原语；拦截、编排、校验、调度和实际边界执行都是 Mechanism 的一部分。Runtime 无法提供所需能力时，Mechanism 必须拒绝或明确降级，不让策略悄悄跑偏。
 
-**Runtime：动作的受约束承载系统。** Runtime 承载 Agent 的一步动作，使其能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 可以组合进程、容器、虚拟机、Overlay 和效果协调等能力；这些是可插拔的能力，不是 Runtime 的固定形态。Runtime Adapter 是 Runtime 与 control plane 之间的接入边界；Registry 属于 Runtime，负责能力声明校验、主动验证和独立证据，control plane 使用其能力事实匹配 Policy。Agent Session 的内部复制、共享、恢复和继续运行由 Instrumentation 负责，Runtime 承载其所需的执行状态和外部效果边界。
+**Runtime：动作的受约束承载系统。** Runtime 承载 Agent 的一步动作，使其能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 可以组合进程、容器、虚拟机、Overlay 和效果协调等能力；这些是可插拔的能力，不是 Runtime 的固定形态。runtime proxy 是 Runtime 与 control plane 之间的接入边界；Registry 属于 Runtime，负责能力声明校验、主动验证和独立证据，control plane 使用其能力事实匹配 Policy。Agent Session 的内部复制、共享、恢复和继续运行由 Instrumentation 负责，Runtime 承载其所需的执行状态和外部效果边界。
 
-Gateway 统一承接 Instrumentation、UI 与 Runtime 的通信，负责接入、消息分发和送达；消息对投机执行的变化由相应控制逻辑决定。它不拥有 Tree、Policy 或投机编排，通信统一也不改变 Runtime Adapter 的契约或 Registry 的证明职责。
+Gateway 统一承接 Instrumentation、UI 与 Runtime 的通信，负责接入、消息分发和送达；消息对投机执行的变化由相应控制逻辑决定。它不拥有 Tree、Policy 或投机编排，通信统一也不改变 runtime proxy 的契约或 Registry 的证明职责。
 
-**Speculation Contract：策略、control plane 与 Runtime 的语义对齐约束。** Contract 约束 Policy 的表达以及 Runtime 通过 Adapter 呈现的可观察行为：Policy 如何表达与校验决策取值、Runtime 需要声明并兑现哪些基本运行语义。control plane 与 Runtime 共同落实这份约束（Mechanism）：control plane 编排受管操作，Runtime 实际承载动作并返回结果和事件。Contract 不直接规定 Runtime 内部实现。
+**Speculation Contract：策略、control plane 与 Runtime 的语义对齐约束。** Contract 约束 Policy 的表达以及 Runtime 通过 runtime proxy 呈现的可观察行为：Policy 如何表达与校验决策取值、Runtime 需要声明并兑现哪些基本运行语义。control plane 与 Runtime 共同落实这份约束（Mechanism）：control plane 编排受管操作，Runtime 实际承载动作并返回结果和事件。Contract 不直接规定 Runtime 内部实现。
 
 ## 2. 工作模型
 
@@ -90,14 +90,14 @@ Speculation Contract 约束 Policy 的表达以及 Runtime 通过接入边界呈
 
 Policy Engine 在加载或任务准入时检查 Policy 的决策取值能否由当前接入的后端能力承载；无法满足时必须拒绝，或明确报告降级。运行期间，control plane 通过 Authority、validator、效果处理和 Runtime 返回的实际结果检查声明是否被兑现。
 
-Contract 不拥有 Branch 或 Runtime 的运行状态，也不直接规定 Runtime 内部实现。总体关系见 [Speculation Contract 设计](design/speculation-contract.md)，Runtime Adapter 的具体接入契约、校验路径、降级结果和运行期证据见 [Runtime Adapter 契约设计](design/runtime-adapter-contract.md)，control plane 如何落实见 [control plane 设计](design/control-plane.md)。
+Contract 不拥有 Branch 或 Runtime 的运行状态，也不直接规定 Runtime 内部实现。总体关系见 [Speculation Contract 设计](design/speculation-contract.md)，runtime proxy 的具体接入契约、校验路径、降级结果和运行期证据见 [runtime proxy 契约设计](design/runtime-adapter-contract.md)，control plane 如何落实见 [control plane 设计](design/control-plane.md)。
 
 ## 4. 跨领域设计约束
 
 以下约束适用于 Policy、Mechanism、Runtime 及其扩展的设计取舍：
 
 1. **策略选择不应被机制固化**：能够交给 Policy 选择的内容，不应由核心机制或 Runtime 固定。
-2. **正确性与资源所有权不能依赖策略自律**：必须由 AScout Mechanism 或经 Adapter 验证的后端机制落实的约束，不能只依赖 Policy 遵守。
+2. **正确性与资源所有权不能依赖策略自律**：必须由 AScout Mechanism 或经 runtime proxy 验证的后端机制落实的约束，不能只依赖 Policy 遵守。
 3. **跨层语义必须显式表达**：Policy 的要求、Runtime 的能力和运行结果不能依赖未声明的隐含假设。
 4. **能力不足不得静默改变语义**：只能拒绝、明确降级或选择其他合法路径。
 5. **扩展不能破坏既有固定语义**：新 Policy、Runtime、状态域或其他扩展不能绕过 Branch、single-winner、隔离、obligation 和 cleanup 等固定约束。

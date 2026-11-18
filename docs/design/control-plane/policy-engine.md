@@ -96,7 +96,7 @@ Policy Engine 编译全部 Decision。会改写全局控制状态或必须在多
 
 - [control plane 设计](../control-plane.md)：control plane 组件与状态边界
 - [Policy Decisions](../policy-decisions.md)：九类 Decision 的目标语义
-- [Speculation Contract](../speculation-contract.md)：Policy 与 Runtime Adapter 能力的语义对齐
+- [Speculation Contract](../speculation-contract.md)：Policy 与 runtime proxy 能力的语义对齐
 - [Instrumentation 设计](../agent-integration.md)：本地 Decision 的求值与记录
 - [开发决策](../../development/decisions.md)：当前编译产物与实现限制
 

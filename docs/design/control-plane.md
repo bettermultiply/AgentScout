@@ -1,12 +1,12 @@
 # control plane 设计
 
-control plane 的主要目的是协调整个投机执行过程，并为 Policy 和 Runtime 的接入与运行提供协调和验证，避免因语义不匹配而无法正确执行。Runtime Adapter 是 Runtime 与 control plane 之间的接入边界，不是另一套 Runtime。Runtime 本身负责动作承载、环境能力和效果边界，External Effect Coordinator 属于 Runtime。
+control plane 的主要目的是协调整个投机执行过程，并为 Policy 和 Runtime 的接入与运行提供协调和验证，避免因语义不匹配而无法正确执行。runtime proxy 是 Runtime 与 control plane 之间的接入边界，不是另一套 Runtime。Runtime 本身负责动作承载、环境能力和效果边界，External Effect Coordinator 属于 Runtime。
 
 ## 1. 总体设计
 
 执行事实分为 Agent action、Agent/Branch 元事件、Agent Adapter 命令回执和 Runtime 事实。control plane 只据对应来源更新状态；Runtime 失败不能伪装成 Agent 已报告失败，Agent 清理回执也不代表环境清理。action 关联 task、Branch 和 action identity，结果必须与开始配对；Authority/Candidate 角色由 Tree 判定。完整定义见 [Agent 接入](agent-integration.md)。
 
-control plane 是抽象责任模型中 Mechanism 的实现主体，也是 Speculation Contract 的实现方。其主要目的是协调整个投机执行过程，并为 Policy 与 Runtime Adapter 的接入和运行提供协调与验证，避免策略意图与后端能力之间因语义不匹配而无法正确执行。
+control plane 是抽象责任模型中 Mechanism 的实现主体，也是 Speculation Contract 的实现方。其主要目的是协调整个投机执行过程，并为 Policy 与 runtime proxy 的接入和运行提供协调与验证，避免策略意图与后端能力之间因语义不匹配而无法正确执行。
 
 每个 session 的 AScoutAgent 拥有自己的一棵 Speculative Tree，Tree 属于 control plane。task 是 session 中 Agent 的一轮工作，Agent 完成本轮工作并开始等待用户输入时完成；多轮 task 共用该控制域。对外这棵树以单一 Agent 的形式呈现给用户，对内我们将这棵树视作整个投机执行生命周期中由多个子树组成的派生嵌套关系。这个单一 Agent 视图和控制域称为 `AScoutAgent`。用户请求经 Gateway 进入相应控制逻辑；control plane 负责建立 Agent 控制上下文，Runtime 负责实际启动对应的 Agent 与接入进程，不要求用户手工启动具体 Agent 产品或接入组件。
 
@@ -18,7 +18,7 @@ control plane 是抽象责任模型中 Mechanism 的实现主体，也是 Specul
 
 control plane 的工作方式是一条贯穿 Policy、控制结构与 Runtime 的闭环，Policy 的表达与 Runtime 的接入都经由 control plane 获得一致的校验与编排。
 
-control plane 通过 Policy Engine 取得各阶段的决策，再将决策编排为受管操作。环境与效果控制经 Gateway 按 Runtime Adapter 契约交付，由 Runtime 返回实际结果和事件。工具执行由 Instrumentation 经已授权的独立连接请求 Runtime，真实结果沿原工具调用路径返回，Instrumentation 再向 control plane 报告 outcome 与 evidence；control plane 不代执行或中转真实工具结果。control plane 据实更新 Speculative Tree，而不直接修改 Runtime 内部状态。在等待 Parent 真实结果的投机路径中，Candidate 验证必须比较 Parent 真实 operation 的 outcome 与 Candidate hypothesis，不能用 Candidate 自己生成的结果替代。control plane 记录决策、操作结果和事件，用于状态对齐与问题定位。
+control plane 通过 Policy Engine 取得各阶段的决策，再将决策编排为受管操作。环境与效果控制经 Gateway 按 runtime proxy 契约交付，由 Runtime 返回实际结果和事件。工具执行由 Instrumentation 经 Environment 的独立执行连接请求 Runtime，真实结果沿原工具调用路径返回，Instrumentation 再向 control plane 报告 outcome 与 evidence；control plane 不代执行或中转真实工具结果。control plane 据实更新 Speculative Tree，而不直接修改 Runtime 内部状态。在等待 Parent 真实结果的投机路径中，Candidate 验证必须比较 Parent 真实 operation 的 outcome 与 Candidate hypothesis，不能用 Candidate 自己生成的结果替代。control plane 记录决策、操作结果和事件，用于状态对齐与问题定位。
 
 这些校验与编排都必须落在 Policy 无法绕过的固定语义边界之内。Policy 使用外部模型时，宿主只在本次求值明确授权的 capability 范围内代理请求，并持有认证凭证；默认拒绝，结束或取消即撤销。详细契约见 [Policy Engine](control-plane/policy-engine.md)。该边界的清单与说明见 [Policy Decisions](policy-decisions.md) §6；control plane 负责在运行期使这些语义被一致地落实。
 
@@ -36,9 +36,9 @@ control plane 由 Gateway、UI Projection、Policy Engine、Speculation Coordina
 
 ### 2.1 Gateway
 
-Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止。它是 control plane 面向 Instrumentation、UI 与 Runtime 的统一受管通信边界，负责通信如何接入、消息交给谁以及如何送达。统一生命周期不规定必须同进程，也不要求自动打开浏览器。消息对投机执行的变化由相应控制逻辑决定；Runtime 的消息仍遵守 Runtime Adapter 契约，不因通信统一而绕过 Adapter 或 Registry。
+Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止。它是 control plane 面向 Instrumentation、UI 与 Runtime 的统一受管通信边界，负责通信如何接入、消息交给谁以及如何送达。统一生命周期不规定必须同进程，也不要求自动打开浏览器。消息对投机执行的变化由相应控制逻辑决定；Runtime 的消息仍遵守 runtime proxy 契约，不因通信统一而绕过 runtime proxy 或 Registry。
 
-Gateway 的通信职责包括：管理连接、会话、握手与断线；进行入口格式、身份、上下文与权限检查；接收请求、执行事实与命令回执并转交相应处理方；交付命令、已编译的本地 Decision、结果及观察事件。Gateway 与 Runtime 采用网络通信；UI 不独立部署，由 control plane 启动和停止，也不因此取得 Tree 或生命周期权威。消息覆盖 Agent、UI 和 Runtime 三侧，各侧既有协议和权限边界继续有效。除通信所需的暂时状态外，Gateway 不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态，也不承担投机编排。control plane 负责启动协调；Runtime 负责实际启动、监视和回收 Agent 与接入进程。Adapter 是 Runtime 的接入边界，其部署与配置组织不由 Gateway 的生命周期规定。
+Gateway 的通信职责包括：管理连接、会话、握手与断线；进行入口格式、身份、上下文与权限检查；接收请求、执行事实与命令回执并转交相应处理方；交付命令、已编译的本地 Decision、结果及观察事件。Gateway 与 Runtime 采用网络通信；UI 不独立部署，由 control plane 启动和停止，也不因此取得 Tree 或生命周期权威。消息覆盖 Agent、UI 和 Runtime 三侧，各侧既有协议和权限边界继续有效。除通信所需的暂时状态外，Gateway 不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态，也不承担投机编排。control plane 负责启动协调；Runtime 负责实际启动、监视和回收 Agent 与接入进程。runtime proxy 是 Runtime 的接入边界，其部署与配置组织不由 Gateway 的生命周期规定。
 
 ### 2.2 Policy Engine
 
@@ -48,7 +48,7 @@ Policy Engine 是可替换 Policy 进入 control plane 的固定入口，只有�
 
 需要全局控制状态的 Decision 由 Policy Engine 根据 control plane 组件按输入约定提供的数据求值，不向算法开放任意访问内部状态的入口。Policy Engine 只返回策略选择；相应状态的拥有组件负责复核、落实选择并更新实际状态。完整边界见 [Policy Engine 设计](control-plane/policy-engine.md)。
 
-### 2.3 与 Runtime 内 Adapter Registry 的协作
+### 2.3 与 Runtime 内 backend registry 的协作
 
 Runtime 通过现有 hello 能力报告提供 backend 身份。control plane 启动时，在收到报告之后，由 Policy Engine 确认 Policy 要求的 backend 存在；Policy 未要求 backend 时不检查，缺少时明确拒绝启动。Policy Engine 不解析 backend 接口，也不把存在检查视为环境保证已验证。
 
@@ -64,9 +64,9 @@ Speculation Coordinator 协调树、Policy 和外部操作，可以服务多棵�
 
 保存、恢复及任务结束也遵循同一所有权边界：Tree 拥有恢复暂停、继续和任务结束的控制状态及合法转换；协调侧组织 Agent 与 Runtime 的保存、加载、物化和清理顺序，恢复资料由 control plane 校验后发布和读取。Gateway 只交付相关请求和回执；可执行入口负责参数、装配、呈现及事件驱动，不另行维护或直接改写树的领域状态。
 
-Speculation Coordinator 通过 Policy Engine 对会改写全局控制状态或必须在多个 Chance、Branch、Proposal 之间协调的 Decision（包括 `predict`）求值并落实，所缺的本地事实由 Instrumentation 计算后提交，并接收 Instrumentation 已经完成的 `admit.opportunity_pass`、`admit.feasibility_pass`、`extent` 和 `effect` 本地 Decision 结果；对已经满足本地范围条件的 Decision 不重复求值。它根据 Policy Decision 和当前全局视图形成操作意图，经 Gateway 按 Runtime Adapter 契约交给 Runtime，并根据实际结果或事件更新全局视图；需要交付 Agent 的结果经 Gateway 返回。
+Speculation Coordinator 通过 Policy Engine 对会改写全局控制状态或必须在多个 Chance、Branch、Proposal 之间协调的 Decision（包括 `predict`）求值并落实，所缺的本地事实由 Instrumentation 计算后提交，并接收 Instrumentation 已经完成的 `admit.opportunity_pass`、`admit.feasibility_pass`、`extent` 和 `effect` 本地 Decision 结果；对已经满足本地范围条件的 Decision 不重复求值。它根据 Policy Decision 和当前全局视图形成操作意图，经 Gateway 按 runtime proxy 契约交给 Runtime，并根据实际结果或事件更新全局视图；需要交付 Agent 的结果经 Gateway 返回。
 
-每棵树维护通过 `admit` 但尚未启动的待选机会及其有效性，向 Policy 提供同一 AScoutAgent 内的待选、运行和暂停工作，以及预算、资源压力、等待时间、依赖和成本等事实；接收 `select` 对当前启动机会的选择和 `rebalance` 对已启动工作的暂停、恢复或抢占意图，并在 Contract、资源与正确性硬约束内执行。每个 Branch 在 Tree 中显式绑定独占的 `environment_id`；Candidate 创建时必须通过 Adapter 请求 Runtime 创建自己的 Environment，不复用 parent Environment。独立环境尚未建立完成时，Coordinator 不把预期状态当作 Runtime 已确认的事实。未被选择的有效机会继续保留；pending result 到达、任务结束、祖先依赖被否定或其他必要前提失效时，Coordinator 将其移出集合。task 的预算计数归对应树，协调侧读取这些事实进行求值和操作协调。
+每棵树维护通过 `admit` 但尚未启动的待选机会及其有效性，向 Policy 提供同一 AScoutAgent 内的待选、运行和暂停工作，以及预算、资源压力、等待时间、依赖和成本等事实；接收 `select` 对当前启动机会的选择和 `rebalance` 对已启动工作的暂停、恢复或抢占意图，并在 Contract、资源与正确性硬约束内执行。每个 Branch 在 Tree 中显式绑定独占的 `environment_id`；Candidate 创建时必须通过 runtime proxy 请求 Runtime 创建自己的 Environment，不复用 parent Environment。独立环境尚未建立完成时，Coordinator 不把预期状态当作 Runtime 已确认的事实。未被选择的有效机会继续保留；pending result 到达、任务结束、祖先依赖被否定或其他必要前提失效时，Coordinator 将其移出集合。task 的预算计数归对应树，协调侧读取这些事实进行求值和操作协调。
 
 Coordinator 不使用固定价值公式替代 Policy 的跨 Chance 权衡，也不在 `select` 前重复 `admit` 精判。启动或调整运行状态前的有效性、后端能力与硬约束复核属于机制校验；条件暂时不满足时可以延后执行 Policy 的意图。`rebalance` 的抢占结果以 `preempted` 原因进入 `dispose`，而不是由 Coordinator 自行决定清理方式。
 
@@ -100,7 +100,7 @@ UI Projection 不拥有 Tree，不裁决投机，不把画面状态或报警写�
 
 Ledger 记录运行事实，不承担合规或安全取证 audit；持久、tamper-evident audit 由具体 Runtime 按部署需求提供，control plane 正确性不依赖它。
 
-Ledger 以异步旁路记录日常运行事实；显式保存的恢复完成记录必须同步持久化成功后才报告保存成功。日常记录包括 Policy 决策、Branch 与 Proposal 状态变化、验证依据、效果与 obligation 处理结果、资源使用、取消与清理结果、Adapter 映射结果与 Runtime 失败。它用于状态对齐、问题定位、shadow/replay 和契约校验；它不从记录中重新决定生命周期，也不代替 Runtime 持有执行状态。
+Ledger 以异步旁路记录日常运行事实；显式保存的恢复完成记录必须同步持久化成功后才报告保存成功。日常记录包括 Policy 决策、Branch 与 Proposal 状态变化、验证依据、效果与 obligation 处理结果、资源使用、取消与清理结果、runtime proxy 映射结果与 Runtime 失败。它用于状态对齐、问题定位、shadow/replay 和契约校验；它不从记录中重新决定生命周期，也不代替 Runtime 持有执行状态。
 
 Ledger 只追加并保存记录，是观察事件日志的唯一保存者，在成功追加时分配同一运行内连续递增的序号；读取只从已保存的记录按序号取出，不以完整内存历史替代失败的文件写入。读取完整历史不得阻塞追加。Tree 在创建 Branch、切换 Authority、改变生命周期和环境状态的统一入口产生事件，由协调循环取走并交给 Ledger；事件记录实际转换及其原因，保留同一次处理中连续经过的中间状态。观察日志只承担观察和事实记录，不要求据此在崩溃后重建整棵树，也不为恢复逐次记录完整树状态。
 
@@ -116,9 +116,9 @@ session 记录由 Instrumentation 完整持久化并汇总为单一最终权威 
 
 落到机制上，control plane 沿固定状态入口撤销对应 Branch 的控制状态，并通过接入边界请求 Runtime 停止执行、清理资源以及取消、清理或补偿受管效果。Salvage 是可选的额外能力：若某段投机工作产生了可移交权威路径的残值，可以在失败默认之上回收；它不是失败处理的必要条件。
 
-## 4. 与 Runtime Adapter 的衔接
+## 4. 与 runtime proxy 的衔接
 
-control plane 通过 Runtime Adapter 这一接入边界使用 Runtime，而不依赖内部的 Overlay、容器或虚拟机细节。请求表达所需的承载与保证，不默认要求独立环境或完整复制；Runtime 可以在满足要求时共享状态。Registry 校验和运行期结果用于确认能力与实际完成情况，不能仅凭模块名称或请求已发送推断保证成立。与 Policy 的完整协调、协商及运行时检测是后续实现目标，见 [Runtime 开发说明](../development/runtime-adapter.md)。具体接入约束见 [Runtime Adapter 契约设计](runtime-adapter-contract.md)。
+control plane 通过 runtime proxy 这一接入边界使用 Runtime，而不依赖内部的 Overlay、容器或虚拟机细节。请求表达所需的承载与保证，不默认要求独立环境或完整复制；Runtime 可以在满足要求时共享状态。Registry 校验和运行期结果用于确认能力与实际完成情况，不能仅凭模块名称或请求已发送推断保证成立。与 Policy 的完整协调、协商及运行时检测是后续实现目标，见 [Runtime 开发说明](../development/runtime-adapter.md)。具体接入约束见 [runtime proxy 契约设计](runtime-adapter-contract.md)。
 
 ## 5. 只读观察
 

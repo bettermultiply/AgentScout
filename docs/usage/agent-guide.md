@@ -1,15 +1,15 @@
 # Agent 接入状态
 
-AScout 当前有一个可构建、可运行的原型：Rust control plane 持有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入；Runtime Adapter 负责启动 Agent 接入进程，并已提供文件系统 Backend（overlay/btrfs 两种数据面）与进程 Backend。稳定的 Agent-facing 命令语法、C API、完整 Runtime Registry 与能力验证仍未实现。
+AScout 当前有一个可构建、可运行的原型：Rust control plane 持有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入；agent supervisor 启动 Agent 与 Instrumentation 的可信宿主，文件系统 Backend（overlay/btrfs 两种数据面）管理环境内的 namespace holder。稳定的 Agent-facing 命令语法、C API、backend 环境保证的独立验证仍未实现。
 
 ## 当前可用内容
 
 - `docs/design/` 中已经确认的目标语义；
 - 已确认的 Instrumentation、control plane 与 Runtime 责任边界，以及 `docs/development/` 中的开发决策；
-- 可构建的 control plane、Pi 接入、Runtime Adapter，以及文件系统/进程 Backend 原型；
+- 可构建的 control plane、Pi 接入、runtime proxy，以及文件系统/进程 Backend 原型；
 - Pi/NLE 的真实投机执行验证；当前验证边界见 [首要验证 Workload](../development/reference-workload.md)。
 
-当前仓库包含可构建代码（`cargo build`、`cargo run --bin ascout-control-plane`）及 Pi 进程内 ASC-Proxy。稳定的对外 Rust API、C API、通用 Agent-facing 命令语法、通用通信认证授权和 Runtime Registry 能力验证尚未完成；不另设 ASC-Proxy 部署服务。
+当前仓库包含可构建代码（`cargo build`、`cargo run --bin ascout-control-plane`）及 Pi 进程内 ASC-Proxy。稳定的对外 Rust API、C API、通用 Agent-facing 命令语法、通用通信认证授权和 backend registry 能力验证尚未完成；不另设 ASC-Proxy 部署服务。
 
 ## 打开已有运行
 
@@ -29,7 +29,7 @@ Outcome 由 Interposer 自动发布，不作为独立 Agent command。Resolver d
 
 ## 计划中的 Launch 与 Integration
 
-当前支持具备足够拦截点或 Hook 的特定 Agent product。产品相关的内部执行结构、拦截点和 Hook 归 Instrumentation；routine control 计划先进入 ASC-Proxy，再由 Gateway 转交 control plane。当前不承诺完全无修改且无需了解产品内部实现的通用接入。control plane 通过 Runtime Adapter 的 typed contract 接入；原型已实现基础连接与 handshake，Adapter discovery、Registry 验证和稳定对外接口仍未完整实现；Registry 的目标职责与独立验证要求见 [Runtime 设计](../design/runtime.md)及其契约。
+当前支持具备足够拦截点或 Hook 的特定 Agent product。产品相关的内部执行结构、拦截点和 Hook 归 Instrumentation；routine control 计划先进入 ASC-Proxy，再由 Gateway 转交 control plane。当前不承诺完全无修改且无需了解产品内部实现的通用接入。control plane 通过 runtime proxy 的 typed contract 接入；原型已实现基础连接与 handshake，Adapter discovery、Registry 验证和稳定对外接口仍未完整实现；Registry 的目标职责与独立验证要求见 [Runtime 设计](../design/runtime.md)及其契约。
 
 launcher、CLI、library、Command + Skill 和 embedded Agent adapter 暂不属于当前范围，后续根据具体产品的可观察和可控制能力单独评估。
 

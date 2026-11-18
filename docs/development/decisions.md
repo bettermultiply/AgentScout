@@ -1,5 +1,11 @@
 # 开发决策
 
+## 删除 `CompositeRuntime` 兼容入口
+
+已删除旧类型、构造函数、模块及导出。六处既有测试构造直接使用 `BaseRuntime::with_policy`，保留原 backend 实例、路由策略与断言。每个 Environment 可关联多个 backend，目标是让各 backend 通过同一机制参与协调。本轮交付范围为入口迁移及文档清理。
+
+本轮 `cargo check --all-targets`、Runtime、Proxy 环境身份、NLE 与文件系统路由的既有定向测试均通过。
+
 ## 完整操作的双向二进制传输
 
 完整操作在既有 socket 上发送有界 JSON 首行和独立字节帧。Rust 和目标 backend 先接收完整上传，再执行原子写入或有序修改。请求指纹覆盖内容字节，输出暂存直到终态确认。目录、声明工具结果和 Control Gateway 继续按各自契约返回。缓存归属、内存需求、磁盘限制和真实 VM 证据见 [Runtime Adapter 开发记录](runtime-adapter.md#完整操作与实际限制)。
@@ -52,7 +58,7 @@ Pi session 的宿主 cwd 仅用于会话。文件工具将原始路径交给绑�
 
 Runtime 在环境结果中返回命令端点访问信息，由 control plane 随 Branch 启动及恢复命令交给 Instrumentation。Instrumentation 通过统一 JSON-lines 执行/取消/终态确认接口发送 Branch、operation、tool、arguments 和 context；control plane 不再执行 Runtime 工具。当前 Pi 原生工具在 Product Integration 中通过 SDK operations 注入调用通用环境操作，Filesystem holder 原生执行文件／命令，不再使用内部 Pi 辅助进程。缺少 execution access 时直接失败，不回退为 control-plane 结果注入，也不执行宿主文件工具。取消必须等端点接受命令后发送，并等待 backend 终态才确认。
 
-2026-11-17 实现：ASC-Proxy 统一拥有控制 Gateway socket 与独立执行连接；control plane 用 `BindExecution` 明确建立 Branch→Environment 独占授权。端点复用 `req-N` 有界滑动身份窗口，确认释放正文，窗口外身份拒绝重放；执行连接传递增量 output。NLE 工具模拟延迟在 backend 内可取消等待，以独立动作锁维持共享世界动作串行，不占住 bridge 阻塞候选环境创建；请求进入 bridge 后转发取消并等待终态，已经进入同步游戏调用的动作等待调用返回。Branch abort 在活跃操作终态后执行 holder `drain(cancel:true)`，清理已完成调用留下的写者。恢复重新发布当前连接状态；失败模型的合成消息保留 action 关联。验证过期检查区分模型与真实工具动作；保存时已有 checkpoint 结果的工具不再因 transcript 尚未追加结果而重复登记恢复调用。具体验证及未完成项见 [Instrumentation 通用层](agent-access.md)。
+2026-11-17 实现：ASC-Proxy 统一拥有控制 Gateway socket 与独立执行连接；control plane 转交目标 Environment 的执行地址。端点复用 `req-N` 有界滑动身份窗口，确认释放正文，窗口外身份拒绝重放；执行连接传递增量 output。NLE 工具模拟延迟在 backend 内可取消等待，以独立动作锁维持共享世界动作串行，不占住 bridge 阻塞候选环境创建；请求进入 bridge 后转发取消并等待终态，已经进入同步游戏调用的动作等待调用返回。Environment 取消在活跃操作终态后执行 holder `drain(cancel:true)`，清理已完成调用留下的写者。恢复重新发布当前连接状态；失败模型的合成消息保留 action 关联。验证过期检查区分模型与真实工具动作；保存时已有 checkpoint 结果的工具不再因 transcript 尚未追加结果而重复登记恢复调用。具体验证及未完成项见 [Instrumentation 通用层](agent-access.md)。
 
 ## 异步反馈与 Gateway 接收确认（待复核）
 
@@ -1178,3 +1184,21 @@ AScout 管理的运行身份命名为 run id，保存位置称“运行记录目
 本轮补充确认了从已结束的 Agent session 继续工作的规则，以及常驻 control plane 管理多个 run 时关闭界面、结束指定 run 和停止整个进程的收尾范围。会话沿用原权威引用、run id 和运行记录目录，下一条 prompt 创建新 task，历史终态保留。具体规则见 [control plane 设计](../design/control-plane.md#1-总体设计)，实现进度见 [恢复开发记录](recovery.md)。
 
 后续确认并实现：同一个 `ascout-control-plane <pi-root> --resume <run-id>` 根据 Ledger 打开已保存暂停的 task 或已结束的权威会话。已结束会话以原历史启动新的控制上下文，等待下一条 prompt。运行目录内的持有锁保护同一 run 的会话和记录，原运行身份沿用。验证和兼容路径见 [恢复开发记录](recovery.md)。
+
+### Runtime 宿主与环境资源归属
+
+`AgentBackend` 管理 run 唯一的 Agent 与 Instrumentation 宿主，统一所有配置的启动和退出。`FilesystemBackend` 管理环境文件视图、holder、冻结与恢复、挂载轮换和清理。Runtime 通过 Backend 接口调用这些环境操作，保留现有配置和调用顺序。声明工具经授权后使用独立执行端点，控制协议保留 `tool_context`。更大的组件重组、通用顺序和晋级交接待讨论。
+
+### Runtime 组件命名与关闭顺序
+
+已确认 runtime proxy、backend registry、base runtime、agent supervisor 和 External Effect Coordinator。runtime proxy 对接 control plane。启动入口读取并规范化节点配置。backend registry 登记实现、入口、接口和能力声明。base runtime 使用自己的路由配置创建和回收实例，管理 Environment、参与者、操作和结果。agent supervisor 接替上条的 `AgentBackend`，只在检查、启动或回收可信宿主时持锁。base runtime 编排宿主启动和环境执行资源启动。runtime proxy 停止接入并取消在飞工作。base runtime 关闭操作受理、停止宿主、排空操作，然后回收环境。尝试保存或恢复后进入保留模式，退出只停止执行资源。原型支持内置 Rust Backend 和按配置接入独立可执行程序。跨节点登记及通信待设计。
+
+本次实现将两层协调收归 `BaseRuntime`，保留既有启动命令与内置恢复布局。独立程序使用版本化 JSON 行接口，配置与程序握手分别检查。无模型核查以构建完成后新写入的 Python 程序验证配置登记、父子环境生命周期、命令结果、业务拒绝及退出回收。缺少接口声明时没有启动程序，缺少 `cleanup` 方法时启动失败且子进程已回收。另用收到 `shutdown` 后不退出的程序验证了超时诊断、强制终止与进程回收。接口、错误处理与覆盖边界见 [独立可执行程序](executable-backend.md)。
+
+## Runtime 执行和 backend 参与路径统一
+
+Branch 只在 control plane 与 Instrumentation 中用于查找 Environment。Runtime 创建或恢复启动时交付访问地址。执行按 Environment 和 operation 关联，Environment 内保留请求去重、generation 与取消终态。内置与可执行 backend 按同一登记、参与、路由和清理规则运行。文件系统 holder、冻结及物化由文件系统 backend 管理。
+
+独立程序的工具调用使用既有执行内容帧。工具声明到 Agent 的交付留在约定范围之外。普通工具取消按 Environment 和 operation identity 通知程序，Runtime 等待工具终态，保留共享实例。超过时限或通信失败时，Runtime 回收共享进程并将其所有 Environment 标为部分可用。无法确认的资源回收会报告失败。
+
+验证通过 `cargo check --all-targets`、218 项 Rust 库测试、两项 FS 集成测试、12 项 Pi 执行与恢复测试，以及真实 Firecracker 的无模型工具测试。默认并发的首次全量库测试有两项 FS holder 挂载超时，限制为四线程后全量通过。旧组件索引的加载用既存的 NLE 与 FS 保存代验证。上一轮独立程序验收覆盖两个 Environment 的归属、失败建立的回滚、文件和命令的二进制帧与结构化工具结果。同一 Runtime 二进制分别载入原配置和增加程序后的配置，SHA-256 保持一致。本轮取消回归经 Instrumentation 的 ASC-Proxy 验证了相同实例 PID、取消与完成竞争、上传与输出分片、等待发送的取消、故障报告及关闭回收。

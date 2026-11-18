@@ -113,4 +113,4 @@ AScout 不作以下保证：
 - [设计模型](../design-model.md)：抽象概念层与跨领域约束
 - [Branch 语义设计](branch-semantics.md)：Branch 语义与隔离通信
 - [control plane 设计](control-plane.md)：全局裁决与暂存请求的释放或取消通知
-- [Speculation Contract 设计](speculation-contract.md)：Policy 表达与 Runtime Adapter 接入行为的语义对齐契约
+- [Speculation Contract 设计](speculation-contract.md)：Policy 表达与 runtime proxy 接入行为的语义对齐契约

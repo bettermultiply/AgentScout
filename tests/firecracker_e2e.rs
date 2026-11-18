@@ -305,37 +305,19 @@ fn pi_sdk_tools_cross_the_real_environment_boundary_without_a_model() {
         .unwrap();
     assert_completed_in_state(&created, EnvironmentState::Available);
     let environment = created.environment_id.as_str();
-    let bound = harness
-        .session
-        .call(
-            environment,
-            Operation::BindExecution {
-                branch_id: "pi-tools".into(),
-            },
-        )
-        .unwrap();
     let second = harness
         .session
         .call("", Operation::EstablishEnvironment)
-        .unwrap();
-    let second_bound = harness
-        .session
-        .call(
-            &second.environment_id,
-            Operation::BindExecution {
-                branch_id: "queue-second".into(),
-            },
-        )
         .unwrap();
     let output = Command::new("node")
         .arg(workspace().join("tests/fixtures/pi-firecracker-tools.mjs"))
         .env(
             "ASCOUT_TEST_SECOND_ACCESS",
-            serde_json::to_string(second_bound.execution_access.as_ref().unwrap()).unwrap(),
+            serde_json::to_string(second.execution_access.as_ref().unwrap()).unwrap(),
         )
         .env(
             "ASCOUT_TEST_ACCESS",
-            serde_json::to_string(bound.execution_access.as_ref().unwrap()).unwrap(),
+            serde_json::to_string(created.execution_access.as_ref().unwrap()).unwrap(),
         )
         .output()
         .unwrap();
@@ -363,21 +345,12 @@ fn real_microvm_completes_the_full_lifecycle_over_vsock() {
     let environment = created.environment_id.as_str();
     // Retain the establish smoke check before exercising guest operations.
     harness.firecracker_process(environment);
-    let bound = harness
-        .session
-        .call(
-            environment,
-            Operation::BindExecution {
-                branch_id: "generic-tools".into(),
-            },
-        )
-        .unwrap();
-    let access = bound.execution_access.as_ref().unwrap();
+    let access = created.execution_access.as_ref().unwrap();
     let generic = |n: u64, operation: &str, arguments: serde_json::Value, body: Option<Vec<u8>>| {
         use ascout::runtime::execution_wire::{self as wire, Body, Message};
         let mut socket = std::os::unix::net::UnixStream::connect(&access.address).unwrap();
         Message {
-            meta: json!({"command":"execute","request_id":format!("req-{n}"),"branch_id":"generic-tools","environment_id":environment,"operation_id":format!("generic-{n}"),"operation":operation,"arguments":arguments}),
+            meta: json!({"command":"execute","request_id":format!("req-{n}"),"environment_id":environment,"operation_id":format!("generic-{n}"),"operation":operation,"arguments":arguments}),
             body: body.map(Body::bytes),
         }.write(&mut socket).unwrap();
         let mut reader = std::io::BufReader::new(socket);

@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::protocol::contract::AgentLaunch;
 use crate::runtime::execution_wire::{self as wire, Body, Message};
-use crate::runtime::process::ProcessBackend;
+use crate::runtime::process::Processes;
 use serde_json::json;
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
@@ -29,7 +29,7 @@ fn success(socket: &Path, command: &str) {
     assert_eq!(result["exit_code"], 0, "{command}: {result}");
 }
 
-fn launch(backend: &FilesystemBackend, environment: &str, workspace: &Path) -> ProcessBackend {
+fn launch(backend: &FilesystemBackend, environment: &str, workspace: &Path) -> Processes {
     let launch = AgentLaunch {
         command: "/bin/true".into(),
         args: Vec::new(),
@@ -42,7 +42,7 @@ fn launch(backend: &FilesystemBackend, environment: &str, workspace: &Path) -> P
         environment_id: environment.to_string(),
         ..BackendContext::default()
     };
-    let process = ProcessBackend::new("process", backend.bubblewrap_path());
+    let process = Processes::new("process", backend.bubblewrap_path());
     let fragment = backend.launch_fragment(&context, &launch).unwrap();
     process.launch_holder(&context, &fragment).unwrap();
     process

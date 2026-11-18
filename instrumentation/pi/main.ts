@@ -339,7 +339,7 @@ function tools(branch) {
     const detect=bytes=>require(resolve(root,'packages/coding-agent/src/utils/mime.ts')).detectSupportedImageMimeType(bytes);
     const builtins=environmentTools(ascProxy,branch,detect,taskId);
     return [...builtins,...runtimeTools.map(spec=>({...spec,label:spec.name,parameters:Type.Unsafe(spec.parameters),execute:async(operation,args,signal,onUpdate)=>{
-        const value=await ascProxy.execute(branch,operation,spec.name,args,{task_id:taskId},signal,onUpdate);
+        const value=await ascProxy.execute(branch,operation,spec.name,args,{task_id:taskId,tool_call_id:operation},signal,onUpdate);
         executionResults.set(key(branch,operation),value);
         return value.result?.content?value.result:{content:[{type:'text',text:text(value.result)}],details:undefined};
     }}))];

@@ -4,7 +4,7 @@ use std::time::Duration;
 use ascout::control_plane::gateway::runtime::ControlServer;
 use ascout::control_plane::policy::PolicyEngine;
 use ascout::runtime::BaseRuntime;
-use ascout::runtime::adapter::Adapter;
+use ascout::runtime::proxy::RuntimeProxy;
 use ascout::runtime::backends::filesystem::{FilesystemBackend, FilesystemConfig};
 
 #[test]
@@ -45,7 +45,7 @@ fn filesystem_hello_confirms_policy_runtime_backend_identity() {
     let server = ControlServer::bind("127.0.0.1:0").unwrap();
     let address = server.local_addr().unwrap().to_string();
     let adapter = std::thread::spawn(move || {
-        Adapter {
+        RuntimeProxy {
             adapter_instance: "filesystem-regression".into(),
             runtime,
         }

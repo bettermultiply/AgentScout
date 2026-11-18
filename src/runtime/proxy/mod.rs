@@ -1,11 +1,8 @@
-//! Adapter 进程：接入 control plane 会话，按环境串行执行操作，上报结果和事件。
-//!
-//! 首版只做一条连接、同步完成、一个状态变化事件类型；能力声明、验证和
-//! 多 Adapter 管理不在这一版。
+//! Runtime proxy 接入 control plane，按环境排队并上报结果和事件。
 
-mod agent;
 mod commands;
 mod dispatch;
+mod events;
 mod queue;
 mod result;
 mod result_cache;
@@ -15,10 +12,10 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-pub use session::Adapter;
+pub use session::RuntimeProxy;
 
+use super::BaseRuntime;
 use std::collections::HashMap;
-use std::process::Child;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -30,8 +27,7 @@ use result_cache::ResultCache;
 
 pub(super) struct Shared {
     pub(super) commands: Option<commands::Commands>,
-    pub(super) preserving: std::sync::atomic::AtomicBool,
-    pub(super) runtime: Arc<dyn Backend>,
+    pub(super) runtime: Arc<BaseRuntime>,
     pub(super) out: Sender<AdapterMessage>,
     pub(super) queues: Mutex<HashMap<String, Arc<Queue>>>,
     /// 已经受理过的请求标识：重发同一标识按重试处理，不重复执行。
@@ -40,8 +36,6 @@ pub(super) struct Shared {
     /// 仍在执行的请求会等待原始结果。
     pub(super) results: Mutex<ResultCache>,
     pub(super) result_signal: Condvar,
-    /// Adapter 记录的每个环境最近一次报告的状态，用于发现意外变化。
+    /// Runtime proxy 记录的每个环境最近一次报告的状态，用于发现意外变化。
     pub(super) known: Mutex<HashMap<String, EnvironmentState>>,
-    /// 由 Runtime 启动的 Instrumentation 进程。一个 run 只有一个，服务所有环境。
-    pub(super) agent: Mutex<Option<Child>>,
 }

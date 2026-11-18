@@ -1,6 +1,6 @@
 # NLE Runtime 地图可视化（原型）
 
-WebUI 的 `/map` 是独立于 AScout 对话和投机树的 NLE 地图浏览入口。它以动作历史为单位重建地图：起点、后退、前进和终点按钮只改变历史游标，不调用 control plane、Runtime Adapter 或 NLE。
+WebUI 的 `/map` 是独立于 AScout 对话和投机树的 NLE 地图浏览入口。它以动作历史为单位重建地图：起点、后退、前进和终点按钮只改变历史游标，不调用 control plane、runtime proxy 或 NLE。
 
 ## 当前实现
 

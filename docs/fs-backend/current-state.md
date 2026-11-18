@@ -99,9 +99,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
     顺序返回（与串行循环一致）。
   - fork/mark 只持久化本操作新增的 snapshot 元数据，不再重写全部历史 snapshot；
     fork 的元数据持久化成本因此不再随历史分支数增长。
-  - FS Backend 自身不冻结写者。经 BaseRuntime 调用时，进程在 fork/mark/accept
-    前由 ProcessBackend 冻结，成功后 `writers_quiesced=true`；直接调用 FS API 或
-    冻结机制为 `none` 时仍为 false，并发写可能导致副本跨文件交错。
+  - 经 Backend 接口调用 fork/mark/accept 时，FilesystemBackend 冻结环境写者后执行操作。确认写入已静止时报告 `writers_quiesced=true`。底层文件操作需由调用者保证一致性。
 - **btrfs fork**
   - 每个挂载使用 `mounts/<hash>/volume` 子卷，其中 upper/work 都是普通子目录。
     fork 对每个选中且非空的父 upper 所在 volume 做只读快照 S_child。Chain 布局
@@ -162,7 +160,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
   - 三方冲突检测保留；ours 逐路径读取目标 lower+upper，不构建完整视图。
   - `target_mount_pid=None`：调用方确认无 live mount，直接写目标 upper，删除写
     whiteout。
-  - `target_mount_pid=Some(inner_pid)`（由 ProcessBackend 提供）：
+  - `target_mount_pid=Some(inner_pid)`（由 FilesystemBackend 的进程句柄提供）：
     - 校验 `/proc/<pid>/ns/mnt` 等于该环境启动时由 bwrap `--json-status-fd`
       记录的 mount namespace，且不等于宿主 mount namespace；
     - 以 `/proc/<pid>/root` 的 dirfd 为根，用
@@ -195,11 +193,8 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
     `non_overlapping_state_directory_uses_lower_chain`、
     `default_config_starts_when_state_directory_is_outside_isolated_mounts`。
 
-- **LaunchFragment / ProcessBackend**
-  - FilesystemBackend 只产出 `LaunchFragment` 中的挂载条目，不再 spawn，也不
-    记录 pid/mnt namespace。
-  - ProcessBackend 负责把 MountSpec 翻译成 bwrap 参数、spawn、cgroup/freeze、
-    `--json-status-fd`，并对外提供 `process_handle(env)`。
+- **环境启动**
+  - FilesystemBackend 生成 holder 挂载计划，使用 `src/runtime/process/` 的底层实现启动 holder，并记录内层 PID 和 mount namespace。
   - 挂载就绪要求 mountinfo 中全部预期 overlay 目标存在，并解码路径的八进制转义；
     保持原有 400 × 5ms 轮询期限。目标未齐时每轮检查持有的 child；只有确认它已
     退出才接受短命令完成，包括 mountinfo 仍可读但不完整，或读取返回 ENOENT/EINVAL
@@ -238,9 +233,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
 - accept 重放已支持修改/删除/创建/目录替换的逆序回滚，但仍非原子；并发读者
   可能观察到中间状态。
 - 有特权时直接 `lower=/`：只做了探测/高权限测试，未作为默认路径。
-- **ProcessBackend 已实现**：`src/runtime/process/` 负责 spawn、MountSpec、bwrap
-  `--json-status-fd`、进程组、cgroup 创建/加入/冻结/解冻/kill、内层 pid 与 mnt ns。
-  FilesystemBackend 只产出 `LaunchFragment`。
+- **环境进程实现**：`src/runtime/process/` 提供 bwrap、进程组、cgroup 和 namespace 句柄。FilesystemBackend 拥有每个已启动环境的 holder。
 - **真实 freeze 已实现**：cgroup v2 `cgroup.freeze`；不可用时 fallback 进程组
   SIGSTOP/SIGCONT；能力字段 `freeze_mechanism`。`BaseRuntime::suspend/resume`
   已改为真实 freeze/thaw，`terminate` 优先 `cgroup.kill`。
@@ -250,7 +243,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
 ## 已知偏差
 
 - overlay fork 的副本不是冻结快照：并发写时各文件可能来自不同时刻；是否冻结
-  由 BaseRuntime/ProcessBackend 在操作窗口内负责。
+  由 FilesystemBackend 在操作窗口内负责。
 - btrfs 低权限下通常不满足 `incremental_diff`，会降级 overlay；用户第四轮特权
   日志已选中真实 btrfs，并通过 Chain/Flatten/mixed 的端到端场景。
 - accept 直接写 upper / live mount 重放均非原子。
@@ -701,19 +694,14 @@ lower 层，upper/work 位于同一 volume 子卷。
 
 ## D. 冻结（简单版）调研
 
-- `BaseRuntime::suspend_with_context` 经 ProcessBackend 执行真实 freeze/thaw。
+- FilesystemBackend 的暂停和恢复操作冻结或解冻环境进程。
 - **cgroup v2**：本机 `/sys/fs/cgroup` 根不可写，但当前进程所在的 delegated
   `.scope` 可创建子 cgroup、写入 `cgroup.procs`、写 `cgroup.freeze=1`，并观察到
   `cgroup.events` 中 `frozen 1`。实测成功（无需 sudo）。
-- **SIGSTOP/SIGCONT**：BaseRuntime 已在 `pre_exec` 设置独立进程组，终止用
-  `kill(-pgid, SIGKILL)`；ProcessBackend 已实现 `SIGSTOP/SIGCONT` fallback，
-  由 `process_group_fallback_freezes_and_reports_mechanism` 验证。限制：Agent
-  自建新 session/进程组后后代不受该组信号影响。
-- 本轮已实现 cgroup v2 freeze，作为 ProcessBackend 的 freeze/thaw；cgroup 不可用
-  时 fallback 到进程组 SIGSTOP/SIGCONT。`BaseRuntime` 在 fork/mark/accept 前冻结、
-  之后解冻，只有真实冻结+解冻成功才把 `writers_quiesced` 置 true。
-- `writers_quiesced` 不由 FS Backend 写 true；FS 侧始终 false，由 BaseRuntime
-  依据 ProcessBackend 结果覆盖。
+- **SIGSTOP/SIGCONT**：底层启动代码在 `pre_exec` 设置独立进程组，终止用
+  `kill(-pgid, SIGKILL)`；环境进程实现提供 `SIGSTOP/SIGCONT` 回退，
+  由 `process_group_fallback_freezes_and_reports_mechanism` 验证。受管命令另建会话时，进程组信号可能无法覆盖其后代。
+- FilesystemBackend 在 fork/mark/accept 的操作窗口内冻结运行中的 holder，操作后恢复原执行状态。已暂停的 holder 保持暂停。
 
 ## P5 调研结论：整根 overlay
 
@@ -837,9 +825,9 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | 全部 overlay 目标就绪 | **实测**：`readiness_requires_every_overlay_and_decodes_mount_paths` 先 red 后 green；不延长轮询期限 |
 | 短命令退出与挂载就绪轮询 | **实测**：真实未回收退出进程的 EINVAL、可读但目标未齐的 mountinfo 两项回归先 red 后 green；受管 child 确认退出才接受完成，退出码保留 |
 | live-target 偶发超时根因 | **未确定**：增加观察标记与分段计时，一次约 107ms 正常结束，不能据此归因高负载；status pipe 首行仍阻塞 |
-| ProcessBackend 启动/冻结/解冻 | **实测**：`process_freeze_thaw_stops_and_resumes_writer` 冻结期间 counter 不变，thaw 后继续 |
+| 环境进程启动、冻结和解冻 | **实测**：`process_freeze_thaw_stops_and_resumes_writer` 冻结期间 counter 不变，thaw 后继续 |
 | 进程组 SIGSTOP/SIGCONT fallback | **实测**：`process_group_fallback_freezes_and_reports_mechanism`，能力上报 `process_group` |
-| BaseRuntime writers_quiesced | **实测**：`base_runtime_freezes_and_marks_writers_quiesced` 有进程时 true，无进程时 false |
+| FilesystemBackend 写入静止确认 | **实测**：`filesystem_freezes_and_marks_writers_quiesced` 有进程时 true，无进程时 false |
 | 状态目录在 sandbox 内不可见 | **实测**：`state_directory_is_hidden_inside_sandbox` |
 | 默认逐挂载写入 /tmp、/var/tmp、/srv | **实测**：`writes_outside_cwd_reach_branch_uppers_not_host`，宿主不变、branch upper 出现 |
 | authority 行为对比 | **实测**：`authority_surface_comparison`；~/.cache、/tmp、/var/tmp 写入一致，inotify 一致 |

@@ -12,8 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum Request {
-    CancelBranch {
-        branch_id: String,
+    CancelEnvironment {
         operation_id: String,
         environment_id: String,
     },
@@ -21,7 +20,6 @@ enum Request {
         #[serde(default)]
         generation: u64,
         request_id: String,
-        branch_id: String,
         operation_id: String,
         environment_id: String,
         #[serde(default)]
@@ -33,12 +31,10 @@ enum Request {
         context: Value,
     },
     Cancel {
-        branch_id: String,
         operation_id: String,
         environment_id: String,
     },
     Confirm {
-        branch_id: String,
         operation_id: String,
         environment_id: String,
     },
@@ -119,12 +115,14 @@ mod tests {
         }
     }
     #[test]
-    fn authorization_output_and_retirement_are_enforced() {
-        let commands = Commands::start(Arc::new(Fake)).unwrap();
-        commands.bind("branch", "environment").unwrap();
-        let request = |n| json!({"command":"execute","request_id":format!("req-{n}"),"branch_id":"branch","operation_id":format!("op-{n}"),"environment_id":"environment","tool":"fake","arguments":{}});
+    fn operation_identity_output_and_retirement_are_enforced() {
+        let runtime = Arc::new(BaseRuntime::new("test", Arc::new(Fake)));
+        runtime.establish("environment").unwrap();
+        let commands = Commands::start(runtime).unwrap();
+        let request = |n| json!({"command":"execute","request_id":format!("req-{n}"),"operation_id":format!("op-{n}"),"environment_id":"environment","tool":"fake","arguments":{}});
         let mut wrong = request(1);
-        wrong["branch_id"] = json!("other");
+        wrong["operation_id"] = json!("other");
+        wrong["command"] = json!("cancel");
         assert_eq!(call(&commands, wrong)[0]["event"], "rejected");
         for n in 1..1300 {
             let events = call(&commands, request(n));
@@ -134,7 +132,7 @@ mod tests {
             assert_eq!(
                 call(
                     &commands,
-                    json!({"command":"confirm","branch_id":"branch","operation_id":format!("op-{n}"),"environment_id":"environment"})
+                    json!({"command":"confirm","operation_id":format!("op-{n}"),"environment_id":"environment"})
                 )[0]["event"],
                 "confirmed"
             );
@@ -232,14 +230,15 @@ mod tests {
             executing: std::sync::Barrier::new(2),
             drains: std::sync::atomic::AtomicUsize::new(0),
         });
-        let commands = Arc::new(Commands::start(backend.clone()).unwrap());
-        commands.bind("branch", "environment").unwrap();
+        let runtime = Arc::new(BaseRuntime::new("test", backend.clone()));
+        runtime.establish("environment").unwrap();
+        let commands = Arc::new(Commands::start(runtime).unwrap());
         let active = std::thread::spawn({
             let commands = commands.clone();
             move || {
                 call(
                     &commands,
-                    json!({"command":"execute","request_id":"req-4","operation_id":"active","branch_id":"branch","environment_id":"environment","tool":"fake","arguments":{"wait":true}}),
+                    json!({"command":"execute","request_id":"req-4","operation_id":"active","environment_id":"environment","tool":"fake","arguments":{"wait":true}}),
                 )
             }
         });
@@ -249,12 +248,12 @@ mod tests {
             move || {
                 call(
                     &commands,
-                    json!({"command":"cancel_branch","branch_id":"branch","operation_id":"cancel","environment_id":"environment"}),
+                    json!({"command":"cancel_environment","operation_id":"cancel","environment_id":"environment"}),
                 )
             }
         });
         backend.entered.wait();
-        let execute = |n, generation| json!({"command":"execute","request_id":format!("req-{n}"),"operation_id":format!("op-{n}"),"branch_id":"branch","environment_id":"environment","generation":generation,"tool":"fake","arguments":{}});
+        let execute = |n, generation| json!({"command":"execute","request_id":format!("req-{n}"),"operation_id":format!("op-{n}"),"environment_id":"environment","generation":generation,"tool":"fake","arguments":{}});
         let during = call(&commands, execute(1, 0));
         backend.release.wait();
         assert_eq!(
@@ -264,7 +263,7 @@ mod tests {
         assert_eq!(cancel.join().unwrap()[0]["event"], "rejected");
         assert_eq!(
             during[0]["event"], "rejected",
-            "execution escaped branch cancellation during writer drain"
+            "execution escaped Environment cancellation during writer drain"
         );
         assert_eq!(
             call(&commands, execute(1, 1))[0]["event"],
@@ -273,7 +272,7 @@ mod tests {
         );
         let retried = call(
             &commands,
-            json!({"command":"cancel_branch","branch_id":"branch","operation_id":"cancel-retry","environment_id":"environment"}),
+            json!({"command":"cancel_environment","operation_id":"cancel-retry","environment_id":"environment"}),
         );
         assert_eq!(
             retried[0]["generation"], 1,
@@ -318,16 +317,15 @@ impl Replay {
 
 #[derive(Default)]
 struct Table {
-    generations: HashMap<(String, String), u64>,
-    cancelling: std::collections::HashSet<(String, String)>,
-    draining: std::collections::HashSet<(String, String)>,
-    entries: HashMap<(String, String, String), Arc<Entry>>,
-    seen: super::seen_requests::SeenRequests,
+    generations: HashMap<String, u64>,
+    cancelling: std::collections::HashSet<String>,
+    draining: std::collections::HashSet<String>,
+    entries: HashMap<(String, String), Arc<Entry>>,
+    seen: HashMap<String, super::seen_requests::SeenRequests>,
 }
 type Entries = Mutex<Table>;
 
 pub struct Commands {
-    bindings: Arc<Mutex<HashMap<String, String>>>,
     directory: tempfile::TempDir,
     stopped: Arc<AtomicBool>,
     entries: Arc<Entries>,
@@ -335,7 +333,7 @@ pub struct Commands {
 }
 
 impl Commands {
-    pub(super) fn start(runtime: Arc<dyn Backend>) -> std::io::Result<Self> {
+    pub(super) fn start(runtime: Arc<BaseRuntime>) -> std::io::Result<Self> {
         let directory = tempfile::Builder::new()
             .prefix("ascout-commands-")
             .tempdir()?;
@@ -344,8 +342,6 @@ impl Commands {
         let stop = stopped.clone();
         let entries = Arc::new(Entries::default());
         let active = entries.clone();
-        let bindings = Arc::new(Mutex::new(HashMap::new()));
-        let authorized = bindings.clone();
         let listener_thread = std::thread::spawn(move || {
             for connection in listener.incoming() {
                 if stop.load(Ordering::Acquire) {
@@ -354,33 +350,18 @@ impl Commands {
                 let Ok(connection) = connection else { break };
                 let runtime = runtime.clone();
                 let entries = entries.clone();
-                let bindings = authorized.clone();
+                let stopped = stop.clone();
                 std::thread::spawn(move || {
-                    let _ = serve(connection, runtime, entries, bindings);
+                    let _ = serve(connection, runtime, entries, stopped);
                 });
             }
         });
         Ok(Self {
-            bindings,
             directory,
             stopped,
             entries: active,
             listener: Some(listener_thread),
         })
-    }
-    pub(super) fn bind(&self, branch: &str, environment: &str) -> Result<(), &'static str> {
-        let mut bindings = self.bindings.lock().unwrap();
-        if bindings
-            .get(branch)
-            .is_some_and(|bound| bound != environment)
-            || bindings
-                .iter()
-                .any(|(owner, bound)| owner != branch && bound == environment)
-        {
-            return Err("Branch and Environment already have a different owner");
-        }
-        bindings.insert(branch.into(), environment.into());
-        Ok(())
     }
     pub(super) fn access(&self, environment: &str) -> ExecutionAccess {
         ExecutionAccess {
@@ -394,16 +375,21 @@ impl Commands {
             environment_id: environment.into(),
         }
     }
+    pub(super) fn stop(&self) {
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let _ = UnixStream::connect(self.directory.path().join("command.sock"));
+        for entry in self.entries.lock().unwrap().entries.values() {
+            entry.cancel.cancel();
+        }
+    }
 }
 impl Drop for Commands {
     fn drop(&mut self) {
-        self.stopped.store(true, Ordering::Release);
-        let _ = UnixStream::connect(self.directory.path().join("command.sock"));
+        self.stop();
         if let Some(listener) = self.listener.take() {
             let _ = listener.join();
-        }
-        for entry in self.entries.lock().unwrap().entries.values() {
-            entry.cancel.cancel();
         }
     }
 }
@@ -414,9 +400,9 @@ fn send(stream: &mut UnixStream, value: &Value) -> std::io::Result<()> {
 
 fn serve(
     mut stream: UnixStream,
-    runtime: Arc<dyn Backend>,
+    runtime: Arc<BaseRuntime>,
     entries: Arc<Entries>,
-    bindings: Arc<Mutex<HashMap<String, String>>>,
+    stopped: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     use std::time::Duration;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
@@ -448,44 +434,32 @@ fn serve(
     if let Err(error) = validated {
         return reject(&mut stream, &error);
     }
-    let (branch, operation, environment) = match &request {
+    let (operation, environment) = match &request {
         Request::Execute {
-            branch_id,
             operation_id,
             environment_id,
             ..
         }
-        | Request::CancelBranch {
-            branch_id,
+        | Request::CancelEnvironment {
             operation_id,
             environment_id,
         }
         | Request::Cancel {
-            branch_id,
             operation_id,
             environment_id,
         }
         | Request::Confirm {
-            branch_id,
             operation_id,
             environment_id,
-        } => (branch_id, operation_id, environment_id),
+        } => (operation_id, environment_id),
     };
-    if branch.is_empty() || operation.is_empty() || environment.is_empty() {
+    if operation.is_empty() || environment.is_empty() {
         return send(
             &mut stream,
-            &json!({"event":"rejected","reason":"Branch, operation and Environment are required"}),
+            &json!({"event":"rejected","reason":"Operation and Environment are required"}),
         );
     }
-    let key = (environment.clone(), branch.clone(), operation.clone());
-    if bindings.lock().unwrap().get(branch) != Some(environment) {
-        return send(
-            &mut stream,
-            &json!({"event":"rejected","reason":"Branch is not authorized for Environment"}),
-        );
-    }
-    // Authorize before accepting a potentially large upload. Admission and
-    // generation checks below still happen after complete body validation.
+    let key = (environment.clone(), operation.clone());
     let body = match length
         .map(|length| wire::spool_body(&mut reader, length))
         .transpose()
@@ -496,15 +470,22 @@ fn serve(
     let inbound = Message { meta, body };
     let fingerprint = inbound.fingerprint()?;
     let body = inbound.body;
+    if stopped.load(Ordering::Acquire) {
+        return reject(&mut stream, &"Runtime is shutting down");
+    }
+    let guard = match runtime.enter_operation() {
+        Ok(guard) => guard,
+        Err(reason) => return reject(&mut stream, &reason),
+    };
     match request {
-        Request::CancelBranch { .. } => {
-            let owner = (environment.clone(), branch.clone());
+        Request::CancelEnvironment { .. } => {
+            let owner = environment.clone();
             let active: Vec<_> = {
                 let mut table = entries.lock().unwrap();
                 if !table.draining.insert(owner.clone()) {
                     return send(
                         &mut stream,
-                        &json!({"event":"rejected","reason":"Branch cancellation in progress"}),
+                        &json!({"event":"rejected","reason":"Environment cancellation in progress"}),
                     );
                 }
                 if table.cancelling.insert(owner.clone()) {
@@ -513,7 +494,7 @@ fn serve(
                 table
                     .entries
                     .iter()
-                    .filter(|((env, owner, _), _)| env == environment && owner == branch)
+                    .filter(|((env, _), _)| env == environment)
                     .map(|(_, entry)| entry.clone())
                     .collect()
             };
@@ -572,13 +553,16 @@ fn serve(
             }
             let (entry, fresh) = {
                 let mut table = entries.lock().unwrap();
-                let owner = (key.0.clone(), key.1.clone());
+                if stopped.load(Ordering::Acquire) {
+                    return reject(&mut stream, &"Runtime is shutting down");
+                }
+                let owner = key.0.clone();
                 if table.cancelling.contains(&owner)
                     || generation != *table.generations.get(&owner).unwrap_or(&0)
                 {
                     return send(
                         &mut stream,
-                        &json!({"event":"rejected","reason":"Branch execution generation is cancelled or cancellation is in progress"}),
+                        &json!({"event":"rejected","reason":"Environment execution generation is cancelled or cancellation is in progress"}),
                     );
                 }
                 if let Some(entry) = table.entries.get(&key) {
@@ -590,17 +574,20 @@ fn serve(
                     }
                     (entry.clone(), false)
                 } else {
-                    if table.seen.get(&request_id).is_some() {
+                    let Table { entries, seen, .. } = &mut *table;
+                    let seen = seen.entry(key.0.clone()).or_default();
+                    if seen.get(&request_id).is_some() {
                         return send(
                             &mut stream,
-                            &json!({"event":"rejected","reason":"request identity already used"}),
+                            &json!({"event":"rejected","reason":"request identity already used in Environment"}),
                         );
                     }
-                    if let Some(reason) = table.seen.admission_error(&request_id) {
+                    if let Some(reason) = seen.admission_error(&request_id) {
                         return send(&mut stream, &json!({"event":"rejected","reason":reason}));
                     }
-                    let Table { entries, seen, .. } = &mut *table;
-                    entries.retain(|_, entry| seen.get(&entry.id).is_some());
+                    entries.retain(|(environment, _), entry| {
+                        environment != &key.0 || seen.get(&entry.id).is_some()
+                    });
                     seen.insert(request_id.clone(), (fingerprint, false));
                     let entry = Arc::new(Entry {
                         output: Mutex::new(None),
@@ -639,8 +626,9 @@ fn serve(
             } else {
                 let entry = entry.clone();
                 let environment = key.0.clone();
-                let operation = key.2.clone();
+                let operation = key.1.clone();
                 std::thread::spawn(move || {
+                    let _guard = guard;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if entry.cancel.is_cancelled() {
                             Err(crate::runtime::backend::BackendError::interrupted())
@@ -656,6 +644,7 @@ fn serve(
                                     .get("tool_call_id")
                                     .and_then(Value::as_str)
                                     .map(str::to_owned),
+                                generation,
                                 task_id: context
                                     .get("task_id")
                                     .and_then(Value::as_str)
@@ -778,7 +767,11 @@ fn serve(
                     .into(),
             );
             *entry.output.lock().unwrap() = None;
-            if let Some((_, complete)) = table.seen.get_mut(&entry.id) {
+            if let Some((_, complete)) = table
+                .seen
+                .get_mut(&key.0)
+                .and_then(|seen| seen.get_mut(&entry.id))
+            {
                 *complete = true;
             }
             // Keep the bounded identity tombstone: confirmation must not permit replay.

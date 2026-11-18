@@ -14,6 +14,7 @@ use super::*;
 
 #[derive(Default)]
 struct Pending {
+    closed: bool,
     preempt: VecDeque<OperationRequest>,
     normal: VecDeque<OperationRequest>,
 }
@@ -40,15 +41,25 @@ impl Queue {
     pub(super) fn enqueue(&self, request: OperationRequest, preempt: bool) {
         {
             let mut pending = self.pending.lock().unwrap();
+            if pending.closed {
+                return;
+            }
             if preempt {
                 pending.preempt.push_back(request);
+                self.cancel.cancel();
             } else {
                 pending.normal.push_back(request);
             }
         }
-        if preempt {
-            self.cancel.cancel();
-        }
+        self.signal.notify_one();
+    }
+
+    pub(super) fn close(&self) {
+        let mut pending = self.pending.lock().unwrap();
+        pending.closed = true;
+        pending.preempt.clear();
+        pending.normal.clear();
+        self.cancel.cancel();
         self.signal.notify_one();
     }
 
@@ -57,6 +68,10 @@ impl Queue {
             let request = {
                 let mut pending = self.pending.lock().unwrap();
                 loop {
+                    if pending.closed {
+                        return;
+                    }
+                    self.cancel.reset();
                     if let Some(request) = pending.preempt.pop_front() {
                         break request;
                     }
@@ -66,7 +81,6 @@ impl Queue {
                     pending = self.signal.wait(pending).unwrap();
                 }
             };
-            self.cancel.reset();
             if let Err(error) = shared.out.send(AdapterMessage::Event(Event {
                 environment_id: request.environment_id.clone(),
                 request_id: Some(request.request_id.clone()),

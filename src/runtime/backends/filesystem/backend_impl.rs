@@ -49,21 +49,75 @@ impl FilesystemBackend {
 }
 
 impl Backend for FilesystemBackend {
-    fn filesystem_tool_directory(&self) -> Option<PathBuf> {
-        Some(self.config.state_directory.join("tool-plans"))
+    fn environment_operation(
+        &self,
+        context: &BackendContext,
+        operation: &str,
+        arguments: &crate::runtime::execution_wire::Message,
+        cancel: &CancelHandle,
+    ) -> Result<crate::runtime::execution_wire::Message, BackendError> {
+        if self.state(&context.environment_id) != Some(EnvironmentState::Available)
+            || !self.process.is_running(&context.environment_id)?
+        {
+            return Err(BackendError::new("filesystem execution is not available"));
+        }
+        self.execute_environment_operation(context, operation, arguments, cancel)
     }
+
+    fn cancel_tool_writers(&self, context: &BackendContext) -> Result<(), BackendError> {
+        self.drain_holder(&context.environment_id, true)
+    }
+
     fn materialize(&self, context: &BackendContext) -> Result<FilesystemResult, BackendError> {
-        self.materialize_authority(&context.environment_id)
+        self.materialize_with_execution(context, &mut || Ok(FilesystemResult::default()))
     }
-    fn launch_fragment(
+
+    fn materialize_after(
+        &self,
+        context: &BackendContext,
+        previous: &mut dyn FnMut() -> Result<FilesystemResult, BackendError>,
+    ) -> Result<FilesystemResult, BackendError> {
+        self.materialize_with_execution(context, previous)
+    }
+
+    fn stop_environment_execution(&self) -> Result<(), BackendError> {
+        let mut failure = BackendError::new("failed to stop filesystem execution");
+        for id in self.environments() {
+            if let Err(error) = self.process.cleanup(&id) {
+                failure.add_cleanup_failure(id, error.to_string());
+            }
+        }
+        if failure.cleanup_failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failure)
+        }
+    }
+
+    fn start_environment_execution(
         &self,
         context: &BackendContext,
         launch: &crate::protocol::contract::AgentLaunch,
-    ) -> Result<LaunchFragment, BackendError> {
-        FilesystemBackend::launch_fragment(self, context, launch)
+    ) -> Result<(), BackendError> {
+        self.start_holder(context, launch)
     }
+
     fn save_runtime(&self, path: &Path) -> Result<(), BackendError> {
-        self.save_recovery(path)
+        self.save_runtime_after(path, &mut || Ok(()))
+    }
+
+    fn save_runtime_after(
+        &self,
+        path: &Path,
+        previous: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        self.process.with_frozen(
+            |id| self.state(id) != Some(EnvironmentState::Suspended),
+            || {
+                previous()?;
+                self.save_recovery(path)
+            },
+        )
     }
 
     fn load_runtime(&self, path: &Path) -> Result<(), BackendError> {
@@ -89,7 +143,7 @@ impl Backend for FilesystemBackend {
                     .map(|path| path.display().to_string())
                     .collect(),
             ),
-            freeze_mechanism: None,
+            freeze_mechanism: Some(self.process.freeze_mechanism().as_str().into()),
             state_directory_overlaps_mount: Some(
                 self.state_overlap_mounts()
                     .iter()
@@ -199,7 +253,15 @@ impl Backend for FilesystemBackend {
             let state = self.environment()?;
             Self::resolve_environment(&state, parent)?.scopes
         };
-        self.fork(parent, child, &scopes).map(|_| ())
+        let operation = Operation::FilesystemFork {
+            parent_snapshot_id: parent.into(),
+            child_snapshot_id: child.into(),
+            path_scope: scopes.clone(),
+        };
+        self.with_filesystem_execution(&BackendContext::new(parent), &operation, |_| {
+            self.fork(parent, child, &scopes)
+        })
+        .map(|_| ())
     }
 
     fn operate(
@@ -296,30 +358,74 @@ impl Backend for FilesystemBackend {
     }
 
     fn suspend(&self, id: &str) -> Result<(), BackendError> {
-        self.transition_state(
-            id,
-            &[EnvironmentState::Available],
-            EnvironmentState::Suspended,
-        )
+        self.suspend_after(&BackendContext::new(id), &mut || Ok(()))
+    }
+
+    fn suspend_after(
+        &self,
+        context: &BackendContext,
+        previous: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        self.transition_execution(&context.environment_id, true, || {
+            previous()?;
+            self.transition_state(
+                &context.environment_id,
+                &[EnvironmentState::Available],
+                EnvironmentState::Suspended,
+            )
+        })
     }
 
     fn resume(&self, id: &str) -> Result<(), BackendError> {
-        self.transition_state(
-            id,
-            &[EnvironmentState::Suspended],
-            EnvironmentState::Available,
-        )
+        self.resume_after(&BackendContext::new(id), &mut || Ok(()))
+    }
+
+    fn resume_after(
+        &self,
+        context: &BackendContext,
+        previous: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        self.transition_execution(&context.environment_id, false, || {
+            previous()?;
+            self.transition_state(
+                &context.environment_id,
+                &[EnvironmentState::Suspended],
+                EnvironmentState::Available,
+            )
+        })
     }
 
     fn terminate(&self, id: &str) -> Result<(), BackendError> {
-        self.transition_state(
-            id,
-            &[EnvironmentState::Available, EnvironmentState::Suspended],
-            EnvironmentState::Terminated,
-        )
+        self.terminate_after(&BackendContext::new(id), &mut || Ok(()))
+    }
+
+    fn terminate_after(
+        &self,
+        context: &BackendContext,
+        previous: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        let id = &context.environment_id;
+        let stopped = self.process.stop(id);
+        let preceding = previous();
+        if let Err(mut error) = stopped {
+            if let Err(other) = preceding {
+                error.add_cleanup_failure("inner", other.to_string());
+            }
+            return Err(error);
+        }
+        if self.state(id) != Some(EnvironmentState::Terminated) {
+            self.transition_state(
+                id,
+                &[EnvironmentState::Available, EnvironmentState::Suspended],
+                EnvironmentState::Terminated,
+            )?;
+        }
+        self.launches.lock().map_err(error)?.remove(id);
+        preceding
     }
 
     fn cleanup(&self, id: &str) -> Result<(), BackendError> {
+        self.process.cleanup(id)?;
         let (environment, garbage) = {
             let mut state = self.environment()?;
             let environment = state
@@ -385,45 +491,46 @@ impl Backend for FilesystemBackend {
             }
             return Ok(record.result);
         }
-        let result = match operation {
-            Operation::FilesystemFork {
-                parent_snapshot_id,
-                child_snapshot_id,
-                path_scope,
-            } => self.fork(parent_snapshot_id, child_snapshot_id, path_scope),
-            Operation::FilesystemMark {
-                snapshot_id,
-                mark_id,
-                path_scope,
-            } => self.mark(snapshot_id, mark_id, path_scope),
-            Operation::FilesystemDiff {
-                base_snapshot_id,
-                source_snapshot_id,
-                path_scope,
-            } => self.diff(base_snapshot_id, source_snapshot_id, path_scope),
-            Operation::FilesystemAccept {
-                base_snapshot_id,
-                source_snapshot_id,
-                target_snapshot_id,
-                path_scope,
-            } => self.accept(
-                base_snapshot_id,
-                source_snapshot_id,
-                target_snapshot_id,
-                path_scope,
-                context.target_mount_pid,
-                context.target_mount_namespace,
-            ),
-            Operation::FilesystemDiscard {
-                snapshot_id,
-                path_scope,
-            } => self.discard(snapshot_id, path_scope),
-            _ => {
-                return Err(BackendError::new(
-                    "filesystem dispatch requires a filesystem operation",
-                ));
-            }
-        };
+        let result =
+            self.with_filesystem_execution(context, operation, |context| match operation {
+                Operation::FilesystemFork {
+                    parent_snapshot_id,
+                    child_snapshot_id,
+                    path_scope,
+                } => self.fork(parent_snapshot_id, child_snapshot_id, path_scope),
+                Operation::FilesystemMark {
+                    snapshot_id,
+                    mark_id,
+                    path_scope,
+                } => self.mark(snapshot_id, mark_id, path_scope),
+                Operation::FilesystemDiff {
+                    base_snapshot_id,
+                    source_snapshot_id,
+                    path_scope,
+                } => self.diff(base_snapshot_id, source_snapshot_id, path_scope),
+                Operation::FilesystemAccept {
+                    base_snapshot_id,
+                    source_snapshot_id,
+                    target_snapshot_id,
+                    path_scope,
+                } => self.accept(
+                    base_snapshot_id,
+                    source_snapshot_id,
+                    target_snapshot_id,
+                    path_scope,
+                    context.target_mount_pid,
+                    context.target_mount_namespace,
+                ),
+                Operation::FilesystemDiscard {
+                    snapshot_id,
+                    path_scope,
+                } => self.discard(snapshot_id, path_scope),
+                _ => {
+                    return Err(BackendError::new(
+                        "filesystem dispatch requires a filesystem operation",
+                    ));
+                }
+            });
         match result {
             Ok(result) => {
                 if let Err(error) = self.remember(

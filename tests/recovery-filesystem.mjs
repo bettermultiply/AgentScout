@@ -61,7 +61,7 @@ test('filesystem main entry restores managed upper with current host lower and r
  let p=launch(false);await ready(p);await new Promise(r=>setTimeout(r,200));await stop(p);
  const baseline=fs.readFileSync(runPath(root, 'recovery.json'),'utf8');
   p=launch(true);await ready(p);await new Promise(r=>setTimeout(r,200));await post({action:'prompt',prompt:'write fixture'});assert.equal(requests,0,'ordinary input stays queued while paused');await post({action:'continue'});await wait(()=>requests===2,'shell completed, stream active');
- // The inner NLE save succeeds before the data-plane hits an unsavable socket.
+ // The NLE component save succeeds before the filesystem backend hits an unsavable socket.
  const socket=net.createServer();t.after(()=>socket.close());
  const currentBase=fs.readdirSync(root+'/fs-state').filter(n=>n.startsWith('restored-')).sort().at(-1);
   const findUpper=dir=>{for(const e of fs.readdirSync(dir,{withFileTypes:true})){const path=dir+'/'+e.name;if(e.isDirectory()){if(e.name==='upper')return path;const found=findUpper(path);if(found)return found}}};
@@ -83,11 +83,14 @@ test('filesystem main entry restores managed upper with current host lower and r
  const beforeEvents=fs.readFileSync(runPath(root,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
  assert.equal(beforeEvents.some(e=>e.message==='action_started'&&e.action_id==='boundary2'),false,'before-tool boundary is stopped without starting the tool');
  const digest=path=>execFileSync('sha256sum',[path],{encoding:'utf8'}).split(' ')[0];const original=digest(generation);
- const dataPlane=generation.replace(/\.json$/,'.components/1.filesystem');
- fs.writeFileSync(dataPlane+'/corrupt','injected load failure after NLE components');
+ const components=JSON.parse(fs.readFileSync(generation)).components;
+ const component=components.find(component=>component.id==='filesystem');
+ assert.ok(component);
+ const filesystemSave=generation.replace(/\.json$/,'.components/')+component.file.replace(/\.json$/,'.filesystem');
+ fs.writeFileSync(filesystemSave+'/corrupt','injected load failure after NLE components');
  p=launch(true);await once(p,'exit');assert.equal(p.exitCode,1);assert.match(fs.readFileSync(root+'/stderr.log','utf8'),/Filesystem recovery content changed/);assert.equal(requests,2);
  assert.ok(!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)),'partial load resources exited');
- fs.unlinkSync(dataPlane+'/corrupt');
+ fs.unlinkSync(filesystemSave+'/corrupt');
  assert.equal(fs.existsSync(runPath(root, 'workspace/value')),false,'shell changes are isolated');
  fs.writeFileSync(runPath(root, 'workspace/lower'),'mutated original lower');
  fs.writeFileSync(extension,'export default ()=>{return 1}');p=launch(true);await once(p,'exit');assert.equal(p.exitCode,1);assert.match(fs.readFileSync(root+'/stderr.log','utf8'),/resources changed/);assert.equal(requests,2);fs.writeFileSync(extension,'export default ()=>{}');

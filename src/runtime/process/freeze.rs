@@ -27,11 +27,11 @@ impl FreezeMechanism {
 pub struct ProcessHandle {
     pub inner_pid: u32,
     pub mount_namespace: u64,
+    #[cfg(test)]
     pub cgroup_path: Option<PathBuf>,
-    pub process_group: i32,
 }
 
-impl ProcessBackend {
+impl Processes {
     pub fn freeze(&self, environment_id: &str) -> Result<(), BackendError> {
         #[cfg(test)]
         if self.fail_freeze.load(Ordering::SeqCst) {
@@ -84,6 +84,7 @@ impl ProcessBackend {
         }
     }
 
+    #[cfg(test)]
     pub fn terminate(&self, environment_id: &str) -> Result<(), BackendError> {
         let process = match self.process(environment_id) {
             Ok(process) => process,
@@ -119,7 +120,7 @@ impl ProcessBackend {
         let process = self
             .processes
             .lock()
-            .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?
+            .map_err(|_| BackendError::new("Processes lock poisoned"))?
             .remove(environment_id);
         let Some(mut process) = process else {
             return Ok(());
@@ -167,7 +168,7 @@ impl ProcessBackend {
             // process/cgroup instead of losing a still-live resource.
             self.processes
                 .lock()
-                .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?
+                .map_err(|_| BackendError::new("Processes lock poisoned"))?
                 .insert(environment_id.to_string(), process);
             Err(BackendError::new(failures.join("; ")))
         }
@@ -225,14 +226,16 @@ impl ProcessBackend {
         let processes = self
             .processes
             .lock()
-            .map_err(|_| BackendError::new("ProcessBackend lock poisoned"))?;
+            .map_err(|_| BackendError::new("Processes lock poisoned"))?;
         let process = processes
             .get(environment_id)
             .ok_or_else(|| BackendError::new("unknown process environment"))?;
         Ok(AgentProcessRef {
             process_group: process.process_group,
             cgroup_path: process.cgroup_path.clone(),
+            #[cfg(test)]
             mount_namespace: process.mount_namespace,
+            #[cfg(test)]
             namespace_fd: process
                 .namespace_fd
                 .as_ref()
@@ -245,7 +248,9 @@ impl ProcessBackend {
 struct AgentProcessRef {
     process_group: libc::pid_t,
     cgroup_path: Option<PathBuf>,
+    #[cfg(test)]
     mount_namespace: u64,
     /// Keeps the branch namespace inode alive while terminate sweeps it.
+    #[cfg(test)]
     namespace_fd: Option<OwnedFd>,
 }

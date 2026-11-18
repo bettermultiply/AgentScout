@@ -143,7 +143,7 @@ WebUI `npm run build` 通过（`/tmp/opencode/task-entry-web-build.log`）；未
 
 Environment id 由 Runtime 在建立或派生时创建并返回，control plane 收到后持久化在 BranchRecord；恢复使用保存的绑定并显式加载 Runtime，不重新创建环境或根据恢复目录推导身份。创建中的 Branch 可以无绑定；已有绑定必须非空且不被其他 Branch 共用，存活环境必须存在于保存的 Runtime 状态中。Runtime 请求不传 Branch id，Agent 接入命令单独传递 Branch→Environment 绑定以选择对应文件工具计划。
 
-Composite 即使只有一个 Backend 也保存和校验参与记录。恢复按存活 Branch 的 Environment 重建 holder；Runtime 事件唤醒 control plane，避免 sibling 结果到达后仍等待其他输入。holder socket 经打开目录的 `/proc/self/fd` 路径连接，保留完整 Environment 身份且不受 Unix socket 全路径长度限制。
+通过 `BackendPolicy` 路由时，即使只有一个 Backend，`BaseRuntime` 也保存和校验参与记录。恢复按存活 Branch 的 Environment 重建 holder；Runtime 事件唤醒 control plane，避免 sibling 结果到达后仍等待其他输入。holder socket 经打开目录的 `/proc/self/fd` 路径连接，保留完整 Environment 身份且不受 Unix socket 全路径长度限制。
 
 最终验收使用本地伪模型，没有真实模型请求：`cargo check --all-targets`、`cargo test --lib`（168/168）、Python bridge 语法检查通过；每个恢复脚本前均执行 `cargo build --bins`，串行运行 `tests/recovery-active.mjs`（5/5）及 `tests/recovery-filesystem.mjs`（1/1）。日志位于 `/tmp/opencode/agent-scout-validation/`，分别为 `check-final.log`、`lib-final.log`、`recovery-active-final.log`、`recovery-filesystem-final.log`。身份唯一性及共享世界生命周期回归均先复现失败再修正；特权项的环境条件与覆盖限制不变。
 
@@ -170,7 +170,7 @@ Pi 常驻会话宿主不持有 Authority overlay。Branch 内建 read/edit/write
 
 组合能力按所有状态域汇总：各状态域能建立独立身份与生命周期时才允许
 branch_environment；内部资源可以共享。候选实际建立 Backend 环境引用，
-不能以回退 authority 文件计划规避。清理原 Authority 数据面时不终止拥有整棵树的
+不能以回退 authority 文件计划规避。清理原 Authority 文件系统资源时不终止拥有整棵树的
 常驻 Pi，宿主进程留到 Runtime shutdown 统一退出。证据：
 `/tmp/opencode/authority-active-final5.log`，`/tmp/opencode/recovery-active-8nPRJI`；
 联合运行 `/tmp/opencode/authority-e2e-final6.log` 中 FS 活候选与普通 FS 恢复均通过。
@@ -244,7 +244,7 @@ target/debug/ascout-control-plane <pi-root> --resume <run-id> --web 127.0.0.1:80
 
 本轮修复：保存代统一建在原 run-dir 下，避免重复 Pause 嵌套到上一代；恢复后输入先解除恢复状态，再等待上一 task 的物化，避免 `task_finishing` 阻塞继续；取消期间 Promote 选出新权威后由库再次停止写者；关闭期间晚到的 TurnCompleted 不再触发重复物化。错误退出和清理完成判定收在 `coordination/task.rs`，bin 只派发动作并关闭连接；coordination 未引用 UI 类型。
 
-归因依据为 `/tmp/opencode/control-plane-refactor-baseline/{staged,unstaged}.diff`：`unstaged.diff` 第 1666–1727 行已包含任务继续的 `task_finishing` 门槛，因此原继续测试需保留晋级与路由断言，同时先断言物化前阻塞、完成后放行。FS cleanup 的既有 BaseRuntime 聚合将 NLE 保留的 Cleaned 与 FS 删除记录后的 None 误报为部分可用；先用新增回归测试复现失败（`/tmp/opencode/control-plane-refactor-cleanup-repro.log`），再修正聚合。没有 data-plane 时直接返回 inner 状态。FS 多目标布局测试改用两个自有 lower 目录，保留 fork／rename／旧格式拒绝断言，避免遍历宿主权限受限内容。复制宿主内容的空间问题由并发 FS 物化实现改动解决，本轮不将该实现认领为生命周期修复；检查时 `/home` 约 73G、`/tmp` 约 2.5G 可用，未大清理或删除其他任务文件。
+归因依据为 `/tmp/opencode/control-plane-refactor-baseline/{staged,unstaged}.diff`：`unstaged.diff` 第 1666–1727 行已包含任务继续的 `task_finishing` 门槛，因此原继续测试需保留晋级与路由断言，同时先断言物化前阻塞、完成后放行。FS cleanup 的既有 BaseRuntime 聚合将 NLE 保留的 Cleaned 与 FS 删除记录后的 None 误报为部分可用；先用新增回归测试复现失败（`/tmp/opencode/control-plane-refactor-cleanup-repro.log`），再修正聚合。FS 多目标布局测试改用两个自有 lower 目录，保留 fork／rename／旧格式拒绝断言，避免遍历宿主权限受限内容。复制宿主内容的空间问题由并发 FS 物化实现改动解决，本轮不将该实现认领为生命周期修复；检查时 `/home` 约 73G、`/tmp` 约 2.5G 可用，未大清理或删除其他任务文件。
 
 正常启动原生保存完整 `policy.json`，恢复默认使用它，外部原 YAML/脚本不再必需；显式传入 Policy 时核对相同 digest。缺失 artifact 必须显式补充原 YAML，不能采用当前默认策略；损坏或绑定不符直接失败。Runtime 未显式覆盖时使用原 binding，路径/内容/能力校验保持。精确保存范围与验证见 [Policy 实现](policy-engine.md)；完整 Runtime 配置保存不在此轮范围。
 
@@ -277,7 +277,7 @@ target/debug/ascout-control-plane <pi-root> --resume <run-id> --web 127.0.0.1:80
 
 ## 多组件、失败继续与资源绑定（2026-11-13）
 
-CompositeRuntime 多连接与 BaseRuntime inner/data-plane 分别写入本代私有 `*.components/`；所有子组件成功才写父组件索引，最后 control plane 发布总 manifest。索引绑定 backend 顺序、身份、组件 SHA-256 与参与环境集合。加载先检查同级所有组件字节，再逐个重建，并核对参与者与实际环境集合；中途失败对所有组件执行 shutdown，错误包含清理失败信息，不启动 Agent 推理。不提供已加载组件的内存事务回滚。
+BaseRuntime 在 `*.components/` 中按登记身份存放组件，文件名由组件索引提供。所有组件保存成功后写入索引，最后 control plane 发布总 manifest。索引绑定 backend 顺序、身份、组件 SHA-256 与参与环境集合。加载先检查同级所有组件字节，再逐个重建，并核对参与者与实际环境集合；中途失败对所有组件执行 shutdown，错误包含清理失败信息，不启动 Agent 推理。不提供已加载组件的内存事务回滚。
 
 FS 复制存活环境的受管 upper、lower/snapshot 与已执行操作回执；普通宿主 bottom lower 不复制，恢复使用恢复时内容。保存数据树校验文件内容、类型/权限、symlink、OverlayFS opaque/whiteout/redirect/metacopy。OverlayFS 内部 work 目录不复制，恢复重建；btrfs 子卷布局记录后在恢复目录重建。BaseRuntime 复制期间冻结拥有的执行进程，失败也尝试 thaw。每次恢复另建 `restored-*` 可写副本；保存代和旧运行目录均不覆盖。可用 `filesystem.isolated_paths` 显式指定独立工作目录，`passthrough_rw` 为宿主直通，不具有保存独立性。系统只读依赖绑定 pacman/dpkg 的已安装版本列表与 sh/env/bwrap 内容摘要，不复制整个宿主 root；这不是对未受包管理文件或任意系统文件原地篡改的完整证明。
 
@@ -293,7 +293,7 @@ Pi SDK 默认使用 DefaultResourceLoader 自动加载全局/项目扩展，因�
 
 ## FS 主入口与保存独立性验收（2026-11-13）
 
-`tests/recovery-filesystem.mjs` 使用两个真实 NLE backend、FS 数据面、Pi bash 和本地假 SSE 服务：实际隔离写入，暂停保存后可跨进程恢复；中间 FS 组件保存失败时旧 manifest 不变、运行保持暂停并可重试；加载中途 FS 内容损坏时清理先前已加载组件且不请求模型；package 扩展代码变化在推理前拒绝。恢复不自动推理，用户继续后读取当前宿主 lower 与保存的受管写入并继续写；再次恢复旧代有效，旧保存文件摘要不变。
+`tests/recovery-filesystem.mjs` 使用两个真实 NLE backend、一个普通登记的 FS backend、Pi bash 和本地假 SSE 服务：实际隔离写入，暂停保存后可跨进程恢复；中间 FS 组件保存失败时旧 manifest 不变、运行保持暂停并可重试；加载中途 FS 内容损坏时清理先前已加载组件且不请求模型；package 扩展代码变化在推理前拒绝。恢复不自动推理，用户继续后读取当前宿主 lower 与保存的受管写入并继续写；再次恢复旧代有效，旧保存文件摘要不变。
 
 实际命令：
 

@@ -95,7 +95,7 @@ print("ok" if data else "fail")
         ..BackendContext::default()
     };
     let process =
-        crate::runtime::process::ProcessBackend::new("process", backend.bubblewrap_path());
+        crate::runtime::process::Processes::new("process", backend.bubblewrap_path());
     let fragment = backend.launch_fragment(&context, &launch).unwrap();
     process.launch(&context, &launch, &fragment).unwrap();
     process.wait("root").unwrap();

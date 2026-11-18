@@ -34,13 +34,13 @@ Agent 以 action 及其结果报告执行事实，action 不限于工具调用�
 
 投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 待选准入 -> 启动选择 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。AScout 可以暂存已经准入但尚未启动的机会；Policy 在同一 AScoutAgent 内全部有效待选机会之间选择现在启动哪些，并可以调整已经运行或暂停的投机工作。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、Promote 或结束。Parent 得到真实结果后立即继续，候选验证可并行进行；合法 Promote 才停止旧 Parent。工具准入与结果兼容性由 Policy 结合实际能力判断，不由固定工具数量或结果类型代替策略决策。
 
-Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Policy 使用外部模型必须经宿主逐请求授予 capability，凭证由宿主持有，详见 [Policy Engine](design/control-plane/policy-engine.md)。Instrumentation 负责 Agent 内部会话和行为接入；Agent 与随附 Instrumentation 在 Branch 隔离环境外的可信宿主运行，由 Runtime 管理宿主生命周期。工作区文件访问、shell、受管子程序和效果在对应 Branch 环境执行，模型、内存和控制通信不绕经文件系统隔离；挂载切换与物化不要求重启宿主。Instrumentation 由与产品无关的通用层和产品专用的 Product Integration 组成——`admit` 的 `opportunity_pass`、`feasibility_pass`、`extent` 和 `effect` 由通用层求值，Product Integration 只把产品执行点接入并执行处置结果；会改写全局控制状态或必须在多个 Chance、Branch、Proposal 之间协调的其余 Decision（包括 `predict`）由 control plane 求值并落实，所缺的本地事实由 Instrumentation 计算后提交；Runtime 承载动作并提供隔离、资源和效果边界；control plane 负责全局编排、校验和裁决。Runtime Adapter 是 Runtime 的接入边界，不是与 Runtime 平级的另一套 Runtime。Speculation Contract 约束 Policy、control plane 和 Runtime 之间的可观察语义；Runtime 内部可以组合不同的执行和效果管理能力。
+Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Policy 使用外部模型必须经宿主逐请求授予 capability，凭证由宿主持有，详见 [Policy Engine](design/control-plane/policy-engine.md)。Instrumentation 负责 Agent 内部会话和行为接入；Agent 与随附 Instrumentation 在 Branch 隔离环境外的可信宿主运行，由 Runtime 的 agent supervisor 管理 run 唯一宿主的生命周期。各环境后端管理自身的执行资源。工作区文件访问、shell、受管子程序和效果在对应 Branch 环境执行，模型、内存和控制通信不绕经文件系统隔离；挂载切换与物化不要求重启宿主。Instrumentation 由与产品无关的通用层和产品专用的 Product Integration 组成——`admit` 的 `opportunity_pass`、`feasibility_pass`、`extent` 和 `effect` 由通用层求值，Product Integration 只把产品执行点接入并执行处置结果；会改写全局控制状态或必须在多个 Chance、Branch、Proposal 之间协调的其余 Decision（包括 `predict`）由 control plane 求值并落实，所缺的本地事实由 Instrumentation 计算后提交；Runtime 承载动作并提供隔离、资源和效果边界；control plane 负责全局编排、校验和裁决。runtime proxy 是 Runtime 的接入边界，不是与 Runtime 平级的另一套 Runtime。Speculation Contract 约束 Policy、control plane 和 Runtime 之间的可观察语义；Runtime 内部可以组合不同的执行和效果管理能力。
 
 工具与模型推理均可 eager 并行启动权威调用，或 speculative-first 将权威调用挂在执行前、让独立候选先行。接受时 Promote 候选 session 并取消旧 Parent，不向旧调用填入候选结果；全部候选不可接受时原调用放行一次。上文 Parent 得到真实结果后继续的规则适用于已被放行的调用。
 
 每个 session 的 AScoutAgent 拥有自己的一棵 Speculative Tree，Tree 属于 control plane。树拥有该 session 的投机控制状态，其方法检查合法转换；Policy 函数计算策略选择。Speculation Coordinator 可以协调多棵树，不保存具体 session 的第二份投机状态。同一棵树由消息和定时器触发顺序处理，耗时操作异步返回；Agent 的普通执行由 Instrumentation 负责。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。
 
-Instrumentation 的 ASC-Proxy 是进程内受管 Unix socket 客户端，管理控制连接和独立的 Runtime 执行连接，不另设代理进程。control plane 建立 Branch 对 Environment 的明确授权并转交执行访问信息；工具执行直接进入 Runtime，结果、增量输出和取消终态由 Instrumentation 接收并报告，control plane 不代执行工具。
+Instrumentation 的 ASC-Proxy 是进程内受管 Unix socket 客户端，管理控制连接和独立的 Runtime 执行连接，不另设代理进程。control plane 保存 Branch 与 Environment 的关联，并将 Runtime 返回的执行地址交给 Instrumentation；工具执行直接进入 Runtime，结果、增量输出和取消终态由 Instrumentation 接收并报告，control plane 不代执行工具。
 
 产品工具参数、schema 与输出格式由 Product Integration 独立适配；一次完整工具调用对应一次 Runtime 通用操作，完整文件修改在目标环境内执行。Runtime 和 backend 不依赖产品 SDK，不为每次请求分配新环境；同一接收边界验证身份与 Branch→Environment 绑定，再把操作交给当前环境的 backend。backend 自身声明的工具也使用相同接收与取消生命周期，但其业务语义留在 backend。
 
@@ -52,7 +52,7 @@ AScout 用三个支撑模型承接不同投机执行策略在预测、验证、�
 
 - **投机过程与 Policy Decisions**：Edge 是描述投机如何进行的抽象模型，给出通用过程形状，九类 Policy Decision 定义在它之上；它不是运行时对象，没有 id。Edge 的具体实例 Chance 是被 `admit` 接纳的投机机会：从 `admit` 通过时获得 id，直到验证后被接受或抛弃、过程收敛为止；一个 Chance 下可有多个 Proposal 和多个 Branch，运行时 Decision 作用于 Chance。候选 Branch 上再次被接纳的机会与无嵌套时同理，仍是 Chance 模型的具体实例。Branch 承载某次具体执行，Candidate 只是 Branch 角色。开发者可以根据任务、上下文、资源和 Runtime 能力，通过组合 Policy Decision 设计可替换的决策 Policy，并处理多次投机的组合与嵌套。
 - **状态与效果**：把投机执行过程中需要保护的文件、进程、输入、结果和外部服务交互放入统一的管理框架。Agent Session 内部状态由 Instrumentation 管理；Runtime 提供动作承载和效果边界，根据需要组合隔离、暂存、延迟、阻塞、补偿或清理能力。External Effect Coordinator 属于 Runtime，与 network backend 协同处理本机隔离覆盖不到的外部 API。真实请求先暂存在本机；可模拟时返回明确标记来源的临时结果，不能模拟时在效果边界阻塞 Branch 并保留进展，待其成为权威后发出真实请求并继续，丢弃或前提失效则取消。control plane 只通知相应暂存请求释放或取消，Coordinator 无需为跨 Branch 命令去重掌握整棵树。
-- **Speculation Contract**：约束 Policy、control plane 与 Runtime 之间语义对齐的契约；Runtime Adapter 负责把 Runtime 的能力、结果和事件接入这条可检查、可执行的路径，并让拒绝或降级原因可见。
+- **Speculation Contract**：约束 Policy、control plane 与 Runtime 之间语义对齐的契约；runtime proxy 负责把 Runtime 的能力、结果和事件接入这条可检查、可执行的路径，并让拒绝或降级原因可见。
 
 支撑模型的完整权威描述见 [设计模型](design-model.md) §3；各模型的细节分别见 [Policy Decisions 设计](design/policy-decisions.md)、[效果管理设计](design/effect-management.md)、[Speculation Contract 设计](design/speculation-contract.md) 与 [control plane 设计](design/control-plane.md)。
 
@@ -65,21 +65,21 @@ AScout 按以下责任边界组织，控制请求向下流动，结果与事件�
 ```text
 Instrumentation <-> Gateway <-> 控制逻辑
 UI         <-> Gateway <-> UI Projection <-> Ledger
-Runtime    <-> Gateway（经 Runtime Adapter 契约）
+Runtime    <-> Gateway（经 runtime proxy 契约）
 ```
 
-这里的调用路径展示逻辑责任，不等同于进程或 crate。Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止；它负责通信如何接入、消息交给谁以及如何送达，不拥有 Tree、Policy 或投机编排。Instrumentation、UI 和 Runtime 通过统一 Gateway 通信边界接入，但三侧的消息处理责任仍由各自控制逻辑决定。Gateway 与 Runtime 采用网络通信；UI 同样不独立部署，由 control plane 启动和停止。这不规定必须同进程或自动打开浏览器。Runtime 是 AScout 支持的完整执行与效果承载系统；Runtime Adapter 只是它与 control plane 之间的接入边界。Adapter 只负责接入配置，环境及其网络配置归 Runtime，实际分配结果属于运行状态。各侧责任见 [架构](architecture.md)。
+这里的调用路径展示逻辑责任，不等同于进程或 crate。Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止；它负责通信如何接入、消息交给谁以及如何送达，不拥有 Tree、Policy 或投机编排。Instrumentation、UI 和 Runtime 通过统一 Gateway 通信边界接入，但三侧的消息处理责任仍由各自控制逻辑决定。Gateway 与 Runtime 采用网络通信；UI 同样不独立部署，由 control plane 启动和停止。这不规定必须同进程或自动打开浏览器。Runtime 是 AScout 支持的完整执行与效果承载系统；runtime proxy 只是它与 control plane 之间的接入边界。runtime proxy 只负责接入配置，环境及其网络配置归 Runtime，实际分配结果属于运行状态。各侧责任见 [架构](architecture.md)。
 
 Runtime 通过接入边界接收控制请求，结果和事件沿相反方向返回：
 
 ```text
-Policy Action -> control plane 编排 -> Gateway 送达 -> Runtime Adapter 接入 -> Runtime 执行
+Policy Action -> control plane 编排 -> Gateway 送达 -> runtime proxy 接入 -> Runtime 执行
   -> typed result/event -> Gateway 送达 -> control plane 更新控制状态
 ```
 
-Adapter Registry 属于 Runtime，负责登记、契约与能力声明校验、主动验证及独立验证证据，向 control plane 提供带验证状态的能力事实；control plane 据此匹配 Policy 并作出投机裁决。Registry 的归属不允许 Adapter 自行证明其声明成立。Agent 与接入进程的实际启动、监视和回收由 Runtime 负责。
+Runtime 内部由 runtime proxy 接入 control plane，backend registry 登记可用 backend 实现、接口与能力声明并核对标准接口，base runtime 创建及回收实例，关联 Environment，管理宿主和环境的启停、保存恢复及操作结果。control plane 按所需能力匹配 Policy 并作出投机裁决。环境保证需要独立验证。agent supervisor 管理 run 唯一的 Agent 与 Instrumentation 宿主，External Effect Coordinator 管理跨出本机隔离边界的外部 API 效果。各组件的责任见 [Runtime 设计](design/runtime.md#runtime-的组件职责)。
 
-Runtime 创建 Environment 并返回身份，control plane 独占绑定 `Branch -> Environment`，每个 Environment 只属于一个 Branch。建立初始环境不预定身份，派生仅指定父 Environment；创建前 Branch 可以无绑定。Runtime 的执行接入边界验证 `branch_id` 授权，内部 Backend 只使用 Environment identity，不接收或推导 Branch 身份；其内部以独立 `BackendConnection.id` 标识 Backend instance，并维护 Environment 与 Backend instance 的多对多关联。因而不同 Environment 可以分别选择 `fs1/process1` 与 `fs1/process2/network1`，而不把共享的 Backend 内部世界误认为共享 Environment 生命周期。Candidate 建立、Promote、暂停与恢复使用实际返回并保存的 Environment identity，不能以 Branch 或 authority 常量替代。
+Runtime 创建 Environment 并返回身份，control plane 独占绑定 `Branch -> Environment`，每个 Environment 只属于一个 Branch。建立初始环境不预定身份，派生仅指定父 Environment；创建前 Branch 可以无绑定。Instrumentation 把 Branch 映射为 Environment。执行、结果和取消按 Environment 与 operation 关联。Runtime 以独立的 `BackendConnection.id` 标识各实例，使用同一套登记、路由和生命周期管理内置与外部 backend，并维护 Environment 与 Backend instance 的多对多关联。因而不同 Environment 可以分别选择 `fs1/process1` 与 `fs1/process2/network1`，而不把共享的 Backend 内部世界误认为共享 Environment 生命周期。Candidate 建立、Promote、暂停与恢复使用实际返回并保存的 Environment identity，不能以 Branch 或 authority 常量替代。
 
 ### 4.2 核心对象与所有权
 
@@ -94,7 +94,7 @@ session
 
 `task` 是 session 中 Agent 的一轮工作；Agent 完成本轮工作、开始等待用户输入时，task 完成。一个 session 对应一个 AScoutAgent 控制域和一棵 Speculative Tree，多轮 task 在该控制域中继续。建立初始 Agent 时，其执行单元称为 root Authority Instance。在运行过程中，随着投机执行的不断发生和结束，Authority Instance 不断变化，由此形成树形结构。树中的每个子树都称为 `Branch`。`Branch` 是树中的计算延续，也是投机世界的结构实体；Branch 对应的根节点称为 `Branch Root`。`Branch Root` 具有稳定 identity 并直接拥有该根的 local state；`Instance` 是由 Runtime 承载 Branch Root 执行活动的实际执行单元。逻辑 Branch 可以在没有立即建立独立 Instance 的情况下先存在并推进，直到其状态或效果要求独立 Runtime 环境。
 
-对外，为只呈现一个单一 Agent，这个统一视图称为 `AScoutAgent`。端用户通过主对话直接操作当前有效的权威执行主线；另可只读观察候选 Branch 的运行状态与内容；候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份，以了解投机是否真实发生及其处理过程。观察不形成另一条用户对话，不表示候选已被接受，也不改变 Branch 的裁决权限或向其他 Branch 传播候选内容。一个 session 对应一个 AScoutAgent，一个 AScoutAgent 拥有一棵 Speculative Tree；control plane 拥有 Tree、Branch 关系、逻辑推进和实际环境对齐状态，已建立 Instance 的实际执行、资源和隔离状态位于 Runtime，control plane 只能通过 Adapter 观察所需结果。
+对外，为只呈现一个单一 Agent，这个统一视图称为 `AScoutAgent`。端用户通过主对话直接操作当前有效的权威执行主线；另可只读观察候选 Branch 的运行状态与内容；候选内容与主对话分开展示，并随 Branch 的角色与状态显示其投机身份，以了解投机是否真实发生及其处理过程。观察不形成另一条用户对话，不表示候选已被接受，也不改变 Branch 的裁决权限或向其他 Branch 传播候选内容。一个 session 对应一个 AScoutAgent，一个 AScoutAgent 拥有一棵 Speculative Tree；control plane 拥有 Tree、Branch 关系、逻辑推进和实际环境对齐状态，已建立 Instance 的实际执行、资源和隔离状态位于 Runtime，control plane 只能通过 runtime proxy 观察所需结果。
 
 control plane 在运行时以三类状态描述一次投机，它们分别回答不同问题：`ChanceStage` 属于 Chance，说明该投机机会从待选到收敛走到哪一步、最终是否被接受；`AuthorityState` 也属于 Chance，说明其权威值是否已请求和到达，与机会的运行并行；`BranchStatus` 属于 Branch，合并生命周期与运行状态，说明承载具体执行的 Branch 当前处于何处。三类状态不能互相替代。
 

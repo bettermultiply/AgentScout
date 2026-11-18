@@ -127,8 +127,7 @@ impl FilesystemBackend {
         lowers
     }
 
-    /// Produce the filesystem part of the process launch.  This backend never
-    /// spawns a process and never records pids or namespaces.
+    /// Prepare the mounts and tool plan for a new filesystem holder.
     pub fn launch_fragment(
         &self,
         context: &BackendContext,

@@ -3,7 +3,7 @@ use ascout::{
     protocol::contract::{AgentLaunch, Operation},
     runtime::{
         BaseRuntime,
-        adapter::Adapter,
+        proxy::RuntimeProxy,
         backend::{Backend, BackendContext},
         backends::filesystem::{FilesystemBackend, FilesystemConfig},
         execution_wire::{self as wire, Message},
@@ -32,28 +32,21 @@ fn unified_filesystem_endpoint_binds_relative_operations_to_target_workspace() {
     config.isolated_paths = Some(vec![workspace.clone()]);
     config.isolated_targets = vec![(workspace.clone(), "/app".into())];
     let plane = Arc::new(FilesystemBackend::new(config).unwrap());
-    let runtime = Arc::new(
-        BaseRuntime::new("runtime", plane.clone()).with_bubblewrap(plane.bubblewrap_path()),
-    );
+    let runtime = Arc::new(BaseRuntime::new("runtime", plane.clone()));
     let context = BackendContext::new("relative");
     runtime.establish_with_context(&context).unwrap();
-    runtime
-        .launch_agent(
-            &context,
-            &AgentLaunch {
-                command: "/bin/sleep".into(),
-                args: vec!["30".into()],
-                cwd: workspace.clone(),
-                log: workspace.join("agent.log"),
-                instance_id: Some("host".into()),
-                env: BTreeMap::new(),
-            },
-        )
-        .unwrap();
+    let launch = AgentLaunch {
+        command: "/bin/sleep".into(),
+        args: vec!["30".into()],
+        cwd: workspace.clone(),
+        log: workspace.join("agent.log"),
+        instance_id: Some("host".into()),
+        env: BTreeMap::new(),
+    };
     let server = ControlServer::bind("127.0.0.1:0").unwrap();
     let address = server.local_addr().unwrap().to_string();
     let worker = std::thread::spawn(move || {
-        Adapter {
+        RuntimeProxy {
             adapter_instance: "relative".into(),
             runtime,
         }
@@ -62,16 +55,23 @@ fn unified_filesystem_endpoint_binds_relative_operations_to_target_workspace() {
     });
     let session = server.accept().unwrap();
     session.wait_for_hello(Duration::from_secs(5)).unwrap();
-    let bound = session
+    let started = session
         .call(
             "relative",
-            Operation::BindExecution {
-                branch_id: "relative".into(),
+            Operation::OperateEnvironment {
+                command: Vec::new(),
+                agent: Some(launch),
             },
         )
         .unwrap();
-    let access = bound.execution_access.unwrap();
-    let request = |id: u64, operation: &str, arguments: Value| json!({"command":"execute","request_id":format!("req-{id}"),"operation_id":format!("op-{id}"),"branch_id":"relative","environment_id":"relative","operation":operation,"arguments":arguments});
+    assert_eq!(
+        started.status,
+        ascout::protocol::contract::ResultStatus::Completed,
+        "{:?}",
+        started.reason
+    );
+    let access = started.execution_access.unwrap();
+    let request = |id: u64, operation: &str, arguments: Value| json!({"command":"execute","request_id":format!("req-{id}"),"operation_id":format!("op-{id}"),"environment_id":"relative","operation":operation,"arguments":arguments});
     let terminal = |socket: UnixStream| {
         let mut reader = BufReader::new(socket);
         loop {
@@ -160,7 +160,7 @@ fn unified_filesystem_endpoint_binds_relative_operations_to_target_workspace() {
             .contains("different content")
     );
     assert_eq!(bytes(call(&read(6), None)), b"cd");
-    let confirmation = json!({"command":"confirm","operation_id":"op-3","branch_id":"relative","environment_id":"relative"});
+    let confirmation = json!({"command":"confirm","operation_id":"op-3","environment_id":"relative"});
     assert_eq!(call(&confirmation, None).meta["event"], "confirmed");
     assert_eq!(call(&replay, Some(b"ab")).meta["event"], "rejected");
 
@@ -208,7 +208,7 @@ fn unified_filesystem_endpoint_binds_relative_operations_to_target_workspace() {
         .read_to_end(&mut chunk)
         .unwrap();
     assert_eq!(chunk, [255, 0]);
-    let cancel = json!({"command":"cancel","operation_id":"op-10","branch_id":"relative","environment_id":"relative"});
+    let cancel = json!({"command":"cancel","operation_id":"op-10","environment_id":"relative"});
     assert_eq!(call(&cancel, None).meta["status"], "cancelled");
     assert_eq!(
         wire::read(&mut execution, false).unwrap().meta["status"],

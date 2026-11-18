@@ -6,7 +6,7 @@ use crate::protocol::contract::AgentLaunch;
 
 /// Fixed marker consumed by scripts/priv-check.sh (same format as the
 /// runtime::process tests).
-fn report_freeze(process: &crate::runtime::process::ProcessBackend, test: &str) {
+fn report_freeze(process: &crate::runtime::process::Processes, test: &str) {
     eprintln!(
         "ASCOUT_FREEZE_MECHANISM={} test={test}",
         process.freeze_mechanism().as_str()
@@ -67,7 +67,7 @@ fn process_group_fallback_freezes_and_reports_mechanism() {
         environment_id: "root".into(),
         ..BackendContext::default()
     };
-    let process = crate::runtime::process::ProcessBackend::new_process_group(
+    let process = crate::runtime::process::Processes::new_process_group(
         "process",
         backend.bubblewrap_path(),
     );

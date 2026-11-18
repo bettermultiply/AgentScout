@@ -562,7 +562,7 @@ pub(super) fn spawn_in_environment(
     environment_id: &str,
     cwd: &Path,
     script: &str,
-) -> (crate::runtime::process::ProcessBackend, u32, u64) {
+) -> (crate::runtime::process::Processes, u32, u64) {
     spawn_in_environment_with_env(backend, environment_id, cwd, script, BTreeMap::new())
 }
 
@@ -572,7 +572,7 @@ pub(super) fn spawn_in_environment_with_env(
     cwd: &Path,
     script: &str,
     env: BTreeMap<String, String>,
-) -> (crate::runtime::process::ProcessBackend, u32, u64) {
+) -> (crate::runtime::process::Processes, u32, u64) {
     let launch = AgentLaunch {
         command: "/bin/sh".into(),
         args: vec!["-c".into(), script.into()],
@@ -586,7 +586,7 @@ pub(super) fn spawn_in_environment_with_env(
         ..BackendContext::default()
     };
     let process =
-        crate::runtime::process::ProcessBackend::new("process", backend.bubblewrap_path());
+        crate::runtime::process::Processes::new("process", backend.bubblewrap_path());
     let fragment = backend.launch_fragment(&context, &launch).unwrap();
     process.launch(&context, &launch, &fragment).unwrap();
     let handle = process.process_handle(environment_id).unwrap();

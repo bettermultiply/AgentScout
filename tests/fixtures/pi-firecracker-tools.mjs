@@ -54,7 +54,7 @@ const detachedCancellationEscape=text(await run('bash',{command:`sleep 0.5; if t
 console.log(JSON.stringify({diagnostic:'individual-cancel detached descendant ownership',detachedCancellationEscape}));
 await run('bash',{command:`setsid sh -c 'sleep 0.4; echo leaked > ${cwd}/pi-boundary/drain-leak' </dev/null >/dev/null 2>&1 &`});
 await proxy.cancel('pi-tools');
-assert.equal(text(await run('bash',{command:`sleep 0.5; if test -f ${cwd}/pi-boundary/drain-leak; then printf leaked; else printf drained; fi`})),'drained','CompositeRuntime must forward backend-required writer drain');
+assert.equal(text(await run('bash',{command:`sleep 0.5; if test -f ${cwd}/pi-boundary/drain-leak; then printf leaked; else printf drained; fi`})),'drained','BaseRuntime must forward backend-required writer drain');
 // Direct generic calls use the existing guest workspace without Pi path conversion.
 await generic('write_file',{path:'ascout-relative-stage',bytes:Buffer.from([97,98])});
 assert.deepEqual(Array.from((await generic('read_file',{path:'ascout-relative-stage'})).value.bytes),[97,98]);

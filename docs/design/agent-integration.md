@@ -36,15 +36,15 @@ Product Integration 负责完整持久化运行分支的 session 记录，并在
 
 ### 2.2 ASC-Proxy
 
-产品工具参数、schema 与结果格式化属于 Product Integration，由它独立适配，一次完整工具调用对应一次完整 Runtime 操作。Runtime 提供 `read_file`（互斥 byte_range／line_range）、`write_file`（完整内容、create_parents）、`replace_text`（有序替换，默认 exactly_one，all 显式启用）、`list_directory` 和 `exec`（cwd、env、timeout、流输出及退出状态）。replace_text 在目标环境内存中依次检查全部匹配，全部成功后写入；失败不修改原文件。Runtime 和 backend 不加载产品 SDK，不为每个调用建立环境。同一 Environment 内，受管理的 write_file／replace_text 按目标环境解析的 canonical path 串行，路径别名共享队列；独立 Environment 队列独立，任意 exec 写文件不受此队列保证。共同身份为 branch_id、environment_id、operation_id，沿用请求序列、generation、授权及重放／确认。backend 声明的 NLE 等工具共用接收、输出、取消与终态生命周期，业务语义由 backend 保留。单操作取消采用尽力终止进程组，脱离进程组的后代可能继续运行；整 Branch 取消保留后台写者 drain、准入关闭、generation 更新及终态确认。
+产品工具参数、schema 与结果格式化属于 Product Integration，由它独立适配，一次完整工具调用对应一次完整 Runtime 操作。Runtime 提供 `read_file`（互斥 byte_range／line_range）、`write_file`（完整内容、create_parents）、`replace_text`（有序替换，默认 exactly_one，all 显式启用）、`list_directory` 和 `exec`（cwd、env、timeout、流输出及退出状态）。replace_text 在目标环境内存中依次检查全部匹配，全部成功后写入；失败不修改原文件。Runtime 和 backend 不加载产品 SDK，不为每个调用建立环境。同一 Environment 内，受管理的 write_file／replace_text 按目标环境解析的 canonical path 串行，路径别名共享队列；独立 Environment 队列独立，任意 exec 写文件不受此队列保证。执行连接以 `environment_id` 和 `operation_id` 关联操作，以各 Environment 的请求序列去重，并以 generation 拒绝取消前的延迟请求。backend 声明的 NLE 等工具共用接收、输出、取消与终态生命周期，业务语义由 backend 保留。单操作取消的隔离范围取决于 backend，必须返回相应终态。取消整个 Environment 时关闭该环境的准入，推进 generation，等待活跃操作终态并确认写者已停止。
 
 Pi 将绝对和相对文件路径原样交给已绑定的 Environment，由目标环境解释 `..` 与符号链接。相对路径和未指定 cwd 的 `exec` 使用该 Environment 的工作目录。通用 `exec` 调用可显式覆盖 cwd。Runtime 成功交付的命令结果携带退出码。Pi 的 `bash` 保留输出与退出码，并在非零退出时报告工具失败。传输错误、取消和超时仍沿各自的 Runtime 路径处理。
 
-ASC-Proxy 是 Instrumentation 进程内的受管 Unix socket 客户端，不是独立代理进程，也不要求用户手工启动或直接管理。它经 Gateway 与 control plane 建立控制会话，同时管理不依赖具体 backend 的独立 Runtime 执行连接。会话与消息必须校验所属 Agent、Branch、operation 及授权上下文；调用方直接传递 Branch 身份，不由代理补齐。身份与授权上下文校验不能替代通信来源认证；认证实现及安全能力差距见 [接入实现](../development/agent-access.md)。
+ASC-Proxy 是 Instrumentation 进程内的受管 Unix socket 客户端，不是独立代理进程，也不要求用户手工启动或直接管理。它经 Gateway 与 control plane 建立控制会话，同时管理不依赖具体 backend 的独立 Runtime 执行连接。控制会话关联 Agent、Branch 与 action。执行连接使用 Instrumentation 保存的 Environment 映射和 operation 身份。通信认证实现及能力差距见 [接入实现](../development/agent-access.md)。
 
 通信会话建立后，Instrumentation 通过 ASC-Proxy 向 control plane 提交 Agent 执行事实、控制请求、本地 Decision 结果和 outcome；control plane 通过同一会话向 Instrumentation 返回命令、结果和事件。ASC-Proxy 负责消息的发送、接收和传递，不参与 Agent 步骤的执行、Decision 的判断或 Branch 生命周期的处理。Runtime 负责实际启动、监视和回收 Agent 进程，Gateway 管理通信连接，用户不直接管理 ASC-Proxy。
 
-ASC-Proxy 同时拥有控制通信连接与独立的 Runtime 执行连接。Runtime 的执行访问信息先交给 control plane，再由 control plane 交给 Instrumentation；control plane 显式授权 Branch 对其独占 Environment 的访问。执行请求携带 Branch 与 operation 身份，端点验证授权并通过相同通用接口返回增量输出、终态和取消确认。取消必须等待 backend 终态，不能用本地等待结束代替；结果确认后释放正文，保留有界身份窗口以拒绝重放。
+ASC-Proxy 同时拥有控制通信连接与独立的 Runtime 执行连接。创建和恢复启动返回目标 Environment 的执行地址，由 control plane 转交 Instrumentation。执行端点根据 Environment 状态接收操作，并通过同一接口返回增量输出、终态和取消确认。取消必须等待 backend 终态，不能用本地等待结束代替；结果确认后释放正文，保留有界身份窗口以拒绝重放。
 
 Branch 取消与执行准入必须具有共同边界：取消覆盖边界前已接受的工作，清理完成前不得接受新工作；已取消的延迟请求不能在清理后复活。取消等待相关操作终态与遗留写者清理，清理失败保持执行关闭但允许重试清理。成功取消不永久禁止保留的 Authority 开始下一轮 task。恢复使用当前 Runtime 提供的执行访问方式，保存时的通信端点不能作为恢复后的访问依据。
 

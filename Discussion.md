@@ -12,7 +12,7 @@
 
 2026-11-16 纯 FS 正常装配已修复，本地预检后唯一真实 FS 短 session 成功；覆盖 Authority 四步、候选隔离只读执行、自然 Discard、正常物化与清理。5 Candidate／5 Discard／0 Promote，晋级后续跑、候选写入发布和恢复仍未在本次覆盖，纯 FS 入口持久回归仍待补齐。旧 FS 脚本使用 NLE inner，不代替纯 FS 证据。原始记录与费用边界见 [参考负载](docs/development/reference-workload.md) 和 [测试讨论](docs/development/test-discussion.md)，不再将入口列为当前阻塞。
 
-2026-11-16 Environment 身份边界已确定并落到实现：Runtime 创建并返回身份，控制面保存 Branch 独占绑定；创建前允许无绑定，恢复沿用保存身份并显式 load。正式语义见 [Runtime Adapter 契约](docs/design/runtime-adapter-contract.md#31-身份与关联)，实现及验证范围见 [Runtime 开发讨论](docs/development/runtime-lifecycle.md) 和 [恢复](docs/development/recovery.md)，不再作为待决问题。
+2026-11-16 Environment 身份边界已确定并落到实现：Runtime 创建并返回身份，控制面保存 Branch 独占绑定；创建前允许无绑定，恢复沿用保存身份并显式 load。正式语义见 [runtime proxy 契约](docs/design/runtime-adapter-contract.md#31-身份与关联)，实现及验证范围见 [Runtime 开发讨论](docs/development/runtime-lifecycle.md) 和 [恢复](docs/development/recovery.md)，不再作为待决问题。
 
 2026-11-13 通用回放剩余范围：完整 Runtime 留档、初始环境自动重建、非文本用户输入、长历史同键碰撞和取消时序仍未保证。已实现范围与本轮证据见 [回放](docs/development/replay.md)，不再将正常模型切换、模型请求失败保留会话列为未实现。
 
@@ -23,8 +23,8 @@
 | 编号 | 主题 | 仍需处理的问题 | 状态与出处 |
 |---|---|---|---|
 | 8 | 原型闭环验收 | 剩余为候选数量与嵌套的端到端覆盖、跨组件取消／超时及可重复演示。基础接受／丢弃、失败清理、迟到／重复消息和嵌套失效已有控制面回归，不重复列为未实现。 | 局部回归通过、剩余整体验收；[参考负载](docs/development/reference-workload.md) |
-| 15 | Adapter 部署与配置 | 部署方式与配置文件组织方式尚待讨论；独立二进制不是语义要求。 | 配置责任已定；[Runtime Adapter 契约 §1](docs/design/runtime-adapter-contract.md#1-契约边界)、[Runtime 接入](docs/development/runtime-adapter.md#当前-firecracker-实现) |
-| 16 | Runtime 按需组合 | 已有显式 Backend 路由、组合与 BaseRuntime 进程／数据面装配；剩余为按隔离需求动态取得和管理 Backend，以及逐层 Runtime 关系的完整语义。待组件职责确认后再讨论 Adapter Registry / BaseRuntime / CompositeRuntime 的命名。Backend 允许哪些包含关系和层次顺序，是否检查、在哪检查、如何检查？用户倾向固定顺序，尚未定案。候选晋级所需的文件差异如何交接及验证？已有 FS 差异合入和会话历史整理见 [session 与状态交接](#2026-11-13-session-与状态交接讨论收敛)。 | 部分实现、剩余设计；[Runtime](docs/design/runtime.md)、[Runtime 语义](docs/development/default-runtime-semantics.md) |
+| 15 | runtime proxy 部署与配置 | 部署方式与配置文件组织方式尚待讨论。 | 启动入口已承担本地配置装配与旧 JSON 规范化。部署仍待讨论。[runtime proxy 契约 §1](docs/design/runtime-adapter-contract.md#1-契约边界)、[Runtime 接入](docs/development/runtime-adapter.md#当前-firecracker-实现) |
+| 16 | Runtime 按需组合 | 现有原型支持显式 backend 路由及编译内实例的配置装配。剩余为按隔离需求发现和管理 backend 以及逐层 Runtime 关系的完整语义。Backend 允许哪些包含关系和层次顺序，是否检查、在哪检查、如何检查？用户倾向固定顺序，尚未定案。候选晋级所需的文件差异如何交接及验证？已有 FS 差异合入和会话历史整理见 [session 与状态交接](#2026-11-13-session-与状态交接讨论收敛)。 | 部分实现、剩余设计；[Runtime](docs/design/runtime.md)、[Runtime 语义](docs/development/default-runtime-semantics.md) |
 | 18 | Authority 物化 | Ctrl-C/SIGINT 终止当前 task 后保留程序与 session；SIGTERM/显式 Shutdown 退出；`/pause` 保存整树，`/continue` 明确继续原任务且不进入模型，普通消息解除暂停兼容现状。上述入口已实现，候选环境承接、task 完成信号、Runtime 物化回报及控制面成功报告仍需扩展组合核查与验证，局部通过不能宣称全部 Authority 完成。物化失败显示失败且不能报告成功。属性变更首版仅支持权限位，其他属性不新增修改支持，未改属性及链接结构保留仍需实现验证，详见提案。 | 入口实现，剩余覆盖见[物化提案](docs/fs-backend/materialize-proposal.md)、[恢复现状](docs/development/recovery.md) |
 | 19 | Runtime 嵌套与压平 | 父候选 Promote 后，保留后代进展并调整底层快照／写时复制层引用；先查 Firecracker 派生方式，再明确何时适合压平及事实来源。 | 暂缓；触发于需要保留后代进展的深度嵌套 Promote；[Policy 实现](docs/development/policy-engine.md)、[FS 现状](docs/fs-backend/current-state.md) |
 | 20 | FS 执行覆盖 | 剩余为嵌套挂载、进程组后备冻结路径对逃逸后代的覆盖及真实环境验证。BaseRuntime 已编排 FS fork／mark／accept 的冻结、操作、解冻；cgroup 冻结路径应单独验收，不能套用进程组限制。 | 编排回归通过、剩余实现／环境验证；[FS 现状](docs/fs-backend/current-state.md)、[Runtime 接入](docs/development/runtime-adapter.md) |
@@ -64,13 +64,13 @@
 
 2026-11-14 本机构建与使用已收敛：在本机运行控制面，用本机浏览器访问；根目录 `make` 为统一构建入口，先准备前端依赖并构建，再构建 Rust，`make -j` 同样保证顺序与失败停止。前端产物继续嵌入二进制且不入库；规则与验证见 [WebUI](docs/development/web-ui.md#生产构建)。Gateway 与 UI 的部署和统一启停见 [控制面 §2.1](docs/design/control-plane.md#21-gateway)。
 
-Gateway 共识入口：[控制面 §2.1](docs/design/control-plane.md#21-gateway)；Registry 的归属与验证职责见 [Runtime Registry 职责](docs/design/runtime.md#adapter-registry)。
+Gateway 共识入口：[控制面 §2.1](docs/design/control-plane.md#21-gateway)；Registry 的归属与验证职责见 [backend registry 职责](docs/design/runtime.md#runtime-的组件职责)。
 
 Gateway 实现及验证范围见 [Gateway 实现核查](docs/development/gateway.md)；部署与统一启停见 [控制面 §2.1](docs/design/control-plane.md#21-gateway)。
 
 2026-11-14 候选环境及终止／暂停已收敛：接受后由候选环境承接后续执行，嵌套接受不越过祖先约束；Agent 常用 Ctrl-C／退出终止任务，AScout 以独立于原 Agent 的 `/pause` 入口暂停并保留树、候选和环境，暂停不意味着退出程序。目标见 [Runtime](docs/design/runtime.md)、[Agent 接入](docs/design/agent-integration.md)；现有退出保存入口调整及物化仍为实现缺口，保存恢复能力保留，见 [恢复](docs/development/recovery.md)。选择理由与废弃表述归[开发决策](docs/development/decisions.md)。
 
-2026-11-16 Environment 归属已收敛：控制面独占 `Branch -> Environment`；Runtime 不接收 `branch_id`，内部用独立 Backend instance ID 维护 Environment 与 Backend 的多对多关联。实现与验证见 [Runtime 生命周期协议](docs/development/runtime-lifecycle.md)；不在本清单重复作为待讨论选型。
+2026-11-16 Environment 归属已收敛：控制面独占 `Branch -> Environment`；Runtime 用 Environment 和 operation 关联执行与取消，创建及恢复启动结果交付执行地址。所有 backend 实例走同一登记和生命周期路径，每个 Environment 可以使用多个 backend。独立程序通过执行帧收发工具操作及结果。实现与验证见 [Runtime 生命周期协议](docs/development/runtime-lifecycle.md)；不在本清单重复作为待讨论选型。
 
 session／task 与物化职责已收敛：task 是 Agent 完成本轮工作并开始等待用户输入时结束的一轮工作；一个 session 对应一个 AScoutAgent 和一棵树。Runtime 报告物化完成／失败，控制面等待物化成功后宣告任务成功。目标见 [心智模型](docs/mental-model.md) 与 [物化提案](docs/fs-backend/materialize-proposal.md)；代码待核查，物化剩余事项归第 18 项。
 

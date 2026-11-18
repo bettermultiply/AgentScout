@@ -30,7 +30,7 @@ impl FilesystemBackend {
                 let expected = target_mount_namespace.ok_or_else(|| {
                     BackendError::new(
                         "target environment has no recorded sandbox mount namespace; \
-                         ProcessBackend must supply it from process_handle()",
+                         Processes must supply it from process_handle()",
                     )
                 })?;
                 let actual = fs::metadata(format!("/proc/{pid}/ns/mnt"))

@@ -84,7 +84,7 @@ pub fn start(
         .environment_id
         .as_deref()
         .ok_or("authority Environment missing")?;
-    runtime_call(
+    let started = runtime_call(
         runtime,
         environment,
         Operation::OperateEnvironment {
@@ -92,28 +92,26 @@ pub fn start(
             agent: Some(launch.clone()),
         },
     )?;
-    let bound = runtime_call(
-        runtime,
-        environment,
-        Operation::BindExecution {
-            branch_id: authority.clone(),
-        },
-    )?;
     if let AgentCommand::StartBranch {
         execution_access, ..
     } = &mut command
     {
-        *execution_access = bound.execution_access.clone();
+        *execution_access = started.execution_access.clone();
     }
-    if let AgentCommand::Load { execution_accesses, .. } = &mut command {
-        if let Some(access) = bound.execution_access { execution_accesses.insert(authority.clone(), access); }
+    if let AgentCommand::Load {
+        execution_accesses, ..
+    } = &mut command
+    {
+        if let Some(access) = started.execution_access {
+            execution_accesses.insert(authority.clone(), access);
+        }
     }
     if recovery_generation.is_some() {
         for branch in tree.branches.values().filter(|branch| {
             branch.branch_id != authority
                 && (branch.status.is_live_candidate() || branch.status.is_live_authority())
         }) {
-            runtime_call(
+            let started = runtime_call(
                 runtime,
                 branch
                     .environment_id
@@ -122,16 +120,6 @@ pub fn start(
                 Operation::OperateEnvironment {
                     command: Vec::new(),
                     agent: Some(launch.clone()),
-                },
-            )?;
-            let started = runtime_call(
-                runtime,
-                branch
-                    .environment_id
-                    .as_deref()
-                    .ok_or("live Branch Environment missing")?,
-                Operation::BindExecution {
-                    branch_id: branch.branch_id.clone(),
                 },
             )?;
             if let AgentCommand::Load {

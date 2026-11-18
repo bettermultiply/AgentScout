@@ -62,10 +62,10 @@
 结论：从共同执行基础按预测结果推进候选。
 为什么：该模型保留完整 Agent execution continuation，同时把真正需要同步的步骤结果建模为可验证事件，避免要求任意多进程内存 later-write propagation 或 parent/candidate merge。
 
-## D-027：控制面、Runtime Adapter 与 Runtime 解耦
+## D-027：控制面经 runtime proxy 接入 Runtime
 
 结论：控制面经适配边界使用 Runtime。
-为什么：Adapter 作为接入边界使稳定语义与具体实现分离；粗粒度原子接口避免半完成的 barrier、Branch、Accept 或 cleanup，连接协议的变化不能泄漏为控制面 Policy 或改变 lifecycle 语义。
+为什么：runtime proxy 作为接入边界使稳定语义与具体实现分离；粗粒度原子接口避免半完成的 barrier、Branch、Accept 或 cleanup，连接协议的变化不能泄漏为控制面 Policy 或改变 lifecycle 语义。
 
 ## D-028：Speculative Tree 关系与 Agent execution activity 正交
 
@@ -90,11 +90,11 @@
 ## D-034：OS privilege 留在 Runtime 执行实现一侧
 
 结论：系统特权留在 Runtime 实现侧。
-为什么：把特权交给控制面或 Agent 会混合 policy 与执行机制，并允许调用方绕过后端实际状态转换。AScout 只需规定 Adapter 必须返回足以确认操作结果的事件，不需要规定 Runtime 内部如何持有特权。
+为什么：把特权交给控制面或 Agent 会混合 policy 与执行机制，并允许调用方绕过后端实际状态转换。AScout 只需规定 runtime proxy 必须返回足以确认操作结果的事件，不需要规定 Runtime 内部如何持有特权。
 
-## D-035：Control transport 由 Runtime Adapter 决定
+## D-035：Control transport 由 runtime proxy 决定
 
-结论：控制传输由适配器实现选择。
+结论：控制传输由 runtime proxy 实现选择。
 为什么：高效默认 Runtime、独立 sandbox daemon、VM Runtime 与 remote Runtime 的通信需求不同。统一 transport 不增加 Branch 语义，却会限制 Runtime 的部署和优化空间。
 
 ## D-037：最小 Agent-facing control surface

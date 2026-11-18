@@ -22,11 +22,12 @@ pub struct BackendSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendOperation {
-    BindExecution,
     SaveRuntime,
     LoadRuntime,
     Establish,
     Operate,
+    Launch,
+    EnvironmentOperation,
     FilesystemFork,
     FilesystemMark,
     FilesystemDiff,
@@ -40,13 +41,24 @@ pub enum BackendOperation {
     Terminate,
     Cleanup,
     ToolContext,
-    InvokeTool,
+    #[serde(rename = "invoke_tool")]
+    ExecuteTool,
 }
 
 impl BackendOperation {
+    pub(super) fn is_filesystem(self) -> bool {
+        matches!(
+            self,
+            Self::FilesystemFork
+                | Self::FilesystemMark
+                | Self::FilesystemDiff
+                | Self::FilesystemAccept
+                | Self::FilesystemDiscard
+        )
+    }
+
     pub fn for_operation(operation: &Operation) -> Self {
         match operation {
-            Operation::BindExecution { .. } => Self::BindExecution,
             Operation::MaterializeAuthority => Self::Materialize,
             Operation::SaveRuntime { .. } => Self::SaveRuntime,
             Operation::LoadRuntime { .. } => Self::LoadRuntime,
@@ -59,7 +71,6 @@ impl BackendOperation {
             Operation::TerminateEnvironment => Self::Terminate,
             Operation::CleanupEnvironment => Self::Cleanup,
             Operation::ToolContext { .. } => Self::ToolContext,
-            Operation::InvokeTool { .. } => Self::InvokeTool,
             Operation::FilesystemFork { .. } => Self::FilesystemFork,
             Operation::FilesystemMark { .. } => Self::FilesystemMark,
             Operation::FilesystemDiff { .. } => Self::FilesystemDiff,
@@ -86,6 +97,9 @@ pub struct BackendRoute {
     pub backends: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_backend: Option<String>,
+    /// Assembly-generated rules retain the precedence of their source selectors.
+    #[serde(skip)]
+    pub(crate) specificity_override: Option<usize>,
 }
 
 impl BackendRoute {
@@ -101,10 +115,18 @@ impl BackendRoute {
                 .is_none_or(|value| value == context.environment_id)
     }
 
-    fn specificity(&self) -> usize {
-        usize::from(self.operation.is_some())
-            + usize::from(self.task_id.is_some())
-            + usize::from(self.environment_id.is_some())
+    /// Preserve selector precedence when startup expands a route into per-operation routes.
+    pub fn with_specificity(mut self, specificity: usize) -> Self {
+        self.specificity_override = Some(specificity);
+        self
+    }
+
+    pub fn specificity(&self) -> usize {
+        self.specificity_override.unwrap_or_else(|| {
+            usize::from(self.operation.is_some())
+                + usize::from(self.task_id.is_some())
+                + usize::from(self.environment_id.is_some())
+        })
     }
 }
 
@@ -135,23 +157,40 @@ impl BackendPolicy {
         context: &BackendContext,
         operation: BackendOperation,
     ) -> Result<BackendSelection, BackendError> {
+        let alternate = match operation {
+            BackendOperation::Launch => Some(BackendOperation::Operate),
+            BackendOperation::EnvironmentOperation => Some(BackendOperation::ExecuteTool),
+            _ => None,
+        };
+        let operation = alternate
+            .filter(|_| {
+                !self.routes.iter().any(|route| {
+                    route.operation == Some(operation) && route.matches(context, operation)
+                })
+            })
+            .unwrap_or(operation);
         let mut best: Option<&BackendRoute> = None;
         let mut best_specificity = 0;
-        for route in &self.routes {
-            if !route.matches(context, operation) {
-                continue;
-            }
+        let mut ambiguous = false;
+        for route in self
+            .routes
+            .iter()
+            .filter(|route| route.matches(context, operation))
+        {
             let specificity = route.specificity();
-            if best.is_some() && specificity == best_specificity {
-                return Err(BackendError::new(format!(
-                    "ambiguous Runtime Backend Policy for {:?} and environment {}",
-                    operation, context.environment_id
-                )));
-            }
             if best.is_none() || specificity > best_specificity {
                 best = Some(route);
                 best_specificity = specificity;
+                ambiguous = false;
+            } else if specificity == best_specificity {
+                ambiguous = true;
             }
+        }
+        if ambiguous {
+            return Err(BackendError::new(format!(
+                "ambiguous Runtime Backend Policy for {:?} and environment {}",
+                operation, context.environment_id
+            )));
         }
         let (backend_ids, output_backend) = best
             .map(|route| (route.backends.clone(), route.output_backend.clone()))
@@ -220,7 +259,7 @@ fn validate_backend_list(
     Ok(())
 }
 
-/// 由 Adapter 统一管理的 Backend 连接。
+/// Backend 实例的配置标识和进程内接口。
 pub struct BackendConnection {
     pub id: String,
     pub backend: Arc<dyn Backend>,

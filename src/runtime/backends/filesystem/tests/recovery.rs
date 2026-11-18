@@ -115,7 +115,7 @@ fn combined_save_failure_thaws_process_and_preserves_previous_generation() {
     *backend.overlay_targets.lock().unwrap() = Some(vec![workspace.clone()]);
     backend.establish("authority").unwrap();
     let process =
-        crate::runtime::process::ProcessBackend::new("process", backend.bubblewrap_path());
+        crate::runtime::process::Processes::new("process", backend.bubblewrap_path());
     let launch = crate::protocol::contract::AgentLaunch {
         command: "/bin/sh".into(),
         args: vec![
@@ -141,11 +141,11 @@ fn combined_save_failure_thaws_process_and_preserves_previous_generation() {
     );
     let previous = root.path().join("previous.json");
     process
-        .with_frozen(|| backend.save_runtime(&previous))
+        .with_frozen(|_| true, || backend.save_runtime(&previous))
         .unwrap();
     let before = fs::read(&previous).unwrap();
     set_clone_failure_after(Some(1));
-    let failure = process.with_frozen(|| backend.save_runtime(&root.path().join("failed.json")));
+    let failure = process.with_frozen(|_| true, || backend.save_runtime(&root.path().join("failed.json")));
     set_clone_failure_after(None);
     assert!(failure.is_err());
     assert_eq!(fs::read(&previous).unwrap(), before);
