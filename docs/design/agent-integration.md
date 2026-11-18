@@ -36,7 +36,11 @@ Product Integration 负责完整持久化运行分支的 session 记录，并在
 
 ### 2.2 ASC-Proxy
 
-ASC-Proxy 是 Instrumentation 与 control plane 之间的受管通信代理。它可以由进程内组件、本地 IPC 客户端、网络客户端或独立进程实现，不要求用户手工启动或直接管理；进程的实际启动由 Runtime 负责。它经 Gateway 与 control plane 建立通信会话，并在会话建立过程中确认通信双方的身份；在后续通信中，它通过通信凭证证明消息来自对应的 Instrumentation，避免信息伪造。
+产品工具参数、schema 与结果格式化属于 Product Integration，由它独立适配，一次完整工具调用对应一次完整 Runtime 操作。Runtime 提供 `read_file`（互斥 byte_range／line_range）、`write_file`（完整内容、create_parents）、`replace_text`（有序替换，默认 exactly_one，all 显式启用）、`list_directory` 和 `exec`（cwd、env、timeout、流输出及退出状态）。replace_text 在目标环境内存中依次检查全部匹配，全部成功后写入；失败不修改原文件。Runtime 和 backend 不加载产品 SDK，不为每个调用建立环境。同一 Environment 内，受管理的 write_file／replace_text 按目标环境解析的 canonical path 串行，路径别名共享队列；独立 Environment 队列独立，任意 exec 写文件不受此队列保证。共同身份为 branch_id、environment_id、operation_id，沿用请求序列、generation、授权及重放／确认。backend 声明的 NLE 等工具共用接收、输出、取消与终态生命周期，业务语义由 backend 保留。单操作取消采用尽力终止进程组，脱离进程组的后代可能继续运行；整 Branch 取消保留后台写者 drain、准入关闭、generation 更新及终态确认。
+
+Pi 将绝对和相对文件路径原样交给已绑定的 Environment，由目标环境解释 `..` 与符号链接。相对路径和未指定 cwd 的 `exec` 使用该 Environment 的工作目录。通用 `exec` 调用可显式覆盖 cwd。Runtime 成功交付的命令结果携带退出码。Pi 的 `bash` 保留输出与退出码，并在非零退出时报告工具失败。传输错误、取消和超时仍沿各自的 Runtime 路径处理。
+
+ASC-Proxy 是 Instrumentation 进程内的受管 Unix socket 客户端，不是独立代理进程，也不要求用户手工启动或直接管理。它经 Gateway 与 control plane 建立控制会话，同时管理不依赖具体 backend 的独立 Runtime 执行连接。会话与消息必须校验所属 Agent、Branch、operation 及授权上下文；调用方直接传递 Branch 身份，不由代理补齐。身份与授权上下文校验不能替代通信来源认证；认证实现及安全能力差距见 [接入实现](../development/agent-access.md)。
 
 通信会话建立后，Instrumentation 通过 ASC-Proxy 向 control plane 提交 Agent 执行事实、控制请求、本地 Decision 结果和 outcome；control plane 通过同一会话向 Instrumentation 返回命令、结果和事件。ASC-Proxy 负责消息的发送、接收和传递，不参与 Agent 步骤的执行、Decision 的判断或 Branch 生命周期的处理。Runtime 负责实际启动、监视和回收 Agent 进程，Gateway 管理通信连接，用户不直接管理 ASC-Proxy。
 
@@ -78,7 +82,7 @@ AScout 管理显示区域、Tree、窗口选择和控制事实，并将用户输
 
 观察先展示当前 AScoutAgent 整棵 Speculative Tree 的 Branch 关系、当前权威路径与投机状态，再允许选择具体 Branch 深入只读查看。选择 Branch 不改变权威执行、输入路由或接受条件，也不向该候选建立用户对话。用户界面可拦截自己的观察操作，不把它作为普通提示词交给 Agent；本地 TUI 的具体操作见开发文档与术语表。
 
-Agent 按照自身原有流程执行步骤。当 Agent 即将执行处于接入范围内的步骤时，Product Integration 将该步骤交给 Interposer。Interposer 根据本地 Decision 或 control plane 返回的处置结果处理该步骤；需要 control plane 参与时，通过 ASC-Proxy 传递相关事实和请求，并接收结果或命令。Product Integration 落实原调用放行、执行前等待或取消，以及候选 session 的创建与 Promote 接替。预测 toolResult 只注入候选 session；替代模型只在对应候选 session 执行，不替旧父调用完成。
+Agent 按照自身原有流程执行步骤。当 Agent 即将执行处于接入范围内的步骤时，Product Integration 将该步骤交给 Interposer。Interposer 根据本地 Decision 或 control plane 返回的处置结果处理该步骤；需要 control plane 参与时，通过 ASC-Proxy 传递相关事实和请求，并接收结果或命令。Product Integration 落实原调用放行、执行前等待或取消，以及候选 session 的创建与 Promote 接替。预测 toolResult 只注入候选 session。Pi 保留预测中的原生文本和图像块及其顺序，以及显式成功／失败状态和适用的原生消息详情。普通字符串作为文本，其他没有原生内容形式的 JSON 值以文本呈现。工具调用身份由实际 checkpoint 决定。替代模型只在对应候选 session 执行，不替旧父调用完成。
 
 真实步骤继续执行时，Product Integration 从原调用返回路径取得结果并交给 Interposer；Interposer 将其作为 outcome 归属对应 Branch，并通过 ASC-Proxy 提交 control plane。Agent 主进程及其 sub-agent 产生的可观察步骤都经过同一处理路径，因此 AScout 介入的是步骤执行边界，而不改变 Agent 原有的执行流程。
 

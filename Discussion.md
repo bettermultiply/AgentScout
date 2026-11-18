@@ -24,7 +24,7 @@
 |---|---|---|---|
 | 8 | 原型闭环验收 | 剩余为候选数量与嵌套的端到端覆盖、跨组件取消／超时及可重复演示。基础接受／丢弃、失败清理、迟到／重复消息和嵌套失效已有控制面回归，不重复列为未实现。 | 局部回归通过、剩余整体验收；[参考负载](docs/development/reference-workload.md) |
 | 15 | Adapter 部署与配置 | 部署方式与配置文件组织方式尚待讨论；独立二进制不是语义要求。 | 配置责任已定；[Runtime Adapter 契约 §1](docs/design/runtime-adapter-contract.md#1-契约边界)、[Runtime 接入](docs/development/runtime-adapter.md#当前-firecracker-实现) |
-| 16 | Runtime 按需组合 | 已有显式 Backend 路由、组合与 BaseRuntime 进程／数据面装配；剩余为按隔离需求动态取得和管理 Backend，以及逐层 Runtime 关系的完整语义。 | 部分实现、剩余设计；[Runtime](docs/design/runtime.md)、[Runtime 语义](docs/development/default-runtime-semantics.md) |
+| 16 | Runtime 按需组合 | 已有显式 Backend 路由、组合与 BaseRuntime 进程／数据面装配；剩余为按隔离需求动态取得和管理 Backend，以及逐层 Runtime 关系的完整语义。待组件职责确认后再讨论 Adapter Registry / BaseRuntime / CompositeRuntime 的命名。Backend 允许哪些包含关系和层次顺序，是否检查、在哪检查、如何检查？用户倾向固定顺序，尚未定案。候选晋级所需的文件差异如何交接及验证？已有 FS 差异合入和会话历史整理见 [session 与状态交接](#2026-11-13-session-与状态交接讨论收敛)。 | 部分实现、剩余设计；[Runtime](docs/design/runtime.md)、[Runtime 语义](docs/development/default-runtime-semantics.md) |
 | 18 | Authority 物化 | Ctrl-C/SIGINT 终止当前 task 后保留程序与 session；SIGTERM/显式 Shutdown 退出；`/pause` 保存整树，`/continue` 明确继续原任务且不进入模型，普通消息解除暂停兼容现状。上述入口已实现，候选环境承接、task 完成信号、Runtime 物化回报及控制面成功报告仍需扩展组合核查与验证，局部通过不能宣称全部 Authority 完成。物化失败显示失败且不能报告成功。属性变更首版仅支持权限位，其他属性不新增修改支持，未改属性及链接结构保留仍需实现验证，详见提案。 | 入口实现，剩余覆盖见[物化提案](docs/fs-backend/materialize-proposal.md)、[恢复现状](docs/development/recovery.md) |
 | 19 | Runtime 嵌套与压平 | 父候选 Promote 后，保留后代进展并调整底层快照／写时复制层引用；先查 Firecracker 派生方式，再明确何时适合压平及事实来源。 | 暂缓；触发于需要保留后代进展的深度嵌套 Promote；[Policy 实现](docs/development/policy-engine.md)、[FS 现状](docs/fs-backend/current-state.md) |
 | 20 | FS 执行覆盖 | 剩余为嵌套挂载、进程组后备冻结路径对逃逸后代的覆盖及真实环境验证。BaseRuntime 已编排 FS fork／mark／accept 的冻结、操作、解冻；cgroup 冻结路径应单独验收，不能套用进程组限制。 | 编排回归通过、剩余实现／环境验证；[FS 现状](docs/fs-backend/current-state.md)、[Runtime 接入](docs/development/runtime-adapter.md) |
@@ -34,7 +34,7 @@
 | 24 | 信息与约束传播 | 用户／parent 向 descendants 的传播、child 向 parent 的 proposal／outcome summary，以及 sibling 不直接协作的边界。 | 排队；[Branch 语义](docs/design/branch-semantics.md) |
 | 25 | Resolution 与策略组合 | winner、旧 parent 和接受前提的关系；accept 选择后续有效执行，不等于宣布候选是客观真值；Policy、自定义操作与 Adapter 证明责任的组合边界。 | 待对照现有契约收敛剩余细节；[Branch 语义](docs/design/branch-semantics.md)、[Policy Decisions](docs/design/policy-decisions.md) |
 | 26 | Chance 模型边界 | 流式输入尚未产完时如何部分消费；L3／Bypass 无真实输入时的措辞；sibling command reuse 与 Chance 的关系。 | 已记录、尚未展开；[设计模型](docs/design-model.md) |
-| 27 | Agent 接入完整性 | 非标准上下文复制／恢复、复杂和多段结果及元数据转换、sub-agent 启动前 Hook。 | 实现／验证缺口；[Agent 接入](docs/development/agent-access.md)、[参考负载](docs/development/reference-workload.md) |
+| 27 | Agent 接入完整性 | 非标准上下文复制／恢复、Pi 原生消息字段之外的工具专有元数据、sub-agent 启动前 Hook。 | 实现／验证缺口；[Agent 接入](docs/development/agent-access.md)、[参考负载](docs/development/reference-workload.md) |
 | 28 | Policy 原型差距 | 草案字段、输出声明、能力授权、领域 schema、Contract／Fidelity、增量预测、score、Reuse／Salvage、执行隔离和取消等剩余能力的范围及落实；服务效果插件的实现范围见 Runtime 开发说明。rebalance 已按 epoch 调度并接通暂停／恢复／抢占，剩余扩展须明确具体缺口。 | 部分实现、剩余待审；以[Policy 实现](docs/development/policy-engine.md)为当前接口依据；[Runtime 接入](docs/development/runtime-adapter.md) |
 | 30 | 退出、异常清理与接受竞态 | 启动握手阶段信号、Runtime 故障注入、独立环境端到端退出；异常退出后受管 Agent／工具进程的停止、残留资源归属确认与清理，不能误清理无关资源；Promote 在途时 Parent 开始下一操作、Agent 确认前候选取消。不要求异常退出后重新启动并继续原任务。 | 实现／验证缺口；已有 Shutdown／SIGINT／SIGTERM 验证不重复列为未实现；[参考负载](docs/development/reference-workload.md)、[Runtime 生命周期](docs/development/runtime-lifecycle.md) |
 | 33 | 嵌套端到端覆盖 | 活跃祖先 Candidate 被 Discard 后的嵌套 Chance 端到端执行、自然重复键与消费顺序；嵌套失效已有单元回归，不能替代端到端验证。 | 剩余端到端验证；[回放](docs/development/replay.md) |

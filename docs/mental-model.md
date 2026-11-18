@@ -40,7 +40,9 @@ Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面
 
 每个 session 的 AScoutAgent 拥有自己的一棵 Speculative Tree，Tree 属于 control plane。树拥有该 session 的投机控制状态，其方法检查合法转换；Policy 函数计算策略选择。Speculation Coordinator 可以协调多棵树，不保存具体 session 的第二份投机状态。同一棵树由消息和定时器触发顺序处理，耗时操作异步返回；Agent 的普通执行由 Instrumentation 负责。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。
 
-Instrumentation 的 ASC-Proxy 管理控制连接和独立的 Runtime 执行连接。control plane 建立 Branch 对 Environment 的明确授权并转交执行访问信息；工具执行直接进入 Runtime，结果、增量输出和取消终态由 Instrumentation 接收并报告，control plane 不代执行工具。
+Instrumentation 的 ASC-Proxy 是进程内受管 Unix socket 客户端，管理控制连接和独立的 Runtime 执行连接，不另设代理进程。control plane 建立 Branch 对 Environment 的明确授权并转交执行访问信息；工具执行直接进入 Runtime，结果、增量输出和取消终态由 Instrumentation 接收并报告，control plane 不代执行工具。
+
+产品工具参数、schema 与输出格式由 Product Integration 独立适配；一次完整工具调用对应一次 Runtime 通用操作，完整文件修改在目标环境内执行。Runtime 和 backend 不依赖产品 SDK，不为每次请求分配新环境；同一接收边界验证身份与 Branch→Environment 绑定，再把操作交给当前环境的 backend。backend 自身声明的工具也使用相同接收与取消生命周期，但其业务语义留在 backend。
 
 工作模型的完整权威描述见 [设计模型](design-model.md) §2。
 
@@ -100,7 +102,7 @@ control plane 在运行时以三类状态描述一次投机，它们分别回答
 
 状态交接正确是机制必须保证的条件，不能仅以路由切换或历史整理代替。最终保留单一权威 session，表示经过验证、用真实结果整理后的执行历史；它不再要求准确复原候选当时收到的预测输入。因此，原始运行上下文与从整理后历史恢复的上下文可能不同。历史整理不决定权威，也不直接替换运行中的上下文；具体语义见 [Agent 接入设计](design/agent-integration.md) §3。
 
-暂停后的保存与恢复保留整棵有效树、各 Branch 的原运行上下文与环境关联；保存成功后才能发布恢复点，发布前须校验各组件之间的身份和引用关联，恢复校验关联、配置及资源后等待用户继续。保存源与后续可写执行独立，继续运行不能改坏既有恢复点；最终历史不能替代运行恢复状态。文件系统恢复保留受管增量，但普通宿主 bottom lower 使用恢复时内容，不承诺宿主历史版本，也不复制整个挂载；代码、配置和依赖绑定仍需校验。现有保存恢复能力及入口调整缺口见 [恢复](development/recovery.md)。
+暂停后的保存与恢复保留整棵有效树、各 Branch 的原运行上下文与环境关联；保存成功后才能发布恢复点，发布前须校验各组件之间的身份和引用关联，恢复校验关联、配置及资源后等待用户继续。保存源与后续可写执行独立，继续运行不能改坏既有恢复点；最终历史不能替代运行恢复状态。文件系统恢复保留受管增量，但普通宿主 bottom lower 使用恢复时内容，不承诺宿主历史版本，也不复制整个挂载；代码、配置和依赖绑定仍需校验。已保存暂停和已结束的会话都可从原 run id 打开。暂停恢复原执行并等待 `/continue`。结束后打开原权威对话，下一条 prompt 开始新 task。具体入口和保存边界见 [control plane](design/control-plane.md) 与 [恢复](development/recovery.md)。
 
 AScout 管理稳定交互入口、显示区域与自身控制事实；Pi 等 Agent 的消息、思考、工具调用和结果通过公开 SDK 报告给 AScout，再由 AScout 的 UI 排版展示，不嵌入 Agent 产品的终端画面。浏览器 UI 与 TUI 共享事实和操作接口，但彼此不依赖绘制实现。用户可从当前 AScoutAgent 的整棵 Tree 查看 Branch 关系与投机状态，并选择具体 Branch 深入只读观察；选择观察对象不改变权威路径或 Branch 生命周期。
 

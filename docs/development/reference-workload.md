@@ -105,7 +105,7 @@ Rust 协议、控制循环与 Pi 接入使用 `ActionStarted` / `ActionFinished`
 
 匹配使用完整工具调用列表，而不是只看第一项或其他输出文本；调用数量、顺序、名称和参数都属于列表比较输入。候选在 Promote 前不把工具效果写入权威路径，候选工具调用受 AScout 生命周期控制；单一胜者 Promote 后切换后续权威会话并清理旧 Parent／其他候选，Discard 则取消并清理候选，未验证输出不进入主对话。调用列表的规范化／语义相似口径、模型成本和失败回退仍未定，见 `Discussion.md` 第 40 项。
 
-当前承载语义：Pi 是宿主上的单一进程，不按 Branch 启动多份 Pi；每个 Branch 环境有一个常驻 namespace-holder，文件工具经 Branch 专属 socket 在该 mount namespace 中执行。`/app` 映射由 `isolated_paths` 的 `{path, target}` 提供，host 目录是 overlay lower 和 publication 目标；物化轮换 generation 会结束旧 holder 并建立新 holder。工具命令并发执行，直接 shell 退出即返回，后台后代保留到环境结束。
+当前承载语义：Pi 是宿主上的单一进程，不按 Branch 启动多份 Pi；启用文件系统隔离的 Branch 环境有常驻 namespace-holder。Pi 经 ASC-Proxy 请求通用 Runtime 执行端点，Runtime 内部文件工具适配器再经 holder socket 在该 mount namespace 中执行；Pi 不读取工具计划或直接访问 holder。`/app` 映射由 `isolated_paths` 的 `{path, target}` 提供，host 目录是 overlay lower 和 publication 目标；物化轮换 generation 会结束旧 holder 并建立新 holder。工具命令并发执行，直接 shell 退出即返回，后台后代保留到环境结束。
 
 ### 四个本地脚本场景（不是付费模型证据）
 
@@ -286,7 +286,7 @@ cargo run --bin ascout-control-plane -- ../pi --policy pi-tool
 
 ## 尚未完成
 
-嵌套、并行工具专项验证、非标准消息、图像等复杂结果转换、多种结果元数据的一致性、Extent/Rebalance 的持续运行管理和完整依赖/效果提交仍未完成。当前不能推广为任意 coding workload 的正确 Promote。字符串枚举和布尔预测已支持，但 Pi 仍把它们转换成工具接口所需的文本内容；图像、结构化多段结果和工具专有元数据尚未转换。Candidate 的会话由独立原生 SessionManager 文件承载，可在最终汇总与恢复流程中使用；在飞模型请求和候选推理上下文仍不构成跨进程恢复协议。
+嵌套、并行工具专项验证、非标准消息、Pi 原生消息字段之外的工具专有元数据、Extent/Rebalance 的持续运行管理和完整依赖/效果提交仍未完成。当前不能推广为任意 coding workload 的正确 Promote。普通预测值以文本交付，原生文本和图像块、显式失败状态及适用的消息详情由 Pi 会话保留，详见 [Agent 接入](agent-access.md#4-session-持久化与状态交接已定方向及实现差距)。Candidate 的会话由独立原生 SessionManager 文件承载，可在最终汇总与恢复流程中使用；在飞模型请求和候选推理上下文仍不构成跨进程恢复协议。
 
 `branch_model` 的模型候选、在飞模型请求和候选推理上下文目前不构成可跨进程保存的恢复协议；保存恢复会保存已定义的 Tree、原生 session、Policy artifact、模型绑定和 Runtime 绑定，但恢复后不会自动重新推理或自动处置候选。无限阻塞 Runtime、任意外部工具副作用、子进程内存和任意旧 run 的隐藏环境等价性仍不保证；详细限制见 [恢复](recovery.md)。
 
@@ -336,31 +336,31 @@ EOF
 
 ### AScout Runtime Adapter 接入
 
-`src/runtime/backends/nle.rs` 现在通过既有 `Backend` 接口调用该 bridge，`src/bin/ascout-runtime-adapter.rs` 根据配置中的 `"backend": "nle"` 选择它；Firecracker 配置路径保持不变。已经用正式的 4 字节大端长度前缀 Unix 协议完成跨边界 smoke test。2026-11-02 起，NLE 不再声明或调用 `branch_environment`：Candidate 与权威共用同一个底层环境，Candidate 动作只在 Instrumentation 暂存，Promote 前不进入环境。Adapter 退出时会主动终止 bridge 子进程。
+`src/runtime/backends/nle.rs` 通过既有 `Backend` 接口调用该 bridge，`src/bin/ascout-runtime-adapter.rs` 根据配置中的 `"backend": "nle"` 选择它；Firecracker 配置路径保持不变。每个 Branch 独占一个 Environment，不同 Environment 在 NLE backend 内引用同一个游戏世界，派生不复制世界。候选动作由 Instrumentation 的 effect 闸门阻塞，Promote 前不进入游戏调用。Adapter 退出时会主动终止 bridge 子进程。
 
 `src/runtime/backends/nle.rs` 目前仍在核心 crate 中；它作为外部 workload 的 Runtime 适配保留，不应把 NLE 语义加入通用 Agent Adapter 或 control plane 工具路径。
 
 ### control plane 等待点接入（当前实现）
 
-`ResolvePending` 携带可选 `outcome`。control plane 收到 Runtime 已声明工具的 action 等待事实后，先依据当前策略创建 Candidate 分支，再通过通用 `ControlSession` 的 `tool_context`／`invoke_tool` 操作调用 Runtime；Runtime 返回的 `result` 交给 Pi 等待中的工具，`evidence` 留给 Policy 匹配。若结果先于 Pi 工具等待器建立到达，Pi integration 会暂存该结果，工具建立等待器后立即消费。通用 control plane 不识别 `nle_action` 或动作编号。
+control plane 收到投机准入请求后按 Policy 创建 Candidate，并用 `tool_context` 查询预测上下文。`launch=true` 通过 `ResolvePending` 的 `phase: execute` 放行原权威调用，`false` 则保持执行前等待，不是先执行再延迟读取结果。Pi 通过 ASC-Proxy 的独立执行连接请求 Runtime，真实 `result` 沿原工具调用返回；Instrumentation 上报 action outcome 与 `evidence`，供 control plane 和 Policy 匹配使用。control plane 不发送工具 Invoke、不把真实工具结果注入等待器，也不识别 `nle_action` 或动作编号。
 
-当前顺序是：
+eager 路径的顺序是：
 
 ```text
-工具 action 等待事实
+工具执行前的投机准入请求
 → Policy 用当前公开观测枚举该动作可能的结果
-→ 每个结果建立一个逻辑 Candidate Branch（共享游戏环境，不复制世界）
+→ 每个结果建立 Candidate Branch（Environment 独占，backend 内共享游戏世界）
 → Candidate 在假设结果下推演一步；它的工具调用被暂存
-→ 权威通过 Runtime 的通用 invoke_tool 真实执行工具（NLE 动作前有固定延迟）
+→ launch 放行原权威调用，由 Instrumentation 直接请求 Runtime 执行工具
 → 公开观察作为真实结果返回
-→ ResolvePending / action 结果
+→ 原工具调用返回，Instrumentation 上报 ActionFinished
 → Policy match
 → Promote 或 Discard
 ```
 
-Candidate 在 Promote 前只产生推理和一次被暂存的工具调用，不改变世界；命中时它的暂存调用直接放行，未命中时丢弃。因此猜错不消耗游戏回合。
+Candidate 在 Promote 前可推进推理，游戏工具调用在 effect 闸门等待，不改变世界；接受时 Promote 候选并放行其后续调用，拒绝时丢弃。speculative-first 则先保持原权威调用不执行：候选被接受后取消旧父调用，全部候选不可接受时原调用放行一次；不向旧调用注入候选结果。因此被拒绝的候选不会消耗游戏回合。
 
-Promote 后 control plane 的权威 Branch 切换到 Candidate，旧 Parent Branch 被清理；NLE 的游戏环境仍是同一个真实实例，不发生世界复制或切换。Discard 只清理 Candidate。Candidate 在 Promote 前调用 `nle_action` 会明确失败并记录为阻止，不会伪造观察。
+Promote 后 control plane 的权威 Branch 切换到 Candidate，旧 Parent Branch 被清理；候选继续使用自己的 Environment，NLE backend 内仍引用同一个游戏世界，不发生世界复制或切换。Discard 清理对应候选；候选在 Promote 前的游戏工具调用保持挂起，不伪造观察。
 
 Rust 全目标编译、库测试和 Pi TypeScript 类型检查通过。Firecracker 全量 E2E 中仍有既有的宿主 Unix socket 路径过长失败（测试目录位于较深路径），不把这些失败归因于 NLE 接入；NLE Adapter 的正式 Unix 协议 smoke test 已通过。
 

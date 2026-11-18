@@ -10,11 +10,15 @@ control plane 是抽象责任模型中 Mechanism 的实现主体，也是 Specul
 
 每个 session 的 AScoutAgent 拥有自己的一棵 Speculative Tree，Tree 属于 control plane。task 是 session 中 Agent 的一轮工作，Agent 完成本轮工作并开始等待用户输入时完成；多轮 task 共用该控制域。对外这棵树以单一 Agent 的形式呈现给用户，对内我们将这棵树视作整个投机执行生命周期中由多个子树组成的派生嵌套关系。这个单一 Agent 视图和控制域称为 `AScoutAgent`。用户请求经 Gateway 进入相应控制逻辑；control plane 负责建立 Agent 控制上下文，Runtime 负责实际启动对应的 Agent 与接入进程，不要求用户手工启动具体 Agent 产品或接入组件。
 
+常驻 control plane 同时管理多个 run。关闭界面只释放该界面的连接，各 run 在后台保持各自的状态。显式结束指定 run 时，只收尾该 run 的 task 与资源。正常停止整个 control plane 时，该进程先收尾自己管理的全部活动 run，再退出。收尾沿用现有暂停、中断与保存恢复语义，保存仍须显式触发。
+
+`ascout-control-plane <pi-root> --resume <run-id>` 按原 run id 打开运行记录，由 Ledger 区分已保存暂停与已结束。暂停恢复原 task 和树，等待显式 `/continue`。已结束时通过原权威 Agent session 引用打开会话，显示原对话，保持空闲直到下一条 prompt 创建新 task。旧 task 的终态和操作历史保留，旧 Branch 与待执行命令不进入新 task。只有显式新建 run 才分配新 run id。当前实现范围见[恢复开发记录](../development/recovery.md)。
+
 允许修改 Policy。control plane 对外宣告任务成功必须等待 Runtime 报告物化成功；Runtime 报告的物化失败等同操作失败。task 完成及物化条件见 [Runtime 设计](runtime.md)。
 
 control plane 的工作方式是一条贯穿 Policy、控制结构与 Runtime 的闭环，Policy 的表达与 Runtime 的接入都经由 control plane 获得一致的校验与编排。
 
-control plane 通过 Policy Engine 取得各阶段的决策，再将决策编排为受管操作。环境与效果处理经 Gateway 按 Runtime Adapter 契约交付，由 Runtime 返回实际结果和事件；需要进入 Agent 工具通道的结果经 Gateway 交付。control plane 据实更新 Speculative Tree，而不直接修改 Runtime 内部状态。在等待 Parent 真实结果的投机路径中，Candidate 验证必须比较 Parent 真实 operation 的 outcome 与 Candidate hypothesis，不能用 Candidate 自己生成的结果替代。control plane 记录决策、操作结果和事件，用于状态对齐与问题定位。
+control plane 通过 Policy Engine 取得各阶段的决策，再将决策编排为受管操作。环境与效果控制经 Gateway 按 Runtime Adapter 契约交付，由 Runtime 返回实际结果和事件。工具执行由 Instrumentation 经已授权的独立连接请求 Runtime，真实结果沿原工具调用路径返回，Instrumentation 再向 control plane 报告 outcome 与 evidence；control plane 不代执行或中转真实工具结果。control plane 据实更新 Speculative Tree，而不直接修改 Runtime 内部状态。在等待 Parent 真实结果的投机路径中，Candidate 验证必须比较 Parent 真实 operation 的 outcome 与 Candidate hypothesis，不能用 Candidate 自己生成的结果替代。control plane 记录决策、操作结果和事件，用于状态对齐与问题定位。
 
 这些校验与编排都必须落在 Policy 无法绕过的固定语义边界之内。Policy 使用外部模型时，宿主只在本次求值明确授权的 capability 范围内代理请求，并持有认证凭证；默认拒绝，结束或取消即撤销。详细契约见 [Policy Engine](control-plane/policy-engine.md)。该边界的清单与说明见 [Policy Decisions](policy-decisions.md) §6；control plane 负责在运行期使这些语义被一致地落实。
 
@@ -118,7 +122,7 @@ control plane 通过 Runtime Adapter 这一接入边界使用 Runtime，而不�
 
 ## 5. 只读观察
 
-control plane 对外提供受限的观察事件，不直接公开 Speculative Tree、控制命令、checkpoint 或 Runtime 内部对象。首次读取取得状态事件集及其对应的最新序号；状态事件集是从第 1 号到该序号的完整有序事件读取，同时给出由这些事件折叠出的 Chance 当前列表（id、父 Branch/父 Chance、operation、tool、阶段、权威值状态、Proposal 与关联 Branch），客户端自行折叠得到展示状态。之后通过 SSE 持续接收增量，断线后携带最后收到的序号补发，不维护另一套独立的树事实。每个事件包含全局递增序号、记录时刻和所属 task；序号在同一 control plane 运行内覆盖所有观察事件。
+control plane 对外提供受限的观察事件，不直接公开 Speculative Tree、控制命令、checkpoint 或 Runtime 内部对象。首次读取取得状态事件集及其对应的最新序号；状态事件集是从第 1 号到该序号的完整有序事件读取，同时给出由这些事件折叠出的 Chance 当前列表（id、父 Branch/父 Chance、operation、tool、阶段、权威值状态、Proposal 与关联 Branch），客户端自行折叠得到展示状态。之后通过 SSE 持续接收增量，断线后携带最后收到的序号补发，不维护另一套独立的树事实。每个事件包含序号、记录时刻和所属 task。序号在同一 run 内递增，覆盖该 run 的所有观察事件。
 
 树结构事件描述 Branch 创建（identity、Parent、Authority/Candidate、所属 Chance、投机对象类型）、Chance 创建与阶段变化、权威值取得状态以及权威切换（新旧 Authority）。Branch 生命周期事件使用 `BranchStatus` 的 Created、Running、Blocked(reason)、Finished、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned，记录新状态与已知原因；`Blocked` 的原因取 ExtentReached、Rebalanced 或 EffectGate，同一时刻只记最近一次挡住它的 Decision，`Blocked` 与 Running 可以随对应 Decision 来回切换。Chance 阶段使用 `ChanceStage` 的 Pending、Running、Resolving、Accepted(proposal_id)、Discarded(reason)，抛弃原因取 MatchRejected、NotSelected、AncestorInvalidated、BudgetExhausted 或 Failed；权威值取得状态使用属于 Chance 的 `AuthorityState` 的 NotRequested、Fetching、Arrived、Unavailable，与 Chance 的 Running 并行。环境事件描述已确认的执行承载、独立 Instance、隔离环境嵌套及关键配置摘要，并区分环境清理结果。未知事实保持未知，命令已发送不表示环境已建立或清理成功。
 

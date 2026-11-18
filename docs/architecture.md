@@ -40,7 +40,9 @@ Runtime 通过接入边界报告物化完成或失败；物化失败按操作失
 
 ## 2. 控制闭环
 
-一次需要 Runtime 参与的操作形成完整闭环：
+环境生命周期等控制操作经 control plane 与 Runtime Adapter 形成闭环；工具执行则使用 control plane 已授权并交付的独立执行连接：
+
+Product Integration 独立适配产品工具参数、schema 和结果格式化，一次完整工具调用对应一次完整 Runtime 操作，不复用 Pi 工具实现。统一接收端验证 Branch、Environment 与请求身份后分派到当前 backend；文件系统 holder 与 Firecracker guest agent 在各自原生环境执行完整 read_file、write_file、replace_text、list_directory、exec，不加载 Pi SDK，也不由宿主读取、修改后回写文件。backend 声明工具经过同一接收端，业务语义留在 backend。共同生命周期保留 accepted、output、终态、取消、确认与重放；执行请求不创建新环境。
 
 ```mermaid
 sequenceDiagram
@@ -48,12 +50,14 @@ sequenceDiagram
     participant C as control plane
     participant R as Runtime
 
-    A->>C: captured Agent step
-    C->>C: 校验控制状态并形成语义操作
-    C->>R: policy-based operation through Adapter boundary
-    R-->>C: result / event through Adapter boundary
-    C->>C: 根据结果更新控制状态
-    C-->>A: Agent-facing result / event
+    A->>C: 执行事实 / 控制请求
+    C->>C: 校验控制状态并形成环境操作
+    C->>R: 经 Adapter 建立或管理环境
+    R-->>C: 环境结果 / 执行访问信息
+    C-->>A: 控制命令 / 授权后的执行访问信息
+    A->>R: 通用环境操作 / backend 声明工具
+    R-->>A: 增量输出 / 终态 / 取消确认
+    A->>C: 实际 action 结果与 evidence
 ```
 
 control plane 是整体 Speculative Tree 和控制语义的权威来源。Runtime 内部的执行、资源、环境和效果状态由 Runtime 管理；control plane 通过 Runtime Adapter 接收能力、结果与事件，不直接读取 Runtime 内部状态。
@@ -68,7 +72,7 @@ control plane 是整体 Speculative Tree 和控制语义的权威来源。Runtim
 | control plane | Gateway、UI Projection、Policy Engine、Speculation Coordinator、Ledger | AScoutAgent 与 Speculative Tree 控制状态、Policy 绑定、请求校验与投机编排；Gateway 只持有通信所需状态；界面缓存与连接读取位置由 UI Projection 管理，系统运行日志由进程持有 |
 | Runtime | 包含 Runtime Adapter 接入边界及所需的执行、状态派生、进程、资源、隔离和效果管理能力；Registry 属于 Runtime | 管理实际承载、能力声明校验与效果状态；不决定 Speculative Tree 的全局裁决，不呈现第二份 Tree 权威状态 |
 
-ASC-Proxy、Interposer 等 Instrumentation 组件随 Agent 留在 Branch 隔离环境外的可信宿主，由 Runtime 管理。Environment 身份按 Branch 独占；候选 session 保持独立，不因共用宿主进程而合并上下文。环境内受管子程序仍须按环境归属取消和清理。
+ASC-Proxy 是 Instrumentation 进程内的受管 Unix socket 客户端，不另设代理进程；它与 Interposer 随 Agent 留在 Branch 隔离环境外的可信宿主，由 Runtime 管理。Environment 身份按 Branch 独占；候选 session 保持独立，不因共用宿主进程而合并上下文。环境内受管子程序仍须按环境归属取消和清理。
 
 执行端点以共同准入边界协调 Branch 取消与新操作：取消等待已接受操作终态和后台写者清理；清理成功后仅新执行 generation 可进入，旧请求不能复活。清理失败时保持准入关闭并允许重试。恢复时 control plane 重新向 Instrumentation 提供当前执行访问信息，不复用旧端点。
 

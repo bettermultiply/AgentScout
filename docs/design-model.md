@@ -4,6 +4,8 @@
 
 本文只记录已确定的抽象语义。仓库包含 Pi/NLE 原型实现；实现覆盖范围、限制与验收状态记录在开发文档中，不能把原型等同于完整通用实现。
 
+产品工具参数、schema 和结果格式化由 Product Integration 独立适配，一次完整工具调用对应一次通用 Runtime 操作。Runtime 的统一执行接入验证身份及 Branch→Environment 绑定，将请求交给已有环境的 backend；不为每个工具或子操作新建环境，也不依赖产品 SDK。backend 声明工具共用接收、输出、取消与确认生命周期，业务语义仍由 backend 实现。control plane 管理生命周期和 Policy、转交执行访问描述，不作为工具执行中介。
+
 ## 1. 抽象分层：Policy / Mechanism / Runtime
 
 Policy、Mechanism 与 Runtime 构成抽象责任模型，描述从策略意图到机制落实、再到具体运行能力的关系。

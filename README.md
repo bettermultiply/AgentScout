@@ -6,7 +6,7 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 仓库现在有一个按 control plane ownership 实现的 Agent 管理原型：Rust control plane 拥有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入；Agent 接入进程由 Runtime Adapter 在环境内启动，control plane 只决定用哪个产品并把路径交给它。Runtime 侧已提供文件系统 Backend（overlay 与 btrfs 两种数据面）和进程 Backend（bubblewrap、cgroup 冻结）；实现范围与已知偏差见 [文件系统 Backend 当前实现状态](docs/fs-backend/current-state.md)。Pi 是首个接入实现，不是 AScout 的架构组成；NLE 是当前验证 workload，不属于 AScout 实现。二者都不应把产品路径、工具或专用语义写进核心契约。它还不是正确完成的投机验证闭环、完整 Runtime、通用 Agent 产品或 coding workload。
 
-目标语义与一级架构已经形成。AScout 按 `Instrumentation -> control plane -> Runtime Adapter -> Runtime` 组织。Runtime Adapter 对 control plane 提供稳定 typed contract，并负责目标 Runtime 的能力映射与协议适配。设计文档是语义权威；开发文档记录已接受的实现选择与剩余任务。
+目标语义与一级架构已经形成。AScout 按 `Instrumentation -> control plane -> Runtime Adapter -> Runtime` 组织控制生命周期。工具执行使用独立连接：Pi Product Integration 在已有宿主内独立适配 read/edit/write/bash 参数、schema 与结果格式，一次工具调用对应一次完整 Runtime 操作，文件编辑在目标环境内完成；Runtime 验证 Branch→Environment 绑定后交给文件系统 holder 或 Firecracker guest agent 原生执行，不加载 Pi SDK，也不逐工具启动 Node 或创建环境。NLE 声明工具共用接收与取消生命周期，游戏语义保留在 backend。control plane 只管理生命周期／Policy 和转交执行访问描述，不代执行工具。Runtime Adapter 对 control plane 提供稳定 typed contract，并负责目标 Runtime 的能力映射与协议适配。设计文档是语义权威；开发文档记录已接受的实现选择与剩余任务。
 
 ## 已确认的实现边界
 
@@ -68,7 +68,7 @@ node tools/replay/run.ts /path/to/source-run ../pi \
 
 源 `policy.json` 优先；缺失时用 `--policy <name>` 选择原 Policy。用 `--runtime` 明确提供新运行环境。源目录只读；普通 AScout 负责新 run 的记录和恢复。工具终端输入 `pause` 暂停自动输入后，可在 WebUI 手动输入或切换模型；`resume` 继续，`status` 查看消费情况，`quit` 协调正常保存退出。完成或缺键仅停止自动输入，保留系统。详见[回放工具](tools/replay/README.md)及[开发边界](docs/development/replay.md)。
 
-唯一位置参数是 Pi 源码路径。运行记录目录由系统在配置的运行根目录下创建，结束时输出 run id。`ascout-control-plane runs` 列出已有运行；`ascout-control-plane ../pi --resume <run-id>` 恢复。旧 `session-*` 目录名仍是有效的 run id，按原 id 恢复，无需移动目录；Agent 原生 session id 保持独立。run id 不等于 task id，新用户 prompt 仍开始新 task。Runtime Adapter 在环境内启动 Agent 接入进程，control plane 只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。Ctrl-C 请求中断，Ctrl-D 退出，TUI 中 ↑/↓ 滚动。运行记录目录及 `agent.log` 保留用于检查。
+唯一位置参数是 Pi 源码路径。运行记录目录由系统在配置的运行根目录下创建，结束时输出 run id。`ascout-control-plane runs` 列出已有运行。`ascout-control-plane ../pi --resume <run-id>` 按原 id 打开运行：已保存暂停的 task 等待 `/continue`，已结束的 Agent 会话显示原权威对话并等待下一条 prompt 开始新 task。旧 `session-*` 目录名仍是有效的 run id，无需迁移目录或提供 Agent 的 session 路径。Agent 原生 session id 保持独立。Runtime Adapter 在环境内启动 Agent 接入进程，control plane 只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。Ctrl-C 请求中断，Ctrl-D 退出，TUI 中 ↑/↓ 滚动。运行记录目录及 `agent.log` 保留用于检查。
 
 已接通工具与模型执行前等待点：Candidate 在独立 session 使用预测工具结果或替代模型续跑。eager 并行放行权威调用；speculative-first 保持原调用等待，由 Policy 依据真实结果或明确的可接受性规则裁决。接受时 Promote 候选 session 并取消旧 Parent，不向旧调用注入候选结果；全部候选不可接受时原调用放行一次。用户仍使用同一个主对话。默认 Policy 禁用候选；可显式启用字符串枚举预测示例：
 
@@ -79,9 +79,9 @@ cargo run --bin ascout-control-plane -- ../pi --policy pi-tool
 
 该示例 Policy 从 `example`、`true`、`false` 中无固定种子地抽取两个不同预测。具体随机场景、脚本模型接口及启动方式见 [验证 Workload](docs/development/reference-workload.md)。`/ascout` 查看预测、实际结果、处置和清理，`/events` 查看原始事件；运行记录目录的 `events.jsonl` 保留原始事实。已有脚本模型接口加真实 Pi/bash 的验证，不冒充真实大模型验证，不宣称预测质量或加速收益。
 
-Runtime Adapter 可以在握手中声明环境工具及其参数结构。control plane 只按声明调用 `tool_context`／`invoke_tool`，不识别具体 workload 的工具名；Pi 接入从声明动态注册工具，NLE 的名称和动作编号不进入通用接入层。
+Runtime Adapter 可以在握手中声明环境工具及其参数结构。control plane 按声明调用 `tool_context` 查询预测上下文，并将 Runtime 执行访问信息交给 Instrumentation；工具由 Instrumentation 经独立执行连接请求 Runtime 执行，control plane 不代执行。Pi 接入从声明动态注册工具，NLE 的名称和动作编号不进入通用接入层。
 
-Parent 已放行并收到真实结果后立即继续，验证并行进行；仅 Promote 时停止旧 Parent。已接入同一等待点的两个 Candidate，至多一个胜出，其余被取消。工具等待点逐项交给 Policy；并行消息续跑需补齐其他工具的真实结果，不重跑这些工具。接入目前支持字符串和布尔预测，复杂结果类型、非标准上下文、嵌套、完整效果隔离、Runtime Registry 与能力验证、多行编辑及确认式退出清理仍未完成。详见 [当前实现与验证边界](docs/development/reference-workload.md)。
+Parent 已放行并收到真实结果后立即继续，验证并行进行；仅 Promote 时停止旧 Parent。已接入同一等待点的两个 Candidate，至多一个胜出，其余被取消。工具等待点逐项交给 Policy；并行消息续跑需补齐其他工具的真实结果，不重跑这些工具。工具预测支持普通文本、布尔值等 JSON 值的文本形式，以及 Pi 的原生文本／图像内容、显式结果状态和适用的消息详情。工具专有元数据的通用映射、非标准上下文、嵌套、完整效果隔离、Runtime Registry 与能力验证、多行编辑及确认式退出清理仍未完成。详见 [当前实现与验证边界](docs/development/reference-workload.md)。
 
 Policy YAML 编译与受限 Python 求值已可独立运行。本地策略按 `assets/policy/<策略目录>/` 独立保存声明和算法，目前均不随 Git 交付；以下命令及相关测试需要先准备这些本地文件，布局见 [Policy Engine 原型](docs/development/policy-engine.md)。默认 `policy/policy.yaml` 禁用候选：
 

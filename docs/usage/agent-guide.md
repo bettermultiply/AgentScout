@@ -9,7 +9,11 @@ AScout 当前有一个可构建、可运行的原型：Rust control plane 持有
 - 可构建的 control plane、Pi 接入、Runtime Adapter，以及文件系统/进程 Backend 原型；
 - Pi/NLE 的真实投机执行验证；当前验证边界见 [首要验证 Workload](../development/reference-workload.md)。
 
-当前仓库包含可构建代码（`cargo build`、`cargo run --bin ascout-control-plane`）。稳定的对外 Rust API、C API、通用 Agent-facing 命令语法、完整 ASC-Proxy 部署和 Runtime Registry 能力验证尚不存在。
+当前仓库包含可构建代码（`cargo build`、`cargo run --bin ascout-control-plane`）及 Pi 进程内 ASC-Proxy。稳定的对外 Rust API、C API、通用 Agent-facing 命令语法、通用通信认证授权和 Runtime Registry 能力验证尚未完成；不另设 ASC-Proxy 部署服务。
+
+## 打开已有运行
+
+用 `ascout-control-plane <pi-root> --resume <run-id>` 打开原运行记录。已保存暂停的 task 保留原树和活跃分支，普通消息先排队，输入 `/continue` 后才继续。已结束的 Agent 会话直接在 AScout 中显示原权威历史，下一条普通 prompt 创建新 task。用 `ascout-control-plane runs` 查找 run id，旧 `session-*` 名称也可直接使用。
 
 ## 计划中的 Agent Surface
 

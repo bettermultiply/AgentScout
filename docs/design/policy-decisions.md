@@ -153,9 +153,9 @@ Proposal 的不可变性不保证其运行内 id 跨运行稳定。外部回放�
 launch(input) -> bool
 ```
 
-`launch` 决定这条 Chance 当前是否启动取得权威值的路径。返回 `true` 表示启动权威路径，返回 `false` 表示当前不启动；`false` 只让 Chance 的 `AuthorityState` 保持 NotRequested，不取消已经由 `predict` 产生的 Proposal 或 candidate Branch。权威值是该 Chance 真实结果 `i` 的可靠来源——真实执行、主生成流、用户输入、环境反馈或远程服务——只有拿到它，`match` 才能与 Proposal 对照；拿不到时只能依赖 validator 或其他可接受性判断。
+`launch` 决定这条 Chance 当前是否启动权威调用，而不是只决定何时读取已经执行完成的结果。返回 `true` 表示放行原权威调用，返回 `false` 表示原调用继续在执行前等待；`false` 只让 Chance 的 `AuthorityState` 保持 NotRequested，不取消已经由 `predict` 产生的 Proposal 或 candidate Branch。调用由 Instrumentation 落实，不由 control plane 代执行。权威值是该 Chance 的真实结果 `i`，其可靠来源包括真实执行、主生成流、用户输入、环境反馈或远程服务；只有拿到它，`match` 才能与 Proposal 对照，拿不到时只能依赖 validator 或其他可接受性判断。
 
-“权威值来自谁”不是 Policy 可以替换的选项，而是这条 Chance 的固有事实：`u` 是谁，真实结果就由谁产生。例如 `u` 是一条命令时真值来自真实执行，`u` 在等待用户输入时真值来自用户。Policy 能决定的只有“是否取得、何时取得”，即 `launch` 函数在当前输入下的返回值。系统可以提供常用快捷定义：
+“权威值来自谁”不是 Policy 可以替换的选项，而是这条 Chance 的固有事实：`u` 是谁，真实结果就由谁产生。例如 `u` 是一条命令时真值来自真实执行，`u` 在等待用户输入时真值来自用户。`launch` 决定是否启动、何时启动对应的权威调用，不改变结果来源。系统可以提供常用快捷定义：
 
 | 快捷定义 | 等价的函数行为 |
 |---|---|

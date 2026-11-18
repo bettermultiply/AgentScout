@@ -6,7 +6,7 @@
 
 ### 当前实现目标
 
-目标语义见 [Runtime 设计](../design/runtime.md)。首阶段实现了 Linux 文件系统 Backend：通过 bubblewrap 创建 mount/user namespace，并在其中把宿主根目录以只读方式挂载，再用 OverlayFS upper/work 层承载写入。Agent 启动入口在该 namespace 中执行，因此绝对路径、临时文件和全部后代进程继承同一文件系统视图；不是改变 cwd、复制目录或拦截 Agent API。当前实现了 overlay 与 btrfs 两种数据面、逐挂载 overlay、进程 Backend（cgroup 冻结）与 live mount accept；实现范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
+目标语义见 [Runtime 设计](../design/runtime.md)。Linux 文件系统 Backend 通过 bubblewrap 创建 mount/user namespace，并在其中把宿主根目录以只读方式挂载，再用 OverlayFS upper/work 层承载写入。当前进入该 namespace 的是环境 holder 及其执行的受管命令，不是 Agent／Instrumentation 宿主；受管命令及其后代继承同一文件系统视图。隔离不是改变 cwd 或复制目录，Agent 工具访问须经已适配的 Runtime 入口。当前实现了 overlay 与 btrfs 两种数据面、逐挂载 overlay、进程 Backend（cgroup 冻结）与 live mount accept；实现范围、已知偏差和需高权限验证的项目见 [文件系统 Backend 当前实现状态](../fs-backend/current-state.md)。
 
 Overlay 是第一项实现工作，不是所有 Runtime 的必需结构。当前 Backend 的 branch
 为父 upper 做独立副本（优先 reflink，失败时复制）或 btrfs 快照，子 lower 追加该
@@ -27,7 +27,9 @@ overlay；4 项特权测试全通过、0 failed、0 ignored，脚本退出 0。a
 live target，不外推运行中目标重放、全部 overlay 元数据或物化能力；范围见
 [特权验证](../fs-backend/priv-check.md)。
 
-尚待实现：受管文件效果的合法生效路径、主动 Registry 验证和运行时偏差检测。Overlay 变更的 accept/冲突处理已实现：三方冲突检测后，无 live mount 时直接写目标 upper，有 live mount 时经 mount namespace 校验与 `openat2` 安全重放。该 Backend 只负责文件系统，不负责进程终止、网络、内存、资源或 Agent Session；进程启动、冻结、终止和句柄由 `runtime/process` 的 ProcessBackend 负责，FilesystemBackend 只产出 `LaunchFragment` 中的挂载条目。它要求 Linux、可执行 bubblewrap、可创建 user/mount namespace 且宿主允许 OverlayFS；任一条件不满足时启动失败，不回退到未隔离启动。宿主 Pi 由 ProcessBackend 作为 run 唯一进程持有；每个文件系统环境另有一个 namespace-holder 进入该 Branch 的 mount namespace。ProcessBackend 将 holder 放入独立进程组，cgroup v2 可用时用 `cgroup.freeze`，否则回退进程组 SIGSTOP/SIGCONT；终止时先按 cgroup/process group 结束，再扫描目标 mount namespace 结束残留后代。cleanup 会先停止 holder，停止失败时保留进程句柄并禁止删除 upper/work；只有停止成功后才清理 inner 和 filesystem，任一清理失败都返回失败，不报告 cleanup 已收敛。物化轮换 generation 前结束旧 holder，发布后建立新 holder。无 context 的 Backend 方法统一转入 context 路径。establish/branch 的组合失败回滚同样先 terminate filesystem environment，再 cleanup；回滚错误追加到原始 BackendError 的 cleanup_failures。BaseRuntime 配置 filesystem 时，generic operate、tool_context 和 invoke_tool 仍只委托 inner Backend；filesystem 只检查环境状态，并在 holder 启动时提供该 Branch 的 namespace/Overlay 视图，不执行同一业务命令。Pi 宿主进程不进入 Branch namespace，文件工具只通过 Branch 专属 socket 由 holder 代执行。
+尚待实现：受管文件效果的合法生效路径、主动 Registry 验证和运行时偏差检测。Overlay 变更的 accept/冲突处理已实现：三方冲突检测后，无 live mount 时直接写目标 upper，有 live mount 时经 mount namespace 校验与 `openat2` 安全重放。该 Backend 负责文件系统视图、挂载信息及内部文件工具计划，不负责进程终止、网络、内存、资源或 Agent Session；进程启动、冻结、终止和句柄由 `runtime/process` 的 ProcessBackend 负责。它要求 Linux、可执行 bubblewrap、可创建 user/mount namespace 且宿主允许 OverlayFS；任一条件不满足时启动失败，不回退到未隔离启动。宿主 Pi 由 ProcessBackend 作为 run 唯一进程持有；每个文件系统环境另有一个 namespace-holder 进入该 Branch 的 mount namespace。ProcessBackend 将 holder 放入独立进程组，cgroup v2 可用时用 `cgroup.freeze`，否则回退进程组 SIGSTOP/SIGCONT；终止时先按 cgroup/process group 结束，再扫描目标 mount namespace 结束残留后代。cleanup 会先停止 holder，停止失败时保留进程句柄并禁止删除 upper/work；只有停止成功后才清理 inner 和 filesystem，任一清理失败都返回失败，不报告 cleanup 已收敛。物化轮换 generation 前结束旧 holder，发布后建立新 holder。无 context 的 Backend 方法统一转入 context 路径。establish/branch 的组合失败回滚同样先 terminate filesystem environment，再 cleanup；回滚错误追加到原始 BackendError 的 cleanup_failures。
+
+BaseRuntime 的 operate、tool_context 与 invoke_tool 在检查文件系统环境可用后委托 inner Backend，不再识别 Pi 工具名称。独立接收端将通用 `environment_operation` 分派到当前环境：文件系统路径经 BaseRuntime 的当前 namespace holder 执行，Firecracker 经 backend 的 vsock guest agent 执行；CompositeRuntime 复用既有 InvokeTool 路由选择执行 backend。通用操作为 `read_file/write_file/replace_text/list_directory/exec`。文件字节、替换文本及 shell 输入／输出通过独立内容帧传送。Pi 的 MIME 判断和工具格式化只在 Product Integration 内完成。独立工具适配代码在 `instrumentation/pi/tools.ts`，不启动逐工具 Node 进程，guest 不依赖 Pi／Node。`tool-plans/<environment>.json` 仍为 Runtime 内部挂载映射，不是 Instrumentation 的访问凭据；访问方式仍经 Runtime → control plane → Instrumentation 交付。请求不创建新环境，Pi 宿主不进入 Branch namespace。
 
 Adapter 中的生命周期状态门槛是所有 Runtime 共同遵守的契约，不是 filesystem
 Backend 的专属规则：operate 只接受 Available；branch 接受 Available 或
@@ -143,6 +145,36 @@ Pi 接入采用宿主单一进程托管全部 Branch session；文件系统 Bran
 网络是环境的固有能力。建立环境时 Adapter 通过免密 sudo 创建独立 network namespace、网桥、TAP、veth 与双层 NAT，Firecracker 在该 namespace 内以降权用户运行，进程与文件保持 Adapter 用户归属；guest 使用固定 MAC 与地址，默认路由由 Adapter 在环境就绪后补齐。cleanup 回收 netns、veth 与 iptables 规则，终止按进程组回收 Firecracker 进程链。分支时 Adapter 短暂暂停父 VM，创建全量 snapshot 和独立磁盘副本，恢复父 VM，再以独立 rootfs、网络与 vsock 路径恢复子 VM。
 
 真实端到端测试位于 `tests/firecracker_e2e.rs`。测试依赖 KVM、Firecracker、kernel、rootfs、`debugfs`、`cp`、`curl`、OpenSSH、`iproute2`、`iptables`，以及允许免密 sudo 运行 `ip` 与 `iptables` 的 Linux 主机；SSH 诊断测试从环境 netns 内发起。测试使用独立镜像副本；因镜像和 snapshot 占用空间较大，应通过 `--test-threads=1` 串行运行。
+
+### 完整操作与实际限制
+
+Pi Integration 独立适配参数、schema 和结果，一次工具调用对应一次完整 Runtime 操作，不复用 Pi 工具实现。操作集合为 read_file、write_file、replace_text、list_directory、exec；backend 声明工具仍走同一生命周期。完整替换在目标环境内依次验证全部匹配后才写入，exactly_one 默认，all 显式启用。受管理写入按 Environment 内 canonical path 串行；不保证 hardlink 合一、外部 symlink 更换或任意 exec 写入也遵守队列。
+
+同一 Unix／vsock 连接双向使用最多 1 MiB 的 JSON 首行。首行有 `body_length` 时，后接原始字节。每帧使用 4 字节大端长度，最多 64 KiB，最后用长度为零的帧结束。没有 body 的消息只发送首行。独立执行访问描述仍使用 `unix-json-lines`，Control Gateway 的帧格式独立。编辑首行只带每步的旧文本长度、新文本长度和匹配模式，UTF-8 内容在同一 body 内依次发送。目录项在 body 内携带 JSON 业务数据，声明工具的终态 body 携带原始 stdout 和 stderr，并用 stdout 长度分隔。
+
+接收端先校验 Branch／Environment 绑定，再将输入分帧写入匿名临时文件。声明长度与终止帧完整后才准入。请求指纹包含首行内容与实际字节，与分帧方式无关。holder 和 guest 接收完整 body 后才执行，写入／替换使用目标同目录临时文件和 rename。输入错误不会截断原文件。该路径未提供目录 fsync 后的断电保证，也不承诺保留 inode 或 hardlink。原始文件读取按指定范围或图片回退从打开的文件分块发送，接收端落盘保存结果，输出事件同步写入每个操作一个匿名重放文件。慢客户端受 socket 写入背压约束，重放文件让进程输出与客户端读取速度解耦。终态确认释放缓存文件，执行身份仍按既有窗口保留。在途发送持有的文件引用随连接释放。暂存容量取决于部署的临时文件系统，包括 tmpfs 配额和可用磁盘。接收端没有固定文件体积上限或按 Branch 的磁盘配额。
+
+行选择仍只累计选区，最多保留 32 MiB，返回 `actual_range` 和 `has_more`。Pi 默认请求最多 2000 行和 50 KiB，超限只返回完整行，空文件、尾部空行、零 limit 和越界 offset 沿用既有语义。同一次 `read_file` 可按 PNG、JPEG、GIF、BMP、WebP 签名回退为完整二进制。原始字节读取与写入不受行选择预算限制。Proxy 当前用内存中的字节数组发起写入，收齐文件结果后返回连续 Buffer。收齐时可能同时保留帧缓冲和连续 Buffer。图片渲染还会分配 Base64，Pi bash 格式化会累计文本。编辑在目标端缓冲当前和更新后的文本及当前替换对，目录排序保留目录项。上述 API 的内存需求取决于实际内容，传输本身按帧分块。
+
+单操作取消和 timeout 采用尽力终止进程组。用户已明确不要求追杀 daemonize 后脱离进程组的全部后代，不引入逐操作 cgroup、supervisor 或 PID namespace。整 Branch drain、取消 generation、准入关闭与终态确认保留。脱离进程组的后台后代可能逃过单操作取消，不能影响无关工具作为补偿。
+
+终态沿用 `succeeded`、`failed`、`cancelled` 和 `timed_out`。backend 向接收端保留 `invalid_input`、`not_found`、`permission_denied`、`timed_out`、`io_error`。旧 backend 的未分类错误为 `backend_error`。FS 通过当前 holder 映射绑定 cwd，定向用例使用 `/app`。stock VM 使用已有 `/root`，客户端的 `bound_cwd` 由 Runtime 移除或覆盖。两种 backend 都验证默认和显式 cwd。同环境的别名共享写入锁，独立环境可以并行写入相同 canonical path。
+
+本轮定向验证记录
+
+- `cargo test --test runtime_relative_endpoint` 通过。真实 FS Runtime 写入和读回 33 MiB + 17 字节。测试拆分首行和内容帧，验证提前 EOF 时文件不变，重试与重新分帧不会再次写入，同身份不同字节被拒绝。取消后重试按相同顺序返回原始输出和终态，确认后释放结果。
+- `cargo test --test firecracker_e2e pi_sdk_tools_cross_the_real_environment_boundary_without_a_model -- --exact` 通过，7 项过滤。真实 VM 走 Pi → Proxy → Rust 接收端 → guest，验证 33 MiB + 17 字节非 UTF-8 往返、多帧编辑文本、二进制 stdin／stdout／stderr、1 GiB 稀疏文件小范围、图片回退和两个 VM 的独立队列。
+- `cargo test --lib runtime::adapter` 11 项，`cargo test --lib guest_agent` 6 项，`cargo test --lib range_regressions` 4 项，`cargo test --lib namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace` 1 项通过。guest 的 socket pair 测试覆盖长度不足的终止帧和进程组取消。
+- `node --no-warnings --experimental-strip-types --import ../pi/packages/coding-agent/src/experimental/source-resolver.ts --test tests/pi-filesystem-tools.mjs tests/pi-asc-proxy.mjs` 11 项通过，覆盖 holder 直接收到截断 body、独立环境和代理取消顺序。相同 Node 参数运行 `tests/pi-access.mjs tests/pi-notification-adapter.mjs tests/pi-recovery-binding.mjs tests/pi-recovery-sources.mjs`，17 项通过。`python3 tests/holder-queue.py` 验证同环境别名确实等待同一把锁。
+
+- `cargo check --all-targets`、`cargo build --bins`、Proxy／工具的 TypeScript 严格检查及相邻 Pi 的 `tsc --noEmit -p ../pi/tsconfig.json` 通过。
+
+### Pi 工作目录与退出状态复核
+
+- `node --no-warnings --experimental-strip-types --import ../pi/packages/coding-agent/src/experimental/source-resolver.ts --test --test-name-pattern='Pi paths|exec streams' tests/pi-filesystem-tools.mjs` 在修复前两项失败。相对写入落在 holder 的只读宿主 session 路径，Pi 原生工具包装器收到退出码 7 时缺少 `isError`。日志 `/tmp/opencode/ascout-pi-integration-red.log`。
+- 相同 Node 参数去掉名称筛选，运行 `tests/pi-filesystem-tools.mjs tests/pi-asc-proxy.mjs tests/pi-access.mjs tests/pi-notification-adapter.mjs tests/pi-recovery-binding.mjs tests/pi-recovery-sources.mjs`，29 项通过。holder 覆盖相对和绝对路径、链接后的 `..`、默认 cwd 和显式通用 exec cwd。工具包装器保留退出码、输出和失败标记，超时与取消分别验证。日志 `/tmp/opencode/ascout-pi-integration-green.log`。
+- `cargo test --test firecracker_e2e pi_sdk_tools_cross_the_real_environment_boundary_without_a_model -- --exact --nocapture` 通过。默认镜像的工作目录为 `/root`，与宿主目录不同。Pi 相对写入通过通用 `read_file` 在 `/root` 下的绝对路径读回，Pi `pwd` 返回 `/root`，通用 `exec` 显式指定 `/tmp` 仍生效。原有二进制往返及终态检查均通过。日志 `/tmp/opencode/ascout-pi-integration-vm.log`。
+- `node --test --test-name-pattern='Pi reports a delivered nonzero' tests/authority-filesystem.mjs` 通过。真实 Pi、control plane 和 FS Runtime 使用本地假模型。退出 7 报告 `action_finished: failed` 并保留输出及退出提示，退出 0 报告 `succeeded`，两次写入各发生一次。日志 `/tmp/opencode/ascout-pi-integration-action.log`，事件目录 `/tmp/opencode/authority-filesystem-OmjGwo`。
 
 ## 相关文档
 

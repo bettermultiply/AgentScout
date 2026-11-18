@@ -1,6 +1,20 @@
 # Instrumentation 通用层
 
-Product Integration 对应 `instrumentation/pi/`，Interposer 对应 `instrumentation/core/` 的 `createAgentAccess`。`instrumentation/pi/asc-proxy.ts` 的进程内 ASC-Proxy 同时管理控制 Gateway Unix socket 和独立的 Runtime 执行连接。Branch 直接传入，control plane 通过 `BindExecution` 明确建立 Branch→Environment 独占绑定，端点校验绑定后才接受执行、取消与确认。文件工具与 Runtime 声明工具都经执行连接调用；私有文件工具计划及 Pi 工具适配器位于 `src/runtime/backends/filesystem/`，Instrumentation 不读取这些计划。
+Product Integration 对应 `instrumentation/pi/`，Interposer 对应 `instrumentation/core/` 的 `createInterposer`，导出类型为 `Interposer`。`instrumentation/pi/asc-proxy.ts` 的进程内 ASC-Proxy 同时管理控制 Gateway Unix socket 和独立的 Runtime 执行连接。Branch 直接传入，control plane 通过 `BindExecution` 明确建立 Branch→Environment 独占绑定，端点校验绑定后才接受执行、取消与确认。`instrumentation/pi/tools.ts` 独立适配 Pi 参数、schema 和格式，一次完整工具调用对应一次 Runtime read_file/write_file/replace_text/list_directory/exec；完整编辑和 canonical path 队列由目标 backend 执行。NLE 等声明工具保留相同生命周期。
+
+Runtime 仍在状态目录写入 `tool-plans/<environment>.json`，BaseRuntime 读取内部 holder 地址及 workspace host/target 映射，连接当前环境 holder；不存在逐工具 Node 进程或 Runtime 内的 Pi SDK 依赖。Firecracker 通过已有 vsock guest agent 原生处理同一组文件／命令请求，guest 不需要 Node 或 Pi。执行访问方式沿 Runtime → control plane → Instrumentation 交付，ASC-Proxy 不读取计划或直接连接 holder。每次完整工具操作有独立身份，保留 tool_call_id 与取消归属。
+
+### 2026-11-18 通用环境操作验证
+
+- `cargo check --all-targets`、`cargo build --bins`、Pi `asc-proxy.ts/tools.ts` 的定向 `tsc --noEmit` 通过。
+- `cargo test --lib -- --test-threads=1`：212/212 通过，覆盖四条工具／模型启动路径、只放行一次、候选 Promote、暂停消息排队、接收端取消代际和重放窗口。此前默认并行运行 211/212，额外挂载测试报 OverlayFS EBUSY；该测试单独复跑和全库串行复跑均通过，未修改测试断言，也未证明并行冲突已修复。
+当前完整操作回归由 tests/pi-filesystem-tools.mjs 与 tests/pi-asc-proxy.mjs 承载；不依赖原生 SDK 工具实现。
+- 重建后 `node --test --test-concurrency=1 tests/authority-filesystem.mjs tests/recovery-filesystem.mjs tests/recovery-active.mjs`：8/8 通过。最终证据为 `/tmp/opencode/authority-filesystem-e6R7R4`、`/tmp/opencode/recovery-filesystem-Wca7Bk`、`/tmp/opencode/recovery-active-1SafyW`（filesystem）。全部模型响应为本地 fixture。
+- `cargo test --test firecracker_e2e real_microvm_completes_the_full_lifecycle_over_vsock -- --exact --nocapture`：真实 VM 1/1 通过，增加统一执行接收端 write/read/exec 检查。未运行整个 Firecracker 组或模型服务测试。guest 本地回归同时验证二进制文件、2 MiB 流输出和 detached writer 取消。
+
+验证边界：完整操作传输与取消限制见 [Runtime 开发文档](runtime-adapter.md)。单操作取消为尽力终止进程组，脱离进程组的后代可能存活。旧 SDK 注入实现的通过记录不作为当前实现验收。
+
+当前控制握手核对 `agent_id` 与能力，Tree 校验 Branch/task/action 归属，执行端点校验显式 Branch→Environment 绑定、generation 和请求身份窗口。Agent session 是 Product Integration 管理的执行上下文，不是另一个通信对端。这些检查不等于通信凭证认证：当前 ASC-Proxy 没有完整的双向凭证认证或防伪机制，不能以 Unix socket、本地握手或身份窗口推定通用认证授权已完成；相关缺口见 [Gateway 实现核查](gateway.md)。
 
 2026-11-17：完整脚本模型 benchmark 的 match、mismatch、authority_first、fast_failure 均通过；证据分别为 `/tmp/opencode/benchmark-task-gT3UtV`、`/tmp/opencode/benchmark-task-y4bhE3`、`/tmp/opencode/benchmark-task-JaHLiL`、`/tmp/opencode/benchmark-task-JaZYQN`。恢复文件场景通过，证据 `/tmp/opencode/recovery-filesystem-f2BUCi`。provider 在首个流事件前失败时保留 action 身份，供 Pi 随后生成的失败消息关联 Usage；恢复后的运行重新发布当前连接状态，避免历史断开事件阻止 `/continue`。未调用真实模型。
 
@@ -62,11 +76,11 @@ Branch cancellation 与 Execute 使用同一 admission 锁：开始取消时推�
 
 上述语义只说明当前已接通的模型投机接缝，不表示已经解决所有模型投机策略问题。调用列表等价的规范化／语义相似规则、多模型成本与失败回退仍由 `Discussion.md` 第 40 项保留为未决问题。
 
-当前实现中 Pi 是宿主上的单一进程，Authority 与全部 Candidate session 都由它托管；每个 Branch 的 Runtime 环境另外持有一个常驻 namespace-holder，文件工具通过该 Branch 专属 socket 在已有 mount namespace 中执行，Pi 不进入 Branch namespace。control plane 持有逻辑 transcript，并在创建 Candidate 时继承父 Branch 的逻辑 transcript；Pi 的 Branch session 继续保留原生记录，以便最终汇总和从原生 checkpoint 续跑。`/app` 这类 workload 路径由 FilesystemBackend 的 `isolated_paths: [{path, target}]` 映射，host 目录仍是 overlay lower 与 publication 目标。holder 的命令各自独立执行，直接 shell 退出即返回，后台后代留在 Branch namespace 直到环境结束；物化轮换 execution generation 时旧 holder 结束，发布后建立新 holder。
+当前实现中 Pi 是宿主上的单一进程，Authority 与全部 Candidate session 都由它托管；启用文件系统隔离的 Branch 环境另外持有一个常驻 namespace-holder。Pi 通过 ASC-Proxy 请求 Runtime 执行文件工具，Runtime 内部适配器再通过该环境的 holder socket 在已有 mount namespace 中执行，Pi 不进入 Branch namespace，也不直接访问 holder。control plane 持有逻辑 transcript，并在创建 Candidate 时继承父 Branch 的逻辑 transcript；Pi 的 Branch session 继续保留原生记录，以便最终汇总和从原生 checkpoint 续跑。`/app` 这类 workload 路径由 FilesystemBackend 的 `isolated_paths: [{path, target}]` 映射，host 目录仍是 overlay lower 与 publication 目标。holder 的命令各自独立执行，直接 shell 退出即返回，后台后代留在 Branch namespace 直到环境结束；物化轮换 execution generation 时旧 holder 结束，发布后建立新 holder。
 
 ## 2. 接口
 
-`instrumentation/core/index.ts` 导出 `createAgentAccess(options)`。调用方提供：
+`instrumentation/core/index.ts` 导出 `createInterposer(options): Interposer`。调用方提供：
 
 | 选项 | 含义 |
 | --- | --- |
@@ -113,6 +127,10 @@ Branch cancellation 与 Execute 使用同一 admission 锁：开始取消时推�
 2026-11-13 确认：运行分支采用 Pi 原生完整持久化，允许多 session 作为过渡，由 Instrumentation 汇总为单一最终权威 session。源分支停止写入且成功汇总后，才可删除对应临时文件；Promote 后仍活跃的 winner 不能删除。compaction、custom 等记录必须保存，不只保存 `message_end`。这些是已定实现方向，不表示当前适配器已经完成。
 
 实现入口为 `instrumentation/pi/main.ts` 与 `session-tree.ts`；当前原生持久化、真实结果父链整理和停止写入后的汇总删除进展及验证范围见本节末。
+
+Policy 的 `predict` 通过现有 proposal `payload` 交付预测值。Pi 在实际工具 checkpoint 后追加原生 `toolResult`。支持单个原生 `text`／`image` 块、非空的原生块列表，以及带原生 `content` 列表的结果体。结果体可携带 `isError`、`details`、`usage`、`nestedCalls`、`timestamp`、`durationMs`，调用 ID 和名称取自 checkpoint。没有显式状态时按成功处理，因此布尔 `false` 是成功的文本 `false`。字符串按原样交付，包括描述图像的字符串。其他 JSON 值（包括裸空列表）以 JSON 文本交付；结果体中的 `content: []` 保留为空。模型端的图像支持及请求格式由 Pi provider 决定，原生历史保留块顺序。任意工具专有字段没有通用映射。
+
+`tests/pi-prediction-result.mjs` 通过正常 YAML Policy、control plane、Runtime 和真实 Pi session 接入本地伪 HTTP 模型。回归先复现了结构化结果被保存为 JSON 文本，再验证候选原生历史中的块顺序、失败状态和消息详情，以及下一请求中的文本和图像。同一轮只执行一次权威工具。候选续跑和恢复沿用原生 session 记录，尚未专项验证带图像候选的跨进程恢复。
 
 必要状态交接的正确性由机制保证。文件系统可讨论以共同快照为基准，将真实执行的差异合入获胜候选；这只是讨论方向，不是已实现 Backend，也不是通用状态 merge 的授权。
 

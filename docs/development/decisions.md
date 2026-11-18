@@ -1,9 +1,42 @@
 # 开发决策
 
+## 完整操作的双向二进制传输
+
+完整操作在既有 socket 上发送有界 JSON 首行和独立字节帧。Rust 和目标 backend 先接收完整上传，再执行原子写入或有序修改。请求指纹覆盖内容字节，输出暂存直到终态确认。目录、声明工具结果和 Control Gateway 继续按各自契约返回。缓存归属、内存需求、磁盘限制和真实 VM 证据见 [Runtime Adapter 开发记录](runtime-adapter.md#完整操作与实际限制)。
+
+## 完整操作阶段：有界读取、目标 cwd 与独立队列验证
+
+本阶段将 Pi offset／limit／50 KiB 输出预算下推到同一次通用 read_file；Runtime 的 binary_fallback 只按标准图片签名选择完整二进制返回，文本返回 actual_range／has_more，不扫描 total_lines。FS 使用已有 backend workspace 映射，VM 使用既有 /root；可信宿主 Agent launch cwd 不能当作 VM cwd，客户端 bound_cwd 不可覆盖绑定。不分配新 Environment，不改变授权、generation／重放或取消策略。
+
+Pi session 的宿主 cwd 仅用于会话。文件工具将原始路径交给绑定的 Environment，`bash` 省略 cwd。非零退出码作为 Runtime 命令结果成功交付，由 Pi 转为 `isError: true`，保留输出和退出码。验证见 [Runtime Adapter 开发记录](runtime-adapter.md#完整操作与实际限制)。
+
+独立 holder 和 VM 使用 FIFO 打开作为确定性持锁屏障，第二环境在第一环境释放前完成相同 canonical path 的写入；同环境 alias 另以锁获取／释放事件验证确实等待同一锁。FS 与 VM 的统一入口均覆盖相对读写、替换、目录项及 exec 默认／显式 cwd。定向测试命令和结果见 [runtime-adapter.md](runtime-adapter.md)。
+
+## 完整 Runtime 操作替代 SDK 工具注入
+
+用户批准撤销下方历史 SDK reuse／mutation 注入方案：Pi Integration 独立适配 schema、参数与结果，一次完整调用对应一次 Runtime read_file、write_file、replace_text、list_directory 或 exec。目标 backend 完成编辑及 canonical path 串行，不经过宿主 read→edit→write；相邻 Pi edit/write 已移除仅为旧方案留下的改动，其他恢复／接入改动保留。Runtime／backend 无 Pi SDK／Node 工具依赖，NLE 声明调用生命周期保留。单操作取消按 Pi 原语义尽力终止进程组；用户明确拒绝为全部 daemonized 后代添加 cgroup、supervisor 或 PID namespace，该限制不作为验收阻碍。通信使用现有 socket 上的有界帧，输入完整接收及验证后才修改文件；实际资源限制与验证范围见 runtime-adapter.md。checkpoint、四启动路径、promotion、一次回退及恢复新执行授权语义不变。
+
+## 2026-11-18：Pi 原生工具与 Runtime 通用环境操作
+
+定向补验发现并修复 guest 请求超限无明确错误、读取文件无内存界限及 CompositeRuntime 漏转发 backend writer drain；保留现有 JSON byte 数组协议，不新增传输方案。后续按明确授权，同时修改相邻 Pi SDK 的 supported operations：edit/write 可注入 mutation 的路径解析与共享 scope，原生默认 realpath、队列登记顺序和取消中在飞写入锁保持不变。Product Integration 经通用 `canonicalize` 在目标 Environment 中解析路径，按执行端点及 Environment 身份共享 scope，独立环境不互相串行；scope 延迟读取当前绑定，不把恢复前地址或 Branch 名称当环境身份。真实 Pi SDK → AscProxy → Runtime → Firecracker 无模型用例以 guest `/root` 路径先复现宿主 EACCES，再通过，并覆盖相冲突的 host/guest symlink。逐操作 detached descendant 取消仍未解决；所有候选机制仅研究，须用户选择，不宣称整体完成。确切范围、上限及候选对比见 [Runtime 接入验证](runtime-adapter.md#2026-11-18-通用操作的定向验证与限制)。
+
+按已批准方案，Pi Product Integration 在已有 Agent 宿主复用 SDK 原生 read/edit/write/bash，通过 supported operations 注入调用 `read_file/write_file/stat/mkdir/exec`。文件系统 holder 与 Firecracker guest agent 各自原生执行；删除 Runtime 内的 Pi 工具模块及逐工具 Node 启动，不新增传输或组件。ASC-Proxy 与 Runtime 接收端复用既有执行／输出／取消／确认及重放窗口；SDK 子操作保留 tool_call_id 和原取消信号，独立请求编号不产生缺口。NLE 业务工具仍由 backend 负责。checkpoint 保持原有 snapshot cloning，不改变四条工具／模型 eager／speculative-first 路径或控制面所有权。
+
+集成验证实际复现：执行、drain 和 materialize 重新生成 launch fragment 会重置仍在使用的 OverlayFS work 目录，导致后续文件访问 ENOENT。三条路径改为读取当前内部 holder 元数据，不再准备已挂载的 work 目录。既有 Authority／恢复测试先失败后通过，不放宽断言。恢复 barrier fixture 保留执行函数新增参数，避免把通用操作误当空名称 NLE 工具。测试、证据和验证限制见 [接入实现](agent-access.md)。无提交／推送，无真实模型请求。
+
 ## Ledger 恢复审查：共享写入与控制快照
 
 按本轮明确授权，同一路径的 Ledger 打开操作复用进程内原写入器，追加、sync、失败回退与失败状态不可分离；等待观察事件不持写入锁。恢复直接使用 recovery_complete.control 重建 Tree，取消必需 tree.json 副本，继续检查 Agent／Runtime 附件和 Pi 引用；回退不得跨过 task_completed。兼容索引替换失败只写系统日志警告。直接附件及目录同步不代表 Runtime 外部资源与 Pi 引用的全链路断电保证。复现、回归和未完成的 session 打开入口见 [恢复开发记录](recovery.md)。未委派、提交或请求真实模型。
 
+## 2026-11-18：Interposer API 命名对齐
+
+用户明确授权将 `instrumentation/core/index.ts` 的 `createAgentAccess` 改名为 `createInterposer`，导出类型 `AgentAccess` 改名为 `Interposer`，使通用 Instrumentation API 与已确认的 Interposer 术语一致。生产调用、测试和当前接口映射同步更新；下文旧工厂名仅表示当时的历史名称。本次仅改名，不改变行为，不保留兼容包装，不新增概念名称，不涉及 backend 重设计；保留既有文档清理及恢复相关未提交改动。不调用子 Agent、真实模型或 Firecracker，不提交或推送。
+
+验证：通用层 `tsc --noEmit --strict --target es2022 --module nodenext --moduleResolution nodenext --skipLibCheck instrumentation/core/index.ts` 通过（使用 `../pi/node_modules/.bin/tsc`）；`node --test --test-concurrency=1 tests/predictor-fact.mjs tests/pi-access.mjs` 共 10 项，8 通过、2 失败，其中 Pi SDK double 6/6、predictor 2/4。失败均为留档 Policy 的模型／工具准入求值报 `Policy evaluation failed`；使用任务开始时保存的原始 core 和测试副本在临时目录复跑，仍为相同 2 项失败、2 项通过，未在改名任务内修复。`git diff --check` 通过。当前接口文档删除不存在的 `.predict` 调用说明，按现有代码描述 `Interposer.hasPredictor` 读取已交付事实；未改变预测实现。
+
+## 2026-11-18：Instrumentation 对齐后的文档清理
+
+核对 `1c6eec7` 后的实际代码，清除旧代理形式、控制面代执行工具及结果注入表述。ASC-Proxy 为进程内受管 Unix socket 客户端；Branch 身份直接传递，Agent session 不另作通信对端。Instrumentation 的执行访问信息沿 Runtime → control plane → Instrumentation 交付，内部工具执行实现已由上节通用环境操作取代。握手、绑定和请求窗口不视为完整凭证认证保证；能力缺口留在开发文档。`launch` 放行原调用；暂停普通消息排队，只有 `/continue` 解除暂停。该文档清理任务本身未改代码、运行模型、提交或推送，未写入 `Discussion.md`。
 
 ## 2026-11-17：Instrumentation 最终定向修正
 
@@ -17,7 +50,7 @@
 
 实现已改为暂停时只排队普通输入；显式 `/continue` 解开暂停后，control plane 依次投递队列内容。`/continue` 自身不作为模型输入。
 
-Runtime 在环境结果中返回命令端点访问信息，由 control plane 随 Branch 启动及恢复命令交给 Instrumentation。Instrumentation 通过统一 JSON-lines 执行/取消/终态确认接口发送 Branch、operation、tool、arguments 和 context；control plane 不再执行 Runtime 工具。Filesystem 命令由 Runtime 内部 Pi 工具适配器经 holder 执行；Pi 辅助进程使用 Pi 的源码解析器。缺少 execution access 时直接失败，不回退为 control-plane 结果注入，也不执行宿主文件工具。取消必须等端点接受命令后发送，并等待 backend 终态才确认。
+Runtime 在环境结果中返回命令端点访问信息，由 control plane 随 Branch 启动及恢复命令交给 Instrumentation。Instrumentation 通过统一 JSON-lines 执行/取消/终态确认接口发送 Branch、operation、tool、arguments 和 context；control plane 不再执行 Runtime 工具。当前 Pi 原生工具在 Product Integration 中通过 SDK operations 注入调用通用环境操作，Filesystem holder 原生执行文件／命令，不再使用内部 Pi 辅助进程。缺少 execution access 时直接失败，不回退为 control-plane 结果注入，也不执行宿主文件工具。取消必须等端点接受命令后发送，并等待 backend 终态才确认。
 
 2026-11-17 实现：ASC-Proxy 统一拥有控制 Gateway socket 与独立执行连接；control plane 用 `BindExecution` 明确建立 Branch→Environment 独占授权。端点复用 `req-N` 有界滑动身份窗口，确认释放正文，窗口外身份拒绝重放；执行连接传递增量 output。NLE 工具模拟延迟在 backend 内可取消等待，以独立动作锁维持共享世界动作串行，不占住 bridge 阻塞候选环境创建；请求进入 bridge 后转发取消并等待终态，已经进入同步游戏调用的动作等待调用返回。Branch abort 在活跃操作终态后执行 holder `drain(cancel:true)`，清理已完成调用留下的写者。恢复重新发布当前连接状态；失败模型的合成消息保留 action 关联。验证过期检查区分模型与真实工具动作；保存时已有 checkpoint 结果的工具不再因 transcript 尚未追加结果而重复登记恢复调用。具体验证及未完成项见 [Instrumentation 通用层](agent-access.md)。
 
@@ -54,7 +87,7 @@ Rust 和 Pi 本地均已接入有界常驻 worker 池，同一编译脚本的请
 
 ## 2026-11-16：终止、暂停与明确继续入口实现
 
-SIGINT 与 SIGTERM 分离：SIGINT、TUI Ctrl-C、Web Interrupt 共用 task 终止路径，SIGTERM 与显式 Shutdown 保留退出语义。`/continue` 走独立控制命令，不生成模型用户消息；普通消息继续解除暂停的兼容行为不扩展为新决定。重复终止不重复发出 Abort，终止期间 Pause 不阻塞收尾；保存晚到回执不重新发布终止中的运行。
+SIGINT 与 SIGTERM 分离：SIGINT、TUI Ctrl-C、Web Interrupt 共用 task 终止路径，SIGTERM 与显式 Shutdown 保留退出语义。`/continue` 走独立控制命令，不生成模型用户消息；当时保留普通消息解除暂停的兼容行为，该行为已由 2026-11-17“普通消息只排队，须 `/continue`”的决定取代。重复终止不重复发出 Abort，终止期间 Pause 不阻塞收尾；保存晚到回执不重新发布终止中的运行。
 
 核查发现持久环境允许工具返回后保留后台进程，而原物化直接结束环境持有进程，后台写者可能被提前终止。环境持有进程通过 Linux subreaper 接管脱离 shell 的后代；物化前确认其拥有的写者结束，取消通过同一环境停止这些写者，不把宿主无关进程视为任务写者。相关实际验证与剩余限制见 [恢复](recovery.md)。此前“SIGINT 仍映射 Shutdown”和“/continue 仅定名未接入”的阶段记录保留为历史，不再代表当前实现。
 
@@ -66,7 +99,7 @@ SIGINT 与 SIGTERM 分离：SIGINT、TUI Ctrl-C、Web Interrupt 共用 task 终�
 
 ## 2026-11-16：暂停后的明确继续命令定为 /continue
 
-用户确认 AScout `/pause` 暂停后的明确继续命令为 `/continue`，用于恢复原任务执行，保留原树、候选和环境关系。普通消息是否也解除暂停未定，本次不增加限制或行为；Ctrl-C 终止当前 task 后保留程序和 session、留在对话中的已定语义保持不变。
+用户确认 AScout `/pause` 暂停后的明确继续命令为 `/continue`，用于恢复原任务执行，保留原树、候选和环境关系。当时普通消息是否解除暂停尚未确定；此历史待议项已由 2026-11-17“普通消息只排队，须 `/continue`”的决定取代。Ctrl-C 终止当前 task 后保留程序和 session、留在对话中的已定语义保持不变。
 
 此决定取代下文“暂停后的继续命令名称未定”的阶段记录，独立暂停入口的具体 UI 仍未定。目标同步至 [Runtime](../design/runtime.md)、[Agent 接入](../design/agent-integration.md)及上层文档；现有普通输入继续仅属实现现状，`/continue` 命令接入待核查／实现，见[恢复](recovery.md)。本轮仅同步文档，不编码、不测试、不提交。
 
@@ -835,6 +868,8 @@ BaseRuntime 组合 filesystem 后，generic operate、tool_context 和 invoke_to
 可由后代进程继承的 bubblewrap namespace/Overlay 视图。这样 NLE/Firecracker
 等已有业务 Backend 不会被静默绕过，且同一命令不会因组合而执行两次。
 
+历史范围说明：上段为当时实现，启动承载已由 2026-11-15 的宿主 Pi／环境 holder 分离取代；2026-11-17 起 `invoke_tool` 对 `read/bash/edit/write` 改走 Runtime 内部文件工具适配器，其余工具仍委托 inner。generic operate 与 tool_context 仍委托 inner，不重复执行同一业务命令；当前路径见 [Runtime Adapter](runtime-adapter.md)。
+
 本轮范围审查确认 Adapter 的生命周期门槛是 Runtime Adapter 契约的通用语义，
 不是为 filesystem 临时增加的限制：operate/promote/suspend 需要 Available，
 branch 允许 Available 或 Suspended（暂停只阻止父环境内的新操作，派生读取
@@ -941,7 +976,7 @@ Agent 接入侧仍然是唯一控制 Agent 会话的地方：创建会话、克�
 - `AgentAccessCore` 真正驱动 Agent 连接和命令分发，并缓存重复命令的结果；同一 `command_id` 携带不同命令时返回 `rejected` 命令结果，而不是把协议冲突误报成 Branch 失败。
 - `agent-access.ts` 只保留入口连接与生命周期，Pi 的 session、transcript、checkpoint、工具拦截和候选续跑全部移入 `PiAdapter`。
 - Runtime Adapter 在 `Hello` 中声明 `RuntimeCapabilities`：可执行的 `RuntimeTool` 列表、是否共享底层环境、是否支持独立 `branch_environment`。
-- 控制面不再识别 `nle_action`。它按 Runtime 声明的工具名调用 `tool_context` 和 `invoke_tool`，用 Runtime 返回的 `result` 更新 Agent 工具通道，用 `evidence` 交给 Policy 匹配。
+- 当时控制面不再识别 `nle_action`，按 Runtime 声明的工具名调用 `tool_context` 和 `invoke_tool`，用 Runtime 返回的 `result` 更新 Agent 工具通道，用 `evidence` 交给 Policy 匹配。此为历史实现：2026-11-17 已改为 Instrumentation 经独立连接执行工具并上报结果，控制面只查询上下文、授权和裁决，不再代执行或注入真实结果。
 - NLE Runtime 声明 `nle_action` 工具；Candidate 仍使用控制面分配的独占 Environment，具体 workload 内部世界行为不暴露给控制面。
 - Pi Adapter 从 `ASCOUT_RUNTIME_TOOLS` 读取 Runtime 工具描述并动态注册；它不知道 NetHack、动作编号或 NLE 语义。
 - 控制面在 ToolPending 后立即发送一次 `resolve_pending`；候选处置阶段只决定 Candidate 生命周期，不再重复发送同一 `command_id` 的 resolve 命令。
@@ -970,7 +1005,7 @@ Agent 接入侧仍然是唯一控制 Agent 会话的地方：创建会话、克�
 - **NLE 只是测试用例，不属于 AScout 实现**。NLE 的 bridge、策略和运行环境作为外部 workload／适配保留，不进入核心 crate 的能力边界；核心契约不得出现 NLE 专用语义。
 - **AScout 不与 Pi 耦合**。Pi 是首个接入实现，不是架构组成；设计文档不得把 Pi 写成 AScout 的前提，控制面也不应把 Pi 的路径、工具或会话结构固化进核心协议。
 
-当前实现差距：`src/runtime/backends/nle.rs` 仍在核心 crate 中。控制面已不再对 NLE 调用 `branch_environment`，也不再识别 `nle_action`；它按 Runtime 声明的共享环境和环境工具调用 `tool_context`／`invoke_tool`。Pi 接入的启动已按 2026-11-02 决策移入 Runtime Adapter。
+当时实现差距：`src/runtime/backends/nle.rs` 仍在核心 crate 中。该阶段控制面不对 NLE 调用 `branch_environment`，按声明的共享环境及 `tool_context`／`invoke_tool` 工作；这些路径已由后来的 Environment 独占绑定及 2026-11-17 Instrumentation 独立执行连接取代，不作为当前规则。Pi 接入的启动已按 2026-11-02 决策移入 Runtime Adapter。
 
 ## 2026-10-31：NLE 投机改为动作边界暂存，废弃进程级 fork 分支
 
@@ -989,7 +1024,7 @@ CRIU 一类进程快照同样不采用：需要特权、镜像 I/O 和 FD 重绑
 
 用户确认 Workload 与 Policy 分离：Parent 真值随机取 example/true/false，Policy 用非固定随机抽取两个不同预测；候选执行 Predicted 命令，Parent 默认继续 spec fail。Parent 结果交付不等待比较，只有 Promote 才取消旧 Parent。等待点按 Parent 和 operation 归属，不因一条消息有多个工具而整组拒绝；其他工具结果需真实配对，不允许重复其效果。Promote 后取消旧 Parent 下其余候选，保持 single-winner。工具准入不写入 Pi；由 Policy、AScout 和 Runtime 的能力边界共同决定。
 
-废弃先前 afterToolCall 等待 ResolvePending、单候选容量、固定 example 预测及以单工具数量作为准入条件的实现。等待点准入和结果匹配在示例 Policy；Pi 不按工具名或命令格式筛选 Candidate 工具。当前接入把布尔预测和字符串枚举预测转换为 Agent 工具所需的文本表示，复杂结果转换仍有实现差距，见 reference-workload.md。非标准上下文仅记录，暂缓处理。
+废弃先前 afterToolCall 等待 ResolvePending、单候选容量、固定 example 预测及以单工具数量作为准入条件的实现。等待点准入和结果匹配在示例 Policy；Pi 不按工具名或命令格式筛选 Candidate 工具。当前候选结果交付和非标准上下文的范围见 [Agent 接入](agent-access.md#4-session-持久化与状态交接已定方向及实现差距)。
 
 随机场景位于独立脚本模型接口，不是控制面业务逻辑，也不是大模型成功证据。已有脚本命中实测确认两个候选先执行、Parent 真值返回、单一 Promote 和 loser/Parent 清理；既有在飞输出验证与本次随机场景验证应分开描述。
 
@@ -1139,3 +1174,7 @@ Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义�
 ### 运行身份命名统一（本轮确认）
 
 AScout 管理的运行身份命名为 run id，保存位置称“运行记录目录”；CLI 使用 `runs`、`--resume <run-id>`，启动和结束输出 `Run id`，新目录使用 `run-` 前缀，系统日志归属字段使用 `run=<id>`，配置仍为 `runs_dir`。旧 `session-*` 是不透明的既有 run id，按原 id 恢复，不迁移目录或改写 Agent 引用。Agent 原生 session/session id、AScoutAgent 的会话概念与 workspace 保留；run id 不等于 task id，新用户 prompt 仍创建新 task。本次不改变 task 机制，也不增加常驻多运行服务、EEC 或已结束会话打开命令。此前决策中的 session 命名保留为历史表述，以本条和当前正式文档为准。
+
+本轮补充确认了从已结束的 Agent session 继续工作的规则，以及常驻 control plane 管理多个 run 时关闭界面、结束指定 run 和停止整个进程的收尾范围。会话沿用原权威引用、run id 和运行记录目录，下一条 prompt 创建新 task，历史终态保留。具体规则见 [control plane 设计](../design/control-plane.md#1-总体设计)，实现进度见 [恢复开发记录](recovery.md)。
+
+后续确认并实现：同一个 `ascout-control-plane <pi-root> --resume <run-id>` 根据 Ledger 打开已保存暂停的 task 或已结束的权威会话。已结束会话以原历史启动新的控制上下文，等待下一条 prompt。运行目录内的持有锁保护同一 run 的会话和记录，原运行身份沿用。验证和兼容路径见 [恢复开发记录](recovery.md)。
