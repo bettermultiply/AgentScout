@@ -3,8 +3,8 @@ use super::{Assets, Connection, Presentation, Request};
 use crate::control_plane::ui_projection::UiProjection;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 

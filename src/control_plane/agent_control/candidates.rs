@@ -177,9 +177,11 @@ impl SpeculativeTree {
             chance.authority == AuthorityState::NotRequested
                 && chance.launch_epoch.is_some()
                 && self.branch_proposal(candidate).is_some()
-                && !self.pending_work.values().any(|work| matches!(work,
+                && !self.pending_work.values().any(|work| {
+                    matches!(work,
                     crate::control_plane::coordination::ControlOperation::Launch(tool)
-                    if tool.chance_id == chance.chance_id))
+                    if tool.chance_id == chance.chance_id)
+                })
         });
         (self.candidate_outcome(candidate).is_some() || held_proposal)
             && branch.status.is_decidable()

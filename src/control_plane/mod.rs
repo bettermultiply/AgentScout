@@ -8,5 +8,5 @@ pub mod observation;
 pub mod policy;
 pub mod recovery;
 
-pub mod ui_projection;
 pub mod system_log;
+pub mod ui_projection;

@@ -120,7 +120,15 @@ impl Worker {
             .arg("--ro-bind")
             .arg(std::fs::canonicalize(python)?)
             .arg(python)
-            .args(["--remount-ro", "/dev", "--remount-ro", "/", "--chdir", "/tmp", "--"])
+            .args([
+                "--remount-ro",
+                "/dev",
+                "--remount-ro",
+                "/",
+                "--chdir",
+                "/tmp",
+                "--",
+            ])
             .arg(python)
             .args(["-I", "-S", "-B", "/runner.py"])
             .stdin(Stdio::from(std::os::fd::OwnedFd::from(input)))
@@ -161,7 +169,10 @@ impl Worker {
         let mut output = Vec::new();
         loop {
             if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
-                return Err(io::Error::new(io::ErrorKind::Interrupted, "Policy evaluation cancelled"));
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Policy evaluation cancelled",
+                ));
             }
             if Instant::now() >= deadline {
                 return Err(io::Error::new(

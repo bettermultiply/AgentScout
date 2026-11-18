@@ -5,9 +5,9 @@
 mod compile;
 mod decision;
 mod engine;
+mod provider;
 mod validation;
 mod worker;
-mod provider;
 pub use provider::ModelProviderProcess;
 
 pub use compile::CompiledPolicy;

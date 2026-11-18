@@ -138,8 +138,16 @@ impl SpeculationCoordinator {
                                 .into(),
                         );
                     }
-                    let bound = call(&result.environment_id, Operation::BindExecution { branch_id: branch_id.clone() })?;
-                    return Ok(ControlResult::Environment(result.environment_id, bound.execution_access));
+                    let bound = call(
+                        &result.environment_id,
+                        Operation::BindExecution {
+                            branch_id: branch_id.clone(),
+                        },
+                    )?;
+                    return Ok(ControlResult::Environment(
+                        result.environment_id,
+                        bound.execution_access,
+                    ));
                 } else {
                     return Err("Runtime cannot create a Candidate Environment".into());
                 }
