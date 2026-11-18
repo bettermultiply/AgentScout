@@ -10,9 +10,9 @@
 
 ### Instrumentation predictor 事实与准入顺序修复（2026-11-16）
 
-依据 `docs/design/policy-decisions.md` §2.1，`has_predictor` 是粗筛之前已有的“对该结果可用的预测手段”事实，粗筛本身不做预测。当前 Instrumentation 唯一实际交付的预测入口是 `local_policy.decisions.predict`；`CompiledPolicy` 要求十个函数绑定完整，`script(Predict)` 把固定源码和绑定交付端侧，`createAgentAccess.predict` 也从同一个 `decisions.predict` 入口调用。当前没有另一个按操作类别声明 predictor 的注册表或配置。
+依据 `docs/design/policy-decisions.md` §2.1，`has_predictor` 是粗筛之前已有的“对该结果可用的预测手段”事实，粗筛本身不做预测。`CompiledPolicy` 要求十个函数绑定完整；当前 `predict` 由 control plane 求值，不通过 `createInterposer` 返回的 `Interposer` 接口调用。当前没有另一个按操作类别声明 predictor 的注册表或配置。
 
-因此 `hasPredictor(branch)` 只检查该 Branch 已交付的非空 `predict` 脚本，不调用任何 Decision，不依赖 `op` 或 `admit` 的结果；模型和工具 Hook 都先由该事实填充 `op.has_predictor`，再执行既有 `beforeAction`。工具入口同时保留原本查询时已有的 `authority` 事实，传入真正的准入输入。`admit` 仍决定当前具体操作是否值得作为入口；`predict` 仍决定当前输入能否产生 Proposal，允许空集合后走权威路径。可调用入口不承诺非空预测或预测正确性，不能把当前完整 Policy 总有 predict 绑定误解为对所有操作强制投机。未来若需按操作声明更细的预测能力，应先确认设计，不能在此修复中添加配置或工具白名单。
+因此 `Interposer.hasPredictor(branch)` 只读取 control plane 已交付的 `has_predictor` 事实，不调用任何 Decision，不依赖 `op` 或 `admit` 的结果；模型和工具 Hook 都先由该事实填充 `op.has_predictor`，再执行既有 `beforeAction`。工具入口同时保留原本查询时已有的 `authority` 事实，传入真正的准入输入。`admit` 仍决定当前具体操作是否值得作为入口；`predict` 仍决定当前输入能否产生 Proposal，允许空集合后走权威路径。可调用入口不承诺非空预测或预测正确性，不能把当前完整 Policy 总有 predict 绑定误解为对所有操作强制投机。未来若需按操作声明更细的预测能力，应先确认设计，不能在此修复中添加配置或工具白名单。
 
 原实现通过 `admit.opportunity_pass` 计算 `has_predictor`，构成循环依赖；模型首次请求和工具首次调用都可复现。修复没有改示例 Policy、预测算法、默认配置、control plane 裁决、single-winner 或 commit/discard，没有捕获并转换 Policy 异常。已交付 Policy 的继承、恢复和清理直接决定该事实，无额外缓存。
 

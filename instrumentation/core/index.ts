@@ -1,5 +1,5 @@
 /**
- * Interposer: product-independent Agent access, exposed by createAgentAccess.
+ * Interposer: product-independent Agent access, exposed by createInterposer.
  *
  * This module owns the parts of the Agent access side that do not depend on a
  * concrete Agent product: local Policy evaluation, per-Branch hook counting and
@@ -55,7 +55,7 @@ export type ControlCommand = {
     [field: string]: unknown;
 };
 
-export type AgentAccess = {
+export type Interposer = {
     setPolicy(branch: string, artifact: PolicyArtifact): void;
     /** Apply the hold bookkeeping for a control-plane command. */
     control(command: ControlCommand): Promise<void>;
@@ -91,7 +91,7 @@ async function waitFor(hold: Hold, signal: AbortSignal | undefined, message: str
     });
 }
 
-export function createAgentAccess({ taskId, report, evaluate, now = Date.now }: Options): AgentAccess {
+export function createInterposer({ taskId, report, evaluate, now = Date.now }: Options): Interposer {
     const policies = new Map<string, PolicyArtifact>();
     const effectHolds = new Map<string, Hold>();
     const pauseHolds = new Map<string, Hold>();

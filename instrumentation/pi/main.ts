@@ -1,4 +1,4 @@
-/** Product Integration: Pi SDK hooks and session management; createAgentAccess
+/** Product Integration: Pi SDK hooks and session management; createInterposer
  * supplies the Interposer and AscProxy supplies ASC-Proxy communication. */
 // This is a protocol boundary: Pi's SDK types are intentionally loaded from
 // the selected checkout at runtime, so the Rust-side wire schema remains the
@@ -9,7 +9,7 @@ import { IdentityWindow, positiveSequence } from '../../../pi/packages/pi-integr
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
 import { evaluatePolicyArtifact } from '../../../pi/packages/pi-integration/src/local-policy.ts';
-import { createAgentAccess } from '../core/index.ts';
+import { createInterposer } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
 import { Notifications } from './notification.ts';
 import { symlinkSync, renameSync, realpathSync, statSync, rmSync } from 'node:fs';
@@ -286,7 +286,7 @@ const report = payload => {
     return sendWire({kind:'message',payload});
 };
 const sendWire = wire => ascProxy.send(wire);
-const access = createAgentAccess({taskId,report,evaluate:evaluatePolicyArtifact});
+const access = createInterposer({taskId,report,evaluate:evaluatePolicyArtifact});
 const key = (branch, operation) => JSON.stringify([branch,operation]);
 const text = value => typeof value==='string'?value:JSON.stringify(value);
 
