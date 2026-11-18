@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 pub mod guest_agent;
 
 use crate::protocol::contract::{CommandOutput, EnvironmentState, RuntimeCapabilities};
-use crate::runtime::backend::{Backend, BackendError, CancelHandle};
+use crate::runtime::backend::{Backend, BackendContext, BackendError, CancelHandle};
 use crate::runtime::backends::firecracker::guest_agent::{GuestRequest, GuestResponse, PORT};
 
 #[derive(Debug, Deserialize)]

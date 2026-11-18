@@ -17,6 +17,8 @@ pub mod backends;
 pub mod base;
 pub mod capabilities;
 pub mod composite;
+pub mod environment;
+pub mod execution_wire;
 mod identity;
 pub mod launch_plan;
 pub mod process;

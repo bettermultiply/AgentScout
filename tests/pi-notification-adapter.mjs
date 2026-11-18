@@ -1,3 +1,4 @@
+import {writeExecution} from '../instrumentation/pi/execution-wire.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
@@ -14,8 +15,6 @@ test(`notification through main.ts: ${mode}`,{timeout:15000},async t=>{
     const failed=mode.includes('write'),idle=mode==='default'||mode.startsWith('idle_');
     const root=await mkdtemp('/tmp/opencode/notification-adapter-');
     await mkdir(join(root,'packages/coding-agent/src'),{recursive:true});
-    await mkdir(join(root,'packages/coding-agent/src/core/tools'),{recursive:true});
-    await writeFile(join(root,'packages/coding-agent/src/core/tools/index.ts'),`export const createToolDefinition=name=>({name,parameters:{type:'object'}});`);
     await mkdir(join(root,'node_modules/typebox'),{recursive:true});
     await writeFile(join(root,'package.json'),' {"type":"module"}');
     await writeFile(join(root,'node_modules/typebox/index.js'),'exports.Type={Unsafe:x=>x};');
@@ -89,7 +88,9 @@ export async function createAgentSession(options){
     assert.equal(audit.filter(e=>e.send).length,mode==='default'?0:1,'full command retransmission sends once');
     if(mode!=='default')assert.equal(messages.filter(m=>m.message==='transcript'&&m.entry.role==='custom').length,0,'queued is not delivered');
     if(mode==='turn_end'){
-        toolSocket.end(JSON.stringify({event:'terminal',status:'succeeded',output:{stdout:JSON.stringify({result:'real'})}})+'\n');toolSocket=undefined;
+        const stdout=Buffer.from(JSON.stringify({result:'real'}));
+        await writeExecution(toolSocket,{event:'terminal',status:'succeeded',body_kind:'business_output',stdout_length:stdout.length,exit_code:0},[stdout]);
+        toolSocket.end();toolSocket=undefined;
         send({command:'resolve_pending',branch_id:'authority',command_id:'finish-tool',operation_id:'op',generation:1,outcome:'real'});await wait(m=>m.message==='turn_completed');
         send(command);send({command:'resolve_pending',branch_id:'authority',command_id:'after-delivery',generation:1});await result('after-delivery','applied');
         send({...command,notification:'changed payload'});send({command:'resolve_pending',branch_id:'authority',command_id:'after-conflict',generation:1});await result('after-conflict','applied');

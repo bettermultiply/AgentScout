@@ -272,6 +272,7 @@ impl CompositeRuntime {
                 created_environment_id: None,
                 message: format!("Runtime cleanup partially failed: {}", messages.join("; ")),
                 cancelled: false,
+                error_category: "backend_error".into(),
                 completed,
                 remaining: Vec::new(),
                 cleanup_failures: messages,
@@ -580,6 +581,61 @@ impl Backend for CompositeRuntime {
         })
     }
 
+    fn cancel_tool_writers(&self, context: &BackendContext) -> Result<(), BackendError> {
+        let (connections, _) = self.selected_existing(context, BackendOperation::InvokeTool)?;
+        for connection in connections {
+            connection.backend.cancel_tool_writers(context)?;
+        }
+        Ok(())
+    }
+
+    fn environment_operation(
+        &self,
+        context: &BackendContext,
+        operation: &str,
+        arguments: &super::execution_wire::Message,
+        cancel: &CancelHandle,
+    ) -> Result<super::execution_wire::Message, BackendError> {
+        let kind = BackendOperation::InvokeTool;
+        let (connections, preferred) = self.selected_existing(context, kind)?;
+        let single = connections.len() == 1;
+        let mut result = None;
+        let mut completed = Vec::new();
+        for (index, connection) in connections.iter().enumerate() {
+            let execution = if cancel.is_cancelled() {
+                Err(BackendError::interrupted())
+            } else {
+                connection
+                    .backend
+                    .environment_operation(context, operation, arguments, cancel)
+            };
+            match execution {
+                Ok(value) => {
+                    completed.push(connection.id.clone());
+                    if preferred
+                        .as_deref()
+                        .map_or(single, |id| id == connection.id)
+                    {
+                        result = Some(value);
+                    }
+                }
+                Err(mut error) => {
+                    error.message = format!(
+                        "Backend {} failed during {kind:?}: {}",
+                        connection.id, error.message
+                    );
+                    error.completed = completed;
+                    error.remaining = connections[index..]
+                        .iter()
+                        .map(|backend| backend.id.clone())
+                        .collect();
+                    return Err(error);
+                }
+            }
+        }
+        result.ok_or_else(|| BackendError::new("ambiguous backend output"))
+    }
+
     fn invoke_tool_with_context(
         &self,
         context: &BackendContext,
@@ -654,6 +710,7 @@ impl Backend for CompositeRuntime {
             .collect();
         let child_context = BackendContext {
             operation_id: context.operation_id.clone(),
+            tool_call_id: context.tool_call_id.clone(),
             generation: context.generation,
             environment_id: child.to_string(),
             parent_environment_id: Some(parent.to_string()),

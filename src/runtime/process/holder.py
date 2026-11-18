@@ -7,17 +7,19 @@ an aborted command can be terminated without killing the holder or background
 work started by an earlier command.
 """
 
-import base64
 import ctypes
 import json
 import os
 import select
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+import tempfile
+import struct
 
 SOCKET = sys.argv[1]
 # Adopt detached tool descendants even when the launcher does not create a
@@ -40,11 +42,254 @@ listener.bind(SOCKET)
 os.chmod(SOCKET, 0o600)
 listener.listen(64)
 writer_lock = threading.Lock()
+mutation_registration = threading.Lock()
+mutation_locks = {}
 
 
-def send_event(connection, payload):
+HEADER_LIMIT = 1024 * 1024
+FRAME_SIZE = 64 * 1024
+
+
+def receive_request(reader, spool):
+    header = reader.readline(HEADER_LIMIT + 1)
+    if len(header) > HEADER_LIMIT or not header.endswith(b'\n'):
+        raise ValueError('oversized or incomplete message header')
+    request = json.loads(header)
+    if not isinstance(request, dict) or 'framed' in request:
+        raise ValueError('invalid request header')
+    if 'body_length' not in request:
+        return request, None
+    length = request.pop('body_length')
+    if type(length) is not int or length < 0 or length > 2**64 - 1:
+        raise ValueError('invalid body length')
+    remaining = length
+    while True:
+        raw = reader.read(4)
+        if len(raw) != 4:
+            raise ValueError('incomplete body frame')
+        size = struct.unpack('>I', raw)[0]
+        if size == 0:
+            if remaining:
+                raise ValueError('incomplete declared body')
+            spool.seek(0)
+            return request, length
+        if size > FRAME_SIZE or size > remaining:
+            raise ValueError('invalid body frame length')
+        chunk = reader.read(size)
+        if len(chunk) != size:
+            raise ValueError('incomplete body frame')
+        spool.write(chunk)
+        remaining -= size
+
+
+def validate_body(operation, request, length):
+    if 'bytes' in request or 'input' in request:
+        raise ValueError('expected a separate binary body')
+    if operation in ('write_file', 'replace_text') and length is None:
+        raise ValueError('operation requires a body')
+    if length is not None and operation not in ('write_file', 'replace_text', 'exec'):
+        raise ValueError('unexpected operation body')
+    if operation == 'replace_text':
+        edits = request.get('replacements')
+        if not isinstance(edits, list) or not edits:
+            raise ValueError('replacements must not be empty')
+        total = 0
+        for edit in edits:
+            if not isinstance(edit, dict) or set(edit) - {'old_length', 'new_length', 'match'}:
+                raise ValueError('invalid replacement metadata')
+            old, new = edit.get('old_length'), edit.get('new_length')
+            if type(old) is not int or old <= 0 or type(new) is not int or new < 0:
+                raise ValueError('invalid replacement lengths')
+            if edit.get('match', 'exactly_one') not in ('all', 'exactly_one'):
+                raise ValueError('invalid replacement match')
+            total += old + new
+        if total != length:
+            raise ValueError('invalid replacement body lengths')
+
+
+def atomic_write(path, content):
+    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path))
     try:
-        connection.sendall((json.dumps(payload) + "\n").encode())
+        with os.fdopen(fd, 'wb') as target:
+            if os.path.exists(path):
+                os.fchmod(target.fileno(), os.stat(path).st_mode & 0o7777)
+            if isinstance(content, bytes):
+                target.write(content)
+            else:
+                shutil.copyfileobj(content, target, FRAME_SIZE)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+MAX_LINE_BYTES = 32 * 1024 * 1024
+
+
+def file_operation(connection, operation, request, spool, length):
+    path = os.path.join(request.get('bound_cwd') or '/', request['path'])
+    if operation == 'list_directory':
+        with os.scandir(path) as entries:
+            entries = sorted([{'name': e.name, 'type': 'symlink' if e.is_symlink() else 'directory' if e.is_dir() else 'file' if e.is_file() else 'other'} for e in entries], key=lambda e: e['name'])
+        with tempfile.TemporaryFile(dir=os.path.dirname(SOCKET)) as output:
+            for part in json.JSONEncoder().iterencode({'entries': entries}):
+                output.write(part.encode())
+            size = output.tell()
+            output.seek(0)
+            send_file(connection, {'value': {}, 'body_kind': 'json_value'}, output, size)
+        return
+    if operation == 'read_file':
+        if 'byte_range' in request and 'line_range' in request:
+            raise ValueError('byte_range and line_range are mutually exclusive')
+        with open(path, 'rb') as source:
+            prefix = source.read(12)
+            source.seek(0)
+            if request.get('binary_fallback') and (prefix.startswith((b'\x89PNG', b'\xff\xd8\xff', b'GIF8', b'BM')) or (prefix.startswith(b'RIFF') and prefix[8:12] == b'WEBP')):
+                size = os.fstat(source.fileno()).st_size
+                return send_file(connection, {'value': {'representation': 'binary'}, 'body_kind': 'file_bytes'}, source, size)
+            if 'line_range' in request:
+                max_bytes = min(request.get('max_bytes', MAX_LINE_BYTES), MAX_LINE_BYTES)
+                bounds = request['line_range']
+                offset, limit = bounds['offset'], bounds['limit']
+                if type(offset) is not int or offset < 1 or type(limit) is not int or limit < 0:
+                    raise ValueError('invalid line range')
+                line, selected, content = 1, 0, bytearray()
+                ended_with_newline, reached_eof = False, False
+                completed_bytes, truncated = 0, False
+                while not (line >= offset and selected >= limit):
+                    chunk = source.readline(65536)
+                    if not chunk:
+                        reached_eof = True
+                        if line < offset:
+                            raise ValueError('Offset is beyond end of file')
+                        if line >= offset and selected < limit:
+                            selected += 1
+                        break
+                    ended_with_newline = chunk.endswith(b'\n')
+                    if line >= offset:
+                        if len(content) + len(chunk) > max_bytes:
+                            del content[completed_bytes:]
+                            truncated = True
+                            break
+                        content.extend(chunk)
+                    if ended_with_newline:
+                        if line >= offset:
+                            selected += 1
+                            completed_bytes = len(content)
+                        line += 1
+                if not reached_eof and content.endswith(b'\n'):
+                    content.pop()
+                content.decode('utf-8')
+                value = {'actual_range': {'offset': offset, 'limit': selected}, 'has_more': not reached_eof, 'truncated': truncated}
+                return send_event(connection, {'value': value, 'body_kind': 'file_bytes'}, content)
+            bounds = request.get('byte_range') or {}
+            offset, limit = bounds.get('offset', 0), bounds.get('limit')
+            if type(offset) is not int or offset < 0 or (limit is not None and (type(limit) is not int or limit < 0)):
+                raise ValueError('invalid byte range')
+            source.seek(offset)
+            file_size = os.fstat(source.fileno()).st_size
+            available = max(0, file_size - offset)
+            if file_size == 0 and limit:
+                # Pseudo-files such as /proc entries need an actual read to
+                # determine the size of a requested range.
+                with tempfile.TemporaryFile(dir=os.path.dirname(SOCKET)) as output:
+                    remaining = limit
+                    while remaining:
+                        chunk = source.read(min(remaining, FRAME_SIZE))
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                        remaining -= len(chunk)
+                    size = limit - remaining
+                    output.seek(0)
+                    value = {'actual_range': {'offset': offset, 'limit': size}, 'has_more': False, 'truncated': False}
+                    return send_file(connection, {'value': value, 'body_kind': 'file_bytes'}, output, size)
+            size = available if limit is None else min(limit, available)
+            value = {'actual_range': {'offset': offset, 'limit': size}, 'has_more': size < available, 'truncated': False}
+            return send_file(connection, {'value': value, 'body_kind': 'file_bytes'}, source, size)
+    path = os.path.realpath(path)
+    with mutation_registration:
+        lock, users = mutation_locks.get(path, (threading.Lock(), 0))
+        mutation_locks[path] = (lock, users+1)
+    try:
+        with lock:
+            if operation == 'write_file':
+                if request.get('create_parents'):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                atomic_write(path, spool)
+                value = {'bytes_written': length}
+            else:
+                value = replace_text(path, request['replacements'], spool)
+        return send_event(connection, {'value': value})
+    finally:
+        with mutation_registration:
+            _, users = mutation_locks[path]
+            if users == 1:
+                del mutation_locks[path]
+            else:
+                mutation_locks[path] = (lock, users-1)
+
+
+def replace_text(path, replacements, spool):
+    with open(path, 'rb') as source:
+        original = source.read().decode('utf-8')
+    text, counts = original, []
+    for replacement in replacements:
+        old = spool.read(replacement['old_length']).decode('utf-8')
+        new = spool.read(replacement['new_length']).decode('utf-8')
+        count = text.count(old)
+        if count == 0:
+            raise ValueError('Could not find exact old_text')
+        if replacement.get('match', 'exactly_one') == 'exactly_one' and count != 1:
+            raise ValueError('old_text is ambiguous; expected exactly one occurrence')
+        text = text.replace(old, new)
+        counts.append(count)
+    changed = text != original
+    content = text.encode() if changed else b''
+    if changed:
+        atomic_write(path, content)
+    return {'counts': counts, 'changed': changed, 'bytes_written': len(content)}
+
+
+def send_header(connection, payload, length=None):
+    if length is not None:
+        payload = dict(payload, body_length=length)
+    header = (json.dumps(payload) + "\n").encode()
+    if len(header) > HEADER_LIMIT:
+        raise ValueError('oversized message header')
+    connection.sendall(header)
+
+
+def send_chunk(connection, chunk):
+    connection.sendall(struct.pack('>I', len(chunk)))
+    if chunk:
+        connection.sendall(chunk)
+
+
+def send_file(connection, payload, source, remaining):
+    send_header(connection, payload, remaining)
+    while remaining:
+        chunk = source.read(min(remaining, FRAME_SIZE))
+        if not chunk:
+            # A concurrent truncate must close the incomplete response, since
+            # the peer is still expecting a content frame.
+            connection.shutdown(socket.SHUT_WR)
+            return
+        send_chunk(connection, chunk)
+        remaining -= len(chunk)
+    send_chunk(connection, b'')
+
+
+def send_event(connection, payload, content=None):
+    try:
+        send_header(connection, payload, None if content is None else len(content))
+        if content is not None:
+            view = memoryview(content)
+            for offset in range(0, len(view), FRAME_SIZE):
+                send_chunk(connection, view[offset:offset + FRAME_SIZE])
+            send_chunk(connection, b'')
         return True
     except OSError:
         return False
@@ -72,7 +317,7 @@ def drain(source, connection, state, field):
             # closed reader.
             if state["finished"]:
                 return True
-            if send_event(connection, {field: base64.b64encode(chunk).decode("ascii")}):
+            if send_event(connection, {"stream": field}, chunk):
                 return True
             state["finished"] = True
             state["foreground_done"] = True
@@ -210,12 +455,16 @@ def serve(connection):
         "stderr_flushed": threading.Event(),
     }
     process = None
+    spool = None
     try:
-        reader = connection.makefile("rb")
-        line = reader.readline()
-        if not line:
-            return
-        request = json.loads(line)
+        connection.settimeout(30)
+        with connection.makefile('rb') as reader:
+            # Only the target holder owns this upload file. It is never named
+            # in the target workspace and cannot survive a failed request.
+            spool = tempfile.TemporaryFile(dir=os.path.dirname(SOCKET))
+            request, length = receive_request(reader, spool)
+        operation = request.get('op')
+        validate_body(operation, request, length)
         if request.get("op") == "drain":
             # Only descendants owned by this holder can be writers. Detached
             # descendants are adopted via subreaper; unrelated PIDs are ignored.
@@ -238,31 +487,24 @@ def serve(connection):
                         return
                 time.sleep(POLL_SECONDS)
             return
-        if request.get("op") != "exec":
+        if operation in ("read_file", "write_file", "replace_text", "list_directory"):
+            file_operation(connection, operation, request, spool, length)
+            return
+        if operation != "exec":
             raise RuntimeError("unknown holder operation")
         environment = dict(os.environ)
         environment.update(request.get("env") or {})
-        raw_input = request.get("input")
         process = subprocess.Popen(
             ["/bin/bash", "-c", request["command"]],
-            cwd=request.get("cwd") or "/",
+            cwd=os.path.join(request.get('bound_cwd') or '/', request.get('cwd') or '.'),
             env=environment,
-            stdin=subprocess.PIPE if raw_input is not None else subprocess.DEVNULL,
+            stdin=spool if length is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
             close_fds=True,
         )
-        if raw_input is not None:
-
-            def feed():
-                try:
-                    process.stdin.write(base64.b64decode(raw_input))
-                    process.stdin.close()
-                except (BrokenPipeError, OSError):
-                    pass
-
-            threading.Thread(target=feed, daemon=True).start()
+        spool.close()
         for source, field in ((process.stdout, "stdout"), (process.stderr, "stderr")):
             threading.Thread(
                 target=drain, args=(source, connection, state, field), daemon=True
@@ -296,7 +538,7 @@ def serve(connection):
             if failure is None:
                 send_event(connection, {"exit_code": process.returncode})
             else:
-                send_event(connection, {"error": failure})
+                send_event(connection, {"error": failure, "error_category": "timed_out" if failure == "Tool timed out" else "cancelled"})
     except Exception as error:  # noqa: BLE001 - report every holder failure
         if process is not None and process.poll() is None:
             terminate(process)
@@ -307,9 +549,12 @@ def serve(connection):
         state["foreground_done"] = True
         with state["lock"]:
             state["finished"] = True
-            send_event(connection, {"error": str(error)})
+            category = 'not_found' if isinstance(error, FileNotFoundError) else 'permission_denied' if isinstance(error, PermissionError) else 'invalid_input' if isinstance(error, (ValueError, TypeError, KeyError, UnicodeError)) else 'io_error'
+            send_event(connection, {"error": str(error), "error_category": category})
     finally:
         try:
+            if spool is not None:
+                spool.close()
             connection.close()
         except OSError:
             pass

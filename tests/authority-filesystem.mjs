@@ -7,11 +7,13 @@ import {once} from 'node:events';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
-test('Authority publishes after background writers, resets across tasks, cancels and retries failure',{timeout:120000},async t=>{
+for (const exitStatus of [true,false]) {
+test(exitStatus?'Pi reports a delivered nonzero bash exit as a failed action once':'Authority publishes after background writers, resets across tasks, cancels and retries failure',{timeout:120000},async t=>{
  const project=process.cwd(),root=fs.mkdtempSync('/tmp/opencode/authority-filesystem-');console.log('evidence',root);
  for(const name of ['workspace','pi','policy','tmp'])fs.mkdirSync(root+'/'+name);
  let requests=0;
-  const commands=[`printf first > a; (echo $BASHPID > '${root}/background-pid'; while :; do printf x >> '${root}/background-heartbeat'; sleep 0.05; done) >/dev/null 2>&1 &`,null,
+ const commands=exitStatus?['printf x >> runs; printf failure-output; exit 7','printf y >> runs; printf success-output',null]:[
+   `printf first > a; (echo $BASHPID > '${root}/background-pid'; while :; do printf x >> '${root}/background-heartbeat'; sleep 0.05; done) >/dev/null 2>&1 &`,null,
    {name:'write',args:{path:'b',content:'before'}},{name:'edit',args:{path:'b',oldText:'before',newText:'second'}},{name:'read',args:{path:'b'}},null,
    `printf cancelled > c; printf ready > '${root}/cancel-ready'; sleep 30`,null,`printf partial > partial; ln -sf new z`,null];
  const fake=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{
@@ -34,6 +36,24 @@ test('Authority publishes after background writers, resets across tasks, cancels
  const post=body=>fetch(`http://127.0.0.1:${port}/api/request`,{method:'POST',headers:{origin:`http://127.0.0.1:${port}`,'content-type':'application/json'},body:JSON.stringify(body)});
  const completed=()=>events().filter(e=>e.message==='task_completed');
  await wait(()=>events().some(e=>e.message==='branch_ready'),'ready');
+ if(exitStatus){
+   assert.equal((await post({action:'prompt',prompt:'Run the two fixture commands.'})).status,202);
+   await wait(()=>completed().length===1,'fixture commands complete');
+   const rows=events();
+   const toolEvents=message=>rows.filter(e=>e.message===message&&e.action_kind==='tool_execution');
+   assert.deepEqual(toolEvents('action_started').map(e=>e.action_id),['shell0','shell1']);
+   const finished=toolEvents('action_finished');
+   assert.deepEqual(finished.map(e=>[e.action_id,e.status,e.result.is_error]),[
+     ['shell0','failed',true],['shell1','succeeded',false],
+   ]);
+   assert.match(finished[0].result.payload,/failure-output[\s\S]*Command exited with code 7/);
+   assert.equal(finished[1].result.payload,'success-output');
+   assert.equal(fs.readFileSync(runPath(root,'workspace/runs'),'utf8'),'xy');
+   assert.equal(requests,3);
+   const done=once(p,'exit');assert.equal((await post({action:'shutdown'})).status,202);await done;
+   assert.equal(p.exitCode,0);
+   return;
+ }
  await post({action:'prompt',prompt:'first'});
  await wait(()=>events().some(e=>e.message==='action_started'&&e.name==='bash'),'writer started');
  await new Promise(r=>setTimeout(r,200));
@@ -115,3 +135,4 @@ test('Authority publishes after background writers, resets across tasks, cancels
     assert.equal(fs.existsSync(runPath(root, 'workspace/shutdown-late')),false);
  console.log('PASS Authority lifecycle',root);
 });
+}

@@ -1,3 +1,4 @@
+import {writeExecution} from '../instrumentation/pi/execution-wire.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
@@ -7,11 +8,6 @@ import { createServer } from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 
 const REAL_PI = '/home/betmul/BETMUL/AgentScout-suit/pi';
-
-async function toolDefinitions(root) {
-    await mkdir(join(root,'packages/coding-agent/src/core/tools'),{recursive:true});
-    await writeFile(join(root,'packages/coding-agent/src/core/tools/index.ts'),`export const createToolDefinition=name=>({name,parameters:{type:'object'}});`);
-}
 
 function readTree(file) {
     const script = `import { SessionManager } from '${REAL_PI}/packages/coding-agent/src/core/session-manager.ts'; const m=SessionManager.open(process.argv[1]); console.log(JSON.stringify({entries:m.getEntries(),messages:m.buildSessionContext().messages}));`;
@@ -25,7 +21,6 @@ test(`runtime result commands and graceful shutdown at ${shutdownAt}`, async t =
     const root = await mkdtemp(join(tmpdir(), 'ascout-pi-'));
     const socketPath = join(root, 'agent.sock');
     await mkdir(join(root, 'packages/coding-agent/src'), { recursive: true });
-    await toolDefinitions(root);
     await mkdir(join(root, 'node_modules/typebox'), { recursive: true });
     await writeFile(join(root, 'package.json'), '{"type":"module"}');
     await writeFile(join(root, 'node_modules/typebox/index.js'), 'exports.Type={Unsafe:x=>x};');
@@ -89,9 +84,20 @@ export async function createAgentSession(options) {
     await new Promise(resolve => server.listen(socketPath, resolve));
     const executionPath=join(root,'execution.sock'),executions=[];
     const executionServer=createServer(socket=>{
-        let input='';socket.on('data',chunk=>{input+=chunk;const end=input.indexOf('\n');if(end<0)return;
-            const request=JSON.parse(input.slice(0,end));input=input.slice(end+1);executions.push(request);
-            if(request.command==='execute')socket.end(JSON.stringify({event:'accepted'})+'\n'+JSON.stringify({event:'terminal',status:'succeeded',output:{stdout:JSON.stringify({result:{payload:request.branch_id==='authority'?'real-result':'candidate-real-result'},evidence:null})}})+'\n');
+        let input='';
+        socket.on('data',async chunk=>{
+            input+=chunk;
+            const end=input.indexOf('\n');
+            if(end<0)return;
+            const request=JSON.parse(input.slice(0,end));
+            input=input.slice(end+1);
+            executions.push(request);
+            if(request.command==='execute'){
+                const stdout = Buffer.from(JSON.stringify({result:{payload:request.branch_id==='authority'?'real-result':'candidate-real-result'},evidence:null}));
+                await writeExecution(socket,{event:'accepted'});
+                await writeExecution(socket,{event:'terminal',status:'succeeded',body_kind:'business_output',stdout_length:stdout.length,exit_code:0},[stdout]);
+                socket.end();
+            }
             else socket.end(JSON.stringify({event:request.command==='confirm'?'confirmed':'terminal',status:'cancelled'})+'\n');
         });
     });
@@ -260,7 +266,6 @@ test('model usage survives completion before message_end and reports an unpaired
     const root = await mkdtemp(join(tmpdir(), 'ascout-pi-'));
     const socketPath = join(root, 'agent.sock');
     await mkdir(join(root, 'packages/coding-agent/src'), { recursive: true });
-    await toolDefinitions(root);
     await mkdir(join(root, 'node_modules/typebox'), { recursive: true });
     await writeFile(join(root, 'package.json'), '{"type":"module"}');
     await writeFile(join(root, 'node_modules/typebox/index.js'), 'exports.Type={Unsafe:x=>x};');

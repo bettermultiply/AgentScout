@@ -10,6 +10,7 @@ use serde_json::Value;
 
 fn operation_context(environment_id: &str, request: &OperationRequest) -> BackendContext {
     BackendContext {
+        tool_call_id: None,
         operation_id: request.request_id.clone(),
         generation: request.generation,
         task_id: request.task_id.clone(),

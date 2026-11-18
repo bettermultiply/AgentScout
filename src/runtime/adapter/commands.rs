@@ -1,11 +1,11 @@
 //! Instrumentation command connection, separate from control-plane operations.
 use super::*;
 use crate::protocol::contract::{EnvironmentState, ExecutionAccess};
-use crate::runtime::backend::{BackendContext, CancelHandle};
+use crate::runtime::backend::{BackendContext, BackendError, CancelHandle};
+use crate::runtime::execution_wire::{self as wire, Body, Message};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -24,7 +24,10 @@ enum Request {
         branch_id: String,
         operation_id: String,
         environment_id: String,
+        #[serde(default)]
         tool: String,
+        #[serde(default)]
+        operation: Option<String>,
         arguments: Value,
         #[serde(default)]
         context: Value,
@@ -101,10 +104,19 @@ mod tests {
     fn call(commands: &Commands, request: Value) -> Vec<Value> {
         let mut socket = UnixStream::connect(commands.access("environment").address).unwrap();
         send(&mut socket, &request).unwrap();
-        BufReader::new(socket)
-            .lines()
-            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
-            .collect()
+        let mut events = Vec::new();
+        let mut reader = BufReader::new(socket);
+        loop {
+            let event = wire::read(&mut reader, false).unwrap();
+            let done = matches!(
+                event.meta["event"].as_str(),
+                Some("terminal" | "confirmed" | "rejected")
+            );
+            events.push(event.meta);
+            if done {
+                return events;
+            }
+        }
     }
     #[test]
     fn authorization_output_and_retirement_are_enforced() {
@@ -281,13 +293,29 @@ mod tests {
 }
 
 struct Entry {
-    output: Mutex<Vec<Value>>,
+    output: Mutex<Option<Replay>>,
     id: String,
     request: [u8; 32],
     cancel: Arc<CancelHandle>,
-    terminal: Mutex<Option<Value>>,
+    terminal: Mutex<Option<Message>>,
     ready: Condvar,
 }
+// One anonymous file per operation with output. Readers snapshot the committed
+// range and send it outside the lock, so a slow client cannot hold up cancel.
+struct Replay {
+    file: Arc<std::fs::File>,
+    length: u64,
+}
+impl Replay {
+    fn append(&mut self, event: &Message) -> std::io::Result<()> {
+        let mut writer = &*self.file;
+        writer.seek(SeekFrom::Start(self.length))?;
+        event.write(&mut writer)?;
+        self.length = writer.stream_position()?;
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct Table {
     generations: HashMap<(String, String), u64>,
@@ -381,8 +409,7 @@ impl Drop for Commands {
 }
 
 fn send(stream: &mut UnixStream, value: &Value) -> std::io::Result<()> {
-    serde_json::to_writer(&mut *stream, value)?;
-    stream.write_all(b"\n")
+    wire::write_header(stream, value)
 }
 
 fn serve(
@@ -391,13 +418,36 @@ fn serve(
     entries: Arc<Entries>,
     bindings: Arc<Mutex<HashMap<String, String>>>,
 ) -> std::io::Result<()> {
-    let mut line = String::new();
-    BufReader::new(stream.try_clone()?)
-        .take(16 * 1024 * 1024)
-        .read_line(&mut line)?;
-    let encoded: Value = serde_json::from_str(&line)?;
-    let fingerprint: [u8; 32] = Sha256::digest(serde_json::to_vec(&encoded)?).into();
-    let request: Request = serde_json::from_value(encoded.clone())?;
+    use std::time::Duration;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    let reject = |stream: &mut UnixStream, error: &dyn std::fmt::Display| {
+        send(
+            stream,
+            &json!({"event":"rejected","reason":error.to_string(),"error_code":"invalid_request"}),
+        )
+    };
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let (meta, length) = match wire::read_header(&mut reader) {
+        Ok(header) => header,
+        Err(error) => return reject(&mut stream, &error),
+    };
+    let request: Request = match serde_json::from_value(meta.clone()) {
+        Ok(request) => request,
+        Err(error) => return reject(&mut stream, &error),
+    };
+    let validated = match &request {
+        Request::Execute {
+            operation: Some(operation),
+            arguments,
+            ..
+        } => crate::runtime::environment::validate_body(operation, arguments, length),
+        _ if length.is_some() => Err(wire::invalid("unexpected request body")),
+        _ => Ok(()),
+    };
+    if let Err(error) = validated {
+        return reject(&mut stream, &error);
+    }
     let (branch, operation, environment) = match &request {
         Request::Execute {
             branch_id,
@@ -434,6 +484,18 @@ fn serve(
             &json!({"event":"rejected","reason":"Branch is not authorized for Environment"}),
         );
     }
+    // Authorize before accepting a potentially large upload. Admission and
+    // generation checks below still happen after complete body validation.
+    let body = match length
+        .map(|length| wire::spool_body(&mut reader, length))
+        .transpose()
+    {
+        Ok(body) => body,
+        Err(error) => return reject(&mut stream, &error),
+    };
+    let inbound = Message { meta, body };
+    let fingerprint = inbound.fingerprint()?;
+    let body = inbound.body;
     match request {
         Request::CancelBranch { .. } => {
             let owner = (environment.clone(), branch.clone());
@@ -490,10 +552,24 @@ fn serve(
             generation,
             request_id,
             tool,
+            operation: environment_operation,
             arguments,
             context,
             ..
         } => {
+            if environment_operation.as_deref().is_some_and(|operation| {
+                !matches!(
+                    operation,
+                    "read_file" | "write_file" | "replace_text" | "list_directory" | "exec"
+                )
+            }) || (environment_operation.is_some() && !tool.is_empty())
+                || (environment_operation.is_none() && tool.is_empty())
+            {
+                return send(
+                    &mut stream,
+                    &json!({"event":"rejected","reason":"exactly one supported operation or declared tool is required"}),
+                );
+            }
             let (entry, fresh) = {
                 let mut table = entries.lock().unwrap();
                 let owner = (key.0.clone(), key.1.clone());
@@ -527,7 +603,7 @@ fn serve(
                     entries.retain(|_, entry| seen.get(&entry.id).is_some());
                     seen.insert(request_id.clone(), (fingerprint, false));
                     let entry = Arc::new(Entry {
-                        output: Mutex::new(Vec::new()),
+                        output: Mutex::new(None),
                         id: request_id,
                         request: fingerprint,
                         cancel: Arc::new(CancelHandle::default()),
@@ -535,18 +611,32 @@ fn serve(
                         ready: Condvar::new(),
                     });
                     let weak = Arc::downgrade(&entry);
-                    entry.cancel.observe_output(move |value| {
+                    entry.cancel.observe_output(move |message| {
                         if let Some(entry) = weak.upgrade() {
                             let _terminal = entry.terminal.lock().unwrap();
-                            entry.output.lock().unwrap().push(value);
+                            let mut output = entry.output.lock().unwrap();
+                            if output.is_none() {
+                                *output = Some(Replay {
+                                    file: Arc::new(tempfile::tempfile()?),
+                                    length: 0,
+                                });
+                            }
+                            let event = Message {
+                                meta: json!({"event":"output","value":message.meta}),
+                                body: message.body,
+                            };
+                            output.as_mut().unwrap().append(&event)?;
                             entry.ready.notify_all();
                         }
+                        Ok(())
                     });
                     table.entries.insert(key.clone(), entry.clone());
                     (entry, true)
                 }
             };
-            if fresh {
+            if !fresh {
+                drop(body);
+            } else {
                 let entry = entry.clone();
                 let environment = key.0.clone();
                 let operation = key.2.clone();
@@ -559,58 +649,91 @@ fn serve(
                                 "Environment is not available",
                             ))
                         } else {
-                            runtime.invoke_tool_with_context(
-                                &BackendContext {
-                                    environment_id: environment,
-                                    operation_id: operation,
-                                    task_id: context
-                                        .get("task_id")
-                                        .and_then(Value::as_str)
-                                        .map(str::to_owned),
-                                    ..Default::default()
-                                },
-                                &tool,
-                                &arguments,
-                                &entry.cancel,
-                            )
+                            let context = BackendContext {
+                                environment_id: environment,
+                                operation_id: operation,
+                                tool_call_id: context
+                                    .get("tool_call_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                                task_id: context
+                                    .get("task_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                                ..Default::default()
+                            };
+                            if let Some(operation) = environment_operation {
+                                runtime.environment_operation(
+                                    &context,
+                                    &operation,
+                                    &Message { meta: arguments, body },
+                                    &entry.cancel,
+                                ).map(|mut message| {
+                                    message.meta["event"] = "terminal".into();
+                                    message.meta["status"] = "succeeded".into();
+                                    message
+                                })
+                            } else {
+                                runtime.invoke_tool_with_context(&context, &tool, &arguments, &entry.cancel)
+                                    .and_then(|execution| {
+                                        let output = execution.single_output().ok_or_else(|| BackendError::new("ambiguous backend output"))?;
+                                        let encode = || -> std::io::Result<Message> {
+                                            let mut spool = tempfile::tempfile()?;
+                                            spool.write_all(output.stdout.as_bytes())?;
+                                            spool.write_all(output.stderr.as_bytes())?;
+                                            let length = spool.metadata()?.len();
+                                            Ok(Message {
+                                                meta: json!({"event":"terminal","status":"succeeded","body_kind":"business_output","stdout_length":output.stdout.len(),"exit_code":output.exit_code}),
+                                                body: Some(Body::file(spool, 0, length)),
+                                            })
+                                        };
+                                        encode().map_err(|error| BackendError::new(error.to_string()))
+                                    })
+                            }
                         }
                     }))
-                    .unwrap_or_else(|_| {
-                        Err(crate::runtime::backend::BackendError::new(
-                            "backend panicked during execution",
-                        ))
+                    .unwrap_or_else(|_| Err(BackendError::new("backend panicked during execution")));
+                    let terminal = result.unwrap_or_else(|error| {
+                        json!({"event":"terminal","status":if error.cancelled { "cancelled" } else if error.error_category == "timed_out" { "timed_out" } else { "failed" },"error_category":error.error_category,"reason":error.to_string()}).into()
                     });
-                    let terminal = match result {
-                        Ok(result) => match result.single_output() {
-                            Some(output) => {
-                                json!({"event":"terminal","status":"succeeded","output":output})
-                            }
-                            None => {
-                                json!({"event":"terminal","status":"failed","reason":"ambiguous backend output"})
-                            }
-                        },
-                        Err(error) => {
-                            json!({"event":"terminal","status":if error.cancelled { "cancelled" } else { "failed" },"reason":error.to_string()})
-                        }
-                    };
                     *entry.terminal.lock().unwrap() = Some(terminal);
                     entry.ready.notify_all();
                 });
             }
             send(&mut stream, &json!({"event":"accepted"}))?;
             let mut cursor = 0;
-            let mut terminal = entry.terminal.lock().unwrap();
             loop {
-                let output = entry.output.lock().unwrap();
-                for value in output.iter().skip(cursor) {
-                    send(&mut stream, &json!({"event":"output","value":value}))?;
+                let (output, terminal) = {
+                    let terminal = entry
+                        .ready
+                        .wait_while(entry.terminal.lock().unwrap(), |terminal| {
+                            terminal.is_none()
+                                && entry
+                                    .output
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .is_none_or(|output| output.length == cursor)
+                        })
+                        .unwrap();
+                    let output = entry.output.lock().unwrap().as_ref().and_then(|output| {
+                        (output.length > cursor).then(|| Body::File {
+                            file: output.file.clone(),
+                            offset: cursor,
+                            len: output.length - cursor,
+                        })
+                    });
+                    (output, terminal.clone())
+                };
+                if let Some(output) = output {
+                    if std::io::copy(&mut output.reader(), &mut stream)? != output.len() {
+                        return Err(wire::invalid("incomplete cached output"));
+                    }
+                    cursor += output.len();
                 }
-                cursor = output.len();
-                drop(output);
-                if let Some(value) = terminal.as_ref() {
-                    return send(&mut stream, value);
+                if let Some(terminal) = terminal {
+                    return terminal.write(&mut stream);
                 }
-                terminal = entry.ready.wait(terminal).unwrap();
             }
         }
         Request::Cancel { .. } => {
@@ -627,7 +750,14 @@ fn serve(
                 .ready
                 .wait_while(entry.terminal.lock().unwrap(), |value| value.is_none())
                 .unwrap();
-            send(&mut stream, terminal.as_ref().unwrap())
+            // Cancellation only acknowledges the terminal status. The execute
+            // connection carries the result and all preceding output.
+            let mut receipt = terminal.as_ref().unwrap().meta.clone();
+            for field in ["value", "exit_code", "body_kind", "stdout_length"] {
+                receipt.as_object_mut().unwrap().remove(field);
+            }
+            drop(terminal);
+            send(&mut stream, &receipt)
         }
         Request::Confirm { .. } => {
             let mut table = entries.lock().unwrap();
@@ -644,9 +774,10 @@ fn serve(
                 );
             }
             *entry.terminal.lock().unwrap() = Some(
-                json!({"event":"rejected","reason":"operation already confirmed; result released"}),
+                json!({"event":"rejected","reason":"operation already confirmed; result released"})
+                    .into(),
             );
-            entry.output.lock().unwrap().clear();
+            *entry.output.lock().unwrap() = None;
             if let Some((_, complete)) = table.seen.get_mut(&entry.id) {
                 *complete = true;
             }

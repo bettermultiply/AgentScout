@@ -1,24 +1,23 @@
 use super::super::*;
 use crate::protocol::contract::AgentLaunch;
+use crate::runtime::execution_wire::{self as wire, Body, Message};
 use crate::runtime::process::ProcessBackend;
 use serde_json::json;
-use std::io::{BufRead, BufReader, Write};
+use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn request(socket: &Path, value: serde_json::Value) -> serde_json::Value {
+    request_message(socket, value.into())
+}
+
+fn request_message(socket: &Path, message: Message) -> serde_json::Value {
     let mut stream = UnixStream::connect(socket).unwrap();
-    stream
-        .write_all((value.to_string() + "\n").as_bytes())
-        .unwrap();
+    message.write(&mut stream).unwrap();
     let mut reader = BufReader::new(stream);
     loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap() == 0 {
-            panic!("holder closed without a result");
-        }
-        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let event = wire::read(&mut reader, true).unwrap().meta;
         if event.get("exit_code").is_some() || event.get("error").is_some() {
             return event;
         }
@@ -91,14 +90,12 @@ fn namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace() {
     success(&socket("authority"), "printf later > /app/later");
     success(&socket("candidate"), "test ! -e /app/later");
 
-    let input = request(
+    let input = request_message(
         &socket("candidate"),
-        json!({
-            "op":"exec",
-            "command":"cat > /app/input.txt",
-            "cwd":"/app",
-            "input":"aGVsbG8="
-        }),
+        Message {
+            meta: json!({"op":"exec","command":"cat > /app/input.txt","cwd":"/app"}),
+            body: Some(Body::bytes(b"hello".to_vec())),
+        },
     );
     assert_eq!(input["exit_code"], 0);
     success(
@@ -138,11 +135,17 @@ fn namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace() {
         .unwrap();
     success(&socket("candidate"), &format!("kill -0 {pid}"));
 
-    let drained=request(&socket("candidate"),json!({"op":"drain","cancel":true}));
-    assert_eq!(drained["exit_code"],0,"{drained}");
-    let alive=request(&socket("candidate"),json!({"op":"exec","command":format!("test -r /proc/{pid}/stat && test \"$(awk '{{print $3}}' /proc/{pid}/stat)\" != Z"),"cwd":"/app"}));
-    assert_ne!(alive["exit_code"],0,"completed command's background writer must stop before drain confirms");
-    success(&socket("candidate"),"echo holder remains available");
+    let drained = request(&socket("candidate"), json!({"op":"drain","cancel":true}));
+    assert_eq!(drained["exit_code"], 0, "{drained}");
+    let alive = request(
+        &socket("candidate"),
+        json!({"op":"exec","command":format!("test -r /proc/{pid}/stat && test \"$(awk '{{print $3}}' /proc/{pid}/stat)\" != Z"),"cwd":"/app"}),
+    );
+    assert_ne!(
+        alive["exit_code"], 0,
+        "completed command's background writer must stop before drain confirms"
+    );
+    success(&socket("candidate"), "echo holder remains available");
 
     candidate.terminate("candidate").unwrap();
     candidate.stop("candidate").unwrap();

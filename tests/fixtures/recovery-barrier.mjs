@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import {AscProxy} from '../../instrumentation/pi/asc-proxy.ts';
 const execute=AscProxy.prototype.execute;
-AscProxy.prototype.execute=async function(branch,operation,tool,args,context,signal,output){
+AscProxy.prototype.execute=async function(branch,operation,tool,args,context,signal,output,...rest){
     if(tool==='nle_action'&&args.action===1){
         const release=process.env.RECOVERY_RELEASE;
         fs.writeFileSync(release+'.pending','');
@@ -12,5 +12,5 @@ AscProxy.prototype.execute=async function(branch,operation,tool,args,context,sig
             await new Promise(resolve=>setTimeout(resolve,5));
         }
     }
-    return execute.call(this,branch,operation,tool,args,context,signal,output);
+    return execute.call(this,branch,operation,tool,args,context,signal,output,...rest);
 };

@@ -61,6 +61,8 @@ pub(super) fn guest_command(
         &mut stream,
         &GuestRequest {
             command: command.to_vec(),
+            operation: None,
+            arguments: Value::Null,
         },
     )
     .map_err(error)?;
@@ -84,6 +86,37 @@ pub(super) fn guest_command(
         stdout: response.stdout,
         stderr: response.stderr,
     })
+}
+
+pub(super) fn guest_operation(
+    socket: &Path,
+    operation: &str,
+    arguments: &crate::runtime::execution_wire::Message,
+    cancel: &CancelHandle,
+) -> Result<crate::runtime::execution_wire::Message, BackendError> {
+    let mut stream = UnixStream::connect(socket).map_err(error)?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .map_err(error)?;
+    stream
+        .write_all(format!("CONNECT {PORT}\n").as_bytes())
+        .map_err(error)?;
+    let mut reader = BufReader::new(stream.try_clone().map_err(error)?);
+    let mut line = String::new();
+    read_line_cancellable(&mut reader, &mut line, cancel)?;
+    if !line.starts_with("OK ") {
+        return Err(BackendError::new("vsock forwarding failed"));
+    }
+    stream
+        .set_write_timeout(Some(Duration::from_secs(30)))
+        .map_err(error)?;
+    crate::runtime::execution_wire::Message {
+        meta: json!({"operation":operation,"arguments":arguments.meta}),
+        body: arguments.body.clone(),
+    }
+    .write(&mut stream)
+    .map_err(error)?;
+    crate::runtime::execution_wire::operation_result(&stream, reader, cancel)
 }
 
 pub(super) fn read_line_cancellable(

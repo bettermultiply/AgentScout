@@ -13,11 +13,13 @@ use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 pub const PORT: u32 = 52;
 
 /// 首行请求（argv JSON）上限。
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
 /// 单条流（stdout 或 stderr）保留给control plane的上限；超出时终止命令并返回错误。
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 /// 同时执行的 guest 连接上限。
@@ -27,7 +29,12 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GuestRequest {
+    #[serde(default)]
     pub command: Vec<String>,
+    #[serde(default)]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,6 +45,9 @@ pub struct GuestResponse {
 }
 
 pub fn serve() -> io::Result<()> {
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     let listener = vsock_listener(PORT)?;
     let active = Arc::new(AtomicUsize::new(0));
     loop {
@@ -95,28 +105,64 @@ fn read_request_line(reader: &mut impl BufRead) -> io::Result<String> {
 fn serve_connection(mut stream: UnixStream) -> io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
-    let request = {
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let line = read_request_line(&mut reader).map_err(|error| {
-            if matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) {
-                io::Error::new(io::ErrorKind::TimedOut, "timed out reading guest request")
-            } else {
-                error
-            }
-        })?;
-        serde_json::from_str::<GuestRequest>(&line)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+    use crate::runtime::execution_wire::{self as wire, Message};
+    let inbound = match wire::read(&mut BufReader::new(stream.try_clone()?), false) {
+        Ok(message) => message,
+        Err(error) => {
+            return wire::write_header(
+                &mut stream,
+                &json!({"error":error.to_string(),"error_category":"invalid_input"}),
+            );
+        }
     };
-    if request.command.is_empty() {
+    let request: GuestRequest = serde_json::from_value(inbound.meta)?;
+    if let Some(operation) = request.operation.as_deref() {
+        if let Err(error) = crate::runtime::environment::validate_body(
+            operation,
+            &request.arguments,
+            inbound.body.as_ref().map(wire::Body::len),
+        ) {
+            return wire::write_header(
+                &mut stream,
+                &json!({"error":error.to_string(),"error_category":"invalid_input"}),
+            );
+        }
+        if operation == "drain" {
+            loop {
+                let writers = descendants(std::process::id())?;
+                if writers.is_empty() {
+                    break;
+                }
+                for pid in writers {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            while unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
+            serde_json::to_writer(&mut stream, &json!({"value":null}))?;
+            stream.write_all(b"\n")?;
+            return stream.flush();
+        }
+        if operation == "exec" {
+            return execute_environment_command(stream, &request.arguments, inbound.body);
+        }
+        let response = crate::runtime::environment::file_operation(operation, &request.arguments, inbound.body.as_ref())
+            .unwrap_or_else(|error| Message::from(json!({"error":error.to_string(),"error_category":crate::runtime::environment::error_category(&error)})));
+        return response.write(&mut stream);
+    }
+    if inbound.body.is_some() {
+        return wire::write_header(&mut stream, &json!({"error":"unexpected command body"}));
+    }
+    let argv = request.command;
+    if argv.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty command"));
     }
 
-    let mut command = Command::new(&request.command[0]);
+    let mut command = Command::new(&argv[0]);
     command
-        .args(&request.command[1..])
+        .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -184,6 +230,215 @@ fn serve_connection(mut stream: UnixStream) -> io::Result<()> {
     };
     write_response(&mut stream, response)
 }
+
+fn descendants(root: u32) -> io::Result<Vec<u32>> {
+    let mut processes = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) {
+            if let Some((_, fields)) = stat.rsplit_once(')') {
+                let fields: Vec<_> = fields.split_whitespace().collect();
+                if let Some(parent) = fields.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                    processes.push((pid, parent, fields[0] == "Z"));
+                }
+            }
+        }
+    }
+    let mut owned = vec![root];
+    loop {
+        let added: Vec<_> = processes
+            .iter()
+            .filter(|(pid, parent, _)| !owned.contains(pid) && owned.contains(parent))
+            .map(|(pid, _, _)| *pid)
+            .collect();
+        if added.is_empty() {
+            break;
+        }
+        owned.extend(added);
+    }
+    Ok(processes
+        .iter()
+        .filter(|(pid, _, zombie)| *pid != root && owned.contains(pid) && !*zombie)
+        .map(|(pid, _, _)| *pid)
+        .collect())
+}
+
+fn execute_environment_command(
+    mut stream: UnixStream,
+    args: &Value,
+    input: Option<crate::runtime::execution_wire::Body>,
+) -> io::Result<()> {
+    use crate::runtime::execution_wire::{self as wire, Body};
+    use std::io::{Seek, SeekFrom};
+    let stdin = match input {
+        Some(Body::File { file, offset, .. }) => {
+            let mut file = file.try_clone()?;
+            file.seek(SeekFrom::Start(offset))?;
+            Stdio::from(file)
+        }
+        None => Stdio::null(),
+        Some(Body::Bytes(_)) => return Err(wire::invalid("expected spooled stdin")),
+    };
+    let mut command = Command::new("/bin/bash");
+    command
+        .arg("-c")
+        .arg(
+            args["command"]
+                .as_str()
+                .ok_or_else(|| io::Error::other("command required"))?,
+        )
+        .current_dir(
+            std::path::Path::new(args["bound_cwd"].as_str().unwrap_or("/"))
+                .join(args["cwd"].as_str().unwrap_or(".")),
+        )
+        .stdin(stdin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(env) = args["env"].as_object() {
+        for (key, value) in env {
+            if let Some(value) = value.as_str() {
+                command.env(key, value);
+            }
+        }
+    }
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = command.spawn()?;
+    let mut pipes: Vec<Box<dyn ReadFd>> = vec![
+        Box::new(child.stdout.take().unwrap()),
+        Box::new(child.stderr.take().unwrap()),
+    ];
+    for pipe in &pipes {
+        let fd = pipe.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            kill_process_group(child.id());
+            let _ = child.wait();
+            return Err(io::Error::last_os_error());
+        }
+    }
+    let started = std::time::Instant::now();
+    let timeout = args["timeout"]
+        .as_f64()
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .map(Duration::from_secs_f64);
+    let mut failure = None;
+    let mut disconnected = false;
+    let mut status = None;
+    let mut terminal_remaining = None::<Vec<usize>>;
+    loop {
+        for (index, pipe) in pipes.iter_mut().enumerate() {
+            let mut buffer = [0; 8192];
+            let capacity = terminal_remaining
+                .as_ref()
+                .map_or(buffer.len(), |remaining| remaining[index].min(buffer.len()));
+            if capacity == 0 {
+                continue;
+            }
+            match pipe.read(&mut buffer[..capacity]) {
+                Ok(0) => {}
+                Ok(count) => {
+                    if let Some(remaining) = terminal_remaining.as_mut() {
+                        remaining[index] = remaining[index].saturating_sub(count);
+                    }
+                    let event = json!({"stream":if index==0 {"stdout"} else {"stderr"}});
+                    if !disconnected
+                        && wire::write_body(&mut stream, &event, count as u64, &buffer[..count])
+                            .is_err()
+                    {
+                        disconnected = true;
+                    }
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => {
+                    kill_process_group(child.id());
+                    let _ = child.wait();
+                    return Err(e);
+                }
+            }
+        }
+        if status.is_none() {
+            status = child.try_wait()?;
+            if status.is_some() {
+                // Snapshot bytes already buffered when the foreground exited.
+                // Drain all of them, without an arbitrary time/size cutoff or
+                // allowing a continuous background writer to delay terminal.
+                let mut remaining = Vec::new();
+                for pipe in &pipes {
+                    let mut count: libc::c_int = 0;
+                    if unsafe { libc::ioctl(pipe.as_raw_fd(), libc::FIONREAD, &mut count) } < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    remaining.push(count.max(0) as usize);
+                }
+                terminal_remaining = Some(remaining);
+            }
+        }
+        if terminal_remaining
+            .as_ref()
+            .is_some_and(|remaining| remaining.iter().all(|count| *count == 0))
+        {
+            break;
+        }
+        disconnected |= peer_disconnected(stream.as_raw_fd())?;
+        if disconnected || timeout.is_some_and(|limit| started.elapsed() >= limit) {
+            kill_process_group(child.id());
+            failure = Some(if disconnected {
+                "Tool cancelled"
+            } else {
+                "Tool timed out"
+            });
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    // Foreground output is drained before terminal; background output continues
+    // to be consumed after the client leaves rather than giving writers SIGPIPE.
+    for mut pipe in pipes {
+        thread::spawn(move || {
+            let mut buffer = [0; 8192];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    if disconnected {
+        return Ok(());
+    }
+    let event = if let Some(failure) = failure {
+        json!({"error":failure,"error_category":if failure == "Tool timed out" {"timed_out"} else {"cancelled"}})
+    } else {
+        json!({"exit_code":status.unwrap().code().unwrap_or(128)})
+    };
+    wire::write_header(&mut stream, &event)
+}
+
+trait ReadFd: Read + AsRawFd + Send {}
+impl<T: Read + AsRawFd + Send> ReadFd for T {}
 
 fn write_response(stream: &mut UnixStream, response: GuestResponse) -> io::Result<()> {
     serde_json::to_writer(&mut *stream, &response)?;
@@ -275,6 +530,115 @@ fn vsock_listener(port: u32) -> io::Result<RawFd> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    use crate::runtime::execution_wire as wire;
+
+    fn contents(message: &wire::Message) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        message
+            .body
+            .as_ref()
+            .unwrap()
+            .reader()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn generic_files_and_command_stream_use_native_guest_operations() {
+        let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        let path = root.path().join("binary");
+        let request = |operation: &str, arguments: Value, body: Option<Vec<u8>>| {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let worker = thread::spawn(|| serve_connection(server));
+            wire::Message {
+                meta: json!({"operation":operation,"arguments":arguments}),
+                body: body.map(wire::Body::bytes),
+            }
+            .write(&mut client)
+            .unwrap();
+            let mut reader = BufReader::new(client);
+            let mut events = Vec::new();
+            loop {
+                let event = wire::read(&mut reader, true).unwrap();
+                let terminal = event.meta["stream"].is_null();
+                events.push(event);
+                if terminal {
+                    break;
+                }
+            }
+            worker.join().unwrap().unwrap();
+            events
+        };
+        let bytes = vec![0, 255, 10];
+        let written = request("write_file", json!({"path":path}), Some(bytes.clone()));
+        assert_eq!(written[0].meta["value"]["bytes_written"], 3);
+        let read = request("read_file", json!({"path":path}), None);
+        assert_eq!(contents(&read[0]), bytes);
+        assert_eq!(
+            read[0].meta["value"]["actual_range"],
+            json!({"offset":0,"limit":3})
+        );
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(|| serve_connection(server));
+        wire::write_header(
+            &mut client,
+            &json!({"operation":"write_file","arguments":{"path":path},"body_length":4}),
+        )
+        .unwrap();
+        client.write_all(b"\0\0\0\x03bad\0\0\0\0").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let rejected = wire::read(&mut BufReader::new(client), false).unwrap();
+        assert_eq!(rejected.meta["error_category"], "invalid_input");
+        worker.join().unwrap().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        let events = request(
+            "exec",
+            json!({"cwd":root.path(),"command":"printf early; sleep 0.05; printf late >&2; exit 7"}),
+            None,
+        );
+        assert_eq!(events.last().unwrap().meta["exit_code"], 7);
+        let output: Vec<u8> = events
+            .iter()
+            .filter(|event| event.body.is_some())
+            .flat_map(contents)
+            .collect();
+        assert_eq!(output, b"earlylate");
+        assert!(events.iter().any(|event| event.meta["stream"] == "stderr"));
+        let events = request("exec", json!({"command":"head -c 2097152 /dev/zero"}), None);
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| event.body.as_ref())
+                .map(wire::Body::len)
+                .sum::<u64>(),
+            2097152
+        );
+    }
+
+    #[test]
+    fn generic_command_cancellation_stops_the_process_group() {
+        let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let worker = thread::spawn(|| serve_connection(server));
+        wire::write_header(&mut client,&json!({"operation":"exec","arguments":{"cwd":root.path(),"command":"(sleep 0.4; echo leaked > leak) & sleep 0.05; echo ready; sleep 30"}})).unwrap();
+        let mut reader = BufReader::new(client);
+        let ready = wire::read(&mut reader, true).unwrap();
+        assert_eq!(contents(&ready), b"ready\n");
+        reader
+            .get_ref()
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap();
+        assert!(
+            matches!(wire::read(&mut reader, true), Err(error) if error.kind() == io::ErrorKind::UnexpectedEof)
+        );
+        worker.join().unwrap().unwrap();
+        thread::sleep(Duration::from_millis(450));
+        assert!(!root.path().join("leak").exists());
+    }
 
     #[test]
     fn read_all_stops_storing_after_the_limit() {

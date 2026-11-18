@@ -498,6 +498,35 @@ impl Backend for FirecrackerBackend {
         }
     }
 
+    fn cancel_tool_writers(&self, context: &BackendContext) -> Result<(), BackendError> {
+        let cancel = CancelHandle::default();
+        self.environment_operation(context, "drain", &json!({}).into(), &cancel)
+            .map(|_| ())
+    }
+
+    fn environment_operation(
+        &self,
+        context: &BackendContext,
+        operation: &str,
+        arguments: &crate::runtime::execution_wire::Message,
+        cancel: &CancelHandle,
+    ) -> Result<crate::runtime::execution_wire::Message, BackendError> {
+        let environment = self.environment(&context.environment_id)?;
+        let socket = {
+            let environment = environment.lock().unwrap();
+            if environment.state != EnvironmentState::Available {
+                return Err(BackendError::new("environment is not available"));
+            }
+            environment.vsock_socket.clone()
+        };
+        let mut arguments = arguments.clone();
+        if arguments.meta["bound_cwd"].is_null() {
+            // The stock guest environment's existing workspace is /root.
+            arguments.meta["bound_cwd"] = Value::String("/root".into());
+        }
+        guest_operation(&socket, operation, &arguments, cancel)
+    }
+
     fn operate(
         &self,
         environment_id: &str,

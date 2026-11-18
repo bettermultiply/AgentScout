@@ -373,7 +373,9 @@ mod queue_panic_tests {
     #[test]
     fn reused_request_content_is_rejected_before_receipt_and_never_executed() {
         let (out, receiver) = mpsc::channel();
-        let backend = Arc::new(PanicOnce { calls: AtomicUsize::new(1) });
+        let backend = Arc::new(PanicOnce {
+            calls: AtomicUsize::new(1),
+        });
         let shared = Arc::new(Shared {
             commands: None,
             preserving: std::sync::atomic::AtomicBool::new(false),
@@ -409,7 +411,9 @@ mod queue_panic_tests {
     #[test]
     fn expired_numeric_request_never_reaches_backend() {
         let (out, receiver) = mpsc::channel();
-        let backend = Arc::new(PanicOnce { calls: AtomicUsize::new(1) });
+        let backend = Arc::new(PanicOnce {
+            calls: AtomicUsize::new(1),
+        });
         let shared = Arc::new(Shared {
             commands: None,
             preserving: std::sync::atomic::AtomicBool::new(false),

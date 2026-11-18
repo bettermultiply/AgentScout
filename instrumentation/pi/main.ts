@@ -4,6 +4,7 @@
 // the selected checkout at runtime, so the Rust-side wire schema remains the
 // compile-time contract for this small launcher.
 // @ts-nocheck
+import type { ToolCall, ToolResultMessage } from '../../../pi/packages/ai/src/types.ts';
 import { IdentityWindow, positiveSequence } from '../../../pi/packages/pi-integration/src/identity-window.ts';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
@@ -16,6 +17,7 @@ import {save as saveRecovery,load as loadRecovery,checksum} from './recovery.ts'
 import {recoveryBinding,snapshotResources} from './recovery-binding.ts';
 import { readFileSync } from 'node:fs';
 import {AscProxy} from './asc-proxy.ts';
+import {environmentTools} from './tools.ts';
 import { Interaction } from './interaction.ts';
 
 const root = process.env.ASCOUT_PI_ROOT;
@@ -255,20 +257,60 @@ const sendWire = wire => ascProxy.send(wire);
 const access = createAgentAccess({taskId,report,evaluate:evaluatePolicyArtifact});
 const key = (branch, operation) => JSON.stringify([branch,operation]);
 const text = value => typeof value==='string'?value:JSON.stringify(value);
+
+type ToolResultContent = ToolResultMessage['content'];
+type ToolResultBody = Pick<ToolResultMessage, 'content' | 'details' | 'usage' | 'nestedCalls' | 'durationMs'>
+    & Partial<Pick<ToolResultMessage, 'isError' | 'timestamp'>>;
+
+function isToolResultBlock(value: unknown): value is ToolResultContent[number] {
+    if (!value || typeof value !== 'object') return false;
+    const block = value as Record<string, unknown>;
+    if (block.type === 'text') return typeof block.text === 'string';
+    return block.type === 'image' && typeof block.mimeType === 'string' && typeof block.data === 'string';
+}
+
+function isToolResultBody(value: unknown): value is ToolResultBody {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const body = value as Record<string, unknown>;
+    return (body.role === undefined || body.role === 'toolResult')
+        && Array.isArray(body.content) && body.content.every(isToolResultBlock)
+        && (body.isError === undefined || typeof body.isError === 'boolean');
+}
+
+function predictionResult(call: ToolCall, prediction: unknown): ToolResultMessage {
+    const message: ToolResultMessage = {
+        role: 'toolResult', toolCallId: call.id, toolName: call.name,
+        content: [], isError: false, timestamp: Date.now(),
+    };
+    if (isToolResultBlock(prediction)) {
+        message.content = [prediction];
+    } else if (Array.isArray(prediction) && prediction.length && prediction.every(isToolResultBlock)) {
+        message.content = prediction;
+    } else if (isToolResultBody(prediction)) {
+        message.content = prediction.content;
+        message.isError = prediction.isError ?? false;
+        if (typeof prediction.timestamp === 'number') message.timestamp = prediction.timestamp;
+        if (typeof prediction.durationMs === 'number') message.durationMs = prediction.durationMs;
+        if (prediction.details !== undefined) message.details = prediction.details;
+        if (prediction.usage !== undefined) message.usage = prediction.usage;
+        if (prediction.nestedCalls !== undefined) message.nestedCalls = prediction.nestedCalls;
+    } else {
+        message.content = [{type: 'text', text: text(prediction)}];
+    }
+    return message;
+}
 async function finishActions(branch,status) {
     for(const action of [...activeActions.values()])if(action.branch_id===branch && !(saving && suspendedHooks.has(key(branch,action.action_id))))
         await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:action.action_kind,status,result:null,timestamp_ms:Date.now()});
 }
 function tools(branch) {
-    const cwd=tree.branches.get(branch)?.manager.getHeader().cwd??process.cwd();
-    const sdk=require(resolve(root,'packages/coding-agent/src/core/tools/index.ts'));
-    const definitions=new Map(['read','bash','edit','write'].map(name=>[name,sdk.createToolDefinition(name,cwd)]));
-    for(const spec of runtimeTools)definitions.set(spec.name,{...spec,label:spec.name,parameters:Type.Unsafe(spec.parameters)});
-    return [...definitions.values()].map(spec=>({...spec,execute:async(operation,args,signal,onUpdate)=>{
+    const detect=bytes=>require(resolve(root,'packages/coding-agent/src/utils/mime.ts')).detectSupportedImageMimeType(bytes);
+    const builtins=environmentTools(ascProxy,branch,detect,taskId);
+    return [...builtins,...runtimeTools.map(spec=>({...spec,label:spec.name,parameters:Type.Unsafe(spec.parameters),execute:async(operation,args,signal,onUpdate)=>{
         const value=await ascProxy.execute(branch,operation,spec.name,args,{task_id:taskId},signal,onUpdate);
         executionResults.set(key(branch,operation),value);
         return value.result?.content?value.result:{content:[{type:'text',text:text(value.result)}],details:undefined};
-    }}));
+    }}))];
 }
 // FS execution must never fall back to host implementations selected through
 // user settings or extensions. Only the isolated built-ins and Runtime tools
@@ -676,10 +718,6 @@ async function handle(command) {
             candidateSetups.set(branch,structuredClone(command));
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
-            // The control plane owns the logical transcript.  Native session
-            // records remain branch-local implementation details; the
-            // supplied history is the checkpoint context for this process.
-            const messages=structuredClone(command.history?.length?command.history:checkpoint.saved);
             if(command.prediction?.predict==='branch_model'){
                 const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail);
                 await access.control(command);
@@ -692,14 +730,14 @@ async function handle(command) {
                 await report({message:'branch_created',branch_id:branch});await report({message:'branch_started',branch_id:branch});await report({message:'branch_ready',branch_id:branch});
                 if(!saving&&!recoveryPaused)executeTurn(session,branch,()=>session.continue());else interruptedBranches.add(branch);return;
             }
-            const checkpointMessage=messages.findLast(message=>message.role==='assistant'&&message.content?.some(p=>p.type==='toolCall'&&p.id===command.operation_id&&p.name===command.tool_name));
+            const checkpointMessage=checkpoint.saved.findLast(message=>message.role==='assistant'&&message.content?.some(p=>p.type==='toolCall'&&p.id===command.operation_id&&p.name===command.tool_name));
             if(!checkpointMessage)throw Error('Invalid pending checkpoint');
             const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail);
             if(saving)return;
-            const paired: any[]=[];
-             for(const part of checkpointMessage.content){
+            const paired: ToolResultMessage[]=[];
+            for(const part of checkpointMessage.content){
                 if(part.type!=='toolCall')continue;
-                if(part.id===command.operation_id)paired.push({role:'toolResult',toolCallId:part.id,toolName:part.name,content:[{type:'text',text:text(command.prediction)}],isError:false,timestamp:Date.now()});
+                if(part.id===command.operation_id)paired.push(predictionResult(part,command.prediction));
                 else {
                     const sibling=checkpoints.get(key(command.parent_branch_id,part.id))?.result;
                     if(sibling) paired.push(structuredClone(sibling));

@@ -22,6 +22,8 @@ use crate::runtime::launch_plan::LaunchFragment;
 pub struct BackendContext {
     /// Stable identity for an operation. Empty for legacy environment calls.
     pub operation_id: String,
+    /// Original product tool call when one tool performs multiple operations.
+    pub tool_call_id: Option<String>,
     /// Fences delayed filesystem results. Zero is the legacy value.
     pub generation: u64,
     pub task_id: Option<String>,
@@ -46,21 +48,33 @@ impl BackendContext {
     }
 }
 
+type OutputObserver = dyn Fn(super::execution_wire::Message) -> std::io::Result<()> + Send + Sync;
+
 /// Adapter 用它通知后端当前操作应当停止。
 #[derive(Default)]
 pub struct CancelHandle {
     cancelled: AtomicBool,
-    output: std::sync::Mutex<Option<Box<dyn Fn(Value) + Send + Sync>>>,
+    output: std::sync::Mutex<Option<Box<OutputObserver>>>,
 }
 
 impl CancelHandle {
-    pub fn observe_output(&self, observer: impl Fn(Value) + Send + Sync + 'static) {
+    pub(crate) fn observe_output(
+        &self,
+        observer: impl Fn(super::execution_wire::Message) -> std::io::Result<()> + Send + Sync + 'static,
+    ) {
         *self.output.lock().unwrap() = Some(Box::new(observer));
     }
     pub fn output(&self, value: Value) {
+        let _ = self.output_message(value.into());
+    }
+    pub(crate) fn output_message(
+        &self,
+        message: super::execution_wire::Message,
+    ) -> Result<(), BackendError> {
         if let Some(observer) = self.output.lock().unwrap().as_ref() {
-            observer(value);
+            observer(message).map_err(|error| BackendError::new(error.to_string()))?;
         }
+        Ok(())
     }
     /// 每个操作开始前重置。
     pub fn reset(&self) {
@@ -82,6 +96,7 @@ pub struct BackendError {
     pub created_environment_id: Option<String>,
     pub message: String,
     pub cancelled: bool,
+    pub error_category: String,
     /// 已经完成的有序 Backend 标识。
     pub completed: Vec<String>,
     /// 因本次错误没有执行的 Backend 标识。
@@ -98,10 +113,20 @@ impl BackendError {
             created_environment_id: None,
             message: message.into(),
             cancelled: false,
+            error_category: "backend_error".into(),
             completed: Vec::new(),
             remaining: Vec::new(),
             cleanup_failures: Vec::new(),
             outputs: Vec::new(),
+        }
+    }
+
+    pub fn operation_error(message: impl Into<String>, category: impl Into<String>) -> Self {
+        let category = category.into();
+        Self {
+            cancelled: category == "cancelled",
+            error_category: category,
+            ..Self::new(message)
         }
     }
 
@@ -271,6 +296,17 @@ pub trait Backend: Send + Sync {
     ) -> Result<BackendExecution, BackendError> {
         self.operate(&context.environment_id, command, cancel)
             .map(|output| BackendExecution::single(self.backend_id(), output))
+    }
+
+    /// Generic environment operations; product tool definitions stay in Integration.
+    fn environment_operation(
+        &self,
+        _context: &BackendContext,
+        _operation: &str,
+        _arguments: &super::execution_wire::Message,
+        _cancel: &CancelHandle,
+    ) -> Result<super::execution_wire::Message, BackendError> {
+        Err(BackendError::new("environment operations are unavailable"))
     }
 
     fn tool_context(
