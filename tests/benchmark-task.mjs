@@ -1,4 +1,4 @@
-import {spawnControl, sessionPath} from './control-plane-fixture.mjs';
+import {spawnControl, runPath} from './control-plane-fixture.mjs';
 // Real Terminal-Bench task, FS/Pi/control plane, and local scripted SSE only.
 import fs from 'node:fs';
 import http from 'node:http';
@@ -12,8 +12,8 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
   const root=fs.mkdtempSync('/tmp/opencode/benchmark-task-');console.log('evidence',root);
   for(const name of ['workspace','pi','policy','tmp','home'])fs.mkdirSync(root+'/'+name);
   fs.mkdirSync(root+'/home/.pi/agent',{recursive:true});
- fs.copyFileSync(fixture+'/environment/NOTE_FROM_ATTACKER.txt',sessionPath(root, 'workspace/NOTE_FROM_ATTACKER.txt'));
- fs.cpSync(fixture+'/environment/setup_files',sessionPath(root, 'workspace/sensitive_data'),{recursive:true});
+ fs.copyFileSync(fixture+'/environment/NOTE_FROM_ATTACKER.txt',runPath(root, 'workspace/NOTE_FROM_ATTACKER.txt'));
+ fs.cpSync(fixture+'/environment/setup_files',runPath(root, 'workspace/sensitive_data'),{recursive:true});
  const prompt=fs.readFileSync(fixture+'/instruction.md','utf8');
   let requests=0;
  const commands=[
@@ -39,11 +39,11 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
   fs.writeFileSync(root+'/pi/models.json',JSON.stringify({providers:{fixture:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'fake',models:['fixture','fast'].map(id=>({id,reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}))}}}));
  for(const name of ['policy.yaml','decisions.py'])fs.copyFileSync(project+'/assets/policy/policy/'+name,root+'/policy/'+name);
   fs.writeFileSync(root+'/policy/policy.yaml',fs.readFileSync(root+'/policy/policy.yaml','utf8').replace('max_steps: 5','max_steps: 100').replace('max_chances: 0','max_chances: 1').replace('scenarios: []','scenarios: [{when: {kind: model_inference}}]').replace('scenarios: []','scenarios:\n        - when: {tool_name: model}\n          predict: branch_model\n          model: fixture/fast'));
-  fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_address:'127.0.0.1:18180',adapter_instance:'fs',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,filesystem:{state_directory:root+'/fs-state',isolated_paths:[{path:sessionPath(root, 'workspace'),target:'/app'}],passthrough_rw:[root]}}));
+  fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_address:'127.0.0.1:18180',adapter_instance:'fs',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,filesystem:{state_directory:root+'/fs-state',isolated_paths:[{path:runPath(root, 'workspace'),target:'/app'}],passthrough_rw:[root]}}));
    const p=spawnControl(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','fixture/fixture','--models',root+'/pi/models.json'],{env:{...process.env,HOME:root+'/home',USERPROFILE:root+'/home',TMPDIR:root+'/tmp',ASCOUT_RUNTIME_CONFIG:root+'/runtime.json'},stdio:['ignore','ignore','pipe']});
   p.stderr.on('data',b=>fs.appendFileSync(root+'/stderr.log',b));
   t.after(()=>{if(p.exitCode===null)p.kill('SIGKILL')});
-  const events=()=>fs.existsSync(sessionPath(root, 'events.jsonl'))?fs.readFileSync(sessionPath(root, 'events.jsonl'),'utf8').split('\n').filter(Boolean).map(s=>JSON.parse(s)):[];
+  const events=()=>fs.existsSync(runPath(root, 'events.jsonl'))?fs.readFileSync(runPath(root, 'events.jsonl'),'utf8').split('\n').filter(Boolean).map(s=>JSON.parse(s)):[];
   const sseEvents=[];
   const sseAbort=new AbortController();
   let sseError=null;
@@ -92,12 +92,12 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
    throw Error(`Timeout waiting for ${label}; SSE evidence: ${JSON.stringify(sseEvents.slice(-10))} ${root}`);
   };
     await waitForStatus(e=>e.event==='run_status'&&e.ready===true,'run_status ready');
-    while(!fs.existsSync(sessionPath(root, 'policy.json'))&&Date.now()<sseDeadline){
+    while(!fs.existsSync(runPath(root, 'policy.json'))&&Date.now()<sseDeadline){
      assert.equal(p.exitCode,null,'process exited before policy artifact: '+root);
      await new Promise(r=>setTimeout(r,20));
     }
-    assert.ok(fs.existsSync(sessionPath(root, 'policy.json')),'policy artifact exists before prompt: '+root);
-    const policyArtifact=JSON.parse(fs.readFileSync(sessionPath(root, 'policy.json'),'utf8'));
+    assert.ok(fs.existsSync(runPath(root, 'policy.json')),'policy artifact exists before prompt: '+root);
+    const policyArtifact=JSON.parse(fs.readFileSync(runPath(root, 'policy.json'),'utf8'));
    assert.equal(policyArtifact.version,1,'normal YAML startup writes a compiled Policy artifact');
    assert.equal(typeof policyArtifact.digest,'string');
    assert.match(policyArtifact.definition,/branch_model/,'compiled Policy enables branch_model');
@@ -111,7 +111,7 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
   let leakedBeforePublish=false;
   const watcher=setInterval(()=>{
    if(events().some(e=>e.message==='materialization_started')){clearInterval(watcher);return}
-   if(fs.existsSync(sessionPath(root, 'workspace/recovered'))){leakedBeforePublish=true;clearInterval(watcher)}
+   if(fs.existsSync(runPath(root, 'workspace/recovered'))){leakedBeforePublish=true;clearInterval(watcher)}
   },50);
   t.after(()=>clearInterval(watcher));
   const response=await fetch(`http://127.0.0.1:${port}/api/request`,{method:'POST',headers:{origin:`http://127.0.0.1:${port}`,'content-type':'application/json'},body:JSON.stringify({action:'prompt',prompt})});
@@ -176,7 +176,7 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
     }
     if(scenario==='match')assert.ok(recorded.some(e=>e.disposition==='Promote'&&e.verdict==='compatible'),'normal Runtime promotion completed');
     else assert.ok(!recorded.some(e=>e.disposition==='Promote'),'nonmatching candidate cannot be promoted');
-   assert.equal(fs.existsSync(sessionPath(root, 'workspace/rejected-candidate')),false,'discarded writes never materialize');
+   assert.equal(fs.existsSync(runPath(root, 'workspace/rejected-candidate')),false,'discarded writes never materialize');
   clearInterval(watcher);
   assert.equal(leakedBeforePublish,false,'tool writes stayed in the Branch overlay until publication: '+root);
   const materialized=events().find(e=>e.message==='materialization_completed');
@@ -194,7 +194,7 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
    mounts.push(...(fs.lstatSync(path).isSymbolicLink()?['--symlink',fs.readlinkSync(path),path]:['--ro-bind',path,path]));
   }
  }
- mounts.push('--dev','/dev','--proc','/proc','--dir','/app','--bind',sessionPath(root, 'workspace'),'/app','--remount-ro','/');
+ mounts.push('--dev','/dev','--proc','/proc','--dir','/app','--bind',runPath(root, 'workspace'),'/app','--remount-ro','/');
   const verification=spawnSync(bwrap.stdout.trim(),[...mounts,'--','/home/betmul/BETMUL/AgentScout-suit/.terminal-bench/bin/python','-m','pytest',fixture+'/tests/test_outputs.py','-rA','-p','no:cacheprovider'],{encoding:'utf8',timeout:30000,env:{...process.env,TMPDIR:'/dev/shm',PYTHONDONTWRITEBYTECODE:'1'}});
  fs.writeFileSync(root+'/verification.stdout.log',verification.stdout??'');
  fs.writeFileSync(root+'/verification.stderr.log',verification.stderr??'');

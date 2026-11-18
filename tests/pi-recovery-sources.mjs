@@ -8,7 +8,7 @@ test('native recovery sources remain independently restorable after original and
     const directory=mkdtempSync('/tmp/opencode/pi-recovery-sources-'),pi=resolve('../pi');
     const script=`
         import assert from 'node:assert/strict';
-        import {mkdirSync,readFileSync} from 'node:fs';
+        import {mkdirSync,readFileSync,unlinkSync} from 'node:fs';
         import {SessionManager} from '${pi}/packages/coding-agent/src/core/session-manager.ts';
         import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
         const directory=process.argv[1],main=SessionManager.open(directory+'/session.jsonl');
@@ -31,6 +31,8 @@ test('native recovery sources remain independently restorable after original and
         assert.throws(()=>SessionTree.restore(invalid,SessionManager,directory+'/invalid.jsonl'),/tail missing/);
         const duplicate=structuredClone(snapshot);duplicate.sources.push(duplicate.sources[0]);
         assert.throws(()=>SessionTree.restore(duplicate,SessionManager,directory+'/duplicate.jsonl'),/Duplicate recovery Pi source/);
+        unlinkSync(snapshot.sources[0].file);
+        assert.throws(()=>SessionTree.restore(snapshot,SessionManager,directory+'/missing.jsonl'),/ENOENT/);
     `;
     execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script,directory],{encoding:'utf8'});
 });

@@ -109,8 +109,7 @@ export async function createAgentSession(options){
     const transcripts=messages.filter(m=>m.message==='transcript'&&m.entry.role==='custom');
     assert.equal(transcripts.length,notices.length);
     if(notices.length)assert.equal(transcripts[0].session_entry_id,notices[0].id);
-    const sources=await readdir(join(root,'sessions'));
-    assert.equal(sources.filter(f=>f.endsWith('.jsonl')).length,failed?1:0);
+    assert.ok(messages.find(message=>message.message==='agent_ready')?.session?.file,'native session reference is reported');
     if(failed){
         assert.match(stderr,/injected notification write failure/);
         assert.ok(messages.some(m=>m.message==='agent_failed'));

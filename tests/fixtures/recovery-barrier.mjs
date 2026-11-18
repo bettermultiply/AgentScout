@@ -8,7 +8,7 @@ AscProxy.prototype.execute=async function(branch,operation,tool,args,context,sig
         const release=process.env.RECOVERY_RELEASE;
         fs.writeFileSync(release+'.pending','');
         while(!fs.existsSync(release)){
-            if(signal?.aborted)throw Error('Fixture sibling cancelled at execution boundary');
+            if(signal?.aborted){fs.writeFileSync(release+'.cancelled','');throw Error('Fixture sibling cancelled at execution boundary');}
             await new Promise(resolve=>setTimeout(resolve,5));
         }
     }

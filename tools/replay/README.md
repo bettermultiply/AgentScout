@@ -30,7 +30,7 @@ Policy 必须用 `--policy <name>` 从配置目录选择；源 session 的 `poli
 
 本地服务通过通用 `--models` 追加模型配置，保留 Pi 原配置、认证和扩展；重名 provider 拒绝覆盖。control plane 启动使用配置目录中的 Policy 名称；session 的 `policy.json` 仅供该 session 恢复。`GET /api/input-status` 返回已处理输入序号 `sequence`、可输入 `ready`、当前输入错误 `error`；HTTP 202 仅表示排队。工具等待序号推进且权威轮次结束、无待确认 Promote 后才提交下一输入，不要求所有候选结束。
 
-AScout 保存追加 provider 配置内容，普通恢复不依赖工具临时目录。工具退出后可用普通 `--resume <session-id> --model provider/model`：先校验并恢复保存的运行，再在空闲权威上切换模型。回放服务和自动输入队列不恢复。
+AScout 保存追加 provider 配置内容，普通恢复不依赖工具临时目录。工具退出后可用普通 `--resume <run-id> --model provider/model`：先校验并恢复保存的运行，再在空闲权威上切换模型。回放服务和自动输入队列不恢复。
 
 只依赖 Node 26。导出只读源文件，在内存中按 transcript 原生 ID、Candidate/Chance 关系和 applied Promote 还原预测批次后的第一条父边（也可能是 custom、摘要或编辑记录）。events 按文件序处理，不按恢复后会重置的 `t_ms` 排序。不解析命名、不比较正文相似度、不按时间猜测；缺引用、批次不完整或关系歧义直接报错。只处理当前 Pi 记录格式。
 

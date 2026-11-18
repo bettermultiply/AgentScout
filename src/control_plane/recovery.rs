@@ -103,9 +103,16 @@ pub fn digest(path: &Path) -> io::Result<String> {
 }
 
 pub fn publish(run_dir: &Path, generation: &Path, tree: &SpeculativeTree) -> io::Result<()> {
-    let tree_path = generation.join("tree.json");
-    write(&tree_path, &serde_json::to_vec_pretty(tree)?)?;
-    let files = ["tree.json", "agent.json", "runtime.json"]
+    // Component writes alone do not establish a recoverable generation.
+    // Apply the same association checks used by load before replacing the
+    // last known-good completion marker.
+    validate(tree, generation)?;
+    for name in ["agent.json", "runtime.json"] {
+        fs::File::open(generation.join(name))?.sync_all()?;
+    }
+    fs::File::open(generation)?.sync_all()?;
+    fs::File::open(run_dir)?.sync_all()?;
+    let files = ["agent.json", "runtime.json"]
         .into_iter()
         .map(|name| {
             Ok((
@@ -114,19 +121,71 @@ pub fn publish(run_dir: &Path, generation: &Path, tree: &SpeculativeTree) -> io:
             ))
         })
         .collect::<io::Result<serde_json::Map<String, Value>>>()?;
-    write(
-        &run_dir.join("recovery.json"),
-        &serde_json::to_vec_pretty(&json!({"version":1,"files":files}))?,
-    )
+    let manifest = json!({"version":1,"files":files});
+    // Opening reuses the process-owned writer, serializing append, sync and
+    // rollback with ordinary events without allocating an observation sequence.
+    let mut ledger = super::ledger::Ledger::open(&run_dir.join("events.jsonl"))?;
+    let temporary = run_dir.join("recovery.tmp");
+    let bytes = serde_json::to_vec_pretty(&manifest)?;
+    let mut index = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    index.write_all(&bytes)?;
+    index.sync_all()?;
+    if let Err(error) = ledger.record_durable(
+        json!({"message":"recovery_complete", "task_id":tree.execution_id,
+        "control":tree, "manifest":manifest}),
+    ) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    // Compatibility index only. Ledger is the durable completion boundary.
+    if let Err(error) = fs::rename(&temporary, run_dir.join("recovery.json")) {
+        ledger.warning(&format!(
+            "Recovery Ledger saved; compatibility index update failed: {error}"
+        ));
+    }
+    Ok(())
 }
 
 pub fn load(run_dir: &Path) -> io::Result<(SpeculativeTree, std::path::PathBuf)> {
-    let record: Value = serde_json::from_slice(&fs::read(run_dir.join("recovery.json"))?)?;
+    use std::io::BufRead;
+    let records = io::BufReader::new(fs::File::open(run_dir.join("events.jsonl"))?)
+        .lines()
+        .collect::<io::Result<Vec<_>>>()?;
+    let mut last_error = None;
+    for line in records.iter().rev() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["message"] == "task_completed" {
+            return Err(io::Error::other(format!(
+                "Saved task has ended; open the Pi session referenced by {}",
+                run_dir.join("session.jsonl").display()
+            )));
+        }
+        if record["message"] != "recovery_complete" {
+            continue;
+        }
+        match load_record(run_dir, &record["manifest"], &record["control"]) {
+            Ok(saved) => return Ok(saved),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| io::Error::other("No complete Ledger recovery record")))
+}
+
+fn load_record(
+    run_dir: &Path,
+    record: &Value,
+    control: &Value,
+) -> io::Result<(SpeculativeTree, std::path::PathBuf)> {
     if record["version"] != 1 {
         return Err(io::Error::other("Unsupported recovery version"));
     }
     let mut generation = None;
-    for name in ["tree.json", "agent.json", "runtime.json"] {
+    for name in ["agent.json", "runtime.json"] {
         let file = &record["files"][name];
         let path = std::path::PathBuf::from(
             file["path"]
@@ -150,8 +209,7 @@ pub fn load(run_dir: &Path) -> io::Result<(SpeculativeTree, std::path::PathBuf)>
         generation = Some(parent);
     }
     let generation = generation.unwrap();
-    let mut tree: SpeculativeTree =
-        serde_json::from_slice(&fs::read(generation.join("tree.json"))?)?;
+    let mut tree: SpeculativeTree = serde_json::from_value(control.clone())?;
     validate(&tree, &generation)?;
     if Some(tree.execution_id.as_str()) != run_dir.file_name().and_then(|name| name.to_str()) {
         return Err(io::Error::other("Recovery task identity mismatch"));
@@ -168,6 +226,17 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
         || agent["authority"] != serde_json::to_value(&tree.authority_branch_id)?
     {
         return Err(fail("task/authority"));
+    }
+    for source in agent["tree"]["sources"]
+        .as_array()
+        .ok_or_else(|| fail("Pi session references missing"))?
+    {
+        let path = source["file"]
+            .as_str()
+            .ok_or_else(|| fail("Pi session reference missing"))?;
+        if source["checksum"] != digest(Path::new(path))? {
+            return Err(fail("Pi session reference changed"));
+        }
     }
     let branches = agent["tree"]["branches"]
         .as_array()
@@ -309,17 +378,42 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temporary = path.with_extension("tmp");
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    if fs::read(&temporary)? != bytes {
-        return Err(io::Error::other("Recovery readback failed"));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_latest_generation_cannot_cross_task_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("events.jsonl"),
+            concat!(
+                "{\"message\":\"recovery_complete\"}\n",
+                "{\"message\":\"task_completed\"}\n",
+                "{\"message\":\"recovery_complete\",\"manifest\":{\"version\":1},\"control\":{}}\n"
+            ),
+        )
+        .unwrap();
+        assert!(
+            load(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("has ended")
+        );
     }
-    fs::rename(temporary, path)?;
-    fs::File::open(path.parent().unwrap())?.sync_all()
+
+    #[test]
+    fn inconsistent_components_do_not_replace_completion_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let generation = directory.path().join("generation");
+        fs::create_dir(&generation).unwrap();
+        for name in ["agent.json", "runtime.json"] {
+            fs::write(generation.join(name), b"{}").unwrap();
+        }
+        let marker = directory.path().join("recovery.json");
+        fs::write(&marker, b"previous complete generation").unwrap();
+        let tree = SpeculativeTree::new("agent-1".into());
+        assert!(publish(directory.path(), &generation, &tree).is_err());
+        assert_eq!(fs::read(marker).unwrap(), b"previous complete generation");
+    }
 }

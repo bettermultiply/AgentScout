@@ -1,5 +1,65 @@
 # 主动退出恢复
 
+## 本次实现复核：发布前关联校验
+
+本轮验证：`cargo check --all-targets`、控制面 55/55、Ledger/Projection 2/2、持久化完成记录部分写入回退 1/1；Pi 历史／通知／访问／恢复引用 19/19（`/tmp/ascout-ledger-check.log`），TS 检查通过（`/tmp/ascout-ledger-ts.log`）；恢复 7/7（`/tmp/ascout-ledger-recovery-final.log`）。缺失 Pi 引用明确报 ENOENT 的回归已覆盖。整链保留保存中间失败／重试及继续检查；旧兼容索引替换用例更新为确认 Ledger 仍选择最新代。实际发现并修复释放 Branch 删除 checkpoint 源，以及汇总父链替代原始父链造成恢复冲突。
+
+边界：正常结束后可通过 run 内 session.jsonl 引用用 Pi 打开权威历史，AgentReleased 也保留原生定位引用；未新增 ASCout 打开会话命令。Pi 源副本目前无自动回收，保存失败可能留下无引用的安全副本。没有增加任意外部等待／进程内存恢复或不确定命令重放保证。
+
+`recovery::publish` 在追加新控制快照与替换 `recovery.json` 前，复用加载阶段的
+组件关联校验。缺失或不一致的 task／Authority、Branch Session、Environment、
+Chance／Proposal 关联直接保存失败，沿既有失败路径保持暂停并保留旧标记。
+新增回归先证明旧实现会把不一致组件发布为完成，再验证拒绝发布。
+Ledger 现在追加 `recovery_complete`：包含完整控制快照、Agent／Runtime 附件路径及 SHA-256；agent 附件记录分支、checkpoint、hook 状态和 Pi session 引用。加载直接从完成记录的 control 重建 Tree，不再生成或要求 tree.json；旧代携带的 tree.json 也不作为恢复依据。附件与关联检查成功后，直接附件和保存目录同步，再在共享写入器内追加并同步完成记录。recovery.json 仅保留兼容索引，替换失败通过系统运行日志警告，已持久化完成不误报失败。加载从 Ledger 倒序选择有效保存，越过未完成／损坏保存；遇到更新的 task_completed 则拒绝复活旧任务。
+
+同一进程中，同一规范路径的 Ledger::open 复用原写入器及失败状态；普通追加、观察序号发布、归档重试、完成记录追加／sync／回退在同一互斥边界内完成。等待观察事件只持 reader，不持写入锁；写入器锁不跨 Runtime 调用或附件准备。此处不增加跨进程多写者支持。故障回归先复现第二句柄绕过部分写入失败，再检查共享失败和 durable 回退期间另一句柄的成功追加不会被截断。
+
+保存保证以已校验附件的进程重启恢复为范围。直接 agent.json、runtime.json、保存目录、运行目录和 Ledger 调用 sync_all；这不等于递归同步 Pi 引用的每个文件、Runtime 外部资源、Git 对象或所有后端的保存数据。因此不承诺任意断电后全部引用仍在；加载仍须校验引用，缺失或损坏时回退合法旧代或拒绝，不能宣称全链路 fsync 保证。兼容索引无需构成恢复依据。
+
+本轮审查验证：`/tmp/ascout-review-repro.log` 记录修复前第二句柄绕过失败的复现；`/tmp/ascout-review-node.log` 为恢复整链 7/7 与 Pi 引用／绑定／历史／通知适配合计 20/20。最终 Rust 检查（控制面 59/59、Projection 2/2、cargo check --all-targets）见 `/tmp/ascout-review-final.log`；附件同步调整后再次运行恢复 7/7，见 `/tmp/ascout-review-recovery-final.log`。已结束 session 打开命令仍未完成，不能将现有活动任务恢复称为完整普通 Agent 恢复；不扩展常驻多运行服务，不改待确认 CLI 命名，不实现 EEC。
+
+Pi 源通过公开 SessionManager.create/forkFrom/open 管理；保存及恢复各建立独立 Pi 源，ASCout 不拼接 Pi 目录。run 内 session.jsonl 现在只是指向 Pi 管理文件的符号链接，兼容已有读取入口。AgentReady/AgentReleased 在 Ledger 中携带原生文件、id、cwd 引用。释放 Branch 不删除仍可能由 checkpoint 引用的源。恢复验证源摘要后才调用 open，缺失引用明确失败。保存附件不重复存储完整 Pi index，恢复使用 Pi 接口取回 entries；保留原始父链控制映射以避免最终权威汇总父链污染模型上下文。
+
+完成记录的追加失败会修复追加边界，保留旧完成记录。兼容索引预备写失败也不提交；完成记录已落盘但索引 rename 失败只报警，Ledger 保存仍有效。当前完成写复用进程内共享 Ledger 写入器，不依赖“当前无并发”的假设；未实现多运行服务架构或跨进程同时写同一运行。
+
+下一拦截点暂停现已替换取消式暂停：`suspend_recovery` 只设置暂停意图，
+模型／工具执行前 hook 阻止下一动作；已经开始的调用继续，保留真实结果。
+已在执行前等待的分支可计为停稳；自然结束的分支不要求再到达一个 hook。
+已有候选初始化允许完成结果配对，但暂停期间不启动候选推理。
+全部活动分支停稳后回报 `recovery_suspended`，保存再等待必要的初始化收敛，
+通过既有 Pi SessionTree 和恢复记录保存 hook 位置、调用及结果事实，不保存 Promise。
+同进程 continue 释放原 hook；重新加载后 continue 重建保存位置，已完成动作不重放。
+普通 Prompt 仍由控制层排队；保存失败保持暂停。Interrupt 仍使用 abort／Runtime
+cancel 主动取消执行，不等待暂停屏障完成，也不把中断后的暂停申请报告为成功。
+
+夹具已改为先断言 Pause 等待且未取消已开始 sibling，再受控释放并确认真实结果、
+下一推理未开始，然后才允许保存；两次 Runtime action 均应在保存中，替代旧的
+“只保存第一次、取消第二次”断言。文件系统夹具的未结束模型流同样由测试受控结束，
+覆盖保存 before-tool 位置、continue 执行一次，以及模型直接结束而无下一动作。
+旧实现失败证据 `/tmp/ascout-pause-boundary-before.log`，断言为
+`Pause must not cancel the already started sibling`。
+新增等待中 SIGINT 用例无需释放 sibling 即完成取消回收。
+本次验证：Rust 库 206/206（`/tmp/ascout-pause-rust.log`），
+`cargo check --all-targets`（`/tmp/ascout-pause-check.log`）；Pi 恢复／通信／历史／
+交互 13/13（`/tmp/ascout-pause-pi.log`），额外 Pi 检查 22/22
+（`/tmp/ascout-pause-pi-extra.log`）。恢复六项及新增中断用例 7/7，最终日志
+`/tmp/ascout-pause-recovery-final.log`；TS 检查启用 allowImportingTsExtensions
+（`/tmp/ascout-pause-ts.log`），`git diff --check` 通过。
+全部使用本地伪模型和受控工具，不调用真实模型；未修改 Pi 原生代码。
+
+尚未实现：异常退出清理闭环，以及 Runtime External Effect Coordinator。检索现有 Runtime
+发现 Firecracker 网络 namespace 配置，未发现通用外部 API 请求暂存／模拟适配；
+namespace 本身不能提供 API 级拦截。未选择新网络技术、未增加模拟服务协议、
+未绕过真实请求路径。本轮不据既有恢复回归通过宣称以上能力已实现。
+
+验证：旧发布逻辑的新增回归失败，日志 `/tmp/ascout-implementation-publish-before.log`；
+修复后库测试 206/206、Ledger/Projection 2/2，通过日志
+`/tmp/ascout-implementation-rust-final.log`。恢复六项、通信取消、Pi 恢复绑定／源、
+历史及交互联合 14/14，通过日志 `/tmp/ascout-implementation-node-final.log`。
+`cargo check --all-targets`、bin 构建、TS 检查（启用 allowImportingTsExtensions）、
+修改的 Rust 文件格式及 diff 空白检查通过。全仓 `cargo fmt -- --check` 仍报告其他
+文件格式差异，未批量重排。仅使用本地伪模型及既有 Runtime 夹具，无真实模型请求。
+
 ## 当前范围
 
 2026-11-16 审查补验：Authority 的首个后台写者现为持续写 heartbeat 的无限循环，
@@ -143,7 +203,7 @@ Pi 源码依据（相邻 ../pi checkout）：
 
 ## 当前实现
 
-control plane 的 Pause 请求 Pi 同时 abort 所有 session，停止调度新工作，收齐已发出控制操作和命令的确定回执，然后保存原生消息、原 Branch 源、接入状态和 Tree；NLE 保存完整初始 RNG/configuration、动作序列及逐步校验值。保存使用独立目录，最后发布包含三个组件 SHA-256 的 `recovery.json`。恢复校验组件、Policy digest、Runtime 配置内容和能力后加载，等待用户输入，不自动推理或处置候选。保存失败报告失败并保留状态，原生执行已取消，后续输入重新连接等待；不删除唯一原生源。下方既往验证使用当时的保存入口，不代表当前入口已经通过同样验收。
+control plane 的 Pause 等待下一拦截点并收齐已开始调用的真实结果，再保存原生会话引用、接入状态及控制快照；Interrupt 保留 abort 语义。NLE 保存初始 RNG/configuration、动作序列及逐步校验值。资料写入 run 内独立目录，经组件关联和摘要校验后追加 Ledger 完成记录。恢复还校验 Policy、Runtime、资源和模型绑定，等待明确继续。保存失败保留暂停及旧完成状态。本能力不保证任意外部等待跨崩溃恢复，也不自动重放不确定外部命令。
 
 ### 活动工具与候选等待（2026-11-13）
 
@@ -159,10 +219,10 @@ Instrumentation 保存 `suspendedHooks`（Branch、toolCall 身份、原 assista
 
 ```sh
 cargo build --bins
-target/debug/ascout-control-plane <pi-root> --resume <session-id> --web 127.0.0.1:8080 --model <provider/model>
+target/debug/ascout-control-plane <pi-root> --resume <run-id> --web 127.0.0.1:8080 --model <provider/model>
 ```
 
-保存通过 Pause／`/pause`，成功后程序保持暂停等待继续；目录包含 `recovery-<timestamp>/{tree,agent,runtime}.json` 和 `recovery.json`。恢复不能只复制最终 `session.jsonl`；`sessions/` 保存各 Branch 的原上下文。NLE 重建只在固定版本和固定配置下校验，不声称公共 observation/RNG 校验是任意隐藏状态等价的数学证明。任意外部工具副作用不能靠此重放。
+保存通过 Pause／`/pause`，成功后程序保持暂停等待继续；目录包含 `recovery-<timestamp>/{agent,runtime}.json`，Ledger 的完成记录保存 Tree 并决定恢复代。Pi 保存分支的原上下文，ASCout 保存引用。NLE 重建只在固定版本和固定配置下校验，不声称公共 observation/RNG 校验是任意隐藏状态等价的数学证明。任意外部工具副作用不能靠此重放。
 
 ### 保存恢复与生命周期的库边界（2026-11-14）
 
@@ -196,7 +256,7 @@ target/debug/ascout-control-plane <pi-root> --resume <session-id> --web 127.0.0.
 - `node --test tests/recovery-active.mjs` 先在原实现复现 Shutdown 不退出（证据 `/tmp/opencode/recovery-active-8zpJIk`），实现后通过真实 Pi + 真实 NLE + 本地假模型：authority 同一 assistant 发两个工具，两个有效候选等待 sibling，真实 sibling NLE 动作在途时退出，收齐一项动作后保存，所有任务进程关闭；重启不请求模型，用户继续后三个 Branch 实际请求模型、两个候选获得真实 sibling 配对结果，原两个动作最终恰执行两次，再次保存退出且保存源不变。最终联合回归证据 `/tmp/opencode/recovery-active-6rDa6i`。这验证了核心等待恢复，不代表全部 backend／extension 恢复。
 - FS portable overlay 与 btrfs snapshot-copy 保存、独立可写恢复、恢复后 fork 和再次保存已通过真实环境验证；FS + Pi control plane 主入口已通过下述整链。原生 btrfs incremental backend 本机探测失败，不能据 snapshot-copy 结果宣称其验收通过。不保存任意子进程内存。
 - 恢复检查 task/authority、存活 Branch 的原生 session、Chance/Proposal 引用、Runtime 参与环境集合和 NLE world 索引；不据此宣称任意复杂部署及深层语义均已验证。无限阻塞 Runtime 或故障导致的回执无法收齐目前不能保存成功；外部原生工具只保留 Pi 取消终态，不承诺恢复子进程内存。
-- Pi 原生源在保存时复制到该代 `sources/`，恢复时再复制为独立可写源，checkpoint 按保存源身份重新关联；继续原运行或恢复运行不会改写该代 Pi 源。package-managed 扩展、glob、配置与代码绑定及外部 Git snapshot 保留见下方。
+- Pi 原生源通过公开 SessionManager.forkFrom 保存和恢复为独立可写源，checkpoint 按保存源身份重新关联；继续原运行或恢复运行不会改写该代 Pi 源。package-managed 扩展、glob、配置与代码绑定及外部 Git snapshot 保留见下方。
 - Promote notification 已在真实 main 入口、真实 Pi + NLE + 假模型的保存失败后继续／晋级／再次保存／恢复中验证最终历史恰一次；尚未验证所有通知交付时刻的跨恢复组合。
 
 早期 `cargo build --bins`、`cargo test --lib control_plane -- --nocapture`（26/26）、Pi 联合回归含新整链用例（20/20）通过。既有无工具、永不自然结束模型流 `/tmp/opencode/check-recovery.mjs` 通过，证据 `/tmp/opencode/control-recovery-wiBhe4`。没有调用真实模型；后续扩展验证见下方。

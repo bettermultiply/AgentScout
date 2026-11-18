@@ -104,4 +104,4 @@ Policy Engine 编译全部 Decision。会改写全局控制状态或必须在多
 
 Policy Engine 管理固定根目录中的多份 Policy，每份是含 `policy.yaml` 与 `decisions.py` 的独立子目录。配置文件为 `~/.config/ascout/config.toml`，支持 `policy_dir`、`runs_dir`、`default_policy` 与 `log_path` 四个键，缺省分别为 `~/.local/share/ascout/policies`、`~/.local/share/ascout/runs`、`policy` 与 `~/.local/share/ascout/ascout.log`；`log_path` 只配置系统运行日志的路径，格式及进程归属固定，启动时打不开即拒绝启动，不轮转。
 
-交互终端启动前列出 Policy 并询问，允许改选；空输入使用当前默认选择。非交互启动使用显式 Policy 名字，否则使用默认。一次 session 内 Policy 固定。系统在运行根目录下创建 session 子目录，以 session id 标识运行，结束时返回该 id；会话列表列出已有 session id，恢复按 id 找到目录，不以路径作为 execution id。
+交互终端启动前列出 Policy 并询问，允许改选；空输入使用当前默认选择。非交互启动使用显式 Policy 名字，否则使用默认。一次运行内 Policy 固定。系统在运行根目录下创建运行记录目录，以 run id 标识运行，结束时返回该 id；运行列表列出已有 run id，恢复按 id 找到目录，不以路径作为 execution id。

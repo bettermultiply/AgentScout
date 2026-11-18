@@ -26,7 +26,7 @@ impl SystemLog {
         &self,
         level: &str,
         component: &str,
-        session: Option<&str>,
+        run: Option<&str>,
         description: &str,
     ) -> io::Result<()> {
         let now = std::time::SystemTime::now()
@@ -38,9 +38,9 @@ impl SystemLog {
             libc::gmtime_r(&seconds, &mut tm);
         }
         let description = description.replace(['\r', '\n'], " ");
-        let session = session.map(|s| format!(" session={s}")).unwrap_or_default();
+        let run = run.map(|s| format!(" run={s}")).unwrap_or_default();
         let line = format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z {level} {component}{session} {description}",
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z {level} {component}{run} {description}",
             tm.tm_year + 1900,
             tm.tm_mon + 1,
             tm.tm_mday,
@@ -52,10 +52,10 @@ impl SystemLog {
         self.warnings.lock().unwrap().push(line.clone());
         writeln!(self.file.lock().unwrap(), "{line}")
     }
-    pub fn history_failure(&self, session: &str, error: &dyn std::fmt::Display) {
+    pub fn history_failure(&self, run: &str, error: &dyn std::fmt::Display) {
         let description = format!("history incomplete: {error}");
-        if let Err(error) = self.write("WARN", "ledger", Some(session), &description) {
-            eprintln!("System log write failed: {error}; session={session} {description}");
+        if let Err(error) = self.write("WARN", "ledger", Some(run), &description) {
+            eprintln!("System log write failed: {error}; run={run} {description}");
         }
     }
     pub fn warnings(&self) -> Vec<String> {

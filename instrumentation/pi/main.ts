@@ -11,7 +11,8 @@ import { evaluatePolicyArtifact } from '../../../pi/packages/pi-integration/src/
 import { createAgentAccess } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
 import { Notifications } from './notification.ts';
-import {save as saveRecovery,load as loadRecovery} from './recovery.ts';
+import { symlinkSync, renameSync } from 'node:fs';
+import {save as saveRecovery,load as loadRecovery,checksum} from './recovery.ts';
 import {recoveryBinding,snapshotResources} from './recovery-binding.ts';
 import { readFileSync } from 'node:fs';
 import {AscProxy} from './asc-proxy.ts';
@@ -40,7 +41,12 @@ async function createAgentSession(options) {
 }
 const sessionFile = process.env.ASCOUT_SESSION_FILE;
 if (!sessionFile) throw Error('ASCOUT_SESSION_FILE is required');
-let tree = new SessionTree(SessionManager.open(sessionFile));
+let tree = new SessionTree(SessionManager.create(process.cwd()));
+function linkSession() {
+    symlinkSync(tree.manager.getSessionFile(),`${sessionFile}.link`);
+    renameSync(`${sessionFile}.link`,sessionFile);
+}
+linkSession();
 const { Type } = require('typebox');
 const args = process.argv.slice(2);
 const socketPath = args.shift();
@@ -107,6 +113,31 @@ const suspendedHooks=new Map(), candidateSetups=new Map();
 const reconnectControllers=new Map();
 const interruptedBranches=new Set();
 let recoveryPaused=false;
+let pauseRequested=false;
+const parkedModels=new Set();
+const pauseReleases=new Set<()=>void>();
+async function pauseBoundary(signal){
+    if(!pauseRequested)return;
+    await new Promise<void>((resolve,reject)=>{
+        const release=()=>{cleanup();resolve()};
+        const abort=()=>{cleanup();reject(Error('Paused execution interrupted'))};
+        const cleanup=()=>{pauseReleases.delete(release);signal?.removeEventListener('abort',abort)};
+        pauseReleases.add(release);signal?.addEventListener('abort',abort,{once:true});
+        if(signal?.aborted)abort();
+    });
+}
+async function waitForPause(){
+    while(pauseRequested){
+        const stable=[...branchTasks.keys()].every(branch=>{
+            const hooks=[...pendingHooks.values()].filter(h=>h.branch===branch);
+            return !hooks.some(h=>h.started)&&(parkedModels.has(branch)||hooks.length>0);
+        });
+        if(stable)return;
+        await new Promise(resolve=>setTimeout(resolve,5));
+    }
+    throw Error('Pause interrupted');
+}
+function releasePause(){pauseRequested=false;for(const release of [...pauseReleases])release();}
 function captureHooks(){
     for(const branch of branchTasks.keys())interruptedBranches.add(branch);
     for(const [id,hook] of pendingHooks){
@@ -244,6 +275,8 @@ function tools(branch) {
 // have an execution plan in this integration.
 const filesystemToolSelection={tools:['read','bash','edit','write',...runtimeTools.map(tool=>tool.name)]};
 async function beforeModelInference(branch, modelValue, context, signal) {
+    parkedModels.add(branch);
+    await pauseBoundary(signal);
     await modelRestores.get(branch);
     syncTranscript(branch);
     // Model inference does not pass the tool effect gate; admission and extent
@@ -278,6 +311,8 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     });
     modelHolds.delete(key(branch,actionId));
     if(closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
+    await pauseBoundary(signal);
+    parkedModels.delete(branch);
     const startedAt=Date.now();
     const queue=modelActions.get(branch)??[];
     const action={action_id:actionId,started_at_ms:startedAt,seen_message:false};
@@ -300,7 +335,6 @@ async function beforeModelInference(branch, modelValue, context, signal) {
 function install(session,branch) {
     const before=session.agent.beforeToolCall, after=session.agent.afterToolCall;
     session.agent.beforeToolCall=async(context,signal)=>{
-        if(saving)throw Error('Save requested before tool execution');
         if(cancelled.has(branch))throw Error('Tool cancelled');
         await modelRestores.get(branch);
         const resultHold=modelResultHolds.get(branch);
@@ -313,6 +347,7 @@ function install(session,branch) {
         const hookKey=key(branch,context.toolCall.id);
         pendingHooks.set(hookKey,{branch,toolCall:structuredClone(context.toolCall),args:structuredClone(context.args),assistantMessage:structuredClone(context.assistantMessage)});
         try {
+        await pauseBoundary(signal);
         const previous=await before?.(context,signal);
         if(previous?.block||signal?.aborted){pendingHooks.delete(key(branch,context.toolCall.id));return previous;}
         let saved, checkpoint;
@@ -352,9 +387,10 @@ function install(session,branch) {
         });
         toolHolds.delete(hookKey);
         if(signal?.aborted)throw Error('Tool cancelled');
+        await pauseBoundary(signal);
         const toolCheckpoint=prepareCheckpoint();
-        await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
         const hook=pendingHooks.get(hookKey);if(hook)hook.started=true;
+        await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
         return previous;
         } catch(error) {
             toolHolds.delete(hookKey);
@@ -410,7 +446,7 @@ function install(session,branch) {
 }
 async function run(session,branch,operation) {
     try { await operation(); }
-    finally { syncTranscript(branch);await finishActions(branch,saving||cancelled.has(branch)||aborting.has(branch)?'cancelled':'failed'); }
+    finally { parkedModels.delete(branch);syncTranscript(branch);await finishActions(branch,saving||cancelled.has(branch)||aborting.has(branch)?'cancelled':'failed'); }
     const last=[...session.messages].reverse().find(m=>m.role==='assistant');
     if(last?.stopReason==='error'&&!saving)await report({message:branch===authority?'turn_failed':'branch_failed',branch_id:branch,reason:last.errorMessage??'Model failed'});
     await report({message:'turn_completed',branch_id:branch});
@@ -452,26 +488,20 @@ async function handle(command) {
             saving=true;
             let error;
             try {
+                await waitForPause();
                 captureHooks();
-                for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
-                // Cancellation is requested concurrently on every session,
-                // before waiting for any individual inference to settle.
-                const aborts=[...sessions.values()].map(session=>session.abort());
-                for(const controller of reconnectControllers.values())controller.abort();
-                await Promise.all(aborts);
                 await commandQueue;
-                await Promise.all([...branchTasks.values()].flatMap(set=>[...set]));
-                await Promise.allSettled([...setupTasks.values()]);
+                await Promise.allSettled([...setupTasks].filter(([branch])=>!candidateWaiters.get(branch)?.size).map(([,task])=>task));
                 for(const [branch,session] of sessions){await notifications.drain(session);syncTranscript(branch)}
                 const commandRecords=[];
                 for(const [id,item] of commands){
                     const value=JSON.parse(item.serialized);
                     if(['save','load'].includes(value.command))continue;
-                    commandRecords.push([id,{serialized:item.serialized,reply:await item.result}]);
+                    commandRecords.push([id,{serialized:item.serialized,reply:!item.settled&&value.command==='start_candidate'?undefined:await item.result}]);
                 }
                 const snapshot=tree.snapshot(dirname(command.path),[...checkpoints.values()].map(c=>c.manager));
                 const sourceFiles=new Map(snapshot.sources.map(source=>[source.originalFile,source.file]));
-                saveRecovery(command.path,{version:1,taskId,tree:snapshot,authority,nextAction,
+                saveRecovery(command.path,{version:1,taskId,tree:{...snapshot,originalEntries:snapshot.originalEntries.map(([id,entry])=>[id,{parentId:entry.parentId}]),sources:snapshot.sources.map(({entries,...reference})=>reference)},authority,nextAction,
                     resourceBinding:await recoveryBinding(root,snapshot.sources.map(source=>source.header.cwd)),
                     snapshotResources:snapshotResources(snapshot.sources),
                     executionConfig:{model:model??null,modelPattern:modelPattern??null,thinkingLevel,runtimeTools},
@@ -496,6 +526,18 @@ async function handle(command) {
             try {
                 if(sessions.size)throw Error('Load requires an empty Agent adapter');
                 const record=loadRecovery(command.path);
+                for(const source of record.tree.sources){
+                    // open() creates a session for a missing path: check the
+                    // saved checksum first so missing references fail clearly.
+                    if(checksum(readFileSync(source.file))!==source.checksum)throw Error(`Recovery source changed: ${source.file}`);
+                    source.entries=SessionManager.open(source.file).getEntries();
+                }
+                const nativeEntries=new Map(record.tree.sources.flatMap(source=>source.entries.map(entry=>[entry.id,entry])));
+                record.tree.originalEntries=record.tree.originalEntries.map(([id,control])=>{
+                    const entry=nativeEntries.get(id);
+                    if(!entry)throw Error(`Recovery Pi entry reference missing: ${id}`);
+                    return [id,{...entry,parentId:control.parentId}];
+                });
                 if(record.commands.length>1024||(record.commandAhead?.length??0)>1024)throw Error('Recovery command identity window exceeds capacity');
                 if(record.taskId!==taskId)throw Error('Recovery task identity mismatch');
                 if(record.resourceBinding&&JSON.stringify(record.resourceBinding)!==JSON.stringify(await recoveryBinding(root,record.tree.sources.map(source=>source.header.cwd))))throw Error('Recovery Pi code, extension or configuration resources changed');
@@ -513,6 +555,8 @@ async function handle(command) {
                     if(entry?.type!=='message'||JSON.stringify(entry.message)!==JSON.stringify(checkpoint.saved.at(-1))||!entry.message.content?.some(part=>part.type==='toolCall'&&part.id===operation))throw Error('Recovery checkpoint context mismatch');
                 }
                 const restored=SessionTree.restore(record.tree,SessionManager,sessionFile);
+                symlinkSync(restored.manager.getSessionFile(),`${sessionFile}.link`);
+                renameSync(`${sessionFile}.link`,sessionFile);
                 const managers=restored.recoveryManagers;
                 for(const [,checkpoint] of record.checkpoints)if(!managers.has(checkpoint.manager))throw Error('Recovery checkpoint manager missing');
                 tree=restored;authority=record.authority;nextAction=record.nextAction;
@@ -545,13 +589,10 @@ async function handle(command) {
         case 'local_policy':
             return;
         case 'suspend_recovery': {
-            interaction.cancel();
-            saving=true;
+            pauseRequested=true;
+            recoveryPaused=true;
+            await waitForPause();
             captureHooks();
-            for(const branch of candidateWaiters.keys())releaseCandidateWaiters(branch);
-            for(const controller of reconnectControllers.values())controller.abort();
-            await Promise.all([...sessions.values()].map(session=>session.abort()));
-            await Promise.allSettled([...setupTasks.values()]);
             await report({message:'recovery_suspended'});return;
         }
         case 'start_branch': {
@@ -579,10 +620,15 @@ async function handle(command) {
             if(branch!==authority)throw Error('Only the authority accepts user input');
             const session=sessions.get(branch);if(!session)throw Error('Session missing');
             if(recoveryPaused){
+                if(!continuing)return;
                 recoveryPaused=false;
-                // Native cancelled tool results remain in history. Reconnect
-                // only suspended calls, appending their eventual real result;
-                // never replay the already issued Runtime action.
+                const live=new Set(branchTasks.keys());
+                for(const [id,hook] of suspendedHooks)if(live.has(hook.branch))suspendedHooks.delete(id);
+                for(const owner of live)interruptedBranches.delete(owner);
+                releasePause();
+                // Live turns resume their existing hooks. Loaded turns rebuild
+                // only saved hook positions from native messages and facts;
+                // completed Runtime actions are never replayed.
                 for(const [id,setup] of [...candidateSetups])startSetup(setup);
                 const grouped=new Map();
                 for(const [id,hook] of suspendedHooks){const hooks=grouped.get(hook.branch)??[];hooks.push([id,hook]);grouped.set(hook.branch,hooks)}
@@ -644,7 +690,7 @@ async function handle(command) {
                 modelForks.set(branch,{model:parent.model,thinkingLevel:parent.thinkingLevel,operation_id:command.operation_id});
                 candidateSetups.delete(branch);
                 await report({message:'branch_created',branch_id:branch});await report({message:'branch_started',branch_id:branch});await report({message:'branch_ready',branch_id:branch});
-                if(!saving&&!recoveryPaused)executeTurn(session,branch,()=>session.continue());return;
+                if(!saving&&!recoveryPaused)executeTurn(session,branch,()=>session.continue());else interruptedBranches.add(branch);return;
             }
             const checkpointMessage=messages.findLast(message=>message.role==='assistant'&&message.content?.some(p=>p.type==='toolCall'&&p.id===command.operation_id&&p.name===command.tool_name));
             if(!checkpointMessage)throw Error('Invalid pending checkpoint');
@@ -683,7 +729,7 @@ async function handle(command) {
             for(let i=0;i<paired.length;i++)await report({message:'transcript',branch_id:branch,entry:paired[i],session_entry_id:pairedEntryIds[i]});
             await report({message:'branch_started',branch_id:branch});
             await report({message:'branch_ready',branch_id:branch});
-            if(!saving&&!recoveryPaused)executeTurn(session,branch,()=>session.continue());return;
+            if(!saving&&!recoveryPaused)executeTurn(session,branch,()=>session.continue());else interruptedBranches.add(branch);return;
         }
         case 'pause':
         case 'resume':
@@ -721,6 +767,7 @@ async function handle(command) {
             return;
         }
         case 'abort':
+            pauseRequested=false;
             saving=false;
             recoveryPaused=false;
             interruptedBranches.delete(branch);
@@ -761,6 +808,7 @@ async function dispatch(command){
     if(operation&&command.command_id)return {message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status:reason?'failed':'applied',generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{}),...(reason?{reason}:{})};
     // A failed command-list query is not a Branch failure; the UI simply gets
     // no list for that request.
+    if(reason&&command.command==='suspend_recovery'&&!pauseRequested)return;
     if(reason&&command.command!=='get_commands'&&!(saving&&command.command==='start_candidate'))return {message:'branch_failed',branch_id:command.branch_id,reason};
 }
 function startSetup(command){
@@ -768,7 +816,7 @@ function startSetup(command){
     void task.then(reply=>reply?report(reply):undefined).finally(()=>setupTasks.delete(command.branch_id));
 }
 await report({message:'agent_connected',agent_id:agentId,capabilities});
-await report({message:'agent_ready',agent_id:agentId});
+await report({message:'agent_ready',agent_id:agentId,session:{file:tree.manager.getSessionFile(),id:tree.manager.getHeader().id,cwd:tree.manager.getHeader().cwd}});
 const tasks=new Set();
 const deliveries=new IdentityWindow(positiveSequence);
 let commandQueue: Promise<unknown>=Promise.resolve();
@@ -836,7 +884,7 @@ try{
         }
     }
     tree.settle();
-    if(!transportError)await report({message:'agent_released',agent_id:agentId});
+    if(!transportError)await report({message:'agent_released',agent_id:agentId,session:{file:tree.manager.getSessionFile(),id:tree.manager.getHeader().id,cwd:tree.manager.getHeader().cwd}});
     await ascProxy.close();
     // An aborted local-policy evaluation can leave the evaluator child's stdio
     // handles open after it rejects; those handles would otherwise keep this

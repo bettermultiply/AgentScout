@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 
-export function sessionPath(root, file) {
+export function runPath(root, file) {
   const runs = path.join(root, 'runs');
   const ids = fs.existsSync(runs) ? fs.readdirSync(runs).filter(id => fs.statSync(path.join(runs,id)).isDirectory()) : [];
-  if (ids.length > 1) throw Error('Fixture expected one session');
+  if (ids.length > 1) throw Error('Fixture expected one run');
   if (!ids.length && file.startsWith('workspace')) return path.join(root,file);
   return path.join(runs, ids[0] ?? 'not-started', file);
 }
@@ -17,7 +17,7 @@ export function spawnControl(binary, fixtureArgs, options) {
   fs.mkdirSync(path.join(home,'.config/ascout'), {recursive:true});
   fs.writeFileSync(path.join(home,'.config/ascout/config.toml'),
     `policy_dir = ${JSON.stringify(path.dirname(path.dirname(policy)))}\nruns_dir = ${JSON.stringify(path.join(root,'runs'))}\ndefault_policy = ${JSON.stringify(path.basename(path.dirname(policy)))}\n`);
-  // The session workspace now lives under runs; cover it in the fake Runtime's
+  // The run workspace now lives under runs; cover it in the fake Runtime's
   // filesystem configuration, alongside fixture-owned host paths.
   const runtimePath = options.env.ASCOUT_RUNTIME_CONFIG;
   if (runtimePath) {
@@ -33,7 +33,7 @@ export function spawnControl(binary, fixtureArgs, options) {
     fs.writeFileSync(runtimePath,JSON.stringify(runtime));
   }
   const resume = rest.indexOf('--resume');
-  if (resume >= 0) rest.splice(resume,1,'--resume',path.basename(path.dirname(sessionPath(root,'recovery.json'))));
+  if (resume >= 0) rest.splice(resume,1,'--resume',path.basename(path.dirname(runPath(root,'recovery.json'))));
   // Seed synchronously in the adapter launcher, before Runtime can observe the workspace.
   const launcher = path.join(root, 'runtime-launcher.cjs');
   const adapter = options.env.ASCOUT_RUNTIME_ADAPTER ?? path.join(path.dirname(binary), 'ascout-runtime-adapter');
@@ -43,7 +43,7 @@ const root = ${JSON.stringify(root)};
 const runs = path.join(root, 'runs');
 const ids = fs.readdirSync(runs);
 if (${resume < 0} && fs.existsSync(path.join(root, 'workspace'))) {
-  if (ids.length !== 1) throw Error('Fixture expected one session');
+  if (ids.length !== 1) throw Error('Fixture expected one run');
   fs.cpSync(path.join(root, 'workspace'), path.join(runs, ids[0], 'workspace'), {recursive:true});
 }
 const child = cp.spawn(${JSON.stringify(adapter)}, process.argv.slice(2), {stdio:'inherit'});

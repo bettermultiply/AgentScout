@@ -886,6 +886,8 @@ pub enum AgentMessage {
     },
     AgentReady {
         agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<serde_json::Value>,
     },
     AgentDisconnected {
         agent_id: String,
@@ -896,6 +898,8 @@ pub enum AgentMessage {
     },
     AgentReleased {
         agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<serde_json::Value>,
     },
     BranchCreated {
         branch_id: String,

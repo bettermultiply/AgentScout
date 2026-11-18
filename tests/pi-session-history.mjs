@@ -31,7 +31,7 @@ test('native Pi history preserves compaction/custom/IDs, rewires only final hist
         assert.ok(reopened.getEntry(prediction));assert.ok(reopened.getEntry(custom));assert.ok(reopened.getEntry(compact));
         assert.equal(reopened.buildSessionContext().messages.find(m=>m.role==='toolResult').content[0].text,'real');
         assert.ok(existsSync(candidate.getSessionFile()));
-        tree.stop('authority');tree.settle();assert.ok(!existsSync(parent.getSessionFile()));assert.ok(existsSync(candidate.getSessionFile()));
+        tree.stop('authority');tree.settle();assert.ok(existsSync(parent.getSessionFile()),'Pi retains released history for checkpoint references');assert.ok(existsSync(candidate.getSessionFile()));
         candidate.appendCustomEntry('fixture-final',{targetId:next});tree.settle();
         reopened=SessionManager.open(file);assert.equal(reopened.getEntries().at(-1).parentId,candidate.getLeafId());
         const bad=candidate.getEntry(next);bad.parentId='missing-parent';

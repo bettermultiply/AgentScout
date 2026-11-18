@@ -221,11 +221,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resume = resume_id.is_some();
     let config = config::Config::load()?;
     let system_log = ascout::control_plane::system_log::SystemLog::open(&config.log_path)?;
-    if args == ["sessions"] {
+    if args == ["runs"] {
         return config.list();
     }
     if args.len() != 1 {
-        return Err("usage: ascout-control-plane <pi-root> [--policy <name>] [--resume <session-id>] [--runtime <runtime.json>] [--web <address>] [--model <provider/model>] [--models <file>] [--thinking <level>]; ascout-control-plane sessions".into());
+        return Err("usage: ascout-control-plane <pi-root> [--policy <name>] [--resume <run-id>] [--runtime <runtime.json>] [--web <address>] [--model <provider/model>] [--models <file>] [--thinking <level>]; ascout-control-plane runs".into());
     }
     let pi_root = fs::canonicalize(&args[0])?;
     let selected_policy = if !resume || policy_name.is_some() {
@@ -233,15 +233,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let (session_id, run_dir) = config.session(resume_id.as_deref())?;
-    eprintln!("Session id: {session_id}");
-    struct SessionNotice(String);
-    impl Drop for SessionNotice {
+    let (run_id, run_dir) = config.run(resume_id.as_deref())?;
+    eprintln!("Run id: {run_id}");
+    struct RunNotice(String);
+    impl Drop for RunNotice {
         fn drop(&mut self) {
-            eprintln!("Session id: {}", self.0);
+            eprintln!("Run id: {}", self.0);
         }
     }
-    let _session_notice = SessionNotice(session_id.clone());
+    let _run_notice = RunNotice(run_id.clone());
     let artifact_path = run_dir.join("policy.json");
     if !resume
         && [
@@ -266,13 +266,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         match fs::read(&artifact_path) {
             Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                None
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => {
-                return Err(
-                    format!("Policy artifact {}: {error}", artifact_path.display()).into(),
-                );
+                return Err(format!("Policy artifact {}: {error}", artifact_path.display()).into());
             }
         }
     };
@@ -313,7 +309,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .or_else(|| policy.runtime_config_path().map(std::path::PathBuf::from))
         .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
-    tree.set_execution_id(session_id.clone())?;
+    tree.set_execution_id(run_id.clone())?;
     let config_digest = if resume {
         recovery::validate_bindings(&tree, policy.digest(), &config_path)?
     } else {
@@ -395,13 +391,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         let requests = events.clone();
         let mut ledger = Ledger::open(&run_dir.join("events.jsonl"))?;
+        ledger.set_system_log(system_log.clone());
         if let Err(error) = ledger.record(json!({
             "source": "control_plane",
             "message": "session_file",
             "task_id": tree.execution_id(),
             "session_file": session_file,
-        })) { system_log.history_failure(&session_id, &format!("record append failed: {error}")); }
-        let projection = ascout::control_plane::ui_projection::UiProjection::new(ledger.reader()).with_log(system_log.clone());
+        })) {
+            system_log.history_failure(&run_id, &format!("record append failed: {error}"));
+        }
+        let projection = ascout::control_plane::ui_projection::UiProjection::new(ledger.reader())
+            .with_log(system_log.clone());
         let interface = ui::Interface::new(tree.execution_id().to_string(), projection.clone());
         let ui_connection =
             ascout::control_plane::gateway::ui::Connection::new(projection.clone(), move |request| {
@@ -421,7 +421,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 requests
                     .send(execution::Event::Request(request))
                     .map_err(|_| "Control plane disconnected".into())
-            });
+            },
+        );
         let mut tui_thread = None;
         let mut web_server = None;
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -436,12 +437,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut observation_error = None;
             for content in tree.drain_observations() {
                 if let Err(error) = ledger.append_observation(tree.execution_id(), content) {
-                    system_log.history_failure(&session_id, &format!("observation append failed: {error}"));
+                    system_log.history_failure(
+                        &run_id,
+                        &format!("observation append failed: {error}"),
+                    );
                     observation_error.get_or_insert(error);
                 }
             }
             let _ = observation_error;
-            if let Err(error) = interface.publish(&mut ledger, false, false, "Starting Agent session…") { system_log.history_failure(&session_id, &format!("observation append failed: {error}")); }
+            if let Err(error) =
+                interface.publish(&mut ledger, false, false, "Starting Agent session…")
+            {
+                system_log
+                    .history_failure(&run_id, &format!("observation append failed: {error}"));
+            }
             tui_thread = if let Some(address) = &web_address {
                 web_server = Some(ascout::control_plane::gateway::ui::start(
                     address,
@@ -486,16 +495,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut failure = None;
             for content in tree.drain_observations() {
                 if let Err(error) = ledger.append_observation(tree.execution_id(), content) {
-                    system_log.history_failure(&session_id, &format!("observation append failed: {error}"));
+                    system_log.history_failure(
+                        &run_id,
+                        &format!("observation append failed: {error}"),
+                    );
                     failure.get_or_insert(error);
                 }
             }
             if let Err(error) = interface.publish(&mut ledger, false, false, "Stopped") {
-                system_log.history_failure(&session_id, &format!("observation append failed: {error}"));
+                system_log
+                    .history_failure(&run_id, &format!("observation append failed: {error}"));
                 failure.get_or_insert(error);
             }
             if let Err(error) = interface.disconnect(&mut ledger) {
-                system_log.history_failure(&session_id, &format!("observation append failed: {error}"));
+                system_log
+                    .history_failure(&run_id, &format!("observation append failed: {error}"));
                 failure.get_or_insert(error);
             }
             failure.map_or(Ok(()), Err)

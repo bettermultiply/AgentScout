@@ -1,5 +1,10 @@
 # 开发决策
 
+## Ledger 恢复审查：共享写入与控制快照
+
+按本轮明确授权，同一路径的 Ledger 打开操作复用进程内原写入器，追加、sync、失败回退与失败状态不可分离；等待观察事件不持写入锁。恢复直接使用 recovery_complete.control 重建 Tree，取消必需 tree.json 副本，继续检查 Agent／Runtime 附件和 Pi 引用；回退不得跨过 task_completed。兼容索引替换失败只写系统日志警告。直接附件及目录同步不代表 Runtime 外部资源与 Pi 引用的全链路断电保证。复现、回归和未完成的 session 打开入口见 [恢复开发记录](recovery.md)。未委派、提交或请求真实模型。
+
+
 ## 2026-11-17：Instrumentation 最终定向修正
 
 按已授权语义修正，不新增组件或 Policy 名称：Session 管理属于 Product Integration；`createAgentAccess` 对应 Interposer，`AscProxy` 对应 ASC-Proxy。工具／模型 speculative-first 保持父调用执行前等待，候选独立运行，接受后 Promote 候选并取消旧父调用，不向旧父调用填入候选结果；全部拒绝时原调用放行一次，eager 则并行启动权威调用。以手工事件先复现空／失败预测未放行、held 候选无法验证、失败预测后模型结果丢失及等待释放前回收问题，复用现有授权、Policy 裁决和生命周期机制修复。具体证据及测试边界见 [接入实现](agent-access.md#本轮验证与能力边界)。未运行真实模型、Firecracker 或已完成的整组检查；未提交或推送。
@@ -1129,3 +1134,8 @@ Execution、Workspace、Input、Effect、Outcome 与 Interposer 的职责语义�
 # 2026-11-16 交互实现纠正
 
 废弃助手此前写入的“TUI 提示回答暂缓、纯 TUI 只能持续等候”及“输入 / 时重新请求 Pi 清单”的表述。当前决定是适配 AScout 终端文字提示；命令清单在 Pi 初始权威 session 完成扩展绑定与资源发现后读取一次，重连和换权威复用缓存。没有新的自动过期、轮询或 Runtime 工具取消设计。
+
+
+### 运行身份命名统一（本轮确认）
+
+AScout 管理的运行身份命名为 run id，保存位置称“运行记录目录”；CLI 使用 `runs`、`--resume <run-id>`，启动和结束输出 `Run id`，新目录使用 `run-` 前缀，系统日志归属字段使用 `run=<id>`，配置仍为 `runs_dir`。旧 `session-*` 是不透明的既有 run id，按原 id 恢复，不迁移目录或改写 Agent 引用。Agent 原生 session/session id、AScoutAgent 的会话概念与 workspace 保留；run id 不等于 task id，新用户 prompt 仍创建新 task。本次不改变 task 机制，也不增加常驻多运行服务、EEC 或已结束会话打开命令。此前决策中的 session 命名保留为历史表述，以本条和当前正式文档为准。

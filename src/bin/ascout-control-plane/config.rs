@@ -30,7 +30,7 @@ fn expand(value: &str, home: &Path) -> PathBuf {
 
 pub fn name(value: &str) -> Result<(), Box<dyn std::error::Error>> {
     if value.is_empty() || value == "." || value == ".." || value.contains(['/', '\\']) {
-        return Err("Policy name and session id must be single directory names".into());
+        return Err("Policy name and run id must be single directory names".into());
     }
     Ok(())
 }
@@ -103,7 +103,7 @@ impl Config {
         Ok(path)
     }
 
-    pub fn session(
+    pub fn run(
         &self,
         resume: Option<&str>,
     ) -> Result<(String, PathBuf), Box<dyn std::error::Error>> {
@@ -111,14 +111,14 @@ impl Config {
             name(id)?;
             let path = self.runs_dir.join(id);
             if !path.is_dir() {
-                return Err(format!("Unknown session id: {id}").into());
+                return Err(format!("Unknown run id: {id}").into());
             }
             return Ok((id.into(), fs::canonicalize(path)?));
         }
         fs::create_dir_all(&self.runs_dir)?;
-        // OS-generated unique directory name is also the persisted session identity.
+        // OS-generated unique directory name is also the persisted run identity.
         let directory = tempfile::Builder::new()
-            .prefix("session-")
+            .prefix("run-")
             .tempdir_in(&self.runs_dir)?
             .keep();
         let id = directory.file_name().unwrap().to_str().unwrap().to_string();
@@ -143,5 +143,32 @@ impl Config {
             println!("{}", id.to_string_lossy());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_identity_preserves_legacy_directories_and_creates_run_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let config = Config {
+            log_path: root.path().join("ascout.log"),
+            policy_dir: root.path().join("policies"),
+            runs_dir: root.path().join("runs"),
+            default_policy: "policy".into(),
+        };
+        let legacy = config.runs_dir.join("session-legacy");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("session.jsonl"), "native Agent session reference").unwrap();
+        let (id, path) = config.run(Some("session-legacy")).unwrap();
+        assert_eq!(id, "session-legacy");
+        assert_eq!(path, fs::canonicalize(&legacy).unwrap());
+        assert_eq!(fs::read_to_string(path.join("session.jsonl")).unwrap(), "native Agent session reference");
+        let (id, path) = config.run(None).unwrap();
+        assert!(id.starts_with("run-"));
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), id);
+        assert!(config.run(Some("../outside")).is_err());
     }
 }

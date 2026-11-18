@@ -396,7 +396,7 @@ pub fn run(
                 }
                 let started = task.started;
                 let ledger = &mut task.ledger;
-                let session_id = task.tree.execution_id().to_string();
+                let run_id = task.tree.execution_id().to_string();
                 let (commands, wake, finish) = task.control.settle(
                     task.tree,
                     runtime,
@@ -407,7 +407,7 @@ pub fn run(
                         value["t_ms"] = json!(started.elapsed().as_millis() as u64);
                         if let Err(error) = ledger.record(value) {
                             system_log.history_failure(
-                                &session_id,
+                                &run_id,
                                 &format!("record append failed: {error}"),
                             );
                         }

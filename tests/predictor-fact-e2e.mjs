@@ -1,4 +1,4 @@
-import {spawnControl, sessionPath} from './control-plane-fixture.mjs';
+import {spawnControl, runPath} from './control-plane-fixture.mjs';
 // Real control plane -> Runtime -> Pi, saved failing Policy, loopback SSE only.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
@@ -46,10 +46,10 @@ for(const multistep of [false,true])test(multistep?'Promote during inference pre
     for(const stream of [p.stdout,p.stderr])stream.on('data',b=>fs.appendFileSync(root+'/control.log',b));
     const post=body=>fetch(`http://127.0.0.1:${port}/api/request`,{method:'POST',headers:{origin:`http://127.0.0.1:${port}`,'content-type':'application/json'},body:JSON.stringify(body)});
     t.after(async()=>{if(p.exitCode===null){try{await post({action:'shutdown'})}catch{};await Promise.race([once(p,'exit'),new Promise(r=>{const timer=setTimeout(()=>{p.kill('SIGKILL');r()},5000);timer.unref()})])}});
-    const events=()=>fs.existsSync(sessionPath(root, 'events.jsonl'))?fs.readFileSync(sessionPath(root, 'events.jsonl'),'utf8').split('\n').slice(0,-1).filter(Boolean).map(JSON.parse):[];
+    const events=()=>fs.existsSync(runPath(root, 'events.jsonl'))?fs.readFileSync(runPath(root, 'events.jsonl'),'utf8').split('\n').slice(0,-1).filter(Boolean).map(JSON.parse):[];
     async function wait(predicate,label){const end=Date.now()+30000;while(Date.now()<end){assert.equal(p.exitCode,null,'control plane exited: '+root);if(await predicate())return;await new Promise(r=>setTimeout(r,20))}assert.fail('timeout '+label+' '+root);}
     await wait(()=>events().some(e=>e.message==='branch_ready'),'Agent ready');
-    const compiled=JSON.parse(fs.readFileSync(sessionPath(root, 'policy.json')));
+    const compiled=JSON.parse(fs.readFileSync(runPath(root, 'policy.json')));
     for(const key of ['definition','version','files','runtime','decisions'])assert.deepEqual(compiled[key],saved[key],`normal startup preserves saved Policy ${key}`);
     assert.equal(compiled.digest,policyDigest({...saved,python:compiled.python}),'digest differs only if the installed Python identity differs');
     if(compiled.python===saved.python)assert.equal(compiled.digest,saved.digest);
@@ -72,7 +72,7 @@ for(const multistep of [false,true])test(multistep?'Promote during inference pre
         const tools=finished.filter(e=>e.action_kind==='tool_execution'&&e.status==='succeeded');
         assert.equal(tools.length,5);
         assert.ok(tools.filter(e=>e.t_ms>promoted.t_ms).length>=2);
-        const entries=fs.readFileSync(sessionPath(root, 'session.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+        const entries=fs.readFileSync(runPath(root, 'session.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
         assert.ok(entries.some(e=>e.message?.role==='assistant'&&e.message.stopReason==='stop'&&e.message.content.some(p=>p.text==='local fixture completed')),'native session persists the complete final reply');
     }
     const done=once(p,'exit');assert.equal((await post({action:'shutdown'})).status,202);await done;

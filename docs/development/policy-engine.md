@@ -177,7 +177,7 @@ control plane 入口仍内嵌 Pi 启动参数；目标是入口不内嵌产品�
 
 control plane 从 `~/.config/ascout/config.toml` 读取 `policy_dir`、`runs_dir`、`default_policy` 与 `log_path`，默认分别为 `~/.local/share/ascout/policies`、`~/.local/share/ascout/runs`、`policy` 与 `~/.local/share/ascout/ascout.log`。仓库开发配置须显式指向本仓库 `assets/policy`。Policy 文件结构保持不变。
 
-入口为 `ascout-control-plane <pi-root> [--policy <name>]`，交互终端启动前允许改选；非交互不等待。新 session 使用 tempfile 的操作系统随机目录名（`session-` 前缀），同一名字用作 session id 和 execution identity；在 `runs_dir` 下原子创建，不接受调用方传入运行目录。结束输出 session id；`sessions` 列出已有目录名，`--resume <session-id>` 恢复并检查保存的身份。
+入口为 `ascout-control-plane <pi-root> [--policy <name>]`，交互终端启动前允许改选；非交互不等待。新运行使用 tempfile 的操作系统随机目录名（`run-` 前缀），同一名字用作 run id 和 execution identity；在 `runs_dir` 下原子创建，不接受调用方传入运行目录。结束输出 run id；`runs` 列出已有目录名，`--resume <run-id>` 恢复并检查保存的身份。
 
 Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Policy 已引用的 Runtime 配置，以单个 `backend` 或 `backends` 数组中各项的 `id` 对照 Runtime hello 的 `capabilities.backends`；没有引用 Runtime 或配置未声明 backend 时不检查。此检查不改变 Policy 摘要或编译产物结构。失败走既有 Adapter teardown。接口解析仍属于 Runtime，不构成环境保证验证。
 

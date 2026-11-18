@@ -100,7 +100,88 @@ use serde_json::Value;
 use crate::control_plane::agent_control::BranchRecord;
 
 /// 一次运行的事件记录。文件由调用方给出，Ledger 只负责追加。
+#[derive(Clone)]
 pub struct Ledger {
+    inner: Arc<Mutex<LedgerWriter>>,
+}
+
+// One process-owned writer per canonical path. Opening a recovery publisher
+// reuses the active writer, including its failure state and observation index.
+impl Ledger {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        use std::sync::{OnceLock, Weak};
+        static WRITERS: OnceLock<
+            Mutex<std::collections::HashMap<std::path::PathBuf, Weak<Mutex<LedgerWriter>>>>,
+        > = OnceLock::new();
+        let path = if path.exists() {
+            std::fs::canonicalize(path)?
+        } else {
+            std::fs::canonicalize(path.parent().unwrap_or(Path::new(".")))?.join(
+                path.file_name()
+                    .ok_or_else(|| io::Error::other("Ledger path missing filename"))?,
+            )
+        };
+        let mut writers = WRITERS.get_or_init(Default::default).lock().unwrap();
+        if let Some(inner) = writers.get(&path).and_then(Weak::upgrade) {
+            return Ok(Self { inner });
+        }
+        let inner = Arc::new(Mutex::new(LedgerWriter::open(&path)?));
+        writers.retain(|_, writer| writer.strong_count() > 0);
+        writers.insert(path, Arc::downgrade(&inner));
+        Ok(Self { inner })
+    }
+    pub fn set_system_log(&mut self, log: super::system_log::SystemLog) {
+        self.inner.lock().unwrap().system_log = Some(log);
+    }
+    pub fn warning(&self, description: &str) {
+        let log = self.inner.lock().unwrap().system_log.clone();
+        let result = log
+            .ok_or_else(|| io::Error::other("System log unavailable"))
+            .and_then(|log| log.write("WARN", "recovery", None, description));
+        if let Err(error) = result {
+            eprintln!("System log write failed: {error}; {description}");
+        }
+    }
+    pub fn reader(&self) -> LedgerReader {
+        self.inner.lock().unwrap().reader()
+    }
+    pub fn disconnect_readers(&self) {
+        self.inner.lock().unwrap().disconnect_readers();
+    }
+    pub fn events_after(&self, sequence: u64) -> Result<Vec<ObservationEvent>, String> {
+        self.reader().events_after(sequence)
+    }
+    pub fn record(&mut self, record: Value) -> io::Result<()> {
+        self.inner.lock().unwrap().record(record)
+    }
+    pub fn record_durable(&mut self, record: Value) -> io::Result<()> {
+        self.inner.lock().unwrap().record_durable(record)
+    }
+    pub fn append_observation(
+        &mut self,
+        task_id: &str,
+        content: ObservationContent,
+    ) -> io::Result<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .append_observation(task_id, content)
+    }
+    pub fn archive_branch(
+        &mut self,
+        branch: BranchRecord,
+        run: &str,
+        log: &super::system_log::SystemLog,
+    ) -> io::Result<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .archive_branch(branch, run, log)
+    }
+}
+
+struct LedgerWriter {
+    system_log: Option<super::system_log::SystemLog>,
     file: File,
     failed: bool,
     append_boundary: Option<u64>,
@@ -109,7 +190,7 @@ pub struct Ledger {
     reader: LedgerReader,
 }
 
-impl Ledger {
+impl LedgerWriter {
     pub fn open(path: &Path) -> io::Result<Self> {
         use std::io::BufRead;
         let file = OpenOptions::new()
@@ -129,6 +210,7 @@ impl Ledger {
             }
         }
         Ok(Self {
+            system_log: None,
             file,
             failed: false,
             append_boundary: None,
@@ -153,9 +235,6 @@ impl Ledger {
     }
     pub fn reader(&self) -> LedgerReader {
         self.reader.clone()
-    }
-    pub fn events_after(&self, sequence: u64) -> Result<Vec<ObservationEvent>, String> {
-        self.reader.events_after(sequence)
     }
     /// Publish only successfully saved observations.
     pub fn append_observation(
@@ -191,6 +270,22 @@ impl Ledger {
         Ok(())
     }
 
+    pub fn record_durable(&mut self, record: Value) -> io::Result<()> {
+        if self.failed {
+            return Err(io::Error::other("Ledger append previously failed"));
+        }
+        let result = self.record(record).and_then(|()| self.file.sync_all());
+        if result.is_err() {
+            self.failed = true;
+            self.restore_append_boundary()?;
+            if let Err(error) = self.file.sync_all() {
+                self.failed = true;
+                return Err(error);
+            }
+        }
+        result
+    }
+
     /// 追加一条记录。记录内容由调用方决定，Ledger 不解释它。
     pub fn record(&mut self, record: Value) -> io::Result<()> {
         if self.failed {
@@ -221,7 +316,7 @@ impl Ledger {
     pub fn archive_branch(
         &mut self,
         branch: BranchRecord,
-        session: &str,
+        run: &str,
         system_log: &super::system_log::SystemLog,
     ) -> io::Result<()> {
         let result = match self.write_archive(&branch) {
@@ -237,7 +332,7 @@ impl Ledger {
         };
         if let Err(error) = &result {
             system_log.history_failure(
-                session,
+                run,
                 &format!(
                     "branch_id={} branch archive failed: {error}",
                     branch.branch_id

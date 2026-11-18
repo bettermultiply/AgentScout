@@ -1,6 +1,5 @@
 // @ts-nocheck
-import { mkdirSync, writeFileSync, renameSync, unlinkSync, copyFileSync, openSync, fsyncSync, closeSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { writeFileSync, renameSync, openSync, fsyncSync, closeSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { checksum } from './recovery.ts';
@@ -28,24 +27,23 @@ export class SessionTree {
     // Copy native records, never reconstruct them from model-visible messages.
     // Keep the full source index: custom/summary entries can refer off-path.
     createBranch(branchId,workspace,source=this.manager,leaf=source.getLeafId()) {
-        const directory=join(dirname(this.manager.getSessionFile()),'sessions');
-        mkdirSync(directory,{recursive:true});
-        const file=join(directory,`${randomUUID()}.jsonl`);
-        const header={...source.getHeader(),id:randomUUID(),timestamp:new Date().toISOString(),cwd:workspace,parentSession:source.getSessionFile()};
+        const manager=source.constructor.create(workspace);
+        const file=manager.getSessionFile();
+        const header={...source.getHeader(),id:manager.getHeader().id,timestamp:new Date().toISOString(),cwd:workspace,parentSession:source.getSessionFile()};
         const entries=structuredClone(source.getEntries());
         // Native createBranchedSession mutates its receiver and recreates label
         // IDs. Copy native records instead, preserving IDs and off-path custom
         // references, and explicitly select the checkpoint on the new manager.
         this.write(file,header,entries);
-        const manager=source.constructor.open(file,undefined,workspace);
-        if(leaf)manager.branch(leaf);else manager.resetLeaf();
+        const opened=source.constructor.open(file,undefined,workspace);
+        if(leaf)opened.branch(leaf);else opened.resetLeaf();
         // branch() only selects an in-memory leaf. A neutral native record
         // persists the checkpoint path for an independent open of this file.
-        manager.appendCustomEntry('authority',{branch_id:branchId,parentId:leaf??null});
-        if(leaf)manager.branch(leaf);else manager.resetLeaf();
-        this.branches.set(branchId,{manager,stopped:false});
+        opened.appendCustomEntry('authority',{branch_id:branchId,parentId:leaf??null});
+        if(leaf)opened.branch(leaf);else opened.resetLeaf();
+        this.branches.set(branchId,{manager:opened,stopped:false});
         this.tails.set(branchId,leaf);
-        return manager;
+        return opened;
     }
 
     write(file,header,entries) {
@@ -95,19 +93,17 @@ export class SessionTree {
         for(const manager of checkpointManagers)managers.set(manager.getSessionFile(),manager);
         const copies=new Map();
         if(directory){
-            const sourcesDirectory=join(directory,'sources');mkdirSync(sourcesDirectory,{recursive:true});
-            for(const file of managers.keys()){
-                const target=join(sourcesDirectory,`${randomUUID()}.jsonl`);
-                if(existsSync(file))copyFileSync(file,target);
-                else {const manager=managers.get(file);this.write(target,manager.getHeader(),manager.getEntries());}
+            for(const [file,manager] of managers){
+                if(!existsSync(file))throw Error(`Pi session is not persisted: ${file}`);
+                const saved=manager.constructor.forkFrom(file,manager.getHeader().cwd);
+                const target=saved.getSessionFile();
                 const descriptor=openSync(target,'r');try{fsyncSync(descriptor)}finally{closeSync(descriptor)}
                 copies.set(file,target);
             }
-            const descriptor=openSync(sourcesDirectory,'r');try{fsyncSync(descriptor)}finally{closeSync(descriptor)}
         }
         const sourceFile=file=>copies.get(file)??file;
         const sources=[...managers].map(([file,manager])=>({file:sourceFile(file),originalFile:file,leaf:manager.getLeafId(),
-            header:manager.getHeader(),entries:structuredClone(manager.getEntries()),
+            header:manager.constructor.open(sourceFile(file)).getHeader(),entries:structuredClone(manager.getEntries()),
             checksum:checksum(readFileSync(sourceFile(file)))}));
         return {authority:this.authority,manager:sourceFile(this.manager.getSessionFile()),sources,
             branches:[...this.branches].map(([id,{manager,stopped}])=>[id,{file:sourceFile(manager.getSessionFile()),stopped}]),
@@ -152,14 +148,8 @@ export class SessionTree {
         for(const [id,input] of record.inputs){
             if((!branches.has(input.parent)&&!input.source)||input.source&&!sources.has(input.source))throw Error('Recovery prediction source missing');
         }
-        const activeDirectory=join(dirname(sessionFile??record.manager),'sessions',`restored-${randomUUID()}`);
-        mkdirSync(activeDirectory,{recursive:true});
         for(const source of record.sources){
-            // Saved generations are immutable. Every restore gets fresh writable
-            // sources, including indexes used only by prediction checkpoints.
-            const target=source.file===record.manager&&sessionFile?sessionFile:join(activeDirectory,`${randomUUID()}.jsonl`);
-            copyFileSync(source.file,target);
-            const manager=SessionManager.open(target);
+            const manager=SessionManager.forkFrom(source.file,source.header.cwd);
             if(source.leaf)manager.branch(source.leaf);else manager.resetLeaf();
             managers.set(source.file,manager);
         }
@@ -262,7 +252,8 @@ export class SessionTree {
         for(const [branchId,branch] of this.branches)if(branch.stopped){
             // Entries remain in the manager until assembly succeeds. A failed
             // write/validation never removes its native source file.
-            unlinkSync(branch.manager.getSessionFile());
+            // Checkpoint managers can still reference this native session after
+            // the Branch is released. Pi owns its persisted history lifetime.
             this.branches.delete(branchId);
         }
     }

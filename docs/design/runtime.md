@@ -32,6 +32,8 @@ Session、Workspace、进程和其他状态可以按需采用不同的承载方�
 
 Agent Session 的内部管理、fork、恢复和继续运行由 Instrumentation 负责，因为它理解具体 Agent 的会话结构和执行切点。Runtime 为相应执行活动提供环境、状态和效果约束；Instrumentation 与 Runtime 必须关联到同一 Branch 和动作上下文，不能只恢复 Session 而忽略它所依赖的文件或进程状态。control plane 仍管理全局 Branch 关系与裁决；Session 派生、环境派生和 Authority 切换不能相互冒充完成。
 
+恢复完成标记只能在保存组件成功且相互关联已校验后发布；仅有可读取的组件文件不足以报告可恢复。校验须包含 task／Authority 身份、存活 Branch 的 Session 与 Environment 引用，以及 Chance／Proposal 关联。校验失败保持暂停并报告失败，不覆盖上一个有效完成标记。
+
 ## 可插拔能力
 
 External Effect Coordinator 属于 Runtime，负责本机隔离覆盖不到的外部 API，并与 network backend 协同。它无需为跨 Branch 命令去重掌握整棵树；control plane 只在 Branch 被接受、丢弃或前提失效时通知相应暂存请求释放或取消，Runtime 按 Authority 与既有提交条件落实处理。

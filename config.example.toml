@@ -1,0 +1,8 @@
+# Policy 所在目录；每份 Policy 使用一个子目录。
+policy_dir = "~/.local/share/ascout/policies"
+# AScout 运行记录目录的根目录；新运行的子目录名以 run- 开头。
+runs_dir = "~/.local/share/ascout/runs"
+# 默认选择的 Policy 名称；配置不会自动安装 Policy。
+default_policy = "policy"
+# control plane 的系统运行日志路径。
+log_path = "~/.local/share/ascout/ascout.log"

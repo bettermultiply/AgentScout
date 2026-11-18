@@ -82,12 +82,12 @@ UI Projection 不拥有 Tree，不裁决投机，不把画面状态或报警写�
 
 ### 系统运行日志
 
-系统运行日志不是新的投机组件，由 control plane 进程持有；组件在进程内写入警告和错误。普通 Ledger 写入错误由 Speculation Coordinator 报告；Branch 归档由 Ledger 完成一次重试及最终失败报警，释放前写入警告。警告标明历史不完整，归档最终失败包含 session id、Branch id 和失败原因；Branch 控制状态保持不变，也不把已移出的 Branch 放回 Tree。界面需要显示时由 UI Projection 转发报警，不追加为 Ledger 记录。
+系统运行日志不是新的投机组件，由 control plane 进程持有；组件在进程内写入警告和错误。普通 Ledger 写入错误由 Speculation Coordinator 报告；Branch 归档由 Ledger 完成一次重试及最终失败报警，释放前写入警告。警告标明历史不完整，归档最终失败包含 run id、Branch id 和失败原因；Branch 控制状态保持不变，也不把已移出的 Branch 放回 Tree。界面需要显示时由 UI Projection 转发报警，不追加为 Ledger 记录。
 
-日志格式固定、不可配置：UTF-8，每条一行，字段依次为 UTC 时间、级别、组件、可选的 `session=<id>`、说明；说明中的换行改为空格。例如：
+日志格式固定、不可配置：UTF-8，每条一行，字段依次为 UTC 时间、级别、组件、可选的 `run=<id>`、说明；说明中的换行改为空格。例如：
 
 ```text
-2026-08-14T12:34:56.789Z WARN ledger session=session-abc history incomplete: observation append failed: disk full
+2026-08-14T12:34:56.789Z WARN ledger run=run-abc history incomplete: observation append failed: disk full
 ```
 
 `~/.config/ascout/config.toml` 的 `log_path` 缺省为 `~/.local/share/ascout/ascout.log`。只允许配置路径，不允许配置格式或归属。control plane 启动时打不开文件就拒绝启动。不做日志轮转。
@@ -96,11 +96,13 @@ UI Projection 不拥有 Tree，不裁决投机，不把画面状态或报警写�
 
 Ledger 记录运行事实，不承担合规或安全取证 audit；持久、tamper-evident audit 由具体 Runtime 按部署需求提供，control plane 正确性不依赖它。
 
-Ledger 以异步旁路记录 control plane 需要保留的运行事实，包括 Policy 决策、Branch 与 Proposal 状态变化、验证依据、效果与 obligation 处理结果、资源使用、取消与清理结果、Adapter 映射结果与 Runtime 失败。它用于状态对齐、问题定位、shadow/replay 和契约校验；它不从记录中重新决定生命周期，也不代替 Runtime 持有执行状态。
+Ledger 以异步旁路记录日常运行事实；显式保存的恢复完成记录必须同步持久化成功后才报告保存成功。日常记录包括 Policy 决策、Branch 与 Proposal 状态变化、验证依据、效果与 obligation 处理结果、资源使用、取消与清理结果、Adapter 映射结果与 Runtime 失败。它用于状态对齐、问题定位、shadow/replay 和契约校验；它不从记录中重新决定生命周期，也不代替 Runtime 持有执行状态。
 
 Ledger 只追加并保存记录，是观察事件日志的唯一保存者，在成功追加时分配同一运行内连续递增的序号；读取只从已保存的记录按序号取出，不以完整内存历史替代失败的文件写入。读取完整历史不得阻塞追加。Tree 在创建 Branch、切换 Authority、改变生命周期和环境状态的统一入口产生事件，由协调循环取走并交给 Ledger；事件记录实际转换及其原因，保留同一次处理中连续经过的中间状态。观察日志只承担观察和事实记录，不要求据此在崩溃后重建整棵树，也不为恢复逐次记录完整树状态。
 
-已经退出活动控制范围、移交 Ledger 的 Branch，首次归档写入失败后先重试一次。重试前必须安全恢复完整行的追加边界，避免把部分写入和重试拼接；无法安全恢复时明确报告恢复失败及重试无法完成。最终失败先将 session id、Branch id 与失败原因写入系统运行日志并经既有 UI Projection 通道报警，再释放 BranchRecord；不永久保留未归档集合，不放回活动 Tree，不恢复已结束的控制状态。系统日志写入失败时以 stderr 回退，仍保留上述身份与原因。失败记录不发布为观察事件。记录成功写出的判定不包含强制 `flush`。
+已经退出活动控制范围、移交 Ledger 的 Branch，首次归档写入失败后先重试一次。重试前必须安全恢复完整行的追加边界，避免把部分写入和重试拼接；无法安全恢复时明确报告恢复失败及重试无法完成。最终失败先将 run id、Branch id 与失败原因写入系统运行日志并经既有 UI Projection 通道报警，再释放 BranchRecord；不永久保留未归档集合，不放回活动 Tree，不恢复已结束的控制状态。系统日志写入失败时以 stderr 回退，仍保留上述身份与原因。失败记录不发布为观察事件。记录成功写出的判定不包含强制 `flush`。
+
+恢复资料归 Ledger 所在运行目录。显式保存先写入 Agent 控制位置和环境附件，完成关联及绑定校验，再向 Ledger 追加包含控制快照、附件摘要、Branch 对应 Pi session 引用的恢复完成记录。该记录持久化是保存完成边界；同一路径的普通追加与完成记录追加、同步及失败回退必须共用写入所有权和失败状态，不能另开独立句柄绕过失败。恢复直接从完成记录的控制快照重建 Tree，附件只补充 Agent／Runtime 状态并接受关联校验，兼容索引不决定恢复代。必需写入失败保持暂停及旧完成状态并报警；兼容索引更新失败只记系统日志警告，不否定已完成保存。该边界不等于所有后端及外部引用具备断电恢复保证，当前同步范围和缺口见 [恢复开发记录](../development/recovery.md)。恢复选择最新完整有效保存，不从观察事件推测控制状态。Pi session 由 Pi 公开接口保存和打开，ASCout 只保存其引用，不推断 Pi 目录结构。正常结束记录使旧 task 不再恢复；权威会话仍可通过 Pi 引用打开。UI Projection 只读取 observation，不公开恢复内部对象。
 
 session 记录由 Instrumentation 完整持久化并汇总为单一最终权威 session，其真实结果整理规则见 [Agent 接入设计](agent-integration.md) §3。Ledger 的 transcript 事实只保存 Branch id、消息记录 id 与 role，并记录文件位置，不重复保存正文。必须先写文件、后写引用；允许文件存在未被 Ledger 引用的记录，不承诺两者原子提交。运行期多 session 汇总时，Instrumentation 必须保持引用可定位；引用不承诺恢复完整活动 Tree，也不能把整理后的父链当作原始模型请求上下文。产品格式与读取位置提示不构成 control plane 裁决；内部记录引用不直接扩大只读观察接口公开范围。
 

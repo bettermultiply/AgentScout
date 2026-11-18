@@ -87,8 +87,17 @@ pub fn start(
             agent: Some(launch.clone()),
         },
     )?;
-    let bound = runtime_call(runtime, environment, Operation::BindExecution { branch_id: authority.clone() })?;
-    if let AgentCommand::StartBranch { execution_access, .. } = &mut command {
+    let bound = runtime_call(
+        runtime,
+        environment,
+        Operation::BindExecution {
+            branch_id: authority.clone(),
+        },
+    )?;
+    if let AgentCommand::StartBranch {
+        execution_access, ..
+    } = &mut command
+    {
         *execution_access = bound.execution_access.clone();
     }
     if let AgentCommand::Load { execution_accesses, .. } = &mut command {
@@ -110,9 +119,23 @@ pub fn start(
                     agent: Some(launch.clone()),
                 },
             )?;
-            let started = runtime_call(runtime, branch.environment_id.as_deref().ok_or("live Branch Environment missing")?, Operation::BindExecution { branch_id: branch.branch_id.clone() })?;
-            if let AgentCommand::Load { execution_accesses, .. } = &mut command {
-                if let Some(access) = started.execution_access { execution_accesses.insert(branch.branch_id.clone(), access); }
+            let started = runtime_call(
+                runtime,
+                branch
+                    .environment_id
+                    .as_deref()
+                    .ok_or("live Branch Environment missing")?,
+                Operation::BindExecution {
+                    branch_id: branch.branch_id.clone(),
+                },
+            )?;
+            if let AgentCommand::Load {
+                execution_accesses, ..
+            } = &mut command
+            {
+                if let Some(access) = started.execution_access {
+                    execution_accesses.insert(branch.branch_id.clone(), access);
+                }
             }
         }
     }

@@ -25,7 +25,12 @@ impl SpeculativeTree {
                             && self.authority_branch_id.as_ref() == Some(*branch)
                         || operation.branch().is_none_or(|target| target == branch.as_str())
                 })
-                .map(|branch| (branch.clone(), self.policy_branch_context(branch, &operation)))
+                .map(|branch| {
+                    (
+                        branch.clone(),
+                        self.policy_branch_context(branch, &operation),
+                    )
+                })
                 .collect();
             self.policy_dependencies.insert(id, self.policy_dependencies_for(&operation));
             self.policy_work_context.insert(id, context);
@@ -34,22 +39,34 @@ impl SpeculativeTree {
         actions.operations.push((id, operation));
     }
 
-    fn discard_expired_validation(&mut self, work: &ControlOperation, actions: &mut ControlActions) -> io::Result<()> {
+    fn discard_expired_validation(
+        &mut self,
+        work: &ControlOperation,
+        actions: &mut ControlActions,
+    ) -> io::Result<()> {
         if let ControlOperation::Launch(tool) = work {
             self.chance_mut(&tool.chance_id)?.launch_epoch = None;
         }
         if let ControlOperation::Validate(candidate) = work
             && self.branches.get(candidate).is_some_and(|branch| self.authority_advanced_past(branch))
         {
-            actions.commands.extend(self.discard_candidate(candidate, DiscardedReason::MatchRejected, "Validation waiting point expired")?);
+            actions.commands.extend(self.discard_candidate(
+                candidate,
+                DiscardedReason::MatchRejected,
+                "Validation waiting point expired",
+            )?);
         }
         Ok(())
     }
 
     fn policy_dependencies_for(&self, operation: &ControlOperation) -> Value {
         match operation {
-            ControlOperation::Predict(_) => json!({"capabilities": self.capability_view, "revision": self.capability_revision}),
-            ControlOperation::Launch(_) => json!({"authority": self.authority_branch_id, "candidates": self.pending_candidates()}),
+            ControlOperation::Predict(_) => {
+                json!({"capabilities": self.capability_view, "revision": self.capability_revision})
+            }
+            ControlOperation::Launch(_) => {
+                json!({"authority": self.authority_branch_id, "candidates": self.pending_candidates()})
+            }
             ControlOperation::Validate(_) => json!({"authority": self.authority_branch_id}),
             _ => Value::Null,
         }
@@ -59,9 +76,15 @@ impl SpeculativeTree {
         let branch = &self.branches[id];
         let lifecycle = json!({"revision":self.policy_revisions.get(id),"generation":branch.generation,"status":branch.status,"role":branch.role});
         match operation {
-            ControlOperation::Select(ids) => return json!({"lifecycle":lifecycle,"chances":ids.iter().filter_map(|key|self.chances.get(key)).filter(|chance|chance.parent_branch_id==id).map(|chance|json!({"chance":chance,"revision":self.policy_chance_revisions.get(&chance.chance_id)})).collect::<Vec<_>>()}),
-            ControlOperation::Predict(tool) => return json!({"generation":branch.generation,"assumptions":branch.assumption_set,"chance":self.chances.get(&tool.chance_id).map(|chance|json!({"id":chance.chance_id,"kind":chance.speculation_kind,"stage":chance.stage,"revision":self.policy_chance_revisions.get(&tool.chance_id).map(|r|r.1)}))}),
-            ControlOperation::Rebalance => return json!({"lifecycle":lifecycle,"chance_id":branch.chance_id}),
+            ControlOperation::Select(ids) => {
+                return json!({"lifecycle":lifecycle,"chances":ids.iter().filter_map(|key|self.chances.get(key)).filter(|chance|chance.parent_branch_id==id).map(|chance|json!({"chance":chance,"revision":self.policy_chance_revisions.get(&chance.chance_id)})).collect::<Vec<_>>()});
+            }
+            ControlOperation::Predict(tool) => {
+                return json!({"generation":branch.generation,"assumptions":branch.assumption_set,"chance":self.chances.get(&tool.chance_id).map(|chance|json!({"id":chance.chance_id,"kind":chance.speculation_kind,"stage":chance.stage,"revision":self.policy_chance_revisions.get(&tool.chance_id).map(|r|r.1)}))});
+            }
+            ControlOperation::Rebalance => {
+                return json!({"lifecycle":lifecycle,"chance_id":branch.chance_id});
+            }
             _ => {}
         }
         json!({"revision": self.policy_revisions.get(id), "record_revision": self.policy_record_revisions.get(id),
@@ -153,9 +176,8 @@ impl SpeculativeTree {
         result: Result<ControlResult, String>,
     ) -> io::Result<ControlActions> {
         use sha2::{Digest, Sha256};
-        let fingerprint: [u8; 32] = Sha256::digest(
-            serde_json::to_vec(&result).expect("control results serialize"),
-        ).into();
+        let fingerprint: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&result).expect("control results serialize")).into();
         let mut actions = ControlActions::default();
         let Some(work) = self.pending_work.remove(&id) else {
             if self.completed_work.get(&id).is_some_and(|first| first != &fingerprint) {
@@ -176,11 +198,15 @@ impl SpeculativeTree {
             self.discard_expired_validation(&work, &mut actions)?;
             return Ok(actions);
         }
-        if matches!(work, ControlOperation::Launch(_) | ControlOperation::Validate(_))
-            && context.as_ref().is_some_and(|context| context.iter().any(|(branch, original)| {
-                !self.branches.contains_key(branch) || *original != self.policy_branch_context(branch, &evaluated_work)
-            }))
-        {
+        if matches!(
+            work,
+            ControlOperation::Launch(_) | ControlOperation::Validate(_)
+        ) && context.as_ref().is_some_and(|context| {
+            context.iter().any(|(branch, original)| {
+                !self.branches.contains_key(branch)
+                    || *original != self.policy_branch_context(branch, &evaluated_work)
+            })
+        }) {
             self.discard_expired_validation(&work, &mut actions)?;
             return Ok(actions);
         }
@@ -215,7 +241,10 @@ impl SpeculativeTree {
                                 .get(&chance.parent_branch_id)
                                 .is_some_and(|original| {
                                     *original
-                                        == self.policy_branch_context(&chance.parent_branch_id, &evaluated_work)
+                                        == self.policy_branch_context(
+                                            &chance.parent_branch_id,
+                                            &evaluated_work,
+                                        )
                                 })
                         })
                     })
@@ -233,7 +262,10 @@ impl SpeculativeTree {
                                 .get(&chance.parent_branch_id)
                                 .is_some_and(|original| {
                                     *original
-                                        == self.policy_branch_context(&chance.parent_branch_id, &evaluated_work)
+                                        == self.policy_branch_context(
+                                            &chance.parent_branch_id,
+                                            &evaluated_work,
+                                        )
                                 })
                         })
                     });
@@ -410,7 +442,11 @@ impl SpeculativeTree {
     fn authorize_authority(&mut self, id: &str, actions: &mut ControlActions) -> io::Result<()> {
         self.change_authority_state(id, AuthorityState::Fetching)?;
         let chance = self.chance(id)?.clone();
-        actions.commands.push(self.resolve_pending(&chance.parent_branch_id, &chance.operation_id, json!({"phase":"execute"}))?);
+        actions.commands.push(self.resolve_pending(
+            &chance.parent_branch_id,
+            &chance.operation_id,
+            json!({"phase":"execute"}),
+        )?);
         Ok(())
     }
 
@@ -567,9 +603,11 @@ impl SpeculativeTree {
                     "Authority value delivered",
                 )?;
             }
-            actions
-                .commands
-                .push(self.resolve_pending(&branch_id, &operation_id, json!({"phase":"continue"}))?);
+            actions.commands.push(self.resolve_pending(
+                &branch_id,
+                &operation_id,
+                json!({"phase":"continue"}),
+            )?);
         }
         Ok(())
     }

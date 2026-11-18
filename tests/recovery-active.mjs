@@ -1,4 +1,4 @@
-import {spawnControl, sessionPath} from './control-plane-fixture.mjs';
+import {spawnControl, runPath} from './control-plane-fixture.mjs';
 // Real Pi + real NLE + local OpenAI fixture. No external model requests.
 import fs from 'node:fs';
 import http from 'node:http';
@@ -7,10 +7,10 @@ import {once} from 'node:events';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
-for(const failureMode of ['none','retry','continue','multiple','filesystem']) test(`active tools and candidates survive recovery: ${failureMode}`, {timeout:120000}, async t=>{
+for(const failureMode of ['none','retry','continue','multiple','filesystem','interrupt']) test(`active tools and candidates survive recovery: ${failureMode}`, {timeout:120000}, async t=>{
  const project=process.cwd(),root=fs.mkdtempSync('/tmp/opencode/recovery-active-');
  console.log('evidence',root);
- fs.mkdirSync(sessionPath(root, 'workspace'));fs.mkdirSync(root+'/pi');fs.mkdirSync(root+'/policy');
+ fs.mkdirSync(runPath(root, 'workspace'));fs.mkdirSync(root+'/pi');fs.mkdirSync(root+'/policy');
   let requests=[];
   let promotedWrite=false;
  const fake=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{
@@ -33,7 +33,7 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
   if(failureMode==='filesystem') {
    fs.mkdirSync(root+'/tmp');
    const config=JSON.parse(fs.readFileSync(root+'/runtime.json'));
-   config.filesystem={state_directory:root+'/fs-state',isolated_paths:[sessionPath(root, 'workspace')],passthrough_rw:[root]};
+   config.filesystem={state_directory:root+'/fs-state',isolated_paths:[runPath(root, 'workspace')],passthrough_rw:[root]};
    fs.writeFileSync(root+'/runtime.json',JSON.stringify(config));
   }
  if(failureMode==='multiple') {
@@ -53,7 +53,7 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
  const wait=async(fn,label)=>{const end=Date.now()+30000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,20))}throw Error('Timeout '+label+' '+root)};
   // The writer may be between writes of a JSON line. Only complete records
   // are observable; malformed complete records still fail this regression.
-  const events=()=>fs.existsSync(sessionPath(root, 'events.jsonl'))?fs.readFileSync(sessionPath(root, 'events.jsonl'),'utf8').split('\n').slice(0,-1).filter(Boolean).map(JSON.parse):[];
+  const events=()=>fs.existsSync(runPath(root, 'events.jsonl'))?fs.readFileSync(runPath(root, 'events.jsonl'),'utf8').split('\n').slice(0,-1).filter(Boolean).map(JSON.parse):[];
  const post=async body=>(await fetch(`http://127.0.0.1:${port}/api/request`,{method:'POST',headers:{origin:`http://127.0.0.1:${port}`,'content-type':'application/json'},body:JSON.stringify(body)})).status;
   const start=async resume=>{
    const loaded=events().filter(e=>e.message==='recovery_loaded').length;
@@ -70,15 +70,15 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
    await wait(()=>!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)),'paused task processes exited');
   };
   const pause=async()=>{
-   const previous=fs.existsSync(sessionPath(root, 'recovery.json'))?fs.readFileSync(sessionPath(root, 'recovery.json'),'utf8'):null;
+   const previous=fs.existsSync(runPath(root, 'recovery.json'))?fs.readFileSync(runPath(root, 'recovery.json'),'utf8'):null;
    assert.equal(await post({action:'pause'}),202);
-    await wait(async()=>fs.existsSync(sessionPath(root, 'recovery.json'))&&fs.readFileSync(sessionPath(root, 'recovery.json'),'utf8')!==previous&&JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Paused;'),'Pause published');
+    await wait(async()=>fs.existsSync(runPath(root, 'recovery.json'))&&fs.readFileSync(runPath(root, 'recovery.json'),'utf8')!==previous&&JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Paused;'),'Pause published');
   };
  let p=await start(false);
  let baseline;
  if(['retry','continue'].includes(failureMode)) {
    await pause();await endPaused(p);
-  baseline=fs.readFileSync(sessionPath(root, 'recovery.json'),'utf8');p=await start(true);
+  baseline=fs.readFileSync(runPath(root, 'recovery.json'),'utf8');p=await start(true);
   await wait(()=>events().some(e=>e.message==='recovery_loaded'),'baseline loaded');
  }
   await post({action:'prompt',prompt:'Start parallel fixture'});
@@ -88,18 +88,39 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
      await wait(()=>events().some(e=>e.message==='action_started'&&e.action_id==='op1'),'active sibling Runtime tool');
      await wait(()=>fs.existsSync(root+'/release.pending'),'sibling held before real execution');
  assert.equal(requests.length,1,'candidates should still be waiting for sibling result');
- if(['retry','continue'].includes(failureMode))fs.mkdirSync(sessionPath(root, 'recovery.tmp'));
-  if(['retry','continue'].includes(failureMode))await post({action:'pause'});else await pause();
+ if(failureMode==='interrupt'){
+  await post({action:'pause'});
+  await new Promise(r=>setTimeout(r,100));
+  assert.equal(fs.existsSync(root+'/release.cancelled'),false);
+  const completed=events().filter(e=>e.message==='task_completed').length;
+  p.kill('SIGINT');
+  await wait(()=>fs.existsSync(root+'/release.cancelled'),'Interrupt cancels the running tool without releasing it');
+  await wait(()=>events().filter(e=>e.message==='task_completed').length>completed,'Interrupt drains the task while Pause waits');
+  assert.equal(fs.existsSync(runPath(root,'recovery.json')),false,'interrupted Pause never publishes success');
+  assert.equal(p.exitCode,null,'Interrupt retains the controller');
+  await pause();await endPaused(p);return;
+ }
+ if(['retry','continue'].includes(failureMode))fs.mkdirSync(runPath(root, 'recovery.tmp'));
+ const savedBeforePause=events().filter(e=>e.message==='recovery_saved').length;
+ const pausePending=post({action:'pause'});
+ assert.equal(await pausePending,202);
+ await new Promise(r=>setTimeout(r,200));
+ assert.equal(fs.existsSync(root+'/release.cancelled'),false,'Pause must not cancel the already started sibling');
+ assert.equal(events().filter(e=>e.message==='recovery_saved').length,savedBeforePause,'Pause waits for the running sibling');
+ assert.equal(requests.length,1,'Pause prevents the next inference');
+ fs.writeFileSync(root+'/release','');
+ await wait(()=>events().some(e=>e.message==='action_finished'&&e.action_id==='op1'&&e.status==='succeeded'),'started sibling retains real result');
+ if(!['retry','continue'].includes(failureMode))await wait(async()=>fs.existsSync(runPath(root,'recovery.json'))&&JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Paused;'),'Pause published after sibling converges');
  if(['retry','continue'].includes(failureMode)) {
   await wait(async()=>JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json()).includes('Save failed'),'injected publish failure');
   assert.equal(p.exitCode,null,'failed save remains paused and alive');
-  assert.equal(fs.readFileSync(sessionPath(root, 'recovery.json'),'utf8'),baseline,'previous manifest remains intact');
+  assert.equal(fs.readFileSync(runPath(root, 'recovery.json'),'utf8'),baseline,'previous manifest remains intact');
   assert.equal(requests.length,1,'failure does not restart inference');
-  fs.rmdirSync(sessionPath(root, 'recovery.tmp'));
+  fs.rmdirSync(runPath(root, 'recovery.tmp'));
    if(failureMode==='continue') {
      fs.writeFileSync(root+'/release','');
     await post({action:'prompt',prompt:'/continue'});
-    await wait(()=>requests.length>=4,'all branches continue after failed save');
+    await wait(()=>requests.length>=2,'surviving branch continues after failed save');
     await wait(()=>events().some(e=>e.message==='task_completed'),'continued task completes before saving');
   }
    await pause();
@@ -107,14 +128,14 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
   const failure=events().find(e=>e.message==='recovery_saved'&&e.error);assert.equal(failure,undefined,JSON.stringify(failure));
   await endPaused(p);
  assert.ok(!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)),'all task processes exited');
- const manifest=JSON.parse(fs.readFileSync(sessionPath(root, 'recovery.json'))),saved=JSON.parse(fs.readFileSync(manifest.files['agent.json'].path));
- assert.equal(saved.candidateSetups.length,failureMode==='continue'?0:2,'persist sibling waiting relations');
+ const manifest=JSON.parse(fs.readFileSync(runPath(root, 'recovery.json'))),saved=JSON.parse(fs.readFileSync(manifest.files['agent.json'].path));
+ assert.equal(saved.candidateSetups.length,0,'already started candidate setup converges without inference during Pause');
  const identities=saved.tree.branches.map(([id])=>id);assert.equal(identities.length,failureMode==='continue'?1:3);
  const immutable=saved.tree.sources.map(source=>[source.file,fs.readFileSync(source.file,'utf8')]);
- if(failureMode==='continue')assert.equal(saved.tree.sources.flatMap(s=>s.entries).filter(e=>e.customType==='notification'&&e.content==='recovery authoritative notification').length>=1,true);
+ if(failureMode==='continue')assert.equal(saved.tree.sources.flatMap(s=>fs.readFileSync(s.file,'utf8').trim().split('\n').map(JSON.parse)).filter(e=>e.customType==='notification'&&e.content==='recovery authoritative notification').length>=1,true);
   const runtimeRecord=path=>{const value=JSON.parse(fs.readFileSync(path));if(value.kind==='runtime-components')return runtimeRecord(path.replace(/\.json$/,'.components/0.json'));return value};
  const beforeRuntime=runtimeRecord(manifest.files['runtime.json'].path);
- assert.equal(beforeRuntime.worlds[0].actions.length,failureMode==='continue'?2:1,'collect real actions before publishing');
+ assert.equal(beforeRuntime.worlds[0].actions.length,2,'collect both real actions before publishing');
  if(failureMode==='retry') {
   const modelFile=root+'/pi/models.json',original=fs.readFileSync(modelFile,'utf8');
   fs.writeFileSync(modelFile,original+'\n');
@@ -128,19 +149,20 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
     fs.writeFileSync(root+'/release','');
    await post({action:'prompt',prompt:'/continue'});
    if(failureMode==='continue')await post({action:'prompt',prompt:'Next task after completed recovery'});
-  await wait(()=>requests.length>=count+(failureMode==='continue'?1:3),'branches advance');
+  await wait(()=>requests.length>=count+1,'surviving branches advance');
+  await wait(()=>events().filter(e=>e.message==='task_completed').length>completedBeforeInput,'continued task completes');
   assert.ok(!requests.some(r=>r.messages.some(m=>m.role==='user'&&JSON.stringify(m.content).includes('/continue'))),'continue is a control command, not model input');
- const texts=fs.readFileSync(sessionPath(root, 'session.jsonl'),'utf8');assert.match(texts,/candidate advanced after recovery/);
+ const texts=fs.readFileSync(runPath(root, 'session.jsonl'),'utf8');assert.match(texts,/candidate advanced after recovery/);
  // Candidate model requests must contain paired real sibling results, not abort errors.
  const candidateRequests=requests.slice(1,failureMode==='continue'?count:undefined).filter(r=>r.messages.some(m=>m.role==='tool'&&['moved','blocked'].includes(m.content)));
- assert.equal(candidateRequests.length,2);
+ assert.ok(candidateRequests.length>=1&&candidateRequests.length<=2,'only surviving candidates require inference');
   for(const request of candidateRequests){const results=request.messages.filter(m=>m.role==='tool');assert.equal(results.length,2);assert.ok(!JSON.stringify(results).includes('cancelled'));}
   if(failureMode==='filesystem') {
    await wait(()=>events().some(e=>e.message==='task_completed'&&e.branch_id!=='authority'),'promoted task materialized');
    const before=events().filter(e=>e.message==='task_completed').length;
    await post({action:'prompt',prompt:'verify promoted filesystem'});
    await wait(()=>events().filter(e=>e.message==='task_completed').length>before,'promoted file task');
-   assert.equal(fs.readFileSync(sessionPath(root, 'workspace/promoted-file'),'utf8'),'promoted');
+   assert.equal(fs.readFileSync(runPath(root, 'workspace/promoted-file'),'utf8'),'promoted');
    const write=events().find(e=>e.message==='action_started'&&e.action_id==='promoted-write');
    assert.ok(write&&write.branch_id!=='authority','file tool belongs to promoted Branch');
   }
@@ -148,9 +170,9 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
    // intentionally ignored, so wait for its publication receipt first.
    if(failureMode==='continue')await wait(()=>events().filter(e=>e.message==='task_completed').length>completedBeforeInput,'continued input task materialized');
    await pause();await endPaused(p);
-  const afterManifest=JSON.parse(fs.readFileSync(sessionPath(root, 'recovery.json')));
+  const afterManifest=JSON.parse(fs.readFileSync(runPath(root, 'recovery.json')));
  if(failureMode==='continue') {
-  const entries=fs.readFileSync(sessionPath(root, 'session.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
+  const entries=fs.readFileSync(runPath(root, 'session.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(entries.filter(e=>e.customType==='notification'&&e.content==='recovery authoritative notification').length,1,'Promote notice persists exactly once across recovery');
  }
  const afterRuntime=runtimeRecord(afterManifest.files['runtime.json'].path);
@@ -158,9 +180,10 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem']) te
  for(const [file,content] of immutable)assert.equal(fs.readFileSync(file,'utf8'),content,'saved sources remain immutable');
  assert.ok(!execFileSync('ps',['-eo','args'],{encoding:'utf8'}).split('\n').some(line=>line.includes(root)),'resumed task processes exited');
  if(baseline) {
-  fs.writeFileSync(sessionPath(root, 'recovery.json'),baseline);
+  fs.writeFileSync(runPath(root, 'recovery.json'),baseline);
   const oldCount=requests.length;p=await start(true);await new Promise(r=>setTimeout(r,100));assert.equal(requests.length,oldCount);
-   await pause();await endPaused(p);
+   assert.notEqual(JSON.parse(fs.readFileSync(runPath(root,'events.jsonl'),'utf8').trim().split('\n').filter(line=>JSON.parse(line).message==='recovery_complete').at(-1)).manifest.files['agent.json'].path,JSON.parse(baseline).files['agent.json'].path,'Ledger selects the newest complete save despite a stale compatibility index');
+   await endPaused(p);
  }
  console.log('PASS active/sibling recovery',root,identities);
 });

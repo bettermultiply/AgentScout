@@ -28,6 +28,8 @@
 
 ## 系统级
 
+- **run id**：AScout 管理的运行身份，也是 `runs_dir` 下运行记录目录的目录名；新建时使用 `run-` 前缀，恢复时保留原 id。它与 Agent 原生 session id、每轮工作的 task id 分别独立；工作区仍指 workspace。
+
 - **AScout（Agent Scout）**：面向 Agent 投机执行的通用底座，位于投机策略与执行机制之间，分离策略决策与具体运行时实现；Agent 可以在不修改自身执行逻辑的情况下接入，具体接入实现应尽可能保持修改面小。（`../mental-model.md`；`../architecture.md`；`../design-model.md`）
 - **Speculative Tree**：Authority Instance 在投机执行不断发生和结束的过程中形成的树形结构；从 root Branch Root 开始记录 Branch 之间的派生关系。（`../mental-model.md` §4.2）
 - **task**：session 中 Agent 的一轮工作；Agent 完成本轮工作、开始等待用户输入时，task 完成。一个 session 对应一个 AScoutAgent 和一棵 Speculative Tree，多轮 task 共用该控制域。（`../mental-model.md` §4.2）
@@ -93,7 +95,7 @@
 - **Policy Engine**：Policy 进入 AScout 的固定入口，只有两项职责：编译 Policy，以及根据规定输入对已编译的 Policy Decision 求值、作出本次 Policy Decision。作出 Policy Decision 不等于落实 Policy Decision；它不负责把 Policy Decision 应用到 Branch、Speculative Tree、外部效果或 Runtime，也不负责选择运行位置或向 Instrumentation 交付编译结果。（`control-plane/policy-engine.md`）
 - **Speculation Coordinator**：control plane 中推动处理、调用 Policy 并发出操作的协调角色；不拥有 Tree，不保存第二份投机状态，可以服务多棵树。Chance、Branch、Proposal、`AssumptionSet`、待选机会和调度状态由每个 session 的 AScoutAgent 所拥有的 Speculative Tree 保存。（`control-plane.md` §2.4）
 - **External Effect Coordinator**：Runtime 的组件，处理本机隔离覆盖不到、需通过网络访问环境之外的 API 操作，与 network backend 协同，不负责本地文件和进程隔离。Policy 的 `effect` 决定处理方式，Instrumentation 本地落实并将模拟操作交给它。真实请求先暂存在本机；可模拟时才返回明确标记来源的临时结果，不能模拟时在效果边界阻塞当前 Branch，保留已完成进展且不提供模拟结果，待该 Branch 成为权威后发出真实请求并继续，丢弃或前提失效则取消。它无需为跨 Branch 命令去重掌握整棵树；control plane 只在接受、丢弃或前提失效时通知相应暂存请求释放或取消。（`effect-management.md`）
-- **Ledger**：异步旁路记录 control plane 运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），只追加并保存记录，读取只从已保存记录按序号取出，用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期，不要求据观察日志恢复整棵树。已退出 Tree 的 Branch 归档首次失败后安全恢复追加边界并重试一次，最终失败先以 session id、Branch id 和原因通过系统运行日志及 UI Projection 报警，再释放记录，不永久保留未归档 Branch。（`control-plane.md` §2.6；`speculation-contract.md` §3）
+- **Ledger**：异步旁路记录 control plane 运行事实（Policy 决策、状态变化、验证依据、效果与清理结果等），只追加并保存记录，读取只从已保存记录按序号取出，用于状态对齐、问题定位、shadow/replay 与契约校验；不从记录中决定生命周期，不要求据观察日志恢复整棵树。已退出 Tree 的 Branch 归档首次失败后安全恢复追加边界并重试一次，最终失败先以 run id、Branch id 和原因通过系统运行日志及 UI Projection 报警，再释放记录，不永久保留未归档 Branch。（`control-plane.md` §2.6；`speculation-contract.md` §3）
 - **ASC-Proxy**：Instrumentation 的受管通信代理，同时管理经 Gateway 接入 control plane 的控制连接及独立 Runtime 执行连接，负责会话、身份确认以及 request、fact、result 和 event 的双向传递；不拥有全局控制状态。（`agent-integration.md` §2.2）
 - **Interposer**：Instrumentation 统一承担 Agent 请求拦截、operation 识别、`pending-result boundary`、本地 Decision 求值和 outcome 路由的责任实体；具体可观察范围由当前接入方式决定。（`agent-integration.md` §2.3）
 - **Gateway**：control plane 面向 Instrumentation、UI 与 Runtime 的统一受管通信边界；负责连接／会话管理、入口格式／身份／上下文／权限检查、消息转交和交付。不拥有 Tree、Policy 或投机编排；消息对投机执行的变化由相应控制逻辑决定。（`control-plane.md` §2.1）

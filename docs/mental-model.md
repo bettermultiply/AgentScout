@@ -1,5 +1,7 @@
 # AScout 心智模型
 
+AScout 管理的运行身份称为 run id，对应的保存位置称为“运行记录目录”。Agent 原生会话仍使用 session/session id，工作区仍为 workspace；run id 与 task id 分别独立，新用户 prompt 仍开始新 task。
+
 AScout（Agent Scout）是面向 Agent 投机执行的通用底座。Agent 可以在不修改自身执行逻辑的情况下接入，但接入实现应尽可能保持修改面小；具体产品仍可能需要 Product Integration、Hook 或其他拦截适配。AScout 提供一套自己的 Runtime：它承载 Agent 的一步动作，使动作能够正常、正确地运行，并把动作对真实世界或 authority 的影响限制在允许范围内。Runtime 的具体隔离和执行能力可以通过不同方式实现，并不绑定某一种后端。
 
 ## 1. 定位 - 为什么需要 AScout
@@ -98,13 +100,13 @@ control plane 在运行时以三类状态描述一次投机，它们分别回答
 
 状态交接正确是机制必须保证的条件，不能仅以路由切换或历史整理代替。最终保留单一权威 session，表示经过验证、用真实结果整理后的执行历史；它不再要求准确复原候选当时收到的预测输入。因此，原始运行上下文与从整理后历史恢复的上下文可能不同。历史整理不决定权威，也不直接替换运行中的上下文；具体语义见 [Agent 接入设计](design/agent-integration.md) §3。
 
-暂停后的保存与恢复保留整棵有效树、各 Branch 的原运行上下文与环境关联；保存成功后才能发布恢复点，恢复校验关联、配置及资源后等待用户继续。保存源与后续可写执行独立，继续运行不能改坏既有恢复点；最终历史不能替代运行恢复状态。文件系统恢复保留受管增量，但普通宿主 bottom lower 使用恢复时内容，不承诺宿主历史版本，也不复制整个挂载；代码、配置和依赖绑定仍需校验。现有保存恢复能力及入口调整缺口见 [恢复](development/recovery.md)。
+暂停后的保存与恢复保留整棵有效树、各 Branch 的原运行上下文与环境关联；保存成功后才能发布恢复点，发布前须校验各组件之间的身份和引用关联，恢复校验关联、配置及资源后等待用户继续。保存源与后续可写执行独立，继续运行不能改坏既有恢复点；最终历史不能替代运行恢复状态。文件系统恢复保留受管增量，但普通宿主 bottom lower 使用恢复时内容，不承诺宿主历史版本，也不复制整个挂载；代码、配置和依赖绑定仍需校验。现有保存恢复能力及入口调整缺口见 [恢复](development/recovery.md)。
 
 AScout 管理稳定交互入口、显示区域与自身控制事实；Pi 等 Agent 的消息、思考、工具调用和结果通过公开 SDK 报告给 AScout，再由 AScout 的 UI 排版展示，不嵌入 Agent 产品的终端画面。浏览器 UI 与 TUI 共享事实和操作接口，但彼此不依赖绘制实现。用户可从当前 AScoutAgent 的整棵 Tree 查看 Branch 关系与投机状态，并选择具体 Branch 深入只读观察；选择观察对象不改变权威路径或 Branch 生命周期。
 
 观察以受限的只读事件接口提供：首次取得状态事件集，随后接收有序增量并支持断线补发；客户端折叠事件得到展示状态，对话内容按 Branch 按需读取。接口不直接公开 control plane 的内部 Tree。详细语义见 [control plane 设计](design/control-plane.md) §5。
 
-UI Projection 按序号读取 Ledger 已保存记录，持有可丢弃的界面缓存与连接读取位置；HTTP 和终端界面均经它读取。它不拥有 Tree、不裁决投机，也不向 Ledger 写回画面状态或报警。系统运行日志由 control plane 进程持有，独立保存警告和错误；Ledger 写入失败报告历史不完整；已退出 Tree 的 Branch 归档首次失败后安全恢复追加边界并重试一次，最终失败先记录 session id、Branch id 与原因、经 UI Projection 报警，再释放记录。Branch 控制状态不变，报警由 UI Projection 转发。日志只允许配置路径，启动时打不开即拒绝启动，不轮转；详见 [control plane](design/control-plane.md)。
+UI Projection 按序号读取 Ledger 已保存记录，持有可丢弃的界面缓存与连接读取位置；HTTP 和终端界面均经它读取。它不拥有 Tree、不裁决投机，也不向 Ledger 写回画面状态或报警。系统运行日志由 control plane 进程持有，独立保存警告和错误；Ledger 写入失败报告历史不完整；已退出 Tree 的 Branch 归档首次失败后安全恢复追加边界并重试一次，最终失败先记录 run id、Branch id 与原因、经 UI Projection 报警，再释放记录。Branch 控制状态不变，报警由 UI Projection 转发。日志只允许配置路径，启动时打不开即拒绝启动，不轮转；详见 [control plane](design/control-plane.md)。
 
 ## 相关文档
 
