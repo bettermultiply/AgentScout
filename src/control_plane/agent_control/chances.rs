@@ -38,7 +38,11 @@ impl SpeculativeTree {
             .get(parent)
             .and_then(|actions| actions.get(operation_id))
             .map(|action| action.action_kind);
-        let chance_id = format!("chance-{}", self.next_chance);
+        let chance_id = if let Some(scope) = self.reopened_execution_scope() {
+            format!("chance-{scope}-{}", self.next_chance)
+        } else {
+            format!("chance-{}", self.next_chance)
+        };
         self.next_chance = self
             .next_chance
             .checked_add(1)

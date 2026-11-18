@@ -45,6 +45,13 @@ impl SpeculativeTree {
     pub fn execution_id(&self) -> &str {
         &self.execution_id
     }
+    pub fn run_id(&self) -> &str {
+        self.run_id.as_deref().unwrap_or(&self.execution_id)
+    }
+    pub(crate) fn reopened_execution_scope(&self) -> Option<&str> {
+        self.run_id.as_ref()?;
+        self.execution_id.rsplit_once(':').map(|(_, scope)| scope)
+    }
     pub fn history_root_branch_id(&self) -> Option<&str> {
         self.history_root_branch_id.as_deref()
     }

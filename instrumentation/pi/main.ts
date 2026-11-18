@@ -12,7 +12,8 @@ import { evaluatePolicyArtifact } from '../../../pi/packages/pi-integration/src/
 import { createAgentAccess } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
 import { Notifications } from './notification.ts';
-import { symlinkSync, renameSync } from 'node:fs';
+import { symlinkSync, renameSync, realpathSync, statSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import {save as saveRecovery,load as loadRecovery,checksum} from './recovery.ts';
 import {recoveryBinding,snapshotResources} from './recovery-binding.ts';
 import { readFileSync } from 'node:fs';
@@ -43,12 +44,34 @@ async function createAgentSession(options) {
 }
 const sessionFile = process.env.ASCOUT_SESSION_FILE;
 if (!sessionFile) throw Error('ASCOUT_SESSION_FILE is required');
-let tree = new SessionTree(SessionManager.create(process.cwd()));
-function linkSession() {
-    symlinkSync(tree.manager.getSessionFile(),`${sessionFile}.link`);
-    renameSync(`${sessionFile}.link`,sessionFile);
+const nativeReference = JSON.parse(process.env.ASCOUT_OPEN_SESSION ?? 'null');
+function openNativeSession(reference) {
+    const file = realpathSync(reference.file);
+    const info = statSync(file);
+    if (!info.isFile() || info.size === 0) throw Error(`Invalid Pi session reference: ${file}`);
+    const manager = SessionManager.open(file);
+    const header = manager.getHeader();
+    if (!header?.id || (reference.id && reference.id !== header.id) ||
+        (reference.cwd && reference.cwd !== header.cwd)) {
+        throw Error(`Pi session identity mismatch: ${file}`);
+    }
+    return manager;
 }
-linkSession();
+let tree = new SessionTree(nativeReference ? openNativeSession(nativeReference) : SessionManager.create(process.cwd()));
+const nativeTail = nativeReference ? tree.tail(tree.authority) : undefined;
+tree.readOnlyUntilPrompt = Boolean(nativeReference);
+function linkSession(manager = tree.manager) {
+    const file = manager.getSessionFile();
+    if (nativeReference) {
+        try { if (realpathSync(sessionFile) === file) return; }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    const temporary = `${sessionFile}.${randomUUID()}.link`;
+    symlinkSync(file, temporary);
+    try { renameSync(temporary, sessionFile); }
+    finally { rmSync(temporary, {force:true}); }
+}
+if (!nativeReference && !process.env.ASCOUT_LOAD_SESSION) linkSession();
 const { Type } = require('typebox');
 const args = process.argv.slice(2);
 const socketPath = args.shift();
@@ -60,7 +83,8 @@ const executionResults=new Map();
 const toolHolds=new Map();
 let nextAction = 1;
 if (!socketPath) throw Error('usage: main.ts <socket> <agent> [--model provider/model] [--thinking level]');
-let modelPattern, modelsPath, additionalModels, thinkingLevel = 'low';
+let modelPattern, modelsPath, additionalModels;
+let thinkingLevel = (nativeReference && tree.manager.buildSessionContext().thinkingLevel) || 'low';
 while (args.length) {
     const flag = args.shift(), value = args.shift();
     if (!value) throw Error(`${flag} requires a value`);
@@ -232,6 +256,14 @@ function syncTranscript(branch) {
     }
     tree.settle();
     for(const payload of pending)void report(payload);
+}
+async function reportSessionHistory(branch, manager) {
+    // Display inherited entries without reporting them as new execution facts.
+    for (const entry of manager.getBranch()) {
+        if (entry.type !== 'message') continue;
+        reportedEntries.add(entry.id);
+        await report({message:'session_history',branch_id:branch,entries:[entry.message]});
+    }
 }
 const runtimeTools = JSON.parse(process.env.ASCOUT_RUNTIME_TOOLS ?? '[]');
 const capabilities = {
@@ -597,8 +629,6 @@ async function handle(command) {
                     if(entry?.type!=='message'||JSON.stringify(entry.message)!==JSON.stringify(checkpoint.saved.at(-1))||!entry.message.content?.some(part=>part.type==='toolCall'&&part.id===operation))throw Error('Recovery checkpoint context mismatch');
                 }
                 const restored=SessionTree.restore(record.tree,SessionManager,sessionFile);
-                symlinkSync(restored.manager.getSessionFile(),`${sessionFile}.link`);
-                renameSync(`${sessionFile}.link`,sessionFile);
                 const managers=restored.recoveryManagers;
                 for(const [,checkpoint] of record.checkpoints)if(!managers.has(checkpoint.manager))throw Error('Recovery checkpoint manager missing');
                 tree=restored;authority=record.authority;nextAction=record.nextAction;
@@ -623,6 +653,8 @@ async function handle(command) {
                     const {session}=await createAgentSession({...filesystemToolSelection,cwd:manager.getHeader().cwd,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
                     bindInteraction(session,branch);
                 }
+                await reportSessionHistory(authority, tree.branches.get(authority)?.manager ?? tree.manager);
+                linkSession(tree.manager);
                 saving=false;
                 recoveryPaused=true;
             }catch(reason){error=String(reason)}
@@ -644,12 +676,16 @@ async function handle(command) {
             // a leftover authority marker in a reused session file must not
             // keep a previous run's winner in charge.
             if(command.role==='authority'){authority=branch;tree.adoptAuthority(branch)}
-            const manager=tree.createBranch(branch,command.workspace,tree.manager,tree.tail(branch)??tree.manager.getLeafId());
+            const manager=tree.createBranch(branch,command.workspace,tree.manager,nativeReference ? nativeTail : tree.tail(branch)??tree.manager.getLeafId());
             const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             bindInteraction(session,branch);
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
             await report({message:'branch_created',branch_id:branch});
             await report({message:'branch_started',branch_id:branch});
+            if(nativeReference){
+                await reportSessionHistory(branch,manager);
+                linkSession();
+            }
             await report({message:'branch_ready',branch_id:branch});
             if(command.prompt)executeTurn(session,branch,()=>session.prompt(command.prompt));
             return;
@@ -657,6 +693,7 @@ async function handle(command) {
         case 'continue':
         case 'prompt': {
             const continuing=command.command==='continue';
+            if(!continuing)tree.readOnlyUntilPrompt=false;
             interaction.resume(branch);
             if(saving)throw Error('Execution is saved and waiting for exit');
             if(branch!==authority)throw Error('Only the authority accepts user input');

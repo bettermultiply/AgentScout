@@ -234,6 +234,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let (run_id, run_dir) = config.run(resume_id.as_deref())?;
+    // Hold ownership before reading history, replacing sockets or launching the Agent.
+    let run_lock = fs::OpenOptions::new().read(true).write(true).create(true)
+        .truncate(false).open(run_dir.join("run.lock"))?;
+    run_lock.try_lock().map_err(|error| format!("Cannot lock run {run_id}: {error}"))?;
     eprintln!("Run id: {run_id}");
     struct RunNotice(String);
     impl Drop for RunNotice {
@@ -257,9 +261,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Saved Policy exists; refusing to overwrite run data".into());
     }
     // Establish task control state before starting its execution infrastructure.
-    let (mut tree, recovery_generation) = coordination_session::prepare(&run_dir, resume)?;
-    let (startup_model, resume_model, models) =
-        recovery::models(&run_dir, recovery_generation.as_deref(), model, models)?;
+    let (mut tree, saved) = coordination_session::prepare(&run_dir, resume)?;
+    let recovery_generation = match &saved {
+        Some(recovery::Resume::Paused(path)) => Some(path.as_path()),
+        _ => None,
+    };
+    let native_session = match &saved {
+        Some(recovery::Resume::Ended(reference)) => Some(reference),
+        _ => None,
+    };
+    let (startup_model, resume_model, models, thinking) = recovery::models(
+        &run_dir, recovery_generation, native_session.is_some(), model, models, thinking,
+    )?;
     let engine = PolicyEngine::default();
     let artifact_bytes = if !resume {
         None
@@ -309,7 +322,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .or_else(|| policy.runtime_config_path().map(std::path::PathBuf::from))
         .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
-    tree.set_execution_id(run_id.clone())?;
+    if !resume {
+        tree.set_execution_id(run_id.clone())?;
+    }
     let config_digest = if resume {
         recovery::validate_bindings(&tree, policy.digest(), &config_path)?
     } else {
@@ -367,7 +382,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             agent_args.push(thinking);
         }
         let session_file = run_dir.join("session.jsonl");
-        let agent_env = std::collections::BTreeMap::from([
+        let mut agent_env = std::collections::BTreeMap::from([
             ("ASCOUT_RUNTIME_TOOLS".into(), runtime_tools),
             ("ASCOUT_PI_ROOT".into(), pi_root.display().to_string()),
             ("ASCOUT_TASK_ID".into(), tree.execution_id().to_string()),
@@ -376,6 +391,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session_file.display().to_string(),
             ),
         ]);
+        if let Some(reference) = native_session {
+            agent_env.insert("ASCOUT_OPEN_SESSION".into(), serde_json::to_string(reference)?);
+        }
+        if recovery_generation.is_some() {
+            agent_env.insert("ASCOUT_LOAD_SESSION".into(), "1".into());
+        }
         let agent_launch = AgentLaunch {
             command: resolve_node()?.display().to_string(),
             args: agent_args,
@@ -397,6 +418,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "message": "session_file",
             "task_id": tree.execution_id(),
             "session_file": session_file,
+            "run_id": run_id,
+            "bindings": {
+                "policy_binding": tree.policy_binding(),
+                "runtime_binding": tree.runtime_binding(),
+                "capability_view": tree.capability_view(),
+                "local_policy_digest": tree.local_policy_digest(),
+            },
         })) {
             system_log.history_failure(&run_id, &format!("record append failed: {error}"));
         }
@@ -430,7 +458,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut tree,
                 &session,
                 agent_launch,
-                recovery_generation.as_deref(),
+                recovery_generation,
             )?;
             let mut connection = listener.accept("agent", Duration::from_secs(30))?;
             let commands = coordination_session::connected(&mut tree, &policy, command)?;

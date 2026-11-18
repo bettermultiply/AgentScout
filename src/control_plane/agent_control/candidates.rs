@@ -36,7 +36,11 @@ impl SpeculativeTree {
         let chance = self.chance(chance_id)?.clone();
         let parent = chance.parent_branch_id.as_str();
         let sequence = self.next_generation;
-        let branch_id = format!("candidate-{sequence}");
+        let branch_id = if let Some(scope) = self.reopened_execution_scope() {
+            format!("candidate-{scope}-{sequence}")
+        } else {
+            format!("candidate-{sequence}")
+        };
         let transcript_index = self.branch(parent)?.execution_position.transcript_index;
         let parent_assumptions = self.branch(parent)?.assumption_set.clone();
         let parent_status = self.branch(parent)?.status;

@@ -63,6 +63,9 @@ fn forward_signals(
 impl Task<'_> {
     fn record(&mut self, mut value: Value) -> io::Result<()> {
         value["t_ms"] = json!(self.started.elapsed().as_millis() as u64);
+        if value.get("task_id").is_none() {
+            value["task_id"] = json!(self.tree.execution_id());
+        }
         if let Err(error) = self.ledger.record(value.clone()) {
             self.system_log.history_failure(
                 self.tree.execution_id(),
@@ -154,7 +157,7 @@ impl Task<'_> {
                         &format!("observation append failed: {error}"),
                     );
                 }
-                if !matches!(message, AgentMessage::Output { .. }) {
+                if !matches!(message, AgentMessage::Output { .. } | AgentMessage::SessionHistory { .. }) {
                     let mut fact = serde_json::to_value(&message)?;
                     if let AgentMessage::Transcript { entry, .. } = &message {
                         fact.as_object_mut().unwrap().remove("entry");
@@ -371,6 +374,11 @@ pub fn run(
                     )?;
                 }
                 task.publish()?;
+                for command in &actions.commands {
+                    if let AgentCommand::Prompt { branch_id, .. } = command {
+                        task.ledger.record_durable(json!({"message":"task_started","task_id":task.tree.execution_id(),"branch_id":branch_id}))?;
+                    }
+                }
                 outstanding += actions.commands.len();
                 queue_deliveries(&deliveries, &mut pending_deliveries, actions.commands)?;
                 for record in actions.records {
@@ -405,6 +413,7 @@ pub fn run(
                     task.draining,
                     |mut value| {
                         value["t_ms"] = json!(started.elapsed().as_millis() as u64);
+                        value["task_id"] = json!(run_id);
                         if let Err(error) = ledger.record(value) {
                             system_log.history_failure(
                                 &run_id,

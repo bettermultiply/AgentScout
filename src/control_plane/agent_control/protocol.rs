@@ -6,6 +6,7 @@ impl SpeculativeTree {
     /// 接收 Pi 报告的启动事实。
     pub fn handle_message(&mut self, message: AgentMessage) -> io::Result<Vec<AgentCommand>> {
         match message {
+            AgentMessage::SessionHistory { .. } => Ok(Vec::new()),
             AgentMessage::UiPromptRequested {
                 branch_id,
                 prompt_id,

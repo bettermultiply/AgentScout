@@ -3,7 +3,7 @@ use crate::control_plane::agent_control::{BranchStatus, SpeculativeTree};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 /// Restore launch configuration before constructing an Agent session. An
@@ -11,14 +11,19 @@ use std::{fs, io};
 pub fn models(
     run_dir: &Path,
     generation: Option<&Path>,
+    reopening: bool,
     model: Option<String>,
-    mut models: Option<std::path::PathBuf>,
-) -> io::Result<(Option<String>, Option<String>, Option<std::path::PathBuf>)> {
+    mut models: Option<PathBuf>,
+    mut thinking: Option<String>,
+) -> io::Result<(Option<String>, Option<String>, Option<PathBuf>, Option<String>)> {
     let mut startup_model = model.clone();
     let mut resume_model = None;
     if let Some(generation) = generation {
         let record: Value = serde_json::from_slice(&fs::read(generation.join("agent.json"))?)?;
         if let Some(config) = record.get("executionConfig") {
+            if thinking.is_none() {
+                thinking = config["thinkingLevel"].as_str().map(str::to_owned);
+            }
             startup_model = config
                 .get("modelPattern")
                 .and_then(Value::as_str)
@@ -40,9 +45,25 @@ pub fn models(
                 }
             }
             let path = run_dir.join("models.json");
-            fs::write(&path, serde_json::to_vec_pretty(extra)?)?;
+            if !path.is_file() || serde_json::from_slice::<Value>(&fs::read(&path)?)? != *extra {
+                fs::write(&path, serde_json::to_vec_pretty(extra)?)?;
+            }
             models = Some(path);
         }
+    } else if reopening {
+        let saved = run_dir.join("models.json");
+        let persisted = match fs::read(&saved) {
+            Ok(bytes) => Some(serde_json::from_slice::<Value>(&bytes)?),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(path) = &models {
+            let supplied: Value = serde_json::from_slice(&fs::read(path)?)?;
+            if persisted.as_ref() != Some(&supplied) {
+                return Err(io::Error::other("Saved additional model configuration changed"));
+            }
+        }
+        models = persisted.map(|_| saved);
     } else if let Some(source) = &models {
         let bytes = fs::read(source)?;
         let _: Value = serde_json::from_slice(&bytes)?;
@@ -50,7 +71,7 @@ pub fn models(
         fs::write(&path, bytes)?;
         models = Some(path);
     }
-    Ok((startup_model, resume_model, models))
+    Ok((startup_model, resume_model, models, thinking))
 }
 
 pub fn validate_policy_artifact(tree: &SpeculativeTree, bytes: &[u8]) -> io::Result<()> {
@@ -149,31 +170,81 @@ pub fn publish(run_dir: &Path, generation: &Path, tree: &SpeculativeTree) -> io:
     Ok(())
 }
 
-pub fn load(run_dir: &Path) -> io::Result<(SpeculativeTree, std::path::PathBuf)> {
+#[derive(Debug)]
+pub enum Resume {
+    Paused(PathBuf),
+    Ended(Value),
+}
+
+pub fn load(run_dir: &Path) -> io::Result<(SpeculativeTree, Resume)> {
     use std::io::BufRead;
-    let records = io::BufReader::new(fs::File::open(run_dir.join("events.jsonl"))?)
-        .lines()
-        .collect::<io::Result<Vec<_>>>()?;
-    let mut last_error = None;
-    for line in records.iter().rev() {
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if record["message"] == "task_completed" {
-            return Err(io::Error::other(format!(
-                "Saved task has ended; open the Pi session referenced by {}",
-                run_dir.join("session.jsonl").display()
-            )));
-        }
-        if record["message"] != "recovery_complete" {
-            continue;
-        }
-        match load_record(run_dir, &record["manifest"], &record["control"]) {
-            Ok(saved) => return Ok(saved),
-            Err(error) => last_error = Some(error),
+    let mut records = Vec::new();
+    for line in io::BufReader::new(fs::File::open(run_dir.join("events.jsonl"))?).lines() {
+        if let Ok(record) = serde_json::from_str::<Value>(&line?) {
+            records.push(record);
         }
     }
-    Err(last_error.unwrap_or_else(|| io::Error::other("No complete Ledger recovery record")))
+    let mut latest_error = None;
+    for (index, record) in records.iter().enumerate().rev() {
+        match record["message"].as_str() {
+            Some("task_started") => break,
+            Some("task_completed") => {
+                if latest_error.is_none() {
+                    return open_ended(run_dir, &records, index);
+                }
+                break;
+            }
+            Some("recovery_complete") => {
+                match load_record(run_dir, &record["manifest"], &record["control"]) {
+                    Ok((tree, path)) => return Ok((tree, Resume::Paused(path))),
+                    Err(error) => { latest_error.get_or_insert(error); }
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(latest_error.unwrap_or_else(|| io::Error::other("No complete Ledger recovery record for the latest task")))
+}
+
+fn open_ended(run_dir: &Path, records: &[Value], completed: usize) -> io::Result<(SpeculativeTree, Resume)> {
+    // Release records after this completion identify the assembled authority.
+    let reference = records[completed + 1..].iter().rev()
+        .find(|record| {
+            record["message"] == "agent_released"
+                && record["task_id"] == records[completed]["task_id"]
+        })
+        .map(|record| record["session"].clone())
+        .unwrap_or_else(|| json!({"file": run_dir.join("session.jsonl")}));
+    let file = reference["file"].as_str().ok_or_else(|| io::Error::other("Ended run is missing its Pi session reference"))?;
+    if !Path::new(file).is_absolute() || !fs::metadata(file).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(io::Error::other(format!("Ended run Pi session reference is unavailable: {file}")));
+    }
+
+    let run_id = run_dir.file_name().and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("Invalid run identity"))?;
+    let bindings = records.iter().rev().find(|record| record["message"] == "session_file" && record.get("bindings").is_some());
+    // Older runs wrote these bindings at shutdown. Never load their execution state.
+    let legacy;
+    let bindings = if let Some(record) = bindings {
+        if record["run_id"] != run_id {
+            return Err(io::Error::other("Ended run identity mismatch"));
+        }
+        &record["bindings"]
+    } else {
+        legacy = serde_json::from_slice::<Value>(&fs::read(run_dir.join("final-tree.json"))?)?;
+        if legacy["execution_id"] != run_id {
+            return Err(io::Error::other("Ended run identity mismatch"));
+        }
+        &legacy
+    };
+    let mut tree = SpeculativeTree::with_workspace("agent", run_dir)?;
+    tree.run_id = Some(run_id.into());
+    tree.set_execution_id(format!("{run_id}:{}", records.len()))?;
+    tree.policy_binding = bindings.get("policy_binding").cloned();
+    tree.runtime_binding = bindings.get("runtime_binding").cloned();
+    tree.capability_view = bindings.get("capability_view").cloned();
+    tree.local_policy_digest = bindings["local_policy_digest"].as_str().map(str::to_owned);
+    Ok((tree, Resume::Ended(reference)))
 }
 
 fn load_record(
@@ -211,7 +282,13 @@ fn load_record(
     let generation = generation.unwrap();
     let mut tree: SpeculativeTree = serde_json::from_value(control.clone())?;
     validate(&tree, &generation)?;
-    if Some(tree.execution_id.as_str()) != run_dir.file_name().and_then(|name| name.to_str()) {
+    let run_id = run_dir.file_name().and_then(|name| name.to_str());
+    if Some(tree.run_id.as_deref().unwrap_or(&tree.execution_id)) != run_id
+        || tree.run_id.as_ref().is_some_and(|id| {
+            tree.execution_id.strip_prefix(id).and_then(|suffix| suffix.strip_prefix(':'))
+                .and_then(|sequence| sequence.parse::<usize>().ok()).is_none()
+        })
+    {
         return Err(io::Error::other("Recovery task identity mismatch"));
     }
     tree.load_recovery();
@@ -398,7 +475,7 @@ mod tests {
             load(dir.path())
                 .unwrap_err()
                 .to_string()
-                .contains("has ended")
+                .contains("Missing recovery component")
         );
     }
 

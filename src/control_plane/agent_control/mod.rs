@@ -404,6 +404,8 @@ pub struct SpeculativeTree {
     #[serde(default)]
     pub(crate) execution_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) history_root_branch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) authority_branch_id: Option<String>,
@@ -501,6 +503,7 @@ impl SpeculativeTree {
         Self {
             agent_id,
             execution_id: String::new(),
+            run_id: None,
             history_root_branch_id: None,
             authority_branch_id: None,
             branches: BTreeMap::new(),
@@ -895,6 +898,10 @@ pub enum AgentMessage {
     AgentFailed {
         agent_id: String,
         reason: String,
+    },
+    SessionHistory {
+        branch_id: String,
+        entries: Vec<Value>,
     },
     AgentReleased {
         agent_id: String,

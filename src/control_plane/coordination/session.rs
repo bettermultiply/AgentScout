@@ -2,6 +2,7 @@
 use super::*;
 use super::{execution::runtime_call, recovery::Recovery, task::Task};
 use crate::control_plane::gateway::ui::Request;
+use crate::control_plane::recovery::Resume;
 use crate::protocol::contract::{AgentLaunch, ResultStatus};
 use std::path::Path;
 
@@ -9,10 +10,10 @@ use std::path::Path;
 pub fn prepare(
     run_dir: &Path,
     resume: bool,
-) -> io::Result<(SpeculativeTree, Option<std::path::PathBuf>)> {
+) -> io::Result<(SpeculativeTree, Option<Resume>)> {
     if resume {
-        let (tree, path) = crate::control_plane::recovery::load(run_dir)?;
-        Ok((tree, Some(path)))
+        let (tree, saved) = crate::control_plane::recovery::load(run_dir)?;
+        Ok((tree, Some(saved)))
     } else {
         if run_dir.join("recovery.json").exists() {
             return Err(io::Error::other("Saved execution exists; use --resume"));
@@ -47,7 +48,11 @@ pub fn start(
             path: path.join("agent.json"),
         }
     } else {
-        tree.create_authority("authority", "")?
+        let branch = tree.reopened_execution_scope().map_or_else(
+            || "authority".to_owned(),
+            |scope| format!("authority-{scope}"),
+        );
+        tree.create_authority(&branch, "")?
     };
     let authority = tree
         .authority_branch_id
@@ -169,7 +174,7 @@ pub fn connected(
     .collect::<Result<serde_json::Map<_, _>, Box<dyn std::error::Error>>>()?;
     Ok(vec![
         AgentCommand::LocalPolicy {
-            branch_id: "authority".into(),
+            branch_id: authority,
             policy_digest: policy.digest().into(),
             has_predictor: policy.has_decision(Decision::Predict),
             decisions: Value::Object(decisions),

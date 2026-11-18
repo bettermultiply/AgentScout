@@ -174,6 +174,7 @@ export class SessionTree {
     // Read native indexes at a synchronous boundary. Active managers are never
     // rewritten, reloaded, disposed or deleted by history assembly.
     settle() {
+        if(this.readOnlyUntilPrompt)return;
         if(this.branches.size===0){
             const tail=this.tail(this.authority);if(!tail)return;
             const last=this.manager.getEntries().at(-1);

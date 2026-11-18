@@ -270,6 +270,10 @@ impl Interface {
                     branch_id: branch_id.clone(),
                 })
             }
+            AgentMessage::SessionHistory { branch_id, entries } => {
+                self.conversations.lock().unwrap().entry(branch_id.clone()).or_default().inherited.extend(entries.iter().cloned());
+                Some(ObservationContent::ConversationUpdated { branch_id: branch_id.clone() })
+            }
             AgentMessage::Transcript {
                 branch_id, entry, ..
             } => {

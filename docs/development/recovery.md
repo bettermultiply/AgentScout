@@ -4,23 +4,27 @@
 
 本轮验证：`cargo check --all-targets`、控制面 55/55、Ledger/Projection 2/2、持久化完成记录部分写入回退 1/1；Pi 历史／通知／访问／恢复引用 19/19（`/tmp/ascout-ledger-check.log`），TS 检查通过（`/tmp/ascout-ledger-ts.log`）；恢复 7/7（`/tmp/ascout-ledger-recovery-final.log`）。缺失 Pi 引用明确报 ENOENT 的回归已覆盖。整链保留保存中间失败／重试及继续检查；旧兼容索引替换用例更新为确认 Ledger 仍选择最新代。实际发现并修复释放 Branch 删除 checkpoint 源，以及汇总父链替代原始父链造成恢复冲突。
 
-边界：正常结束后可通过 run 内 session.jsonl 引用用 Pi 打开权威历史，AgentReleased 也保留原生定位引用；未新增 ASCout 打开会话命令。Pi 源副本目前无自动回收，保存失败可能留下无引用的安全副本。没有增加任意外部等待／进程内存恢复或不确定命令重放保证。
+当前 `ascout-control-plane <pi-root> --resume <run-id>` 按原 id 和运行记录目录打开两种状态。Ledger 有最新的有效保存时恢复原 task、树与活跃分支，普通消息排队，直到显式 `/continue`。最新 task 已结束时使用该次执行的 `AgentReleased` 权威引用，通过 Pi `SessionManager.open` 打开同一原生会话，显示历史并等待下一条 prompt 创建新 task。旧记录可使用 `session.jsonl` 引用和 `final-tree.json` 中的启动绑定。旧 `session-*` 目录照用。相同 run 已被打开时，第二个进程在修改记录和启动 Agent 前报错。
+
+已结束路径只复用会话和启动绑定。新的执行身份与 Branch 身份将新操作和旧 Ledger 事实分开，后续暂停保存会记录这次执行的身份。旧命令、工具等待和 Branch 执行状态不进入新上下文。启动时原生源保持只读，下一条 prompt 到来后才允许合并新会话内容。正常终结优先于较早的保存，较新的开始记录或保存错误也不能被当作旧 task 已结束。
+
+常驻 control plane 同时管理多个 run 仍待实现。Pi 源副本目前无自动回收，保存失败可能留下无引用的安全副本。没有增加任意外部等待／进程内存恢复或不确定命令重放保证。目标见 [control plane 设计](../design/control-plane.md#1-总体设计)。
 
 `recovery::publish` 在追加新控制快照与替换 `recovery.json` 前，复用加载阶段的
 组件关联校验。缺失或不一致的 task／Authority、Branch Session、Environment、
 Chance／Proposal 关联直接保存失败，沿既有失败路径保持暂停并保留旧标记。
 新增回归先证明旧实现会把不一致组件发布为完成，再验证拒绝发布。
-Ledger 现在追加 `recovery_complete`：包含完整控制快照、Agent／Runtime 附件路径及 SHA-256；agent 附件记录分支、checkpoint、hook 状态和 Pi session 引用。加载直接从完成记录的 control 重建 Tree，不再生成或要求 tree.json；旧代携带的 tree.json 也不作为恢复依据。附件与关联检查成功后，直接附件和保存目录同步，再在共享写入器内追加并同步完成记录。recovery.json 仅保留兼容索引，替换失败通过系统运行日志警告，已持久化完成不误报失败。加载从 Ledger 倒序选择有效保存，越过未完成／损坏保存；遇到更新的 task_completed 则拒绝复活旧任务。
+Ledger 现在追加 `recovery_complete`：包含完整控制快照、Agent／Runtime 附件路径及 SHA-256；agent 附件记录分支、checkpoint、hook 状态和 Pi session 引用。加载直接从完成记录的 control 重建 Tree，不再生成或要求 tree.json；旧代携带的 tree.json 也不作为恢复依据。附件与关联检查成功后，直接附件和保存目录同步，再在共享写入器内追加并同步完成记录。recovery.json 仅保留兼容索引，替换失败通过系统运行日志警告，已持久化完成不误报失败。加载从 Ledger 倒序选择最新 task 的有效保存。保存错误可以回查同一 task 的较早有效保存。遇到 task 开始或结束边界时停止回查。若 task 已结束，打开其权威历史。
 
 同一进程中，同一规范路径的 Ledger::open 复用原写入器及失败状态；普通追加、观察序号发布、归档重试、完成记录追加／sync／回退在同一互斥边界内完成。等待观察事件只持 reader，不持写入锁；写入器锁不跨 Runtime 调用或附件准备。此处不增加跨进程多写者支持。故障回归先复现第二句柄绕过部分写入失败，再检查共享失败和 durable 回退期间另一句柄的成功追加不会被截断。
 
 保存保证以已校验附件的进程重启恢复为范围。直接 agent.json、runtime.json、保存目录、运行目录和 Ledger 调用 sync_all；这不等于递归同步 Pi 引用的每个文件、Runtime 外部资源、Git 对象或所有后端的保存数据。因此不承诺任意断电后全部引用仍在；加载仍须校验引用，缺失或损坏时回退合法旧代或拒绝，不能宣称全链路 fsync 保证。兼容索引无需构成恢复依据。
 
-本轮审查验证：`/tmp/ascout-review-repro.log` 记录修复前第二句柄绕过失败的复现；`/tmp/ascout-review-node.log` 为恢复整链 7/7 与 Pi 引用／绑定／历史／通知适配合计 20/20。最终 Rust 检查（控制面 59/59、Projection 2/2、cargo check --all-targets）见 `/tmp/ascout-review-final.log`；附件同步调整后再次运行恢复 7/7，见 `/tmp/ascout-review-recovery-final.log`。已结束 session 打开命令仍未完成，不能将现有活动任务恢复称为完整普通 Agent 恢复；不扩展常驻多运行服务，不改待确认 CLI 命名，不实现 EEC。
+本轮审查验证：`/tmp/ascout-review-repro.log` 记录修复前第二句柄绕过失败的复现；`/tmp/ascout-review-node.log` 为恢复整链 7/7 与 Pi 引用／绑定／历史／通知适配合计 20/20。最终 Rust 检查（控制面 59/59、Projection 2/2、cargo check --all-targets）见 `/tmp/ascout-review-final.log`；附件同步调整后再次运行恢复 7/7，见 `/tmp/ascout-review-recovery-final.log`。该次审查未调整待确认的 CLI 命名，也未实现 EEC。
 
 Pi 源通过公开 SessionManager.create/forkFrom/open 管理；保存及恢复各建立独立 Pi 源，ASCout 不拼接 Pi 目录。run 内 session.jsonl 现在只是指向 Pi 管理文件的符号链接，兼容已有读取入口。AgentReady/AgentReleased 在 Ledger 中携带原生文件、id、cwd 引用。释放 Branch 不删除仍可能由 checkpoint 引用的源。恢复验证源摘要后才调用 open，缺失引用明确失败。保存附件不重复存储完整 Pi index，恢复使用 Pi 接口取回 entries；保留原始父链控制映射以避免最终权威汇总父链污染模型上下文。
 
-完成记录的追加失败会修复追加边界，保留旧完成记录。兼容索引预备写失败也不提交；完成记录已落盘但索引 rename 失败只报警，Ledger 保存仍有效。当前完成写复用进程内共享 Ledger 写入器，不依赖“当前无并发”的假设；未实现多运行服务架构或跨进程同时写同一运行。
+完成记录的追加失败会修复追加边界，保留旧完成记录。兼容索引预备写失败也不提交；完成记录已落盘但索引 rename 失败只报警，Ledger 保存仍有效。当前完成写复用进程内共享 Ledger 写入器，不依赖“当前无并发”的假设。跨进程同时写同一运行仍未实现。
 
 下一拦截点暂停现已替换取消式暂停：`suspend_recovery` 只设置暂停意图，
 模型／工具执行前 hook 阻止下一动作；已经开始的调用继续，保留真实结果。
