@@ -8,6 +8,8 @@
 
 已结束路径只复用会话和启动绑定。新的执行身份与 Branch 身份将新操作和旧 Ledger 事实分开，后续暂停保存会记录这次执行的身份。旧命令、工具等待和 Branch 执行状态不进入新上下文。启动时原生源保持只读，下一条 prompt 到来后才允许合并新会话内容。正常终结优先于较早的保存，较新的开始记录或保存错误也不能被当作旧 task 已结束。
 
+正常 CLI 回归 `tests/resume-ended.mjs` 使用隔离配置、真实 Pi 和本地假 provider。修正前在首次打开已结束 run 时失败，见 `/tmp/ascout-resume-before.log`。修正后覆盖无 checkpoint 的已结束 run、旧记录兼容引用、界面会话接口的历史、重复和并发打开、引用丢失、下一条 prompt 携带旧上下文、旧工具执行恰一次、下一 task 保存暂停与显式继续，以及终结后跳过旧 checkpoint。最终证据目录为 `/tmp/as-resume-Mfgjp2`，回归和原暂停恢复 7 项纳入 `/tmp/ascout-resume-node-final.log`（18 项通过）。`cargo check --all-targets`、串行 `cargo test --lib --bins`（221 项）和兄弟 Pi 的 SessionManager 文件及上下文测试（51 项）通过。
+
 常驻 control plane 同时管理多个 run 仍待实现。Pi 源副本目前无自动回收，保存失败可能留下无引用的安全副本。没有增加任意外部等待／进程内存恢复或不确定命令重放保证。目标见 [control plane 设计](../design/control-plane.md#1-总体设计)。
 
 `recovery::publish` 在追加新控制快照与替换 `recovery.json` 前，复用加载阶段的

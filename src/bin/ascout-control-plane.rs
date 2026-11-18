@@ -234,10 +234,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     let (run_id, run_dir) = config.run(resume_id.as_deref())?;
+    if run_dir.file_name().and_then(|name| name.to_str()) != Some(&run_id) {
+        return Err("Run directory identity mismatch".into());
+    }
     // Hold ownership before reading history, replacing sockets or launching the Agent.
-    let run_lock = fs::OpenOptions::new().read(true).write(true).create(true)
-        .truncate(false).open(run_dir.join("run.lock"))?;
-    run_lock.try_lock().map_err(|error| format!("Cannot lock run {run_id}: {error}"))?;
+    let run_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(run_dir.join("run.lock"))?;
+    run_lock
+        .try_lock()
+        .map_err(|error| format!("Cannot lock run {run_id}: {error}"))?;
     eprintln!("Run id: {run_id}");
     struct RunNotice(String);
     impl Drop for RunNotice {
@@ -271,7 +280,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => None,
     };
     let (startup_model, resume_model, models, thinking) = recovery::models(
-        &run_dir, recovery_generation, native_session.is_some(), model, models, thinking,
+        &run_dir,
+        recovery_generation,
+        native_session.is_some(),
+        model,
+        models,
+        thinking,
     )?;
     let engine = PolicyEngine::default();
     let artifact_bytes = if !resume {

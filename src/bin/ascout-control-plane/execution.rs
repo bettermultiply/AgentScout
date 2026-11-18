@@ -68,7 +68,7 @@ impl Task<'_> {
         }
         if let Err(error) = self.ledger.record(value.clone()) {
             self.system_log.history_failure(
-                self.tree.execution_id(),
+                self.tree.run_id(),
                 &format!("record append failed: {error}"),
             );
         }
@@ -153,7 +153,7 @@ impl Task<'_> {
                 self.flush_observations()?;
                 if let Err(error) = self.interface.message(self.ledger, &message) {
                     self.system_log.history_failure(
-                        self.tree.execution_id(),
+                        self.tree.run_id(),
                         &format!("observation append failed: {error}"),
                     );
                 }
@@ -185,7 +185,7 @@ impl Task<'_> {
                 .append_observation(self.tree.execution_id(), content)
             {
                 self.system_log.history_failure(
-                    self.tree.execution_id(),
+                    self.tree.run_id(),
                     &format!("observation append failed: {error}"),
                 );
                 failure.get_or_insert(error);
@@ -201,7 +201,7 @@ impl Task<'_> {
                 if let Err(error) = self.system_log.write(
                     "ERROR",
                     "coordinator",
-                    Some(self.tree.execution_id()),
+                    Some(self.tree.run_id()),
                     &record.to_string(),
                 ) {
                     eprintln!("System log write failed: {error}; {record}");
@@ -209,7 +209,7 @@ impl Task<'_> {
             }
             if let Err(error) = self.ledger.record(record) {
                 self.system_log.history_failure(
-                    self.tree.execution_id(),
+                    self.tree.run_id(),
                     &format!("record append failed: {error}"),
                 );
             }
@@ -364,7 +364,7 @@ pub fn run(
                     task.system_log.write(
                         "ERROR",
                         "runtime",
-                        Some(task.tree.execution_id()),
+                        Some(task.tree.run_id()),
                         &error,
                     )?;
                 }
@@ -404,7 +404,8 @@ pub fn run(
                 }
                 let started = task.started;
                 let ledger = &mut task.ledger;
-                let run_id = task.tree.execution_id().to_string();
+                let run_id = task.tree.run_id().to_string();
+                let task_id = task.tree.execution_id().to_string();
                 let (commands, wake, finish) = task.control.settle(
                     task.tree,
                     runtime,
@@ -413,7 +414,7 @@ pub fn run(
                     task.draining,
                     |mut value| {
                         value["t_ms"] = json!(started.elapsed().as_millis() as u64);
-                        value["task_id"] = json!(run_id);
+                        value["task_id"] = json!(task_id);
                         if let Err(error) = ledger.record(value) {
                             system_log.history_failure(
                                 &run_id,
@@ -452,7 +453,7 @@ pub fn run(
                     for id in ids {
                         let _ = task.ledger.archive_branch(
                             task.tree.take_archivable_branch(&id)?,
-                            task.tree.execution_id(),
+                            task.tree.run_id(),
                             task.system_log,
                         );
                     }
@@ -478,7 +479,7 @@ pub fn run(
     task.flush_observations()?;
     if let Err(error) = interface.publish(task.ledger, false, false, "Stopped") {
         system_log.history_failure(
-            task.tree.execution_id(),
+            task.tree.run_id(),
             &format!("observation append failed: {error}"),
         );
     }

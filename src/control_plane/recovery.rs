@@ -15,7 +15,12 @@ pub fn models(
     model: Option<String>,
     mut models: Option<PathBuf>,
     mut thinking: Option<String>,
-) -> io::Result<(Option<String>, Option<String>, Option<PathBuf>, Option<String>)> {
+) -> io::Result<(
+    Option<String>,
+    Option<String>,
+    Option<PathBuf>,
+    Option<String>,
+)> {
     let mut startup_model = model.clone();
     let mut resume_model = None;
     if let Some(generation) = generation {
@@ -60,7 +65,9 @@ pub fn models(
         if let Some(path) = &models {
             let supplied: Value = serde_json::from_slice(&fs::read(path)?)?;
             if persisted.as_ref() != Some(&supplied) {
-                return Err(io::Error::other("Saved additional model configuration changed"));
+                return Err(io::Error::other(
+                    "Saved additional model configuration changed",
+                ));
             }
         }
         models = persisted.map(|_| saved);
@@ -197,32 +204,53 @@ pub fn load(run_dir: &Path) -> io::Result<(SpeculativeTree, Resume)> {
             Some("recovery_complete") => {
                 match load_record(run_dir, &record["manifest"], &record["control"]) {
                     Ok((tree, path)) => return Ok((tree, Resume::Paused(path))),
-                    Err(error) => { latest_error.get_or_insert(error); }
+                    Err(error) => {
+                        latest_error.get_or_insert(error);
+                    }
                 }
             }
             _ => {}
         }
     }
-    Err(latest_error.unwrap_or_else(|| io::Error::other("No complete Ledger recovery record for the latest task")))
+    Err(latest_error.unwrap_or_else(|| {
+        io::Error::other("No complete Ledger recovery record for the latest task")
+    }))
 }
 
-fn open_ended(run_dir: &Path, records: &[Value], completed: usize) -> io::Result<(SpeculativeTree, Resume)> {
+fn open_ended(
+    run_dir: &Path,
+    records: &[Value],
+    completed: usize,
+) -> io::Result<(SpeculativeTree, Resume)> {
     // Release records after this completion identify the assembled authority.
-    let reference = records[completed + 1..].iter().rev()
+    let reference = records[completed + 1..]
+        .iter()
+        .rev()
         .find(|record| {
             record["message"] == "agent_released"
                 && record["task_id"] == records[completed]["task_id"]
         })
         .map(|record| record["session"].clone())
         .unwrap_or_else(|| json!({"file": run_dir.join("session.jsonl")}));
-    let file = reference["file"].as_str().ok_or_else(|| io::Error::other("Ended run is missing its Pi session reference"))?;
-    if !Path::new(file).is_absolute() || !fs::metadata(file).is_ok_and(|metadata| metadata.is_file()) {
-        return Err(io::Error::other(format!("Ended run Pi session reference is unavailable: {file}")));
+    let file = reference["file"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("Ended run is missing its Pi session reference"))?;
+    if !Path::new(file).is_absolute()
+        || !fs::metadata(file).is_ok_and(|metadata| metadata.is_file())
+    {
+        return Err(io::Error::other(format!(
+            "Ended run Pi session reference is unavailable: {file}"
+        )));
     }
 
-    let run_id = run_dir.file_name().and_then(|name| name.to_str())
+    let run_id = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
         .ok_or_else(|| io::Error::other("Invalid run identity"))?;
-    let bindings = records.iter().rev().find(|record| record["message"] == "session_file" && record.get("bindings").is_some());
+    let bindings = records
+        .iter()
+        .rev()
+        .find(|record| record["message"] == "session_file" && record.get("bindings").is_some());
     // Older runs wrote these bindings at shutdown. Never load their execution state.
     let legacy;
     let bindings = if let Some(record) = bindings {
@@ -285,8 +313,11 @@ fn load_record(
     let run_id = run_dir.file_name().and_then(|name| name.to_str());
     if Some(tree.run_id.as_deref().unwrap_or(&tree.execution_id)) != run_id
         || tree.run_id.as_ref().is_some_and(|id| {
-            tree.execution_id.strip_prefix(id).and_then(|suffix| suffix.strip_prefix(':'))
-                .and_then(|sequence| sequence.parse::<usize>().ok()).is_none()
+            tree.execution_id
+                .strip_prefix(id)
+                .and_then(|suffix| suffix.strip_prefix(':'))
+                .and_then(|sequence| sequence.parse::<usize>().ok())
+                .is_none()
         })
     {
         return Err(io::Error::other("Recovery task identity mismatch"));
