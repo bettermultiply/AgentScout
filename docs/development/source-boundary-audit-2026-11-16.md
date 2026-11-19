@@ -6,14 +6,14 @@
 
 | 范围 | 当前源码证据 | 判断 |
 |---|---|---|
-| 顶层与协议 | `src/lib.rs` 仅公开 control_plane／protocol／runtime；`protocol/{contract,transport}.rs` 只使用标准库及 serde／serde_json | 生产依赖方向符合架构；协议不读取 Tree 或 Backend 实现。Agent 线消息定义在 agent_control，不能误称所有线协议都已集中到 protocol。 |
+| 顶层与协议 | `src/lib.rs` 仅公开 control_plane／protocol／runtime；`protocol/{contract,transport}.rs` 只使用标准库及 serde／serde_json | 生产依赖方向符合架构；协议不读取 Tree 或 Backend 实现。Agent 线消息、命令、握手能力和线封装定义在 `gateway/agent/protocol.rs`，仅依赖通用契约和序列化类型，不读取 Tree 或 Backend 实现。 |
 | control plane → Runtime | `gateway/runtime.rs::Runtime` 只传 Operation／OperationResult／Event，coordination 使用该 trait；control_plane 不引用 runtime 模块 | 通过契约使用 Runtime，没有直接访问 Backend、进程句柄或挂载状态。 |
 | Runtime → control plane | `RuntimeProxy` 依赖 protocol 和 `BaseRuntime`，`BaseRuntime` 持有有序 Backend 实例；runtime 的测试使用 control plane 会话驱动请求 | 生产实现没有反向依赖 control plane。测试借用真实控制会话驱动 runtime proxy 是测试装配，不是生产依赖。 |
-| Gateway | agent 管连接与线消息；runtime 管请求、结果缓存与事件；ui/http 管 HTTP/SSE 与 Presentation | 不持有 Tree／Policy／调度预算。Tree 合法性检查仍在控制逻辑；LedgerReader 是只读事实访问，不能算第二份 Tree。 |
+| Gateway | agent 管连接与线消息；runtime 管请求、结果缓存与事件；ui/http 管 HTTP/SSE 与 Presentation | 不持有 Tree／Policy／调度预算。`speculative_tree/messages.rs` 应用 Agent 消息并检查 Tree 转换是否合法；LedgerReader 是只读事实访问，不能算第二份 Tree。 |
 | Runtime 二进制 | `ascout-runtime-adapter/config.rs` 读取并规范化 JSON，登记实现后调用 `BaseRuntime::from_registry` 并装配 `RuntimeProxy`。`ascout-guest-agent.rs` 调用 `guest_agent::serve` | 配置读取归入口，实例创建和宿主、环境资源的协调归 base runtime。 |
-| control plane 二进制 | main 调用 `coordination::session::{prepare,start,connected}`；execution 调用 `Session::{request,interaction,agent,timer,progress,settle,fail_and_exit}` | root／恢复／Agent 启动、本地 Policy 交付、控制请求、模型切换及保存／物化协调已进入库接口。入口仅解析与装配、接收事件、派发异步工作、送达命令及呈现／写 Ledger。 |
+| control plane 二进制 | `src/bin/ascout-control-plane.rs` 处理 CLI、配置选择和 run id 提示。`foreground.rs` 装配锁、Adapter、Agent 产品入口、事件渠道和 TUI／HTTP，`execution.rs` 转交进程信号。 | `coordination::session` 准备 Tree 与 Policy／Runtime 绑定，`coordination::execution` 协调 Agent 接入、事件循环与收尾。界面从只读投影和展示缓存读数据。 |
 | Tree 公开接口 | `SpeculativeTree` 与 `BranchRecord` 的领域字段均不再为 pub；只读方法返回借用／值，无公开可变 getter | 二进制及外部调用方不能直接赋值或取得内部可变记录。身份设置经 `set_execution_id` 限制在启动／恢复阶段；Environment 仍经 `bind_environment` 检查，转换继续使用 Tree 方法。库内协调及恢复使用 crate 可见性，序列化格式未变。 |
-| workload 边界 | `chances.rs::record_public_nle_map_action` 过滤公开 chars／blstats／message，发布 NleMapAction；`coordination/actions.rs` 调用它 | 是 [现行地图实现](nle-map.md) 已明确的只读事实投影，不计算移动判断、不裁决 Policy；不能把这处已有展示适配擅自扩展成通用新协议或视为必须移除的运行策略。 |
+| workload 边界 | `chances.rs::record_public_nle_map_action` 过滤公开 chars／blstats／message，发布 NleMapAction；`speculative_tree/actions.rs` 调用它 | 是 [现行地图实现](nle-map.md) 已明确的只读事实投影，不计算移动判断、不裁决 Policy；不能把这处已有展示适配擅自扩展成通用新协议或视为必须移除的运行策略。 |
 
 公开 API 是库面向各二进制／外部调用方的接口，不是 UI 可直接访问 Tree 的授权。HTTP/SSE 继续通过受限观察接口。恢复反序列化保留原格式和既有校验，不通过重新绑定改变保存身份。
 
@@ -23,7 +23,7 @@
 
 `coordination/session.rs` 负责已有 session 的语义协调，不保存第二份 Tree：`prepare` 读取恢复点或建立树；`start` 登记 root／加载 Runtime、绑定实际环境并要求 Runtime 启动 Agent；连接接纳后 `connected` 记录 Ready 并按 LocalPolicy → StartBranch／Load 顺序返回命令。AgentLaunch 的产品路径、参数和配置仍由入口装配，实际进程仍由 Runtime 启动。
 
-`Session` 统一处理 UI 请求与 Agent 事实，保持恢复暂停／继续、交互应答合法性、取消、在飞工作／Promote 期间禁止模型切换、后代保留自身模型等既有规则。保存／物化成功失败与结束前提由 `settle` 协调；二进制只送达返回命令、唤醒事件循环和关闭连接。Tree／BranchRecord 的只读访问及字段可见性收口已完成。未新增测试或项目术语。
+`Session` 统一处理 UI 请求与 Agent 事实，保持恢复暂停／继续、交互应答合法性、取消、在飞工作／Promote 期间禁止模型切换、后代保留自身模型等既有规则。保存／物化结果与结束前提由 `settle` 协调。`coordination/execution.rs` 运行事件循环，持久化 `task_started` 后排入 Prompt，负责异步工作、命令回执与取消、退出清理和 Branch 归档。Tree／BranchRecord 的访问仍经已有接口。
 
 ## 范围与限制
 
@@ -33,7 +33,13 @@
 
 本次继续实现开始时已有 40 个受跟踪文件的未提交差异及未跟踪文件。编辑前已查看相关 diff；全部使用局部 patch 整合，保留交互接口新增路径以及进行中新增的旧 Authority 提示取消修正，未提交、切分支、reset 或覆盖并行文档重命名。仅格式化新增文件及自己的编辑范围，没有全局重写。未调用真实模型，未做深度回放或 Firecracker 环境修复。
 
-## 本轮完成验证
+## 前台入口验证
+
+`cargo check --all-targets`、`cargo build --bins`、`git diff --check` 通过。`cargo test --lib --bins --test ledger_projection -- --test-threads=1` 共通过 224 项。CLI、HTTP 观察、交付及恢复相关的既有 Node 用例共通过 23 项，覆盖从暂停点继续和从已结束会话打开。模型响应来自本地伪模型。
+
+临时检查分别在 Adapter 握手后缺少 Agent 入口、Agent 连接后 HTTP 端口被占用时触发失败。两次均返回退出码 1，输出两次 run id 并回收 Adapter。第二条还记录了环境已清理和观察断开。另一次临时运行验证了流式正文可从对话接口读取、Ledger 不含正文、`task_started` 早于 Agent 的用户消息记录，且保留工具名称和耗时。日志位于 `/tmp/ascout-foreground-final-rust.log`、`/tmp/ascout-foreground-node.log`、`/tmp/ascout-foreground-startup.log` 和 `/tmp/ascout-foreground-final-resume.log`。
+
+## 此前边界核查的验证
 
 | 命令 | 结果 | 日志 |
 |---|---|---|

@@ -525,7 +525,7 @@ mod notification_tests {
                 validate_result(Decision::Dispose, &input, &json!({"actions":[action]})).is_err()
             );
         }
-        let command: crate::control_plane::agent_control::AgentCommand =
+        let command: crate::control_plane::gateway::agent::protocol::AgentCommand =
             serde_json::from_value(json!({"command":"promote","branch_id":"winner"})).unwrap();
         assert!(
             serde_json::to_value(command)
@@ -535,7 +535,7 @@ mod notification_tests {
         );
         for value in [json!(null), json!(" \n"), json!(2)] {
             assert!(
-                serde_json::from_value::<crate::control_plane::agent_control::AgentCommand>(
+                serde_json::from_value::<crate::control_plane::gateway::agent::protocol::AgentCommand>(
                     json!({"command":"promote","branch_id":"winner","notification":value})
                 )
                 .is_err()

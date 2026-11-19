@@ -22,7 +22,7 @@
 
 原 `/tmp/opencode/runtime-id-real-success-20261116` 失败证据保持不变。原事件中，candidate-2 的 model-2 在 12.56 秒开始，13.52 秒 Branch 进入 Promoting 时，其 chance-3 被 sweep 标为 Unavailable／Discarded，17.35 秒模型成功结束时不再进入 `record_authority_outcome` 的非终态 Chance 路径，故正常 `ResolvePending(phase=continue)` 永远不会产生。Pi 在 assistant 结束时创建的 `modelResultHolds` 随后挡住工具 Hook。Promote Applied 已释放 effect／extent gate，现场没有 pause hold；因此不能靠重复 Promote、手动放行或修改 Pi 权限解决。
 
-最小修复位于 `src/control_plane/agent_control/chances.rs`：`chance_waiting_live` 将 `Promoting` 也视为现有等待点仍存活。晋级是角色过渡，不是终止该 Branch 的在飞操作；Discarding 及之后的失效传播保持原规则。未修改 Policy、模型准入、暂停语义、Runtime 身份生成或 NLE 单世界。
+最小修复位于 `src/control_plane/speculative_tree/chances.rs`：`chance_waiting_live` 将 `Promoting` 也视为现有等待点仍存活。晋级是角色过渡，不是终止该 Branch 的在飞操作；Discarding 及之后的失效传播保持原规则。未修改 Policy、模型准入、暂停语义、Runtime 身份生成或 NLE 单世界。
 
 先红后绿证据集中于 `/tmp/opencode/promote-continuation-20261116`（检查日志原路径为 `/tmp/opencode/promote-*.log`）。新增 Rust 回归先证明 sweep 错删在飞模型 Chance，修复后证明真实 ActionFinished 推进到 Arrived 并由正常 progress 生成 continue。`tests/predictor-fact-e2e.mjs` 新增本地 SSE 延迟响应场景，保留原完整 Policy，真实 Pi→Runtime→NLE；原版在 `/tmp/opencode/predictor-fact-e2e-v6Ti3K` 超时，修复后 `/tmp/opencode/predictor-fact-e2e-yL408f` 完成 5 次实际动作、首次 Promote 后 4 次工具、完整原生最终回复及正常退出（7 次本地伪模型请求、5 个 Candidate）。首次绿色尝试的最终回复断言误查 Ledger output（Ledger 不保存该正文），改为检查原生 session 完整 stop 回复；该脚本失败证据 `/tmp/opencode/predictor-fact-e2e-C3gJPQ` 保留。
 
@@ -282,7 +282,7 @@ cargo run --bin ascout-control-plane -- ../pi --policy pi-tool
 
 输入任意请求触发场景。2026-10-25 实测日志 `/tmp/opencode/ascout-f7tYJy/events.jsonl`：两个 Candidate 均在 Parent 返回前执行完成，真实值 `example` 后一个 Promote、另一个 Discard，旧 Parent 开始默认命令后被取消，Tree 确认旧 Parent 与 loser 已 Cleaned。这是脚本模型接口加真实工具验证，不是真实大模型成功证据。
 
-同一保留会话继续运行，第六轮真实值为 `false`、两个预测均不匹配：两个 Candidate Discard，Parent 的 `spec fail` 实际完成并作为主对话结果，未发布失败候选输出。Rust 编译、既有两个 agent_control 测试和 Pi 完整 check 通过。检查全仓空白时发现原有 `AGENTS.md` 末尾空行提示，本轮未修改该用户文件。
+同一保留会话继续运行，第六轮真实值为 `false`、两个预测均不匹配：两个 Candidate Discard，Parent 的 `spec fail` 实际完成并作为主对话结果，未发布失败候选输出。Rust 编译、既有两个 Tree 测试和 Pi 完整 check 通过。检查全仓空白时发现原有 `AGENTS.md` 末尾空行提示，本轮未修改该用户文件。
 
 ## 尚未完成
 

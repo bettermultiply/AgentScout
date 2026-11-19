@@ -1,7 +1,7 @@
 //! Agent listener, handshake, typed ingress and command delivery.
-use crate::control_plane::agent_control::{
-    AdapterCapabilities, AgentCommand, AgentMessage, AgentWireMessage,
-};
+pub mod protocol;
+
+use self::protocol::{AdapterCapabilities, AgentCommand, AgentMessage, AgentWireMessage};
 use crate::protocol::transport;
 use std::io;
 use std::os::unix::net::{UnixListener, UnixStream};

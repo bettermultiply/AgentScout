@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -54,9 +55,33 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     const web = `http://127.0.0.1:${await freePort()}`;
     const children = [];
     t.after(() => {for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');});
-    function start(runId) {
+    // Hold the first history frame at the real Pi transport. The commands_listed
+    // reply has no matching request, but its Ledger record proves the control
+    // plane has already processed all preceding frames and published their status.
+    const gatedEntry = `${root}/hold-history.mjs`;
+    const releaseHistory = `${root}/release-history`;
+    const historyBarrier = 'fixture-hold-history';
+    fs.writeFileSync(gatedEntry, `
+        import { existsSync } from 'node:fs';
+        import { setTimeout as delay } from 'node:timers/promises';
+        import { AscProxy } from ${JSON.stringify(pathToFileURL(resolve('instrumentation/pi/asc-proxy.ts')).href)};
+        const send = AscProxy.prototype.send;
+        let held = false;
+        AscProxy.prototype.send = async function(wire) {
+            if (!held && wire.kind === 'message' && wire.payload.message === 'session_history') {
+                held = true;
+                await send.call(this, {kind:'message', payload:{source:'agent_adapter', message:'commands_listed',
+                    branch_id:wire.payload.branch_id, request_id:${JSON.stringify(historyBarrier)}, commands:[]}});
+                while (!existsSync(${JSON.stringify(releaseHistory)})) await delay(20);
+            }
+            return send.call(this, wire);
+        };
+        await import(${JSON.stringify(pathToFileURL(resolve('instrumentation/pi/main.ts')).href)});
+    `);
+    function start(runId, holdHistory = false) {
+        const entry = holdHistory ? {ASCOUT_AGENT_ENTRY:gatedEntry} : {};
         const child = spawn('target/debug/ascout-control-plane', [resolve('../pi'), '--web', web.slice(7), ...(runId ? ['--resume', runId] : ['--model', 'local/fake', '--models', modelFile])], {
-            env:{...process.env, HOME:`${root}/home`, TMPDIR:`${root}/tmp`, PI_CODING_AGENT_DIR:`${root}/pi`, ASCOUT_RUNTIME_CONFIG:`${root}/runtime.json`}, stdio:['ignore','ignore','pipe'],
+            env:{...process.env, ...entry, HOME:`${root}/home`, TMPDIR:`${root}/tmp`, PI_CODING_AGENT_DIR:`${root}/pi`, ASCOUT_RUNTIME_CONFIG:`${root}/runtime.json`}, stdio:['ignore','ignore','pipe'],
         });
         child.log = '';
         child.stderr.on('data', chunk => {child.log += chunk; fs.appendFileSync(`${root}/cli.log`, chunk);});
@@ -74,11 +99,18 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     function post(action, prompt) {
         return fetch(`${web}/api/request`, {method:'POST',headers:{origin:web,'content-type':'application/json'},body:JSON.stringify({action,prompt})}).then(response => assert.equal(response.status, 202));
     }
+    const inputStatus = async () => (await fetch(`${web}/api/input-status`)).json();
     async function ready(child) {
         await wait(child, async () => {
-            try {return (await (await fetch(`${web}/api/input-status`)).json()).ready;}
+            try {return (await inputStatus()).ready;}
             catch {return false;}
         }, 'input ready');
+    }
+    async function currentAuthority() {
+        const state = await (await fetch(`${web}/api/observation/state-event-set`)).json();
+        const authority = state.events.findLast(event => event.event === 'authority_changed');
+        assert.ok(authority, 'public state identifies the current authority');
+        return authority.branch_id;
     }
     async function shutdown(child) {
         const exited = once(child, 'exit');
@@ -107,10 +139,19 @@ test('normal CLI opens finished Pi history and can save and resume its next task
         if (event.message === 'session_file') delete event.bindings;
         return JSON.stringify(event);
     }).join('\n') + '\n');
-    child = start(runId);
+    child = start(runId, true);
+    await wait(child, () => events().some(event => event.request_id === historyBarrier), 'Pi history held');
+    const reopenedBranch = await currentAuthority();
+    const conversationFor = async branch => (await fetch(`${web}/api/branches/${branch}/conversation`)).json();
+    assert.deepEqual((await conversationFor(reopenedBranch)).inherited, [], 'current authority history is held');
+    assert.equal((await inputStatus()).ready, false, 'input stays closed while inherited history is held');
+    fs.writeFileSync(releaseHistory, '');
     await ready(child);
-    const reopenedBranch = events().filter(event => event.message === 'branch_ready').at(-1).branch_id;
-    const conversation = await (await fetch(`${web}/api/branches/${reopenedBranch}/conversation`)).json();
+    assert.equal(await currentAuthority(), reopenedBranch);
+    const conversation = await conversationFor(reopenedBranch);
+    const originalMessages = original.trim().split('\n').map(JSON.parse)
+        .filter(entry => entry.type === 'message').map(entry => entry.message);
+    assert.deepEqual(conversation.inherited, originalMessages);
     assert.match(JSON.stringify(conversation.inherited), /first prompt.*old-tool-output.*saved answer/s);
     const competing = start(runId);
     assert.deepEqual(await once(competing, 'exit'), [1, null]);
@@ -136,7 +177,7 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     finish();
     await wait(child, () => count('recovery_complete') === 1, 'next task saved');
     const checkpoint = events().find(event => event.message === 'recovery_complete');
-    assert.equal(checkpoint.control.authority_branch_id, events().filter(event => event.message === 'branch_ready').at(-1).branch_id);
+    assert.equal(checkpoint.control.authority_branch_id, await currentAuthority());
     assert.equal(checkpoint.task_id, events().filter(event => event.message === 'task_started').at(-1).task_id);
     assert.notEqual(checkpoint.task_id, events().filter(event => event.message === 'task_started')[0].task_id);
     const exited = once(child, 'exit');

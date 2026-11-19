@@ -10,7 +10,7 @@
 
 正常 CLI 回归 `tests/resume-ended.mjs` 使用隔离配置、真实 Pi 和本地假 provider。修正前在首次打开已结束 run 时失败，见 `/tmp/ascout-resume-before.log`。修正后覆盖无 checkpoint 的已结束 run、旧记录兼容引用、界面会话接口的历史、重复和并发打开、引用丢失、下一条 prompt 携带旧上下文、旧工具执行恰一次、下一 task 保存暂停与显式继续，以及终结后跳过旧 checkpoint。最终证据目录为 `/tmp/as-resume-Mfgjp2`，回归和原暂停恢复 7 项纳入 `/tmp/ascout-resume-node-final.log`（18 项通过）。`cargo check --all-targets`、串行 `cargo test --lib --bins`（221 项）和兄弟 Pi 的 SessionManager 文件及上下文测试（51 项）通过。
 
-常驻 control plane 同时管理多个 run 仍待实现。Pi 源副本目前无自动回收，保存失败可能留下无引用的安全副本。没有增加任意外部等待／进程内存恢复或不确定命令重放保证。目标见 [control plane 设计](../design/control-plane.md#1-总体设计)。
+前台 control plane 一次管理一个 run。TUI 的 Ctrl-D、显式 Shutdown 或 SIGTERM 请求正常收尾并退出进程。SIGINT 与 TUI Ctrl-C 请求中断当前 task 并保留会话。Web 页面关闭只断开页面与仍在前台运行的进程之间的连接。暂停保存使用 `/pause`。Pi 源副本目前无自动回收，保存失败可能留下无引用的安全副本。任意外部等待、进程内存恢复和不确定命令重放仍超出恢复范围。
 
 `recovery::publish` 在追加新控制快照与替换 `recovery.json` 前，复用加载阶段的
 组件关联校验。缺失或不一致的 task／Authority、Branch Session、Environment、
@@ -233,10 +233,10 @@ target/debug/ascout-control-plane <pi-root> --resume <run-id> --web 127.0.0.1:80
 ### 保存恢复与生命周期的库边界（2026-11-14）
 
 - `src/control_plane/recovery.rs` 保存组件摘要、原子发布 manifest，读取并校验树／Agent／Runtime 关联及启动配置绑定；读取完成后通过 Tree 方法进入恢复状态。
-- `src/control_plane/agent_control/tree.rs` 拥有恢复状态、暂停时刻、继续时期限顺延及任务结束状态转换；字段仅库内可写，二进制使用只读查询。
+- `src/control_plane/speculative_tree/tree.rs` 拥有恢复状态、暂停时刻、继续时期限顺延及任务结束状态转换；字段仅库内可写，二进制使用只读查询。
 - `src/control_plane/coordination/recovery.rs` 组织 SuspendRecovery → 回执及在途工作收齐 → Save → SaveRuntime → 发布 → CancelSave；失败保留暂停状态与旧 manifest。该对象只保存当前保存尝试的路径和回执进度，不复制 Tree。
 - `src/control_plane/coordination/task.rs` 组织终止与物化，物化记录写出后才结束 task／发出关闭命令；`coordination/execution.rs` 解释 Runtime 完成结果并组织共享／独立环境的最终清理。
-- 二进制保留参数和进程装配、信号与事件等待、异步工作派发、Gateway 发送、Ledger／UI 呈现；不把 UI 文件整体移入库。不改 Gateway 三侧边界，不调整 `agent_control` 整体命名。
+- 二进制保留参数和进程装配、信号与事件等待、异步工作派发、Gateway 发送、Ledger／UI 呈现；不把 UI 文件整体移入库。不改 Gateway 三侧边界。
 
 本轮最终验收（2026-11-14）：`cargo check --all-targets`、`cargo build --bins`、`git diff --check` 通过；`cargo test --lib` 153/153，Node 联合回归 25/25（命令见文末，增加 `--test-concurrency=1`）通过。日志分别为 `/tmp/opencode/control-plane-refactor-verify-{check-complete,build-latest,lib-complete,node-complete}.log`。所有模型请求均为本地伪模型，没有调用真实模型。
 

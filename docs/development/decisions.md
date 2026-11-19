@@ -1,10 +1,36 @@
 # 开发决策
 
+## Agent 协议与 Speculative Tree 分离
+
+原 `src/control_plane/agent_control/` 已迁移至 `src/control_plane/speculative_tree/`。Agent 消息、命令、握手能力、线封装及其共享值类型归 `src/control_plane/gateway/agent/protocol.rs`；Tree 在 `speculative_tree/messages.rs` 检查并应用消息，继续持有状态、未决命令和恢复转换。这样 Gateway 能接入并交付消息而不依赖 Tree 实现，Tree 仍决定状态如何变化。仅迁移 Rust 模块与定义，不更改消息编码、恢复快照格式或执行行为。
+
+## 前台 control plane
+
+当前入口采用前台单 run 生命周期。此前常驻 control plane 与 CLI 自动启动后台的决定由本条取代，是否采用后台常驻延后再定。多 run 调度独立于进程部署方式，保留 Coordinator 可服务多棵 Tree 的边界。从暂停记录继续和从已结束会话打开下一轮的规则沿用。
+
 ## 删除 `CompositeRuntime` 兼容入口
 
 已删除旧类型、构造函数、模块及导出。六处既有测试构造直接使用 `BaseRuntime::with_policy`，保留原 backend 实例、路由策略与断言。每个 Environment 可关联多个 backend，目标是让各 backend 通过同一机制参与协调。本轮交付范围为入口迁移及文档清理。
 
 本轮 `cargo check --all-targets`、Runtime、Proxy 环境身份、NLE 与文件系统路由的既有定向测试均通过。
+
+## 2026-11-18 Tree 异步操作归属
+
+`src/control_plane/speculative_tree/actions.rs` 负责登记操作、识别过期反馈、应用完成结果和推进 `progress`。Tree 与 `SpeculationCoordinator` 共用 `ControlOperation`、`ControlResult`、`ControlActions` 和 `ToolPending`。Coordinator 继续组织 Policy 求值及 Runtime 操作。Tree 内部维护操作编号、反馈指纹、Policy 上下文和推进状态。`coordination` 保留共享类型的既有导入路径，Tree 快照沿用原字段、枚举名称与序列化规则。
+
+Tree 在重开已结束 run 时初始化 run 与 task 身份并恢复 Policy、Runtime、capability 和本地 Policy 绑定，也负责校验暂停 task 与 run id 的关联。恢复层负责读取 Ledger 和 Pi 引用及附件，并校验这些记录与 Tree 的关联。
+
+CLI 调用启动连接与 run 操作，Coordinator 顺序推进每棵 Tree。当前入口服务一个 run。自动启动后台是期望的使用方式，目前尚未实现。
+
+### 正常入口的运行顺序
+
+`coordination/execution.rs` 接管正常入口的事件循环和交付顺序。它先持久化 `task_started`，再把 Prompt 放入交付队列。异步操作和物化回到同一事件循环处理结果，命令交付继续使用独立的工作线程、取消标志及回执。协调侧负责清理、归档、Agent 事实和观察事件的发布。可执行入口负责装配、转交进程信号及管理界面。界面接收正文、流式文本和输入状态用于展示，UI Projection 继续从 Ledger 读取已保存的观察事件。
+
+本次 `cargo check --all-targets`、`cargo build --bins`、`git diff --check` 通过。`cargo test --lib --bins --test ledger_projection -- --test-threads=1` 通过 224 项。正常入口的 Authority、观察 SSE、交付回执及恢复脚本合计通过 15 项。另用临时检查验证了实时流式正文、`task_started` 先于 Agent 的用户消息引用、Ledger 不含对话正文，以及工具名称和耗时字段。模型响应均来自本地伪模型。验收日志为 `/tmp/ascout-coordinator-rust.log`、`/tmp/ascout-coordinator-node.log` 和 `/tmp/ascout-coordinator-streaming.log`。
+
+### 此前的 Tree 归属回归
+
+实跑通过 `cargo check --all-targets`、`cargo build --bins`、`cargo test --lib control_plane::`（59 项）及 `cargo test --lib recovery`（8 项，含与前一组重叠的用例）。使用本地伪模型的 `tests/recovery-active.mjs`、`tests/recovery-filesystem.mjs` 和 `tests/resume-ended.mjs` 共通过 8 项，覆盖活跃任务暂停、恢复失败重试和重开已结束的会话。
 
 ## 完整操作的双向二进制传输
 

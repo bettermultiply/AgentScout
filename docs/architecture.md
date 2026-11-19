@@ -20,7 +20,7 @@ AScout 的完整调用路径涉及 Instrumentation、control plane 和 Runtime�
 
 Instrumentation 围绕一组 Agent 进程及其执行活动提供本地管理。Branch 为执行活动提供逻辑归属，Instrumentation 为每个 Branch 承载独立的本地管理上下文；control plane 通过 Instrumentation 获取 Agent 行为事实、发出控制命令，并协调 Branch 与 Instance 的全局状态。多个 Branch 共用 Backend 内部资源，但 Environment 身份按 Branch 独占；Branch 建立独立环境后，其工作区访问、shell、受管子程序及效果进入相应环境；Agent 与随附 Instrumentation 留在环境外的可信宿主，由 Runtime 管理启动、监视和回收。
 
-完整执行须先建立受管 Runtime 边界，再创建 root Agent；launcher frontend 可由 CLI、IDE、daemon 或 Agent platform 等价提供，不影响受管范围。
+完整执行须先建立受管 Runtime 边界，再创建 root Agent。当前 CLI 启动一个前台 control plane，并由其管理该次 run 的连接、界面与关闭。
 
 control plane 负责维护投机执行过程当中 Agent 的控制状态，特别是由多次投机执行组合嵌套形成的拓扑结构。同时还负责执行过程中的决策和检查，Policy 和 runtime proxy 都以可插拔的形式与该结构连接。Runtime 启动入口读取节点配置并装配各组件。backend registry 登记 backend 实现、程序入口、接口与能力声明，并核对所需标准接口。base runtime 创建并管理实例、Environment 关联及操作结果，编排宿主与环境执行资源的启动、保存恢复和关闭。control plane 使用其能力视图加载与校验 Policy，并解析回传事件、检查请求和实际结果是否符合控制语义。逻辑 Branch 可以先进入 control plane 视图，独立 Runtime 环境按需建立，不要求每次投机执行都立即 fork。
 
@@ -87,11 +87,12 @@ src/
     mod.rs  contract.rs  transport.rs
   control_plane/               control plane
     mod.rs
-    agent_control/             Tree、Branch、命令/事件与协议消息
-    coordination/              动作投影、SpeculationCoordinator、session 启动与请求协调
+    speculative_tree/          Tree、Branch 状态及消息驱动的合法转换
+    coordination/              SpeculationCoordinator、session 启动与请求协调
     ledger.rs
     policy/                    YAML 编译、Python 求值、Decision、校验
     gateway/                   Agent、UI 与 Runtime 通信接入
+      agent/protocol.rs        Agent 消息、命令和线封装
     observation.rs             只读观察事件
     recovery.rs                恢复资料校验与发布
   runtime/                     runtime proxy 进程与通用组合层
@@ -128,11 +129,7 @@ src/
   runtime proxy 或 control plane。
 - `bin/` 读取并规范化启动配置，使用库的公开 API 装配各组件。
 
-control plane 入口通过 `coordination::session` 的公开接口完成 root 建立／恢复、Agent
-启动、本地 Policy 交付及控制请求协调；模型切换、保存与物化前提也由库接口
-处理。入口保留参数、配置、装配、呈现及事件驱动。Tree／BranchRecord 领域字段
-不向二进制或外部调用方公开写入，只读访问与受控转换分离；实现与验证范围见
-[源码责任边界核查](development/source-boundary-audit-2026-11-16.md)。
+control plane 入口保留参数、配置、组件装配、进程与界面生命周期。`coordination::session` 根据记录准备 Tree，校验 Policy／Runtime 绑定并协调 Agent 启动或恢复。`coordination::execution` 负责事件循环、命令交付、观察发布和收尾。Tree／BranchRecord 的领域转换通过库接口完成。实现与验证范围见[源码责任边界核查](development/source-boundary-audit-2026-11-16.md)。
 
 `BaseRuntime` 根据登记项创建实例，使用统一的 `Backend` 接口为 Environment 协调所有实际参与的实例。`FilesystemBackend` 管理文件视图、holder 冻结和恢复、挂载轮换与清理。独立程序通过标准接口接收生命周期和工具操作消息。见 [独立程序接入](development/executable-backend.md)。
 

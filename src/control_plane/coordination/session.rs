@@ -2,15 +2,18 @@
 use super::*;
 use super::{execution::runtime_call, recovery::Recovery, task::Task};
 use crate::control_plane::gateway::ui::Request;
-use crate::control_plane::recovery::Resume;
+use crate::control_plane::policy::PolicyEngine;
+use crate::control_plane::recovery::{self, Resume};
 use crate::protocol::contract::{AgentLaunch, ResultStatus};
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// Restore the saved execution or create its root control context before assembly.
-pub fn prepare(
-    run_dir: &Path,
-    resume: bool,
-) -> io::Result<(SpeculativeTree, Option<Resume>)> {
+pub fn prepare(run_dir: &Path, resume: bool) -> io::Result<(SpeculativeTree, Option<Resume>)> {
     if resume {
         let (tree, saved) = crate::control_plane::recovery::load(run_dir)?;
         Ok((tree, Some(saved)))
@@ -19,6 +22,215 @@ pub fn prepare(
             return Err(io::Error::other("Saved execution exists; use --resume"));
         }
         Ok((SpeculativeTree::with_workspace("agent", run_dir)?, None))
+    }
+}
+
+/// Product options after applying the saved launch configuration, if any.
+pub struct AgentSettings {
+    pub model: Option<String>,
+    pub models: Option<PathBuf>,
+    pub thinking: Option<String>,
+}
+
+/// The single Tree and its bindings before admitting the Runtime and Agent.
+pub struct Prepared {
+    pub(super) run_dir: PathBuf,
+    pub(super) tree: SpeculativeTree,
+    pub(super) policy: CompiledPolicy,
+    pub(super) engine: PolicyEngine,
+    pub(super) saved: Option<Resume>,
+    pub(super) resume_model: Option<String>,
+    runtime_config: PathBuf,
+    runtime_digest: String,
+    artifact_digest: String,
+    settings: AgentSettings,
+}
+
+impl Prepared {
+    pub fn new(
+        run_id: String,
+        run_dir: PathBuf,
+        resume: bool,
+        selected_policy: Option<PathBuf>,
+        runtime_override: Option<PathBuf>,
+        settings: AgentSettings,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let artifact_path = run_dir.join("policy.json");
+        if !resume
+            && [
+                "policy.json",
+                "events.jsonl",
+                "session.jsonl",
+                "recovery.json",
+                "agent.sock",
+            ]
+            .iter()
+            .any(|name| run_dir.join(name).symlink_metadata().is_ok())
+        {
+            return Err("Saved Policy exists; refusing to overwrite run data".into());
+        }
+        // Establish task control state before starting its execution infrastructure.
+        let (mut tree, saved) = prepare(&run_dir, resume)?;
+        let recovery_generation = match &saved {
+            Some(recovery::Resume::Paused(path)) => Some(path.as_path()),
+            _ => None,
+        };
+        let reopening = matches!(&saved, Some(Resume::Ended(_)));
+        let (startup_model, resume_model, models, thinking) = recovery::models(
+            &run_dir,
+            recovery_generation,
+            reopening,
+            settings.model,
+            settings.models,
+            settings.thinking,
+        )?;
+        let engine = PolicyEngine::default();
+        let artifact_bytes = if !resume {
+            None
+        } else {
+            match fs::read(&artifact_path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(
+                        format!("Policy artifact {}: {error}", artifact_path.display()).into(),
+                    );
+                }
+            }
+        };
+        let policy = if let Some(bytes) = artifact_bytes.as_ref() {
+            recovery::validate_policy_artifact(&tree, bytes)?;
+            let saved = CompiledPolicy::from_bytes(bytes)?;
+            if let Some(path) = selected_policy.as_ref() {
+                let supplied = engine.compile(path)?;
+                if supplied.digest() != saved.digest() {
+                    return Err("Recovery Policy changed".into());
+                }
+            }
+            saved
+        } else {
+            let path = selected_policy
+                .as_ref()
+                .ok_or("Saved Policy artifact missing; supply --policy <name> explicitly")?;
+            engine.compile(path)?
+        };
+        // Policy references a Runtime configuration, not a saved Runtime. Preserve
+        // the original cwd resolution even when the artifact lives inside the run.
+        let config_path = runtime_override
+            .or_else(|| {
+                if resume {
+                    tree.runtime_binding()?
+                        .get("config_path")?
+                        .as_str()
+                        .map(std::path::PathBuf::from)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| policy.runtime_config_path().map(std::path::PathBuf::from))
+            .ok_or("no Runtime selected: set runtime in the Policy or ASCOUT_RUNTIME_CONFIG")?;
+        if !resume {
+            tree.set_execution_id(run_id)?;
+        }
+        let config_digest = if resume {
+            recovery::validate_bindings(&tree, policy.digest(), &config_path)?
+        } else {
+            recovery::digest(&config_path)?
+        };
+        let artifact_digest = if let Some(bytes) = artifact_bytes {
+            format!("{:x}", Sha256::digest(bytes))
+        } else {
+            policy.save(&artifact_path)?;
+            // Hash the exact deterministic bytes published by save, not a second
+            // read of a file another process could have changed in the meantime.
+            format!("{:x}", Sha256::digest(serde_json::to_vec_pretty(&policy)?))
+        };
+        Ok(Self {
+            run_dir,
+            tree,
+            policy,
+            engine,
+            saved,
+            resume_model,
+            runtime_config: config_path,
+            runtime_digest: config_digest,
+            artifact_digest,
+            settings: AgentSettings {
+                model: startup_model,
+                models,
+                thinking,
+            },
+        })
+    }
+
+    pub fn run_dir(&self) -> &Path {
+        &self.run_dir
+    }
+
+    pub fn runtime_config(&self) -> &Path {
+        &self.runtime_config
+    }
+
+    pub fn agent_settings(&self) -> &AgentSettings {
+        &self.settings
+    }
+
+    pub fn bind_runtime(
+        &mut self,
+        capabilities: &RuntimeCapabilities,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.engine.confirm_backends(&self.policy, capabilities)?;
+        if self.saved.is_some() {
+            recovery::validate_capabilities(&self.tree, capabilities)?;
+        }
+        self.tree.bind_execution(
+            json!({"source": self.policy.source(), "artifact": "policy.json", "sha256": self.artifact_digest}),
+            json!({"config_path": self.runtime_config, "sha256": self.runtime_digest}),
+            serde_json::to_value(capabilities)?,
+        );
+        self.tree.bind_local_policy(self.policy.digest());
+        Ok(())
+    }
+
+    pub fn agent_launch(
+        &self,
+        capabilities: &RuntimeCapabilities,
+        command: String,
+        args: Vec<String>,
+        mut env: BTreeMap<String, String>,
+    ) -> Result<AgentLaunch, Box<dyn std::error::Error>> {
+        env.insert(
+            "ASCOUT_RUNTIME_TOOLS".into(),
+            serde_json::to_string(&capabilities.tools)?,
+        );
+        env.insert(
+            "ASCOUT_TASK_ID".into(),
+            self.tree.execution_id().to_string(),
+        );
+        env.insert(
+            "ASCOUT_SESSION_FILE".into(),
+            self.run_dir.join("session.jsonl").display().to_string(),
+        );
+        match &self.saved {
+            Some(Resume::Ended(reference)) => {
+                env.insert(
+                    "ASCOUT_OPEN_SESSION".into(),
+                    serde_json::to_string(reference)?,
+                );
+            }
+            Some(Resume::Paused(_)) => {
+                env.insert("ASCOUT_LOAD_SESSION".into(), "1".into());
+            }
+            None => {}
+        }
+        Ok(AgentLaunch {
+            command,
+            args,
+            env,
+            cwd: self.tree.workspace(),
+            log: self.run_dir.join("agent.log"),
+            instance_id: Some("agent".into()),
+        })
     }
 }
 
@@ -74,7 +286,12 @@ pub fn start(
         if established.status != ResultStatus::Completed || established.environment_id.is_empty() {
             return Err("Runtime failed to establish the authority Environment".into());
         }
-        if let AgentCommand::StartBranch { environment_id, execution_access, .. } = &mut command {
+        if let AgentCommand::StartBranch {
+            environment_id,
+            execution_access,
+            ..
+        } = &mut command
+        {
             *environment_id = Some(established.environment_id);
             *execution_access = established.execution_access;
         }
@@ -284,7 +501,12 @@ impl Session {
                 tree.queue_prompt(prompt);
                 self.input_sequence += 1;
                 self.input_error = None;
-                self.notice = if paused { "Input queued while paused" } else { "Agent running" }.into();
+                self.notice = if paused {
+                    "Input queued while paused"
+                } else {
+                    "Agent running"
+                }
+                .into();
                 Vec::new()
             }
         };

@@ -3,7 +3,7 @@ use super::{
     ui::{Interface, Request},
     view,
 };
-use ascout::control_plane::agent_control::BranchRole;
+use ascout::control_plane::gateway::agent::protocol::BranchRole;
 use ascout::control_plane::gateway::ui::Connection;
 use ascout::control_plane::ui_projection::UiProjection;
 use std::io::{self, Read, Write};
@@ -389,7 +389,7 @@ fn run_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ascout::control_plane::agent_control::UiPrompt;
+    use ascout::control_plane::gateway::agent::protocol::UiPrompt;
     use ascout::control_plane::ledger::Ledger;
     use ascout::control_plane::observation::ObservationContent;
     use std::sync::{Arc, Mutex};
@@ -493,7 +493,7 @@ mod tests {
                     .unwrap();
                 Ok(())
             });
-            let interface = Interface::new("task".into(), reader.clone());
+            let interface = Interface::new(reader.clone());
             let (tx, rx) = mpsc::channel();
             for byte in keys {
                 tx.send(Ok(*byte)).unwrap();

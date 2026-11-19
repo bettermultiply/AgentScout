@@ -7,8 +7,8 @@
 1. **`BaseRuntime` 依赖已解决（第七轮）**
    `BaseRuntime` 为每个 Environment 记录实际参与的普通 Backend 实例。
 2. **个别文件略超 600 行**
-   - `src/control_plane/agent_control/mod.rs` 约 628 行：主要是类型定义和模块声明，
-     按职责继续拆会把紧密相关的状态类型拆散，暂保留。
+   - 当轮的 Tree 模块约 628 行，主要是类型定义和模块声明。当前状态类型在
+     `src/control_plane/speculative_tree/mod.rs`，Agent 协议已移入 Gateway。
    - `src/runtime/backends/filesystem/tests/ops.rs` 约 561 行，仍在限制内。
 3. **内部类型可见性为 `pub(crate)`**
    `filesystem::state` 的 `Environment`、`MountUnit`、`BackendState` 等被
@@ -29,9 +29,10 @@
 8. **`BackendConnection` 等选择类型**
    原先在 `runtime.rs` 中，现拆到 `runtime/selection.rs`，并通过
    `runtime/mod.rs` 原路径重新导出公开类型；未改变类型定义。
-9. **`coordination` 的 Tree 动作实现**
-   仍在 `impl SpeculativeTree` 上，只是移到 `coordination/actions.rs`；
-   没有拆成 trait 或自由函数，避免改变调用方式。
+9. **Tree 动作实现**
+   `src/control_plane/speculative_tree/actions.rs` 实现 `SpeculativeTree` 的操作登记、
+   反馈处理、过期检查和 `progress`。`SpeculationCoordinator` 使用同一组操作与反馈类型，
+   负责调用 Policy 和 Runtime。
 10. **`EnvironmentNetwork` / Firecracker 辅助函数**
     仍按原函数边界移动，没有改变命令参数、常量或网络语义。
 

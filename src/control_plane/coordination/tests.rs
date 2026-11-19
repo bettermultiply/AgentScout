@@ -2,7 +2,8 @@
 
 use super::*;
 
-use crate::control_plane::agent_control::{BranchRole, CommandOperation, CommandStatus};
+use crate::control_plane::gateway::agent::protocol::{BranchRole, CommandOperation, CommandStatus};
+use crate::control_plane::speculative_tree::{AuthorityState, ChanceStage, OperationKind, OperationStatus};
 use crate::control_plane::gateway::runtime::ControlServer;
 use crate::control_plane::policy::CompiledPolicy;
 use crate::protocol::contract::{
@@ -15,10 +16,10 @@ use std::net::TcpStream;
 fn task() -> (SpeculativeTree, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
     let mut tree = SpeculativeTree::with_workspace("agent", root.path()).unwrap();
-    tree.execution_id = String::new();
+    tree.set_execution_id(String::new()).unwrap();
     tree.bind_local_policy("test-policy");
     tree.create_authority("authority", "").unwrap();
-    tree.branches.get_mut("authority").unwrap().environment_id = Some("runtime-authority".into());
+    tree.bind_environment("authority", "runtime-authority".into()).unwrap();
     tree.handle_message(AgentMessage::BranchStarted {
         branch_id: "authority".into(),
     })
@@ -31,7 +32,7 @@ fn waiting() -> AgentMessage {
         task_id: String::new(),
         policy_digest: "test-policy".into(),
         parent_action_id: None,
-        action_kind: crate::control_plane::agent_control::ActionKind::ToolExecution,
+        action_kind: crate::control_plane::gateway::agent::protocol::ActionKind::ToolExecution,
         branch_id: "authority".into(),
         action_id: "op".into(),
         name: "tool".into(),
@@ -43,7 +44,7 @@ fn waiting() -> AgentMessage {
 
 #[test]
 fn held_authority_prediction_failure_or_empty_releases_tool_and_model_once() {
-    use crate::control_plane::agent_control::ActionKind;
+    use crate::control_plane::gateway::agent::protocol::ActionKind;
     for kind in [ActionKind::ToolExecution, ActionKind::ModelInference] {
         for failure in [false, true] {
             let (mut tree, _root) = task();
@@ -79,7 +80,7 @@ fn held_authority_prediction_failure_or_empty_releases_tool_and_model_once() {
                     branch_id: "authority".into(),
                     action_id: "op".into(),
                     action_kind: kind,
-                    status: crate::control_plane::agent_control::ActionStatus::Succeeded,
+                    status: crate::control_plane::gateway::agent::protocol::ActionStatus::Succeeded,
                     result: json!({"tool_calls":[]}),
                     evidence: None,
                     timestamp_ms: 1,
@@ -100,7 +101,7 @@ fn held_authority_prediction_failure_or_empty_releases_tool_and_model_once() {
 
 #[test]
 fn held_authority_candidate_can_be_validated_without_parent_result() {
-    use crate::control_plane::agent_control::{ActionKind, ActionStatus};
+    use crate::control_plane::gateway::agent::protocol::{ActionKind, ActionStatus};
     for kind in [ActionKind::ToolExecution, ActionKind::ModelInference] {
         let (mut tree, _root) = task();
         let mut message = waiting();
@@ -168,7 +169,7 @@ fn held_authority_candidate_can_be_validated_without_parent_result() {
 
 #[test]
 fn held_authority_four_launch_paths_promote_or_fallback_once() {
-    use crate::control_plane::agent_control::{ActionKind, ActionStatus};
+    use crate::control_plane::gateway::agent::protocol::{ActionKind, ActionStatus};
     for kind in [ActionKind::ToolExecution, ActionKind::ModelInference] {
         for eager in [false, true] {
             for accepted in [false, true] {
@@ -312,13 +313,14 @@ fn consumed_work_keeps_first_fingerprint_and_reports_only_conflicts() {
     tree.schedule(ControlOperation::Select(vec![]), &mut actions);
     let id = actions.operations[0].0;
     tree.complete_work(id, Ok(ControlResult::Selected(vec![]))).unwrap();
-    let first = tree.completed_work[&id];
+    let is_conflict = |r: Value| r["reason"] == "conflicting complete_work feedback";
     tree.complete_work(id, Ok(ControlResult::Selected(vec![]))).unwrap();
-    assert!(!tree.pending_records.iter().any(|r| r["reason"] == "conflicting complete_work feedback"));
+    assert!(!tree.drain_records().into_iter().any(is_conflict));
     tree.complete_work(id, Err("late failure".into())).unwrap();
-    assert_eq!(tree.completed_work[&id], first);
-    assert!(tree.pending_records.iter().any(|r| r["reason"] == "conflicting complete_work feedback"));
-    assert!(!tree.pending_work.contains_key(&id));
+    assert!(tree.drain_records().into_iter().any(is_conflict));
+    tree.complete_work(id, Ok(ControlResult::Selected(vec![]))).unwrap();
+    assert!(!tree.drain_records().into_iter().any(is_conflict));
+    assert!(!tree.pending_work());
 }
 
 #[test]
@@ -653,7 +655,7 @@ fn repeated_interrupt_and_idle_continue_do_not_start_another_turn() {
 
 #[test]
 fn promoting_branch_keeps_its_inflight_model_waiting_point_live() {
-    use crate::control_plane::agent_control::{ActionKind, ActionStatus};
+    use crate::control_plane::gateway::agent::protocol::{ActionKind, ActionStatus};
     let (mut tree, _root) = task();
     tree.speculative_admission(waiting()).unwrap();
     let AgentCommand::StartCandidate { branch_id, .. } =
@@ -738,7 +740,7 @@ fn next_model_admission_does_not_expire_tool_validation() {
     let mut model = waiting();
     if let AgentMessage::SpeculativeAdmissionRequest { action_id, action_kind, name, .. } = &mut model {
         *action_id = "next-model".into();
-        *action_kind = crate::control_plane::agent_control::ActionKind::ModelInference;
+        *action_kind = crate::control_plane::gateway::agent::protocol::ActionKind::ModelInference;
         *name = "model".into();
     }
     tree.speculative_admission(model).unwrap();
@@ -776,7 +778,7 @@ fn validation_cannot_promote_after_parent_enters_a_later_operation() {
         task_id: String::new(),
         policy_digest: "test-policy".into(),
         parent_action_id: None,
-        action_kind: crate::control_plane::agent_control::ActionKind::ToolExecution,
+        action_kind: crate::control_plane::gateway::agent::protocol::ActionKind::ToolExecution,
         branch_id: parent,
         action_id: "later".into(),
         name: tool_name,

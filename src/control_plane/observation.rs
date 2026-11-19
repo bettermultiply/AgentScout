@@ -1,8 +1,6 @@
 //! Public observation facts, independent of transport and file storage.
-use super::agent_control::{
-    ActionKind, ActionStatus, AuthorityState, BranchRole, BranchStatus, ChanceStage,
-    RuntimeExecutionState,
-};
+use super::gateway::agent::protocol::{ActionKind, ActionStatus, BranchRole};
+use super::speculative_tree::{AuthorityState, BranchStatus, ChanceStage, RuntimeExecutionState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -23,7 +21,7 @@ pub enum ObservationContent {
         branch_id: String,
         prompt_id: String,
         #[serde(flatten)]
-        prompt: super::agent_control::UiPrompt,
+        prompt: super::gateway::agent::protocol::UiPrompt,
     },
     UiPromptResolved {
         branch_id: String,

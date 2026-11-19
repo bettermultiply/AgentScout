@@ -1,9 +1,87 @@
 //! SpeculativeTree 的控制操作与动作投影。
 
 use super::*;
+use crate::protocol::contract::RuntimeCapabilities;
+use serde_json::json;
+
+/// 一个 Chance 的等待点：权威 Branch 在哪个 operation 上等待哪个工具结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPending {
+    pub chance_id: String,
+    pub branch_id: String,
+    pub operation_id: String,
+    pub tool_name: String,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ControlOperation {
+    /// 对给定的 Pending Chance 求值 `select`。
+    Select(Vec<String>),
+    Predict(ToolPending),
+    Launch(ToolPending),
+    Establish(AgentCommand),
+    Validate(String),
+    Promote(String, Value),
+    Terminate(String),
+    Cleanup(String),
+    Rebalance,
+}
+
+impl ControlOperation {
+    pub fn references(&self, branch: &str) -> bool {
+        self.branch() == Some(branch)
+            || matches!(self, Self::Establish(AgentCommand::StartCandidate {parent_branch_id, ..}) if parent_branch_id == branch)
+    }
+
+    pub fn branch(&self) -> Option<&str> {
+        match self {
+            Self::Select(_) | Self::Rebalance => None,
+            Self::Predict(tool) | Self::Launch(tool) => Some(&tool.branch_id),
+            Self::Establish(command) => {
+                let AgentCommand::StartCandidate { branch_id, .. } = command else {
+                    unreachable!()
+                };
+                Some(branch_id)
+            }
+            Self::Validate(id) | Self::Promote(id, _) | Self::Terminate(id) | Self::Cleanup(id) => {
+                Some(id)
+            }
+        }
+    }
+
+    pub fn chance_id(&self) -> Option<&str> {
+        match self {
+            Self::Predict(tool) | Self::Launch(tool) => Some(&tool.chance_id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub enum ControlResult {
+    Selected(Vec<String>),
+    Predictions(Vec<Value>),
+    BranchModel(Value),
+    Launch(bool),
+    Outcome(Value, Value),
+    Disposition(bool, String, Option<String>, Option<u64>),
+    /// `(branch_id, action)` pairs returned by `rebalance`.
+    Rebalance(Vec<(String, String)>),
+    Completed,
+    Environment(String, Option<crate::protocol::contract::ExecutionAccess>),
+    EnvironmentFailed(String, String),
+}
+
+#[derive(Default)]
+pub struct ControlActions {
+    pub commands: Vec<AgentCommand>,
+    pub operations: Vec<(u64, ControlOperation)>,
+    pub records: Vec<Value>,
+}
 
 impl SpeculativeTree {
-    pub(super) fn schedule(&mut self, operation: ControlOperation, actions: &mut ControlActions) {
+    pub(in crate::control_plane) fn schedule(&mut self, operation: ControlOperation, actions: &mut ControlActions) {
         let id = self.next_work;
         self.next_work += 1;
         if matches!(
@@ -540,7 +618,7 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    pub(crate) fn complete_tool_outcome(
+    pub(super) fn complete_tool_outcome(
         &mut self,
         tool: ToolPending,
         result: Result<ControlResult, String>,
@@ -775,11 +853,7 @@ impl SpeculativeTree {
     /// Drive each Chance forward: `select` over the Pending ones, `launch`
     /// for those waiting to fetch the authority value, and the authority
     /// fetch itself once its candidate environments exist.
-    fn progress_chances(
-        &mut self,
-        _capabilities: &RuntimeCapabilities,
-        actions: &mut ControlActions,
-    ) -> io::Result<()> {
+    fn progress_chances(&mut self, actions: &mut ControlActions) -> io::Result<()> {
         let selectable = self.selectable_chances();
         if !selectable.is_empty()
             && !self
@@ -793,7 +867,7 @@ impl SpeculativeTree {
         for id in ids {
             let chance = self.chance(&id)?;
             if chance.speculation_kind
-                == Some(crate::control_plane::agent_control::ActionKind::ModelInference)
+                == Some(ActionKind::ModelInference)
                 && chance.authority == AuthorityState::Arrived
                 && (chance.branch_ids.is_empty() || chance.stage.is_terminal())
                 && self
@@ -858,7 +932,7 @@ impl SpeculativeTree {
         self.check_command_deadlines()?;
         self.sweep_chances()?;
         if !self.stopping {
-            self.progress_chances(capabilities, &mut actions)?;
+            self.progress_chances(&mut actions)?;
             for candidate in self.pending_candidates() {
                 if self.candidate_due(&candidate)
                     && !self

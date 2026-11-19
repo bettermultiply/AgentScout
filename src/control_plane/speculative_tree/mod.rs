@@ -1,12 +1,13 @@
-//! AScout control plane 管理一个 Agent 的最小状态与 Agent 接入协议。
+//! AScout control plane 管理一个 Agent 的投机状态及其合法转换。
 //!
 //! 这里的状态属于 control plane。Pi integration 只能报告事实并执行返回的命令，不能以
 //! 自己的对象保存或裁决 Speculative Tree。
 
+mod actions;
 mod candidates;
 mod chances;
 mod commands;
-mod protocol;
+mod messages;
 mod settlement;
 mod tree;
 
@@ -18,22 +19,12 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// 一个 Agent 内 Branch 的角色。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BranchRole {
-    Authority,
-    Candidate,
-}
+use crate::control_plane::gateway::agent::protocol::{
+    ActionKind, ActionStatus, AgentCommand, AgentMessage, BlockedReason, BranchRole,
+    CommandOperation, CommandStatus, UiPrompt,
+};
 
-/// Branch 暂时不能前进的原因，同一时刻只记最近挡住它的 Decision。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BlockedReason {
-    ExtentReached,
-    Rebalanced,
-    EffectGate,
-}
+pub use actions::{ControlActions, ControlOperation, ControlResult, ToolPending};
 
 /// control plane 已知的 Branch 生命周期与运行状态。`Finished` 表示已经跑完、等待裁决。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,50 +114,6 @@ pub enum AuthorityState {
     Fetching,
     Arrived,
     Unavailable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandOperation {
-    Abort,
-    Promote,
-    ResolvePending,
-    Discard,
-    Cleanup,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CommandStatus {
-    Accepted,
-    Started,
-    Applied,
-    Rejected,
-    Failed,
-    Timeout,
-    Cancelled,
-}
-
-/// Agent action 类型不包含 Authority/Candidate；角色始终由 Tree 决定。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionKind {
-    ModelInference,
-    ToolExecution,
-    StartSubagent,
-    SendMessage,
-    Wait,
-    Finish,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionStatus {
-    Succeeded,
-    Failed,
-    Cancelled,
-    TimedOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -327,29 +274,6 @@ pub struct ChanceRecord {
     pub launch_epoch: Option<u64>,
 }
 
-/// Capabilities declared by an Agent Adapter during the wire handshake.
-/// These are descriptive facts; the control plane does not currently use them
-/// to evaluate local Decisions or admit ordinary actions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdapterCapabilities {
-    #[serde(rename = "preExecutionInterception")]
-    pub pre_execution_interception: bool,
-    #[serde(rename = "localDecisionEvaluation")]
-    pub local_decision_evaluation: bool,
-    #[serde(rename = "modelInferencePreExecutionInterception")]
-    pub model_inference_pre_execution_interception: bool,
-    #[serde(rename = "subagentPreExecutionInterception")]
-    pub subagent_pre_execution_interception: bool,
-    #[serde(rename = "checkpointContinuation")]
-    pub checkpoint_continuation: bool,
-    #[serde(rename = "independentCandidateSession")]
-    pub independent_candidate_session: bool,
-    #[serde(rename = "cancelCompletion")]
-    pub cancel_completion: bool,
-    #[serde(rename = "toolResultInjection")]
-    pub tool_result_injection: bool,
-}
-
 /// control plane 希望发生的操作，不代表外部操作已经完成。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingOperation {
@@ -400,11 +324,11 @@ pub struct BranchExecutionState {
 /// 一个 Agent 的完整投机树视图。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeculativeTree {
-    pub(crate) agent_id: String,
+    agent_id: String,
     #[serde(default)]
-    pub(crate) execution_id: String,
+    execution_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) run_id: Option<String>,
+    run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) history_root_branch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -419,14 +343,14 @@ pub struct SpeculativeTree {
     #[serde(default)]
     pub(crate) action_facts: BTreeMap<String, BTreeMap<String, ActionFinishedFact>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) policy_binding: Option<Value>,
+    policy_binding: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) runtime_binding: Option<Value>,
+    runtime_binding: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) capability_view: Option<Value>,
+    capability_view: Option<Value>,
     /// Digest of the local Policy artifact delivered to the Agent Adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) local_policy_digest: Option<String>,
+    local_policy_digest: Option<String>,
     #[serde(default)]
     pending_commands: BTreeMap<String, PendingCommand>,
     #[serde(default)]
@@ -434,15 +358,15 @@ pub struct SpeculativeTree {
     #[serde(default)]
     pub(crate) workspace_root: PathBuf,
     #[serde(default)]
-    pub(crate) completed_work: BTreeMap<u64, [u8; 32]>,
-    pub(crate) pending_work: BTreeMap<u64, crate::control_plane::coordination::ControlOperation>,
+    completed_work: BTreeMap<u64, [u8; 32]>,
+    pending_work: BTreeMap<u64, ControlOperation>,
     #[serde(skip)]
-    pub(crate) policy_dependencies: BTreeMap<u64, Value>,
-    pub(crate) capability_revision: u64,
-    pub(crate) policy_chance_revisions: BTreeMap<String, (u64, u64)>,
-    pub(crate) policy_record_revisions: BTreeMap<String, u64>,
-    pub(crate) policy_revisions: BTreeMap<String, u64>,
-    pub(crate) policy_work_context: BTreeMap<u64, BTreeMap<String, Value>>,
+    policy_dependencies: BTreeMap<u64, Value>,
+    capability_revision: u64,
+    policy_chance_revisions: BTreeMap<String, (u64, u64)>,
+    policy_record_revisions: BTreeMap<String, u64>,
+    policy_revisions: BTreeMap<String, u64>,
+    policy_work_context: BTreeMap<u64, BTreeMap<String, Value>>,
     /// 已准入投机的内部事实，按 Branch 保存；不进入 Branch 归档。
     #[serde(default)]
     pub(crate) speculations: BTreeMap<String, SpeculationRecord>,
@@ -454,23 +378,23 @@ pub struct SpeculativeTree {
     #[serde(default)]
     pub(crate) tool_finished_at_ms: BTreeMap<String, BTreeMap<String, u64>>,
     #[serde(default)]
-    pub(crate) next_work: u64,
+    next_work: u64,
     #[serde(default = "first_id")]
     next_chance: u64,
     /// 每次 Branch 或 Chance 状态变化加一；`launch`、`rebalance` 只在版本
     /// 变化后重新求值，避免空转。
     #[serde(default)]
-    pub(crate) epoch: u64,
+    epoch: u64,
     #[serde(default)]
-    pub(crate) rebalance_epoch: Option<u64>,
+    rebalance_epoch: Option<u64>,
     #[serde(default)]
-    pub(crate) stopping: bool,
+    stopping: bool,
     #[serde(default)]
-    pub(crate) recovering: bool,
+    recovering: bool,
     #[serde(default)]
-    pub(crate) task_finishing: bool,
+    task_finishing: bool,
     #[serde(default)]
-    pub(crate) recovery_paused_at: Option<u64>,
+    recovery_paused_at: Option<u64>,
     #[serde(default)]
     shutdown_deadline: Option<u64>,
     #[serde(default = "first_id")]
@@ -488,12 +412,12 @@ pub struct SpeculativeTree {
     #[serde(skip)]
     command_queries: BTreeMap<String, String>,
     #[serde(skip)]
-    pub(crate) pending_records: Vec<Value>,
+    pending_records: Vec<Value>,
     /// The control plane's logical transcript, retained independently of
     /// native Agent session files.
     #[serde(default)]
     pub(crate) transcripts: BTreeMap<String, Vec<Value>>,
-    /// Runtime launch template used to derive one Agent process per branch.
+    /// Runtime launch template for the run host and branch environment execution.
     #[serde(default)]
     pub(crate) agent_launch: Option<crate::protocol::contract::AgentLaunch>,
 }
@@ -597,353 +521,6 @@ impl SpeculativeTree {
     }
 }
 
-/// control plane 向 Pi integration 发送的命令。
-fn deserialize_notification<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error> {
-    let text = String::deserialize(deserializer)?;
-    if text.trim().is_empty() {
-        return Err(serde::de::Error::custom("notification must be nonblank"));
-    }
-    Ok(Some(text))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
-pub enum AgentCommand {
-    UiPromptAnswer {
-        branch_id: String,
-        prompt_id: String,
-        answer: Value,
-        cancelled: bool,
-        reason: Option<String>,
-    },
-    GetCommands {
-        branch_id: String,
-        request_id: String,
-    },
-    Model {
-        branch_id: String,
-        model: String,
-    },
-    SuspendRecovery {
-        branch_id: String,
-    },
-    CancelSave {
-        branch_id: String,
-    },
-    Continue {
-        branch_id: String,
-    },
-    Save {
-        branch_id: String,
-        path: PathBuf,
-    },
-    Load {
-        branch_id: String,
-        path: PathBuf,
-        environments: BTreeMap<String, String>,
-        #[serde(default)]
-        execution_accesses: BTreeMap<String, crate::protocol::contract::ExecutionAccess>,
-    },
-    /// Delivers the compiled local Decision artifact. The adapter may reject
-    /// it when it has no real Hook/evaluation seam.
-    LocalPolicy {
-        branch_id: String,
-        policy_digest: String,
-        has_predictor: bool,
-        decisions: Value,
-    },
-    Prompt {
-        branch_id: String,
-        prompt: String,
-    },
-    Abort {
-        branch_id: String,
-        command_id: String,
-        generation: u64,
-    },
-    /// `rebalance` 的 `pause`：Agent Adapter 在下一个边界停住该 Branch，
-    /// 并以 `branch_suspended` 报告。
-    Pause {
-        branch_id: String,
-    },
-    /// `rebalance` 的 `resume`：放行被停住的 Branch，并以 `branch_resumed` 报告。
-    Resume {
-        branch_id: String,
-    },
-    StartCandidate {
-        branch_id: String,
-        environment_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        execution_access: Option<crate::protocol::contract::ExecutionAccess>,
-        parent_branch_id: String,
-        operation_id: String,
-        tool_name: String,
-        workspace: PathBuf,
-        prediction: Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        checkpoint: Option<Value>,
-        #[serde(default)]
-        command_id: String,
-        #[serde(default)]
-        generation: u64,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        history: Vec<Value>,
-    },
-    ResolvePending {
-        branch_id: String,
-        operation_id: String,
-        accepted: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        outcome: Option<Value>,
-        #[serde(default)]
-        command_id: String,
-        #[serde(default)]
-        generation: u64,
-    },
-    StartBranch {
-        branch_id: String,
-        environment_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        execution_access: Option<crate::protocol::contract::ExecutionAccess>,
-        role: BranchRole,
-        workspace: PathBuf,
-        prompt: String,
-    },
-    Promote {
-        branch_id: String,
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "deserialize_notification"
-        )]
-        notification: Option<String>,
-        #[serde(default)]
-        command_id: String,
-        #[serde(default)]
-        generation: u64,
-    },
-    Discard {
-        branch_id: String,
-        #[serde(default)]
-        command_id: String,
-        #[serde(default)]
-        generation: u64,
-    },
-    Cleanup {
-        branch_id: String,
-        workspace: PathBuf,
-        #[serde(default)]
-        command_id: String,
-        #[serde(default)]
-        generation: u64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UiPrompt {
-    pub kind: String,
-    pub title: String,
-    pub message_text: Option<String>,
-    pub options: Vec<String>,
-    pub placeholder: Option<String>,
-    pub prefill: Option<String>,
-}
-
-/// Agent Adapter 向 control plane 报告的事实；不包含 Runtime 或 Tree 完成事实。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "message", rename_all = "snake_case")]
-pub enum AgentMessage {
-    UiPromptRequested {
-        branch_id: String,
-        prompt_id: String,
-        #[serde(flatten)]
-        prompt: UiPrompt,
-    },
-    UiPromptCancelled {
-        branch_id: String,
-        prompt_id: String,
-    },
-    UiNotification {
-        branch_id: String,
-        text: String,
-        level: String,
-    },
-    CommandsListed {
-        branch_id: String,
-        request_id: String,
-        commands: Value,
-    },
-    TurnFailed {
-        branch_id: String,
-        reason: String,
-    },
-    ModelChanged {
-        branch_id: String,
-        model: String,
-        error: Option<String>,
-    },
-    RecoverySuspended,
-    RecoverySaved {
-        path: PathBuf,
-        error: Option<String>,
-    },
-    RecoveryLoaded {
-        error: Option<String>,
-    },
-    Output {
-        branch_id: String,
-        #[serde(default)]
-        action_id: Option<String>,
-        text: String,
-    },
-    TurnCompleted {
-        branch_id: String,
-    },
-    ActionStarted {
-        task_id: String,
-        branch_id: String,
-        action_id: String,
-        action_kind: ActionKind,
-        #[serde(default)]
-        parent_action_id: Option<String>,
-        name: String,
-        arguments: Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        checkpoint: Option<Value>,
-        /// Instrumentation 测量的事件时刻（Unix 毫秒），不是 control plane 收到消息的时刻。
-        timestamp_ms: u64,
-    },
-    /// Explicit request from the adapter's local decision path. An ordinary
-    /// ActionStarted is only an execution fact and never admits speculation.
-    SpeculativeAdmissionRequest {
-        task_id: String,
-        policy_digest: String,
-        branch_id: String,
-        action_id: String,
-        action_kind: ActionKind,
-        #[serde(default)]
-        parent_action_id: Option<String>,
-        name: String,
-        arguments: Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        checkpoint: Option<Value>,
-        /// 投机开始的 Instrumentation 测量时刻（Unix 毫秒）。
-        timestamp_ms: u64,
-    },
-    Transcript {
-        branch_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session_entry_id: Option<String>,
-        entry: Value,
-    },
-    BranchReleased {
-        branch_id: String,
-    },
-    AgentSessionReleased {
-        branch_id: String,
-    },
-    AgentConnected {
-        agent_id: String,
-        capabilities: AdapterCapabilities,
-    },
-    AdapterCapabilityGap {
-        branch_id: String,
-        capability: String,
-        status: String,
-        reason: String,
-    },
-    BranchStarted {
-        branch_id: String,
-    },
-    ActionFinished {
-        task_id: String,
-        branch_id: String,
-        action_id: String,
-        action_kind: ActionKind,
-        status: ActionStatus,
-        result: Value,
-        #[serde(default)]
-        evidence: Option<Value>,
-        /// Instrumentation 观察到的结果到达时刻（Unix 毫秒）。
-        timestamp_ms: u64,
-    },
-    Usage {
-        branch_id: String,
-        /// 这次调用对应的模型 action。Instrumentation 确实无法配对时为 None：仍然上报
-        /// 用量，但不伪造 action 身份。
-        #[serde(default)]
-        action_id: Option<String>,
-        model: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        thinking_level: Option<String>,
-        usage: Value,
-        /// Instrumentation 测量的模型请求开始与结束时刻（Unix 毫秒）。
-        started_at_ms: u64,
-        finished_at_ms: u64,
-    },
-    BranchFailed {
-        branch_id: String,
-        reason: String,
-    },
-    AgentReady {
-        agent_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session: Option<serde_json::Value>,
-    },
-    AgentDisconnected {
-        agent_id: String,
-    },
-    AgentFailed {
-        agent_id: String,
-        reason: String,
-    },
-    SessionHistory {
-        branch_id: String,
-        entries: Vec<Value>,
-    },
-    AgentReleased {
-        agent_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session: Option<serde_json::Value>,
-    },
-    BranchCreated {
-        branch_id: String,
-    },
-    BranchReady {
-        branch_id: String,
-    },
-    BranchSuspended {
-        branch_id: String,
-        reason: BlockedReason,
-    },
-    BranchResumed {
-        branch_id: String,
-    },
-    CommandResult {
-        command_id: String,
-        branch_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        operation_id: Option<String>,
-        operation: CommandOperation,
-        status: CommandStatus,
-        generation: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-    },
-}
-
-/// Agent socket 上的双向消息。长度前缀由传输层负责，消息本身只描述方向。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
-pub enum AgentWireMessage {
-    Command(AgentCommand),
-    Delivery { id: u64, command: AgentCommand },
-    Received { id: u64 },
-    Message(AgentMessage),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingCommand {
     branch_id: String,
@@ -976,8 +553,6 @@ fn now_ms() -> u64 {
 fn first_id() -> u64 {
     1
 }
-
-pub use crate::control_plane::coordination::SpeculationCoordinator;
 
 #[cfg(test)]
 mod tests;

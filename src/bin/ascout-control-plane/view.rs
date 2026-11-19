@@ -1,6 +1,7 @@
 //! AScout control facts only. Agent messages are rendered by the product in its PTY.
 use super::ui::{ObservedBranch, ObservedTree};
-use ascout::control_plane::agent_control::{BlockedReason, BranchRole, BranchStatus};
+use ascout::control_plane::gateway::agent::protocol::{BlockedReason, BranchRole};
+use ascout::control_plane::speculative_tree::BranchStatus;
 use serde_json::Value;
 
 pub fn role_label(role: BranchRole) -> &'static str {
@@ -89,7 +90,8 @@ pub fn structured(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ascout::control_plane::agent_control::{BranchRole, BranchStatus};
+    use ascout::control_plane::gateway::agent::protocol::BranchRole;
+    use ascout::control_plane::speculative_tree::BranchStatus;
     #[test]
     fn invalid_selection_is_explicit_and_valid_selection_is_read_only() {
         let branch = ObservedBranch {

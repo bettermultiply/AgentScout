@@ -97,7 +97,7 @@ mod tests;
 
 use serde_json::Value;
 
-use crate::control_plane::agent_control::BranchRecord;
+use crate::control_plane::speculative_tree::BranchRecord;
 
 /// 一次运行的事件记录。文件由调用方给出，Ledger 只负责追加。
 #[derive(Clone)]

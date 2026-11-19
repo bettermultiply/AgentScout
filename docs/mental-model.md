@@ -68,7 +68,9 @@ UI         <-> Gateway <-> UI Projection <-> Ledger
 Runtime    <-> Gateway（经 runtime proxy 契约）
 ```
 
-这里的调用路径展示逻辑责任，不等同于进程或 crate。Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止；它负责通信如何接入、消息交给谁以及如何送达，不拥有 Tree、Policy 或投机编排。Instrumentation、UI 和 Runtime 通过统一 Gateway 通信边界接入，但三侧的消息处理责任仍由各自控制逻辑决定。Gateway 与 Runtime 采用网络通信；UI 同样不独立部署，由 control plane 启动和停止。这不规定必须同进程或自动打开浏览器。Runtime 是 AScout 支持的完整执行与效果承载系统；runtime proxy 只是它与 control plane 之间的接入边界。runtime proxy 只负责接入配置，环境及其网络配置归 Runtime，实际分配结果属于运行状态。各侧责任见 [架构](architecture.md)。
+这里的调用路径展示逻辑责任，不等同于进程或 crate。Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止；它负责通信如何接入、消息交给谁以及如何送达，不拥有 Tree、Policy 或投机编排。Gateway 的 Agent 协议定义消息、命令和线封装；影响投机状态的消息由 Tree 检查并应用。Instrumentation、UI 和 Runtime 通过统一 Gateway 通信边界接入，但三侧的消息处理责任仍由各自控制逻辑决定。Gateway 与 Runtime 采用网络通信；UI 同样不独立部署，由 control plane 启动和停止。这不规定必须同进程或自动打开浏览器。Runtime 是 AScout 支持的完整执行与效果承载系统；runtime proxy 只是它与 control plane 之间的接入边界。runtime proxy 只负责接入配置，环境及其网络配置归 Runtime，实际分配结果属于运行状态。各侧责任见 [架构](architecture.md)。
+
+当前入口以前台程序运行，一次启动管理一个 run。是否采用后台常驻另行决定。单次启动的范围与协调逻辑能服务多棵独立 Tree 的设计相互独立。
 
 Runtime 通过接入边界接收控制请求，结果和事件沿相反方向返回：
 

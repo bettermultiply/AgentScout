@@ -1,6 +1,7 @@
 //! SpeculativeTree 的基础访问与内部索引。
 
 use super::*;
+use std::path::Path;
 
 impl BranchRecord {
     pub fn branch_id(&self) -> &str {
@@ -48,6 +49,21 @@ impl SpeculativeTree {
     pub fn run_id(&self) -> &str {
         self.run_id.as_deref().unwrap_or(&self.execution_id)
     }
+    pub(crate) fn validate_recovery_identity(&self, run_id: Option<&str>) -> io::Result<()> {
+        if Some(self.run_id()) != run_id
+            || self.run_id.as_ref().is_some_and(|id| {
+                self.execution_id
+                    .strip_prefix(id)
+                    .and_then(|suffix| suffix.strip_prefix(':'))
+                    .and_then(|sequence| sequence.parse::<usize>().ok())
+                    .is_none()
+            })
+        {
+            return Err(io::Error::other("Recovery task identity mismatch"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn reopened_execution_scope(&self) -> Option<&str> {
         self.run_id.as_ref()?;
         self.execution_id.rsplit_once(':').map(|(_, scope)| scope)
@@ -79,7 +95,7 @@ impl SpeculativeTree {
     pub fn local_policy_digest(&self) -> Option<&str> {
         self.local_policy_digest.as_deref()
     }
-    pub fn workspace_root(&self) -> &std::path::Path {
+    pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }
 
@@ -260,6 +276,24 @@ impl SpeculativeTree {
         let mut tree = Self::new(agent_id.into());
         tree.workspace_root = root.into();
         fs::create_dir_all(tree.workspace())?;
+        Ok(tree)
+    }
+
+    /// Start a fresh task with only the saved bindings of the ended run.
+    pub(crate) fn reopen_ended(
+        run_dir: &Path,
+        run_id: &str,
+        sequence: usize,
+        bindings: &Value,
+    ) -> io::Result<Self> {
+        let mut tree = Self::with_workspace("agent", run_dir)?;
+        tree.run_id = Some(run_id.into());
+        tree.set_execution_id(format!("{run_id}:{sequence}"))?;
+        // Restore the saved values exactly, including omitted bindings and JSON nulls.
+        tree.policy_binding = bindings.get("policy_binding").cloned();
+        tree.runtime_binding = bindings.get("runtime_binding").cloned();
+        tree.capability_view = bindings.get("capability_view").cloned();
+        tree.local_policy_digest = bindings["local_policy_digest"].as_str().map(str::to_owned);
         Ok(tree)
     }
 

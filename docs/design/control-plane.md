@@ -10,7 +10,7 @@ control plane 是抽象责任模型中 Mechanism 的实现主体，也是 Specul
 
 每个 session 的 AScoutAgent 拥有自己的一棵 Speculative Tree，Tree 属于 control plane。task 是 session 中 Agent 的一轮工作，Agent 完成本轮工作并开始等待用户输入时完成；多轮 task 共用该控制域。对外这棵树以单一 Agent 的形式呈现给用户，对内我们将这棵树视作整个投机执行生命周期中由多个子树组成的派生嵌套关系。这个单一 Agent 视图和控制域称为 `AScoutAgent`。用户请求经 Gateway 进入相应控制逻辑；control plane 负责建立 Agent 控制上下文，Runtime 负责实际启动对应的 Agent 与接入进程，不要求用户手工启动具体 Agent 产品或接入组件。
 
-常驻 control plane 同时管理多个 run。关闭界面只释放该界面的连接，各 run 在后台保持各自的状态。显式结束指定 run 时，只收尾该 run 的 task 与资源。正常停止整个 control plane 时，该进程先收尾自己管理的全部活动 run，再退出。收尾沿用现有暂停、中断与保存恢复语义，保存仍须显式触发。
+control plane 当前以前台程序运行，每次启动管理一个 run。正常关闭进程时收尾该 run 的 task 并清理受管资源，暂停保存需要显式触发。是否采用常驻部署另行决定。多 run 调度是独立议题，各 Tree 的状态与顺序处理边界按 §2.4 保持。
 
 `ascout-control-plane <pi-root> --resume <run-id>` 按原 run id 打开运行记录，由 Ledger 区分已保存暂停与已结束。暂停恢复原 task 和树，等待显式 `/continue`。已结束时通过原权威 Agent session 引用打开会话，显示原对话，保持空闲直到下一条 prompt 创建新 task。旧 task 的终态和操作历史保留，旧 Branch 与待执行命令不进入新 task。只有显式新建 run 才分配新 run id。当前实现范围见[恢复开发记录](../development/recovery.md)。
 
@@ -38,7 +38,7 @@ control plane 由 Gateway、UI Projection、Policy Engine、Speculation Coordina
 
 Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止。它是 control plane 面向 Instrumentation、UI 与 Runtime 的统一受管通信边界，负责通信如何接入、消息交给谁以及如何送达。统一生命周期不规定必须同进程，也不要求自动打开浏览器。消息对投机执行的变化由相应控制逻辑决定；Runtime 的消息仍遵守 runtime proxy 契约，不因通信统一而绕过 runtime proxy 或 Registry。
 
-Gateway 的通信职责包括：管理连接、会话、握手与断线；进行入口格式、身份、上下文与权限检查；接收请求、执行事实与命令回执并转交相应处理方；交付命令、已编译的本地 Decision、结果及观察事件。Gateway 与 Runtime 采用网络通信；UI 不独立部署，由 control plane 启动和停止，也不因此取得 Tree 或生命周期权威。消息覆盖 Agent、UI 和 Runtime 三侧，各侧既有协议和权限边界继续有效。除通信所需的暂时状态外，Gateway 不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态，也不承担投机编排。control plane 负责启动协调；Runtime 负责实际启动、监视和回收 Agent 与接入进程。runtime proxy 是 Runtime 的接入边界，其部署与配置组织不由 Gateway 的生命周期规定。
+Gateway 的通信职责包括：管理连接、会话、握手与断线；进行入口格式、身份、上下文与权限检查；接收请求、执行事实与命令回执并转交相应处理方；交付命令、已编译的本地 Decision、结果及观察事件。Gateway 与 Runtime 采用网络通信；UI 不独立部署，由 control plane 启动和停止，也不因此取得 Tree 或生命周期权威。Gateway 定义 Agent 消息、命令和线封装，Tree 检查并应用影响自身状态的消息。消息覆盖 Agent、UI 和 Runtime 三侧，各侧既有协议和权限边界继续有效。除通信所需的暂时状态外，Gateway 不持有 Speculative Tree、Branch 生命周期、调度、预算、Policy 或 Runtime 执行状态，也不承担投机编排。control plane 负责启动协调；Runtime 负责实际启动、监视和回收 Agent 与接入进程。runtime proxy 是 Runtime 的接入边界，其部署与配置组织不由 Gateway 的生命周期规定。
 
 ### 2.2 Policy Engine
 
@@ -62,7 +62,7 @@ control plane 围绕 Speculative Tree 组织。建立 session 的 AScoutAgent �
 
 Speculation Coordinator 协调树、Policy 和外部操作，可以服务多棵树。Speculation Coordinator 不拥有 Tree，也不持有某个 session 的第二份投机状态；共享服务、连接与全局配置可以由协调侧持有。Policy 是一组决策函数，按处理点提供事实并求值，返回策略选择；其返回值须经树的当前状态检查后应用。
 
-保存、恢复及任务结束也遵循同一所有权边界：Tree 拥有恢复暂停、继续和任务结束的控制状态及合法转换；协调侧组织 Agent 与 Runtime 的保存、加载、物化和清理顺序，恢复资料由 control plane 校验后发布和读取。Gateway 只交付相关请求和回执；可执行入口负责参数、装配、呈现及事件驱动，不另行维护或直接改写树的领域状态。
+保存、恢复及任务结束也遵循同一所有权边界：Tree 拥有恢复暂停、继续和任务结束的控制状态及合法转换。协调侧处理事件和异步反馈，组织操作调度、命令交付、保存、加载、物化、清理和归档。交付 Prompt 前须先持久化 `task_started`。恢复资料由 control plane 校验后发布和读取。Gateway 只交付请求和回执。可执行入口负责参数、装配、呈现及转交输入和信号。
 
 Speculation Coordinator 通过 Policy Engine 对会改写全局控制状态或必须在多个 Chance、Branch、Proposal 之间协调的 Decision（包括 `predict`）求值并落实，所缺的本地事实由 Instrumentation 计算后提交，并接收 Instrumentation 已经完成的 `admit.opportunity_pass`、`admit.feasibility_pass`、`extent` 和 `effect` 本地 Decision 结果；对已经满足本地范围条件的 Decision 不重复求值。它根据 Policy Decision 和当前全局视图形成操作意图，经 Gateway 按 runtime proxy 契约交给 Runtime，并根据实际结果或事件更新全局视图；需要交付 Agent 的结果经 Gateway 返回。
 
@@ -82,7 +82,7 @@ Instrumentation 将被定为模拟的操作交给 External Effect Coordinator。
 
 UI Projection 位于 Gateway 和 Ledger 之间，按序号读取 Ledger 已保存的记录，缓存界面当前需要的内容，并管理界面连接自身的资源，包括当前连接和每个连接已经读到的位置。缓存可以丢弃，丢失后重新向 Ledger 按序号读取。浏览器 HTTP 和终端界面都通过 UI Projection 读取；Gateway 只转交界面读取请求，不保存这份缓存。
 
-UI Projection 不拥有 Tree，不裁决投机，不把画面状态或报警写回 Ledger。
+UI Projection 不拥有 Tree，不裁决投机，不把画面状态或报警写回 Ledger。协调侧组织运行事实及观察事件的发布，由 Ledger 保存。对话正文与流式文本仅更新独立的界面缓存。协调侧先交付缓存更新，再发布仅含 Branch id 的对话变化通知。
 
 ### 系统运行日志
 

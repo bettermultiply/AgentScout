@@ -1,5 +1,11 @@
 # 测试删除与合并审查
 
+## 已结束 run 的 `--resume` 就绪顺序
+
+Pi 在报告 `branch_started` 前先发完原生会话的继承历史，并修复兼容会话链接。回归测试从公开状态读取当前 Authority。测试在真实 Pi 适配器的发送入口扣住第一条历史消息，确认当前 Authority 的会话仍为空且输入未就绪，随后在首次公开 `ready` 时逐条核对历史。下一次重开在首次 `ready` 后提交 prompt，由本地假模型验证原生上下文和调用次数。
+
+修复前扣住历史时输入已返回 `ready: true`，见 `/tmp/ascout-resume-ended-before.log`。修复后活动恢复、文件系统恢复和结束后重开合计 8/8，见 `/tmp/ascout-resume-ended-after.log`。补强逐条核对后，重开用例单独复跑通过，见 `/tmp/ascout-resume-ended-exact-history.log`。
+
 ## 无 NLE 的 FS 真实模型短任务通过（2026-11-16）
 
 付费前发现并复现的纯 FS 装配缺口已按授权修复：正常 Adapter 新增单 filesystem 装配，BaseRuntime 的物化写者检查覆盖纯 FS holder。初始三种配置拒绝证据保留于 `/tmp/opencode/fs-real-20261116-preflight`，其中零请求与阻塞状态只描述当时预检。没有用 NLE 或宿主工具绕过。

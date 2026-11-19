@@ -1,15 +1,13 @@
 //! Presentation folding and conversations. Ledger owns all observation events.
-use ascout::control_plane::agent_control::{
-    ActionKind, AgentMessage, BranchRole, BranchStatus, RuntimeExecutionState,
-};
+use ascout::control_plane::gateway::agent::protocol::BranchRole;
+use ascout::control_plane::speculative_tree::{BranchStatus, RuntimeExecutionState};
+use ascout::control_plane::coordination::execution::{PresentationUpdate, PresentationUpdates};
 pub use ascout::control_plane::gateway::ui::Request;
-use ascout::control_plane::ledger::Ledger;
 use ascout::control_plane::observation::{ObservationContent, StateEventSet};
 use ascout::control_plane::ui_projection::UiProjection;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::io;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Serialize)]
@@ -50,7 +48,7 @@ pub struct ObservedTree {
 }
 
 pub struct AScoutRunView {
-    pub prompts: BTreeMap<String, (String, ascout::control_plane::agent_control::UiPrompt)>,
+    pub prompts: BTreeMap<String, (String, ascout::control_plane::gateway::agent::protocol::UiPrompt)>,
     pub commands: Vec<Value>,
     pub tree: ObservedTree,
     pub events: Vec<Value>,
@@ -161,23 +159,17 @@ pub fn run_view(set: StateEventSet) -> AScoutRunView {
 #[derive(Clone)]
 pub struct Interface {
     input_status: Arc<Mutex<Value>>,
-    task_id: String,
     conversations: Arc<Mutex<BTreeMap<String, Conversation>>>,
-    /// 每个工具 action 的开始时刻与工具名；工具名来自同一 action 的
-    /// `ActionStarted.name`，没有 ActionStarted 时两者都不存在。
-    action_starts: Arc<Mutex<BTreeMap<(String, String), (u64, String)>>>,
     reader: UiProjection,
 }
 
 impl Interface {
-    pub fn new(task_id: String, reader: UiProjection) -> Self {
+    pub fn new(reader: UiProjection) -> Self {
         Self {
             input_status: Arc::new(Mutex::new(
                 serde_json::json!({"sequence":0,"ready":false,"error":null}),
             )),
-            task_id,
             conversations: Default::default(),
-            action_starts: Default::default(),
             reader,
         }
     }
@@ -198,173 +190,59 @@ impl Interface {
     pub fn input_status(&self) -> Value {
         self.input_status.lock().unwrap().clone()
     }
-    pub fn publish_input_status(&self, sequence: u64, ready: bool, error: &Option<String>) {
-        *self.input_status.lock().unwrap() =
-            serde_json::json!({"sequence":sequence,"ready":ready,"error":error});
-    }
-    pub fn publish(
-        &self,
-        ledger: &mut Ledger,
-        ready: bool,
-        running: bool,
-        notice: &str,
-    ) -> io::Result<()> {
-        let view = run_view(self.reader.state_event_set());
-        if !view.connected || (ready, running, notice) != (view.ready, view.running, view.notice.as_str()) {
-            ledger.append_observation(
-                &self.task_id,
-                ObservationContent::RunStatus {
-                    ready,
-                    running,
-                    notice: notice.into(),
-                    connected: true,
-                },
-            )?;
-        }
-        Ok(())
-    }
-    pub fn disconnect(&self, ledger: &mut Ledger) -> io::Result<()> {
-        ledger.append_observation(
-            &self.task_id,
-            ObservationContent::RunStatus {
-                ready: false,
-                running: false,
-                notice: "Control plane disconnected".into(),
-                connected: false,
-            },
-        )
-    }
-    pub fn fork(&self, ledger: &mut Ledger, parent: &str, child: &str) -> io::Result<()> {
-        let mut conversations = self.conversations.lock().unwrap();
-        let parent = conversations.get(parent).cloned().unwrap_or_default();
-        let mut inherited = parent.inherited;
-        inherited.extend(parent.messages);
-        conversations.insert(
-            child.into(),
-            Conversation {
-                inherited,
-                ..Default::default()
-            },
-        );
-        drop(conversations);
-        ledger.append_observation(
-            &self.task_id,
-            ObservationContent::ConversationUpdated {
-                branch_id: child.into(),
-            },
-        )
-    }
-    pub fn message(&self, ledger: &mut Ledger, message: &AgentMessage) -> io::Result<()> {
-        let content = match message {
-            AgentMessage::Output {
-                branch_id, text, ..
+}
+
+impl PresentationUpdates for Interface {
+    fn update(&self, update: PresentationUpdate<'_>) {
+        match update {
+            PresentationUpdate::InputStatus {
+                sequence,
+                ready,
+                error,
             } => {
+                *self.input_status.lock().unwrap() =
+                    serde_json::json!({"sequence":sequence,"ready":ready,"error":error});
+            }
+            PresentationUpdate::Fork { parent, child } => {
+                let mut conversations = self.conversations.lock().unwrap();
+                let parent = conversations.get(parent).cloned().unwrap_or_default();
+                let mut inherited = parent.inherited;
+                inherited.extend(parent.messages);
+                conversations.insert(
+                    child.into(),
+                    Conversation {
+                        inherited,
+                        ..Default::default()
+                    },
+                );
+            }
+            PresentationUpdate::Output { branch_id, text } => {
                 self.conversations
                     .lock()
                     .unwrap()
-                    .entry(branch_id.clone())
+                    .entry(branch_id.into())
                     .or_default()
                     .streaming
                     .push_str(text);
-                Some(ObservationContent::ConversationUpdated {
-                    branch_id: branch_id.clone(),
-                })
             }
-            AgentMessage::SessionHistory { branch_id, entries } => {
-                self.conversations.lock().unwrap().entry(branch_id.clone()).or_default().inherited.extend(entries.iter().cloned());
-                Some(ObservationContent::ConversationUpdated { branch_id: branch_id.clone() })
+            PresentationUpdate::SessionHistory { branch_id, entries } => {
+                self.conversations
+                    .lock()
+                    .unwrap()
+                    .entry(branch_id.into())
+                    .or_default()
+                    .inherited
+                    .extend(entries.iter().cloned());
             }
-            AgentMessage::Transcript {
-                branch_id, entry, ..
-            } => {
+            PresentationUpdate::Transcript { branch_id, entry } => {
                 let mut conversations = self.conversations.lock().unwrap();
-                let conversation = conversations.entry(branch_id.clone()).or_default();
+                let conversation = conversations.entry(branch_id.into()).or_default();
                 if entry["role"] == "assistant" {
                     conversation.streaming.clear();
                 }
                 conversation.messages.push(entry.clone());
-                drop(conversations);
-                Some(ObservationContent::ConversationUpdated {
-                    branch_id: branch_id.clone(),
-                })
             }
-            AgentMessage::ActionStarted {
-                branch_id,
-                action_id,
-                name,
-                timestamp_ms,
-                ..
-            } => {
-                self.action_starts.lock().unwrap().insert(
-                    (branch_id.clone(), action_id.clone()),
-                    (*timestamp_ms, name.clone()),
-                );
-                None
-            }
-            AgentMessage::Usage {
-                branch_id,
-                action_id,
-                model,
-                usage,
-                started_at_ms,
-                finished_at_ms,
-                ..
-            } => Some(ObservationContent::ModelUsage {
-                branch_id: branch_id.clone(),
-                action_id: action_id.clone(),
-                model: model.clone(),
-                input_tokens: usage["input"].as_u64(),
-                output_tokens: usage["output"].as_u64(),
-                cache_read_tokens: usage["cacheRead"].as_u64(),
-                cache_write_tokens: usage["cacheWrite"].as_u64(),
-                total_tokens: usage["totalTokens"].as_u64(),
-                cost: usage["cost"]["total"].as_f64(),
-                started_at_ms: Some(*started_at_ms),
-                finished_at_ms: Some(*finished_at_ms),
-                duration_ms: finished_at_ms.checked_sub(*started_at_ms),
-            }),
-            AgentMessage::ActionFinished {
-                branch_id,
-                action_id,
-                action_kind: ActionKind::ToolExecution,
-                status,
-                timestamp_ms,
-                ..
-            } => {
-                let start = self
-                    .action_starts
-                    .lock()
-                    .unwrap()
-                    .remove(&(branch_id.clone(), action_id.clone()));
-                let started_at_ms = start.as_ref().map(|(timestamp, _)| *timestamp);
-                let tool_name = start.map(|(_, name)| name);
-                Some(ObservationContent::ToolFinished {
-                    branch_id: branch_id.clone(),
-                    action_id: action_id.clone(),
-                    tool_name,
-                    status: *status,
-                    started_at_ms,
-                    finished_at_ms: Some(*timestamp_ms),
-                    duration_ms: started_at_ms.and_then(|start| timestamp_ms.checked_sub(start)),
-                })
-            }
-            AgentMessage::ActionFinished {
-                branch_id,
-                action_id,
-                ..
-            } => {
-                self.action_starts
-                    .lock()
-                    .unwrap()
-                    .remove(&(branch_id.clone(), action_id.clone()));
-                None
-            }
-            _ => None,
-        };
-        if let Some(content) = content {
-            ledger.append_observation(&self.task_id, content)?;
         }
-        Ok(())
     }
 }
 

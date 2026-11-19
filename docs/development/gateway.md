@@ -4,6 +4,10 @@
 
 目标依据：[control plane §2.1](../design/control-plane.md#21-gateway)。Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止；UI 同样由 control plane 启动和停止。Gateway 与 Runtime 网络通信；Agent 与接入进程的实际启动、监视和回收仍由 Runtime 执行。不规定必须同进程或自动打开浏览器，不实现 Registry，不改变投机语义。
 
+## Agent 协议与 Tree 的源码边界
+
+`src/control_plane/gateway/agent/protocol.rs` 定义 Agent 消息、命令、握手能力和线封装。Gateway 校验握手、收发消息并处理交付回执；`src/control_plane/speculative_tree/messages.rs` 检查并应用影响 Tree 状态的消息。此次迁移未改变线格式、快照格式或交付行为。`cargo check --all-targets`、控制面库测试（60 项）、控制面二进制与 Ledger 投影测试（6 项）、交付与恢复集成测试（9 项）通过；模型响应均来自本地伪模型。
+
 ## 2026-11-16：统一启动和停止
 
 当前实现仍由 `src/bin/ascout-control-plane.rs` 装配三侧通信，不增加统一总对象或重写协议：
@@ -29,7 +33,7 @@
 | HTTP/SSE／Runtime 手构造通信 | `gateway-lifecycle-probe.log`：活 SSE、空闲 HTTP 下显式 stop、重复 stop、Drop 均退出约 10ms，UI 端口可立即重新 bind；Runtime 显式 shutdown、重复 shutdown、Drop 均 join 返回且对端收到 EOF。源码 `gateway-lifecycle-probe.rs`，临时 Cargo 工程 `gateway-lifecycle-probe/`。未改 HTTP 校验、状态码和正常 SSE 补发循环。 |
 | 正常 main 退出 | 快照目录 `normal-exit/result.txt`、`stderr.log`：无模型请求的空闲会话，HTTP Shutdown 返回 202，control plane 退出 0，所属进程消失，UI 端口重新 bind 成功。 |
 | main 装配错误退出 | 快照目录 `early-error/`：假 Adapter 完成 hello 后，缺失 ASCOUT_AGENT_ENTRY 导致非零退出；Adapter 收到 EOF，PID 已回收。Runtime 端口的立即 bind 检查遇到 Address already in use，不据此宣称立即复用通过（TCP 连接关闭状态未排除）。该例不建立 Agent 或环境。 |
-| 格式检查 | `gateway-lifecycle-local-fmt.log`：main、Runtime／HTTP／Ledger 使用 skip_children 的定向 rustfmt 检查通过；全仓 `cargo fmt --all -- --check` 仍失败，`gateway-lifecycle-fmt-final.log`，差异来自并行交互工作涉及的 tui、agent_control、coordination/session、gateway/ui.rs、observation 等，本轮不批量格式化它们。 |
+| 格式检查 | `gateway-lifecycle-local-fmt.log`：main、Runtime／HTTP／Ledger 使用 skip_children 的定向 rustfmt 检查通过；全仓 `cargo fmt --all -- --check` 仍失败，`gateway-lifecycle-fmt-final.log`，差异来自并行交互工作涉及的 tui、当时的 `agent_control`（现 `speculative_tree`）、coordination/session、gateway/ui.rs、observation 等，本轮不批量格式化它们。 |
 
 剩余范围：通用身份认证授权、Registry 验证、启动握手阶段信号快速响应、所有资源耗尽／线程 panic 注入、阻塞写及停止期间在飞交互回执、SSE 全量重连故障矩阵仍未完成专项验收。Runtime 读线程的错误类型尚未保存并向外作为独立错误传播；现有断线唤醒不等于错误分类完整。跨重启幂等和完整事件顺序不在本轮。Adapter 部署及配置组织继续由 Discussion 第 15 项承接，Gateway 生命周期结论不关闭它。
 
@@ -39,7 +43,7 @@
 
 | 当前调用链 | 保留在控制／展示侧的责任 |
 |---|---|
-| main 装配 `gateway::agent::Listener` → accept → `Connection`；execution 通过 receive 接收类型化 AgentMessage、send 交付 AgentCommand、finish 半关闭、stop_receiving 回收读线程 | Tree 身份／Branch／task／命令关联和合法转换；LocalPolicy 的生成；恢复保存顺序；错误后的关闭与清理决策 |
+| 前台入口装配 `gateway::agent::Listener`，协调侧 accept 得到 `Connection`，通过 receive 接收类型化 AgentMessage、send 交付 AgentCommand、finish 半关闭、stop_receiving 回收读线程 | Tree 身份／Branch／task／命令关联和合法转换，LocalPolicy 的生成，恢复保存顺序，错误后的关闭与清理决策 |
 | `gateway::runtime::{ControlServer, ControlSession}`；SpeculationCoordinator.perform 与运行循环依赖 `&dyn Runtime` 的 Operation / OperationResult / Event | 环境选择、结果 Completed 判定、运行状态映射、Policy、Promote／Discard、预算与调度 |
 | main 装配共享 UI Connection、嵌入静态资源及只读 Presentation；HTTP 和 TUI 直接调用 Connection.request → execution 事件 | `ui.rs` 对话／输入状态读取和展示折叠；TUI 绘制与终端输入；Ledger 原始事实保存、序号和补发读取 |
 

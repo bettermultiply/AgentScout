@@ -179,7 +179,7 @@ impl SpeculativeTree {
                 && self.branch_proposal(candidate).is_some()
                 && !self.pending_work.values().any(|work| {
                     matches!(work,
-                    crate::control_plane::coordination::ControlOperation::Launch(tool)
+                    ControlOperation::Launch(tool)
                     if tool.chance_id == chance.chance_id)
                 })
         });

@@ -56,6 +56,8 @@ ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
 cargo run --bin ascout-control-plane -- ../pi --web 127.0.0.1:8080
 ```
 
+当前程序在前台运行，每次启动管理一个 run。TUI 的 Ctrl-C 中断当前 task 并保留会话，Ctrl-D 请求收尾并退出。Web 模式下关闭浏览器页面只断开页面连接。要正常停止前台进程，可发送 SIGTERM 或使用 Shutdown。保存暂停点需显式使用 `/pause`。
+
 浏览器 UI 只绑定 loopback；用本机浏览器打开本机 control plane 输出的地址即可。左侧是权威窗口对话，右侧是可隐藏的投机面板（投机树与分支详情）；候选内容始终只读。TUI 与浏览器 UI 不共享绘制代码，只通过 control plane 提供的 AScoutRunView 和操作请求接口工作。界面的开发代理、构建与嵌入方式见 [control plane WebUI](docs/development/web-ui.md)。
 
 外部回放工具从已有 run 的原生 `session.jsonl`、`events.jsonl` 在内存提供模型回复，并启动普通 AScout 执行 Runtime 与 Policy：
@@ -68,7 +70,7 @@ node tools/replay/run.ts /path/to/source-run ../pi \
 
 源 `policy.json` 优先；缺失时用 `--policy <name>` 选择原 Policy。用 `--runtime` 明确提供新运行环境。源目录只读；普通 AScout 负责新 run 的记录和恢复。工具终端输入 `pause` 暂停自动输入后，可在 WebUI 手动输入或切换模型；`resume` 继续，`status` 查看消费情况，`quit` 协调正常保存退出。完成或缺键仅停止自动输入，保留系统。详见[回放工具](tools/replay/README.md)及[开发边界](docs/development/replay.md)。
 
-唯一位置参数是 Pi 源码路径。运行记录目录由系统在配置的运行根目录下创建，结束时输出 run id。`ascout-control-plane runs` 列出已有运行。`ascout-control-plane ../pi --resume <run-id>` 按原 id 打开运行：已保存暂停的 task 等待 `/continue`，已结束的 Agent 会话显示原权威对话并等待下一条 prompt 开始新 task。旧 `session-*` 目录名仍是有效的 run id，无需迁移目录或提供 Agent 的 session 路径。Agent 原生 session id 保持独立。agent supervisor 在 Branch 环境外启动 Agent 与 Instrumentation，control plane 只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。Ctrl-C 请求中断，Ctrl-D 退出，TUI 中 ↑/↓ 滚动。运行记录目录及 `agent.log` 保留用于检查。
+唯一位置参数是 Pi 源码路径。运行记录目录由系统在配置的运行根目录下创建，结束时输出 run id。`ascout-control-plane runs` 列出已有运行。`ascout-control-plane ../pi --resume <run-id>` 按原 id 打开运行：已保存暂停的 task 等待 `/continue`，已结束的 Agent 会话显示原权威对话并等待下一条 prompt 开始新 task。旧 `session-*` 目录名仍是有效的 run id，无需迁移目录或提供 Agent 的 session 路径。Agent 原生 session id 保持独立。agent supervisor 在 Branch 环境外启动 Agent 与 Instrumentation，control plane 只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。TUI 中 ↑/↓ 滚动。运行记录目录及 `agent.log` 保留用于检查。
 
 已接通工具与模型执行前等待点：Candidate 在独立 session 使用预测工具结果或替代模型续跑。eager 并行放行权威调用；speculative-first 保持原调用等待，由 Policy 依据真实结果或明确的可接受性规则裁决。接受时 Promote 候选 session 并取消旧 Parent，不向旧调用注入候选结果；全部候选不可接受时原调用放行一次。用户仍使用同一个主对话。默认 Policy 禁用候选；可显式启用字符串枚举预测示例：
 
@@ -122,8 +124,8 @@ B1 验证记录键规范化及端点的顺序消费；B1-PI 还验证 Pi 对两�
 - [开发决策](docs/development/decisions.md)
 - [首要验证 Workload](docs/development/reference-workload.md)
 - [Agent 接入状态](docs/usage/agent-guide.md)
+- [接入独立可执行的 backend](docs/development/executable-backend.md)
 - [试一次 AScout 投机执行（NLE）](docs/usage/try-speculation.md)
 - [FAQ](docs/usage/faq.md)
-- [接入独立可执行的 backend](docs/development/executable-backend.md)
 - [投机执行底座抽象设计札记](docs/development/spec-exec-abstraction.md)
 - [讨论记录](Discussion.md)

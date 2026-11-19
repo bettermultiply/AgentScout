@@ -14,12 +14,12 @@ impl SpeculationCoordinator {
         work: &ControlOperation,
     ) -> Result<ControlResult, String> {
         let environment_for = |branch: &str| -> Result<&str, String> {
-            tree.branches
-                .get(branch)
-                .and_then(|record| record.environment_id.as_deref())
+            tree.branch(branch)
+                .ok()
+                .and_then(|record| record.environment_id())
                 .ok_or_else(|| format!("unknown Branch {branch}"))
         };
-        let authority = tree.authority_branch_id.as_deref().unwrap_or("authority");
+        let authority = tree.authority_branch_id().unwrap_or("authority");
         let environment = || environment_for(work.branch().unwrap_or(authority));
         let call = |environment: &str, operation| {
             super::execution::runtime_call(runtime, environment, operation)
@@ -129,8 +129,8 @@ impl SpeculationCoordinator {
                         return Err(reason);
                     }
                     if result.environment_id.is_empty()
-                        || tree.branches.values().any(|record| {
-                            record.environment_id.as_deref() == Some(result.environment_id.as_str())
+                        || tree.branches().values().any(|record| {
+                            record.environment_id() == Some(result.environment_id.as_str())
                         })
                     {
                         return Err(
@@ -251,7 +251,7 @@ impl SpeculationCoordinator {
                 "assumption_set": assumptions,
                 "capability_context": {
                     "tool": tool.tool_name,
-                    "runtime_capabilities": tree.capability_view,
+                    "runtime_capabilities": tree.capability_view(),
                     "prediction_types": ["string", "boolean", "enum"],
                 },
             }),
@@ -306,7 +306,7 @@ impl SpeculationCoordinator {
         policy: &CompiledPolicy,
         engine: &PolicyEngine,
     ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-        let view = |branch: &crate::control_plane::agent_control::BranchRecord| json!({"branch_id": branch.branch_id, "chance_id": branch.chance_id});
+        let view = |branch: &crate::control_plane::speculative_tree::BranchRecord| json!({"branch_id": branch.branch_id, "chance_id": branch.chance_id});
         let candidates = || {
             tree.branches
                 .values()

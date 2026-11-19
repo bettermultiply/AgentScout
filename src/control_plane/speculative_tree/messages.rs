@@ -1,9 +1,9 @@
-//! SpeculativeTree 的Agent 协议消息处理。
+//! 应用 Agent 消息，检查并推进 SpeculativeTree 的状态转换。
 
 use super::*;
 
 impl SpeculativeTree {
-    /// 接收 Pi 报告的启动事实。
+    /// 检查并应用 Agent 报告的事实，返回后续命令。
     pub fn handle_message(&mut self, message: AgentMessage) -> io::Result<Vec<AgentCommand>> {
         match message {
             AgentMessage::SessionHistory { .. } => Ok(Vec::new()),
@@ -220,9 +220,9 @@ impl SpeculativeTree {
                         .collect();
                     for id in ids {
                         let chance = self.chance(&id)?.clone();
-                        let mut actions = crate::control_plane::coordination::ControlActions::default();
+                        let mut actions = ControlActions::default();
                         let outcome = if status == ActionStatus::Succeeded {
-                            Ok(crate::control_plane::coordination::ControlResult::Outcome(
+                            Ok(ControlResult::Outcome(
                                 result.clone(),
                                 evidence.clone().unwrap_or(Value::Null),
                             ))
@@ -230,7 +230,7 @@ impl SpeculativeTree {
                             Err(format!("Authority tool {status:?}"))
                         };
                         self.complete_tool_outcome(
-                            crate::control_plane::coordination::ToolPending {
+                            ToolPending {
                                 chance_id: id,
                                 branch_id: branch_id.clone(),
                                 operation_id: action_id.clone(),

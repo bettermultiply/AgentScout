@@ -2,7 +2,6 @@
 
 use super::super::*;
 use super::support::*;
-use crate::control_plane::coordination::{ControlOperation, ControlResult};
 use crate::protocol::contract::RuntimeCapabilities;
 use serde_json::json;
 

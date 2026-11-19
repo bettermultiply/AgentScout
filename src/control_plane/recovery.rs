@@ -1,5 +1,5 @@
 //! Recovery components, association validation and atomic manifest publication.
-use crate::control_plane::agent_control::{BranchStatus, SpeculativeTree};
+use crate::control_plane::speculative_tree::{BranchStatus, SpeculativeTree};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -83,8 +83,7 @@ pub fn models(
 
 pub fn validate_policy_artifact(tree: &SpeculativeTree, bytes: &[u8]) -> io::Result<()> {
     if tree
-        .policy_binding
-        .as_ref()
+        .policy_binding()
         .and_then(|binding| binding.get("sha256"))
         != Some(&json!(format!("{:x}", Sha256::digest(bytes))))
     {
@@ -98,19 +97,18 @@ pub fn validate_bindings(
     policy_digest: &str,
     config_path: &Path,
 ) -> io::Result<String> {
-    if tree.local_policy_digest.as_deref() != Some(policy_digest) {
+    if tree.local_policy_digest() != Some(policy_digest) {
         return Err(io::Error::other("Recovery Policy changed"));
     }
     if tree
-        .runtime_binding
-        .as_ref()
+        .runtime_binding()
         .and_then(|v| v.get("config_path"))
         != Some(&json!(config_path))
     {
         return Err(io::Error::other("Recovery Runtime binding changed"));
     }
     let config_digest = digest(config_path)?;
-    if tree.runtime_binding.as_ref().and_then(|v| v.get("sha256")) != Some(&json!(config_digest)) {
+    if tree.runtime_binding().and_then(|v| v.get("sha256")) != Some(&json!(config_digest)) {
         return Err(io::Error::other("Recovery Runtime configuration changed"));
     }
     Ok(config_digest)
@@ -120,7 +118,7 @@ pub fn validate_capabilities(
     tree: &SpeculativeTree,
     capabilities: &crate::protocol::contract::RuntimeCapabilities,
 ) -> io::Result<()> {
-    if tree.capability_view.as_ref() != Some(&serde_json::to_value(capabilities)?) {
+    if tree.capability_view() != Some(&serde_json::to_value(capabilities)?) {
         return Err(io::Error::other("Recovery Runtime capabilities changed"));
     }
     Ok(())
@@ -162,7 +160,7 @@ pub fn publish(run_dir: &Path, generation: &Path, tree: &SpeculativeTree) -> io:
     index.write_all(&bytes)?;
     index.sync_all()?;
     if let Err(error) = ledger.record_durable(
-        json!({"message":"recovery_complete", "task_id":tree.execution_id,
+        json!({"message":"recovery_complete", "task_id":tree.execution_id(),
         "control":tree, "manifest":manifest}),
     ) {
         let _ = fs::remove_file(&temporary);
@@ -265,13 +263,7 @@ fn open_ended(
         }
         &legacy
     };
-    let mut tree = SpeculativeTree::with_workspace("agent", run_dir)?;
-    tree.run_id = Some(run_id.into());
-    tree.set_execution_id(format!("{run_id}:{}", records.len()))?;
-    tree.policy_binding = bindings.get("policy_binding").cloned();
-    tree.runtime_binding = bindings.get("runtime_binding").cloned();
-    tree.capability_view = bindings.get("capability_view").cloned();
-    tree.local_policy_digest = bindings["local_policy_digest"].as_str().map(str::to_owned);
+    let tree = SpeculativeTree::reopen_ended(run_dir, run_id, records.len(), bindings)?;
     Ok((tree, Resume::Ended(reference)))
 }
 
@@ -311,17 +303,7 @@ fn load_record(
     let mut tree: SpeculativeTree = serde_json::from_value(control.clone())?;
     validate(&tree, &generation)?;
     let run_id = run_dir.file_name().and_then(|name| name.to_str());
-    if Some(tree.run_id.as_deref().unwrap_or(&tree.execution_id)) != run_id
-        || tree.run_id.as_ref().is_some_and(|id| {
-            tree.execution_id
-                .strip_prefix(id)
-                .and_then(|suffix| suffix.strip_prefix(':'))
-                .and_then(|sequence| sequence.parse::<usize>().ok())
-                .is_none()
-        })
-    {
-        return Err(io::Error::other("Recovery task identity mismatch"));
-    }
+    tree.validate_recovery_identity(run_id)?;
     tree.load_recovery();
     Ok((tree, generation))
 }
@@ -330,7 +312,7 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
     let fail =
         |message: &str| io::Error::other(format!("Recovery association mismatch: {message}"));
     let agent: Value = serde_json::from_slice(&fs::read(generation.join("agent.json"))?)?;
-    if agent["taskId"] != tree.execution_id
+    if agent["taskId"] != tree.execution_id()
         || agent["authority"] != serde_json::to_value(&tree.authority_branch_id)?
     {
         return Err(fail("task/authority"));
@@ -360,8 +342,8 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
         } else if !matches!(branch.status, BranchStatus::Cleaned | BranchStatus::Discarded)
             && !(branch.status == BranchStatus::Created
                 && matches!(branch.execution_state.runtime,
-                    crate::control_plane::agent_control::RuntimeExecutionState::Unknown
-                    | crate::control_plane::agent_control::RuntimeExecutionState::EnvironmentRequested)) {
+                    crate::control_plane::speculative_tree::RuntimeExecutionState::Unknown
+                    | crate::control_plane::speculative_tree::RuntimeExecutionState::EnvironmentRequested)) {
             return Err(fail("live Branch Environment binding is missing"));
         }
         if id != &branch.branch_id {

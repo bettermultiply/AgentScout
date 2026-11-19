@@ -681,11 +681,13 @@ async function handle(command) {
             bindInteraction(session,branch);
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
             await report({message:'branch_created',branch_id:branch});
-            await report({message:'branch_started',branch_id:branch});
             if(nativeReference){
+                // The control plane opens input on branch_started. Publish the
+                // inherited conversation and restore the session link first.
                 await reportSessionHistory(branch,manager);
                 linkSession();
             }
+            await report({message:'branch_started',branch_id:branch});
             await report({message:'branch_ready',branch_id:branch});
             if(command.prompt)executeTurn(session,branch,()=>session.prompt(command.prompt));
             return;
