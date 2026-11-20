@@ -49,7 +49,7 @@ export const EXTRA_FIELDS: TuneField[] = [
   field('leafSideProbability', '叶片反侧概率', 0, 1, .01, '叶片'),
   field('budLength', '空枝芽长度', 0, 200, 1, '树枝'), field('budWidth', '空枝芽宽度', 0, 100, .5, '树枝'),
   field('modelTipRadius', '模型端点半径', 0, 30, .1, '叶茎'),
-  field('chanceRadiusRatio', 'Chance 半径 / 子枝根宽', 0, 2, .05, '树枝'),
+  field('chanceRadiusRatio', 'Chance 半径 / 采样宽度（单候选用子枝根宽）', 0, 2, .05, '树枝'),
   field('sampleGap', '树枝曲线采样步长', 1, 30, 1, '树枝'),
   field('stemOppositeBias', '叶茎反向生长偏好', 0, .5, .05, '叶茎'),
   field('petioleLength', '叶柄长度', 0, 50, .5, '叶片'),

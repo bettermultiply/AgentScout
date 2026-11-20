@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
   Controls,
   ReactFlow,
   ReactFlowProvider,
+  getNodesBounds,
   useReactFlow,
   type NodeTypes,
 } from '@xyflow/react'
@@ -19,47 +20,51 @@ import { TreeTuningPanel } from './TreeTuningPanel'
 import { useAppStore } from '../store'
 
 const nodeTypes: NodeTypes = { branch: BranchNode }
+const minZoom = 0.008
 
 function TreeCanvas({ graph, tuning, onTuning }: { graph: TreeGraph; tuning: TreeTuning; onTuning: (next: TreeTuning) => void }) {
-  const { fitView, getViewport, setViewport } = useReactFlow()
+  const { fitView, setViewport, viewportInitialized } = useReactFlow()
+  const canvasRef = useRef<HTMLDivElement>(null)
+  const initialFitHandled = useRef(false)
   const [open, setOpen] = useState(() => new URLSearchParams(window.location.search).has('tune'))
   const nodes = graph.nodes
-  // Refit when the set of Branches changes, not while tuning geometry.
-  const fitKey = nodes.map(node => node.id).join('|')
 
   useEffect(() => {
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      const canvas = document.querySelector('.tree-canvas')?.getBoundingClientRect()
-      const rects = [...document.querySelectorAll('.tree-trunk, .tree-empty-bud, .tree-trunk-cap, .tree-leaf-visual, .tree-chance, .tree-leaf-petiole')]
-        .map(element => element.getBoundingClientRect())
-      if (!canvas || !rects.length || cancelled) return
-      const left = Math.min(...rects.map(rect => rect.left))
-      const right = Math.max(...rects.map(rect => rect.right))
-      const top = Math.min(...rects.map(rect => rect.top))
-      const bottom = Math.max(...rects.map(rect => rect.bottom))
-      const current = getViewport()
-      const factor = Math.min((canvas.width - 88) / (right - left), (canvas.height - 100) / (bottom - top))
-      const target = Math.min(1, current.zoom * factor)
+    const canvas = canvasRef.current
+    if (initialFitHandled.current || !viewportInitialized || !canvas) return
+
+    // Node rectangles already contain the full ink, including stems without leaves.
+    const bounds = getNodesBounds(nodes)
+    const fit = () => {
+      if (initialFitHandled.current) return true
+      const { clientWidth: width, clientHeight: height } = canvas
+      if (width === 0 || height === 0) return false
+      const zoom = Math.max(minZoom, Math.min(1,
+        Math.max(1, width - 88) / bounds.width,
+        Math.max(1, height - 100) / bounds.height,
+      ))
+      initialFitHandled.current = true
       void setViewport({
-        zoom: target,
-        x: canvas.width / 2 - ((left + right) / 2 - canvas.left - current.x) / current.zoom * target,
-        y: canvas.height / 2 - ((top + bottom) / 2 - canvas.top - current.y) / current.zoom * target,
+        zoom,
+        x: width / 2 - (bounds.x + bounds.width / 2) * zoom,
+        y: height / 2 - (bounds.y + bounds.height / 2) * zoom,
       })
-    }, 100)
-    return () => { cancelled = true; window.clearTimeout(timer) }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fitKey, getViewport, setViewport])
+      return true
+    }
+
+    if (fit()) return
+    const observer = new ResizeObserver(() => { if (fit()) observer.disconnect() })
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [nodes, setViewport, viewportInitialized])
 
   return (
-    <div className="tree-canvas">
+    <div className="tree-canvas" ref={canvasRef}>
       <ReactFlow
         nodes={nodes}
         edges={[]}
         nodeTypes={nodeTypes}
-        fitView
-        fitViewOptions={{ padding: 0.12, maxZoom: 1 }}
-        minZoom={0.008}
+        minZoom={minZoom}
         maxZoom={4}
         nodesDraggable={false}
         nodesConnectable={false}
@@ -127,7 +132,7 @@ export function SpeculationTree({ task }: { task: TaskState | null }) {
   }
 
   return (
-    <ReactFlowProvider>
+    <ReactFlowProvider key={task?.taskId}>
       <TreeCanvas graph={graph} tuning={tuning} onTuning={setTuning} />
     </ReactFlowProvider>
   )

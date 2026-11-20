@@ -94,7 +94,7 @@ export interface BranchGeometry {
   trunk: PathGeometry
   connection?: PathGeometry & { rootWidth: number }
   bud: { transform: string; angle: number; base: Point; tip: Point; ellipse: EllipseGeometry }
-  chanceCircles: Array<{ chanceId: string; branchId: string; x: number; y: number; radius: number }>
+  chanceCircles: Array<{ chanceId: string; candidateBranchIds: string[]; x: number; y: number; radius: number }>
   validationEnd: { x1: number; y1: number; x2: number; y2: number; validatedAtMs: number } | null
 }
 
@@ -661,9 +661,17 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
     place(branch, { x: 0, y: 0 }, 0, tuning.rootWidth)
   }
 
-  // Conservative bounds in both axes. Quadratic curves stay in their control
-  // hull; rotations cannot exceed the control hull's largest radius. Include
-  // wide leaves, petioles, all strokes, buds and Chance circles, not just tips.
+  const candidatesByChance = new Map<string, string[]>()
+  for (const branch of branches) {
+    if (branch.chanceId === null) continue
+    const ids = candidatesByChance.get(branch.chanceId) ?? []
+    ids.push(branch.branchId)
+    candidatesByChance.set(branch.chanceId, ids)
+  }
+  for (const ids of candidatesByChance.values()) ids.sort()
+
+  // Conservative bounds include the full outlines, strokes, leaves, buds,
+  // and Chance circles, not just tips.
   for (const geometry of result.values()) {
     const hit = hits.get(geometry.branchId)
     if (hit) {
@@ -706,11 +714,12 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       add({ x: geometry.validationEnd.x2, y: geometry.validationEnd.y2 }, 1)
     }
     for (const [chanceId, distance] of geometry.chancePositions) {
-      const child = branches.find(b => b.chanceId === chanceId)
+      const candidateBranchIds = candidatesByChance.get(chanceId) ?? []
+      const onlyChild = candidateBranchIds.length === 1 ? candidateBranchIds[0] : null
       const sample = sampleGeometry(geometry, distance)
-      const point = geometry.forkPoints.get(child?.branchId ?? '') ?? sample
-      const width = result.get(child?.branchId ?? '')?.trunkWidths[0] ?? sample.width
-      const circle = { chanceId, branchId: child?.branchId ?? geometry.branchId, ...point, radius: width * tuning.chanceRadiusRatio }
+      const { x, y } = (onlyChild ? geometry.forkPoints.get(onlyChild) : undefined) ?? sample
+      const width = (onlyChild ? result.get(onlyChild)?.trunkWidths[0] : undefined) ?? sample.width
+      const circle = { chanceId, candidateBranchIds, x, y, radius: width * tuning.chanceRadiusRatio }
       geometry.chanceCircles.push(circle)
       add(circle, circle.radius)
     }
