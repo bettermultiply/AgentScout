@@ -32,11 +32,11 @@ AScout 不是某个固定算法，也不要求每个动作都建立完整、昂�
 
 Agent 以 action 及其结果报告执行事实，action 不限于工具调用。Agent 与 Branch 的生命周期、Agent 对控制命令的回执、Runtime 的操作与环境事实分别归属各自产生方；control plane 据此更新 Tree，不以“发出命令”冒充“已完成”。
 
-投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 待选准入 -> 启动选择 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。AScout 可以暂存已经准入但尚未启动的机会；Policy 在同一 AScoutAgent 内全部有效待选机会之间选择现在启动哪些，并可以调整已经运行或暂停的投机工作。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、Promote 或结束。Parent 得到真实结果后立即继续，候选验证可并行进行；合法 Promote 才停止旧 Parent。工具准入与结果兼容性由 Policy 结合实际能力判断，不由固定工具数量或结果类型代替策略决策。
+投机执行由一组可组合的阶段构成，而不是固定的线性流程：机会发现 -> 待选准入 -> 启动选择 -> 预测生成 -> 过程执行 -> 验证 -> 处置与提交。AScout 可以暂存已经准入但尚未启动的机会；Policy 在同一 AScoutAgent 内全部有效待选机会之间选择现在启动哪些，并可以调整已经运行或暂停的投机工作。Policy 可以选择、替换和组合这些阶段，但被启用的阶段仍需遵守必要的数据依赖和 AScout 固定的正确性、隔离、资源与副作用约束。投机执行可以基于尚未确认的 Proposal 提前开展后续工作，并在获得权威依据或其他可接受性判断后继续、Promote 或结束。Parent 得到真实结果后可以继续，候选验证可并行进行。Policy 接受后，正式提交还要求 Proposal 有效且候选进展与 Parent 相容。工具准入与结果兼容性由 Policy 结合实际能力判断，不由固定工具数量或结果类型代替策略决策。
 
 Policy、Mechanism 与 Runtime 构成抽象责任模型：Policy 作者只需面对一组抽象的决策点；Policy 使用外部模型必须经宿主逐请求授予 capability，凭证由宿主持有，详见 [Policy Engine](design/control-plane/policy-engine.md)。Instrumentation 负责 Agent 内部会话和行为接入；Agent 与随附 Instrumentation 在 Branch 隔离环境外的可信宿主运行，由 Runtime 的 agent supervisor 管理 run 唯一宿主的生命周期。各环境后端管理自身的执行资源。工作区文件访问、shell、受管子程序和效果在对应 Branch 环境执行，模型、内存和控制通信不绕经文件系统隔离；挂载切换与物化不要求重启宿主。Instrumentation 由与产品无关的通用层和产品专用的 Product Integration 组成——`admit` 的 `opportunity_pass`、`feasibility_pass`、`extent` 和 `effect` 由通用层求值，Product Integration 只把产品执行点接入并执行处置结果；会改写全局控制状态或必须在多个 Chance、Branch、Proposal 之间协调的其余 Decision（包括 `predict`）由 control plane 求值并落实，所缺的本地事实由 Instrumentation 计算后提交；Runtime 承载动作并提供隔离、资源和效果边界；control plane 负责全局编排、校验和裁决。runtime proxy 是 Runtime 的接入边界，不是与 Runtime 平级的另一套 Runtime。Speculation Contract 约束 Policy、control plane 和 Runtime 之间的可观察语义；Runtime 内部可以组合不同的执行和效果管理能力。
 
-工具与模型推理均可 eager 并行启动权威调用，或 speculative-first 将权威调用挂在执行前、让独立候选先行。接受时 Promote 候选 session 并取消旧 Parent，不向旧调用填入候选结果；全部候选不可接受时原调用放行一次。上文 Parent 得到真实结果后继续的规则适用于已被放行的调用。
+工具与模型推理均可 eager 并行启动权威调用，或 speculative-first 将权威调用挂在执行前、让独立候选先行。接受时先阻止双方开始新调用，暂停目标环境，再等待候选自己已开始的调用和受管写者收敛。Full 把 SpB 状态合入 AuB，保留 SpB session 和后代，后续调用使用 AuB 的合并环境。Part 只移交选中的结果与所需状态，保留 AuB session，丢弃 SpB 及其后代。两种方式都保留 AuB 已有进展，full 降为 part 须经 Policy 预先接受。全部候选不可接受时原调用放行一次。上文 Parent 得到真实结果后继续的规则适用于已被放行的调用。
 
 每个 session 的 AScoutAgent 拥有自己的一棵 Speculative Tree，Tree 属于 control plane。树拥有该 session 的投机控制状态，其方法检查合法转换；Policy 函数计算策略选择。Speculation Coordinator 可以协调多棵树，不保存具体 session 的第二份投机状态。同一棵树由消息和定时器触发顺序处理，耗时操作异步返回；Agent 的普通执行由 Instrumentation 负责。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。
 
@@ -100,7 +100,7 @@ session
 
 control plane 在运行时以三类状态描述一次投机，它们分别回答不同问题：`ChanceStage` 属于 Chance，说明该投机机会从待选到收敛走到哪一步、最终是否被接受；`AuthorityState` 也属于 Chance，说明其权威值是否已请求和到达，与机会的运行并行；`BranchStatus` 属于 Branch，合并生命周期与运行状态，说明承载具体执行的 Branch 当前处于何处。三类状态不能互相替代。
 
-输入侧的可用命令与提示由 Agent 侧声明，AScout 只发现、排版和转发，不复制 Agent 的命令语义或原生界面。用户端保持稳定的 AScoutAgent 交互入口，不绑定某个后端 Agent session。合法 Promote 改变该视图对应的权威执行及输入输出路由，不要求用户切换对话，也不以候选会话结束为前提；候选保留自己的环境、执行状态和在飞进展承接后续执行，接受与效果约束仍然有效，嵌套接受不能越过祖先约束。
+输入侧的可用命令与提示由 Agent 侧声明，AScout 只发现、排版和转发，不复制 Agent 的命令语义或原生界面。用户端保持稳定的 AScoutAgent 交互入口，不绑定某个后端 Agent session。Full 接受改变该视图对应的权威执行及输入输出路由。候选 session 与后代保留，后续调用进入 AuB 合并后的环境。Part 接受保留原权威 session，并将实际提交的结果反馈给它。嵌套 full 和 part 只移交到直接父级的环境和会话路径。外层依赖仍由保留的延续承担，用户视图只随外层权威切换更新。
 
 状态交接正确是机制必须保证的条件，不能仅以路由切换或历史整理代替。最终保留单一权威 session，表示经过验证、用真实结果整理后的执行历史；它不再要求准确复原候选当时收到的预测输入。因此，原始运行上下文与从整理后历史恢复的上下文可能不同。历史整理不决定权威，也不直接替换运行中的上下文；具体语义见 [Agent 接入设计](design/agent-integration.md) §3。
 

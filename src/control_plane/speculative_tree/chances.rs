@@ -171,9 +171,13 @@ impl SpeculativeTree {
                 })
     }
 
-    /// Branch 除自身 Proposal 外，仍携带至少一个祖先 Chance 的未确认
-    /// Proposal。`AssumptionSet` 清空前该 Branch 没有提交资格；这里不新增
-    /// 依赖机制，只根据现有引用与 Chance 阶段判断。
+    pub(super) fn assumption_confirmed(&self, assumption: &Assumption) -> bool {
+        self.chances.get(&assumption.chance_id).is_some_and(|chance| {
+            matches!(&chance.stage, ChanceStage::Accepted(id) if id == &assumption.proposal_id)
+        })
+    }
+
+    /// Global promotion must resolve every inherited Proposal.
     pub(crate) fn ancestor_assumptions_unresolved(&self, branch: &BranchRecord) -> bool {
         // A branch_model execution can exist before its Proposal. Its ownership
         // is already in the Tree, but there is no Proposal reference to invent.
@@ -196,10 +200,7 @@ impl SpeculativeTree {
         }
         branch.assumption_set.iter().any(|assumption| {
             Some(&assumption.chance_id) != branch.chance_id.as_ref()
-                && !self
-                    .chances
-                    .get(&assumption.chance_id)
-                    .is_some_and(|chance| matches!(chance.stage, ChanceStage::Accepted(_)))
+                && !self.assumption_confirmed(assumption)
         })
     }
 
@@ -393,6 +394,9 @@ impl SpeculativeTree {
                         .branch_ids
                         .iter()
                         .any(|id| self.branches.contains_key(id))
+                    && !self.branches.values().any(|branch| {
+                        branch.assumption_set.iter().any(|assumption| assumption.chance_id == chance.chance_id)
+                    })
                     && !self
                         .pending_work
                         .values()

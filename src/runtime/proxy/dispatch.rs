@@ -120,6 +120,36 @@ impl Shared {
                 Err(reason) => return self.reasoned_failure(request, None, reason),
             }
         };
+        let mut environments = vec![environment_id.to_owned()];
+        match &request.operation {
+            Operation::AcceptEnvironment {
+                source_environment_id,
+                ..
+            } => environments.push(source_environment_id.clone()),
+            Operation::FilesystemAccept {
+                source_snapshot_id,
+                target_snapshot_id,
+                ..
+            } => {
+                environments.extend([source_snapshot_id.clone(), target_snapshot_id.clone()]);
+            }
+            Operation::FilesystemFork {
+                parent_snapshot_id,
+                child_snapshot_id,
+                ..
+            } => {
+                environments.extend([parent_snapshot_id.clone(), child_snapshot_id.clone()]);
+            }
+            Operation::FilesystemMark { snapshot_id, .. }
+            | Operation::FilesystemDiscard { snapshot_id, .. } => {
+                environments.push(snapshot_id.clone())
+            }
+            _ => {}
+        }
+        let _admission = match self.runtime.admit_control(environments) {
+            Ok(admission) => admission,
+            Err(reason) => return self.reasoned_failure(request, None, reason),
+        };
         let state = self.runtime.state(environment_id);
         let context = operation_context(environment_id, request);
         match &request.operation {
@@ -154,6 +184,41 @@ impl Shared {
             }
             Operation::PromoteEnvironment => {
                 self.execute_promote(environment_id, request, state, &context)
+            }
+            Operation::AcceptEnvironment {
+                source_environment_id,
+                full,
+                part,
+                target_suspended,
+            } => {
+                let Some(commands) = &self.commands else {
+                    return self.reasoned_failure(
+                        request,
+                        state,
+                        "Runtime execution admission is unavailable",
+                    );
+                };
+                let admission =
+                    match commands.pause_admission(&[environment_id, source_environment_id]) {
+                        Ok(admission) => admission,
+                        Err(reason) => return self.reasoned_failure(request, state, reason),
+                    };
+                match self.runtime.accept_environment(
+                    &context,
+                    source_environment_id,
+                    *full,
+                    part.as_ref(),
+                    *target_suspended,
+                    |id| admission.wait(id),
+                ) {
+                    Ok(filesystem) => {
+                        let actual = self.runtime.state(environment_id);
+                        let mut result = self.success(request, actual, can_accept(actual));
+                        result.filesystem = Some(filesystem);
+                        result
+                    }
+                    Err(error) => self.backend_error(request, environment_id, error),
+                }
             }
             Operation::SuspendEnvironment => {
                 self.execute_suspend(environment_id, request, state, &context)
@@ -343,6 +408,16 @@ impl Shared {
     ) -> OperationResult {
         if state != Some(EnvironmentState::Available) {
             return self.not_applicable(request, state, "environment cannot be suspended");
+        }
+        // Gate execution requests while their foreground writers finish and
+        // while the backend freezes managed processes, including background writers.
+        let _admission = self.commands.as_ref().map(|commands| commands.pause_admission(&[environment_id])).transpose();
+        let _admission = match _admission {
+            Ok(admission) => admission,
+            Err(reason) => return self.reasoned_failure(request, state, reason),
+        };
+        if let Some(admission) = &_admission {
+            admission.wait(environment_id);
         }
         match self.runtime.suspend_with_context(context) {
             Ok(()) => {

@@ -24,7 +24,7 @@ Instrumentation 负责在 Branch-local 状态或受纳管 Effect 发生前识别
 
 Product Integration 是面向具体 Agent product 的产品适配组件，负责依据接入约定，将 Agent 提供的执行点连接到 Instrumentation。Agent 在启动时通过 Product Integration 接入随附的、位于 Branch 隔离环境外的 Instrumentation；Product Integration 以尽可能小的产品改造接入 Agent 的内部执行结构，使 Instrumentation 能够观察目标执行活动，并在真实 operation 开始前暂停或阻止其执行。
 
-当 Agent 即将执行可管理步骤时，Product Integration 将该步骤交给 Interposer，并落实继续、执行前挂起或取消。放行时，产品按原有路径执行步骤一次；挂起期间原调用尚未执行。候选在独立 session 中使用预测输入或替代模型推进，接受时 Promote 该 session 并取消已过时的父调用，不向旧父调用填入候选结果。全部候选不可接受时，放行原调用一次。
+当 Agent 即将执行可管理步骤时，Product Integration 将该步骤交给 Interposer，并落实继续、执行前挂起或取消。放行时，产品按原有路径执行步骤一次；挂起期间原调用尚未执行。候选在独立 session 中使用预测输入或替代模型推进。Full 由候选 session 继续执行，并取消已过时的父调用。Part 保留父 session，将实际接受的结果作为后续模型输入，原调用仍按自身等待点处理。全部候选不可接受时，放行原调用一次。
 
 Product Integration 从被拦截步骤的原调用返回路径自动取得成功、失败或取消结果，并将其交给 Instrumentation 形成 outcome。它不修改 Agent 的业务逻辑，也不要求 Agent 主动调用 AScout API；具体产品适配可以了解其内部执行结构，但应将改造限制在观察和控制所需的接入范围内。只有产品确实提供真实的执行前接缝时才能声明支持该类 action；SDK 的输出观察事件（例如 `message_start`）本身不是推理前 Hook，不能冒称为此能力。
 
@@ -68,7 +68,7 @@ Interposer 是 Instrumentation 中介入 Agent 执行接缝并落实本地 AScou
 
 属于本地范围的 Decision 由 Interposer 结合当前执行事实直接判断和执行；依赖全局控制状态、资源或 Branch lifecycle 的 Decision，则由 Interposer 通过 ASC-Proxy 将相关事实和请求提交 control plane，并等待 control plane 返回结果或命令。
 
-工具与模型推理都支持 eager 和 speculative-first 两种顺序。eager 在候选运行的同时放行原权威调用；speculative-first 将原权威调用保持在执行前，由独立候选 session 使用预测输入或替代模型先行推进。Policy 根据真实结果或明确的可接受性依据裁决；候选被接受后 Promote 该 session，取消旧父路径及其尚未执行的调用，不把候选结果注入旧父调用。全部候选不可接受、预测失败或没有候选时，放行原权威调用一次。取消与重复命令不能导致重复执行。
+工具与模型推理都支持 eager 和 speculative-first 两种顺序。eager 在候选运行的同时放行原权威调用；speculative-first 将原权威调用保持在执行前，由独立候选 session 使用预测输入或替代模型先行推进。Policy 根据真实结果或明确的可接受性依据裁决。Full 接受候选 session 作为该 Chance 的后续执行，Part 则保留父 session。全部候选不可接受、预测失败或没有候选时，放行原调用一次。取消与重复命令不能导致重复执行。
 
 Interposer 还负责在 Branch-local 状态或受纳管 Effect 发生前识别相应边界。需要独立 Branch-local 状态时，它通过 ASC-Proxy 向 control plane 请求建立相应的独立执行环境；识别到共享、外部或 Policy 要求纳管的 Effect 时，它在 Effect 发生前将相关请求提交 control plane。真实 operation 保持 once-only；继续执行时，Interposer 从原调用返回路径取得成功、失败或取消结果，将 outcome 归属对应 Branch 并通过 ASC-Proxy 提交 control plane。Interposer 同时记录本地 Decision 的输入事实、求值内容、Policy 版本、结果和执行上下文。
 
@@ -90,7 +90,7 @@ Parent 已被放行并获得真实结果后沿原路径继续，不以候选比�
 
 最终权威 session 表示经过验证的执行历史，不要求准确复原候选当时收到的预测输入。有对应真实结果时，预测输入节点保留；整理将候选在预测输入之后的第一条后续记录的 `parentId` 改接到真实结果的记录 ID。由独立可接受性判断接受且未执行原权威调用时，保留候选原生历史，不伪造真实结果记录。原主分支和被丢弃分支的历史继续保留，不授予其执行权或发布权，也不改变 single-winner。此规则不额外要求另存一条完整的投机后续路径。
 
-最终单一 session 不等于运行期间只能有一个 session。Promote 后 winner 沿自己的 session 和候选环境保留执行进展继续，不默认把候选改动复制回父分支；Instrumentation 与 Runtime 保持其环境关联及必要状态交接。历史整理不决定权威，也不直接替换运行中的上下文。原始运行上下文与从整理后历史恢复的上下文可能不同，这是上述历史含义的组成部分，不承诺二者必然相同。
+最终单一 session 可以由多个运行期 session 形成。Full 保留胜者 session，后续调用关联直接父级合并后的环境。Part 保留父 session，以 Runtime 回执确认的结果作为下一次模型调用的输入。父级仍在投机时，获准内容只进入父级的延续，外层未决依赖继续限制权威路由和效果交付。历史整理不决定权威，也不直接替换运行中的上下文。原始运行上下文与从整理后历史恢复的上下文可能不同，这是上述历史含义的组成部分，不承诺二者必然相同。
 
 是否向获胜候选追加真实结果通知由 Policy 决定；默认完全不追加，而不是追加空消息。不因此强制引入新的 Policy 名称或类别。真实结果的验证与必要状态交接仍是机制责任，不依赖这条通知是否追加。
 

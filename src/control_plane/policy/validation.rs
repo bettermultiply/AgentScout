@@ -460,12 +460,13 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                             value.as_str().is_some_and(|text| !text.trim().is_empty())
                         });
                         action.as_object().is_some_and(|m| {
-                            (m.len() == 1 || (m.len() == 2 && action["intent"] == "Promote"))
-                                && m.keys()
-                                    .all(|key| ["intent", "notification"].contains(&key.as_str()))
-                                && (action.get("notification").is_none()
-                                    || action["intent"] == "Promote")
+                            m.keys().all(|key| {
+                                ["intent", "notification", "full", "part"].contains(&key.as_str())
+                            }) && (m.len() == 1 || action["intent"] == "Promote")
                                 && valid_notification
+                                && action.get("full").is_none_or(|full| full.is_boolean())
+                                && (action["full"] != false || action.get("part").is_some())
+                                && action.get("part").is_none_or(valid_part)
                         }) && (action["intent"] == "Reuse"
                             || action["intent"] == "Salvage"
                             || action["intent"] == "Re-execute"
@@ -484,6 +485,32 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
             decision.as_str()
         ),
     )
+}
+
+fn valid_part(part: &Value) -> bool {
+    use crate::protocol::contract::{PartResult, PartSelection};
+    let nonblank = |value: &Value| value.as_str().is_some_and(|text| !text.trim().is_empty());
+    let Some(fields) = part.as_object() else { return false };
+    if let Some(results) = part["results"].as_array() {
+        if fields.len() != 1 {
+            return false;
+        }
+        let dependencies: Option<Vec<PartResult>> = results.iter().map(|result| {
+            if result.as_object()?.len() != 3 || !nonblank(&result["notification"]) {
+                return None;
+            }
+            serde_json::from_value(serde_json::json!({"id": result["id"], "files": result["files"]})).ok()
+        }).collect();
+        return dependencies.is_some_and(|results| PartSelection::valid_results(&results));
+    }
+    fields.keys().all(|key| ["scopes", "notification"].contains(&key.as_str()))
+        && part["scopes"].as_array().is_some_and(|scopes| {
+            scopes.len() <= 2
+                && scopes.iter().all(|scope| scope == "workspace" || scope == "tmp")
+                && (scopes.len() < 2 || scopes[0] != scopes[1])
+                && (!scopes.is_empty() || part.get("notification").is_some())
+        })
+        && part.get("notification").is_none_or(nonblank)
 }
 
 pub(super) fn ids(value: &Value, key: &str) -> io::Result<BTreeSet<String>> {
@@ -535,7 +562,9 @@ mod notification_tests {
         );
         for value in [json!(null), json!(" \n"), json!(2)] {
             assert!(
-                serde_json::from_value::<crate::control_plane::gateway::agent::protocol::AgentCommand>(
+                serde_json::from_value::<
+                    crate::control_plane::gateway::agent::protocol::AgentCommand,
+                >(
                     json!({"command":"promote","branch_id":"winner","notification":value})
                 )
                 .is_err()

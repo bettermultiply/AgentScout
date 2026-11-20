@@ -143,6 +143,8 @@ pub enum OperationKind {
     StartAgent,
     StartCandidate,
     ResolvePending,
+    PrepareAcceptance,
+    CancelAcceptance,
     Promote,
     Discard,
     Cleanup,
@@ -360,6 +362,10 @@ pub struct SpeculativeTree {
     #[serde(default)]
     completed_work: BTreeMap<u64, [u8; 32]>,
     pending_work: BTreeMap<u64, ControlOperation>,
+    #[serde(default)]
+    pending_acceptance: Option<(String, Value)>,
+    #[serde(default)]
+    retained_source_environments: BTreeSet<String>,
     #[serde(skip)]
     policy_dependencies: BTreeMap<u64, Value>,
     capability_revision: u64,
@@ -443,6 +449,8 @@ impl SpeculativeTree {
             workspace_root: PathBuf::new(),
             completed_work: BTreeMap::new(),
             pending_work: BTreeMap::new(),
+            pending_acceptance: None,
+            retained_source_environments: BTreeSet::new(),
             policy_dependencies: BTreeMap::new(),
             capability_revision: 0,
             policy_chance_revisions: BTreeMap::new(),
@@ -479,7 +487,10 @@ impl SpeculativeTree {
     pub fn bind_execution(&mut self, policy: Value, runtime: Value, capabilities: Value) {
         self.policy_binding = Some(policy);
         self.runtime_binding = Some(runtime);
-        self.capability_revision = self.capability_revision.checked_add(1).expect("Capability revision exhausted");
+        self.capability_revision = self
+            .capability_revision
+            .checked_add(1)
+            .expect("Capability revision exhausted");
         self.capability_view = Some(capabilities);
     }
 
@@ -531,6 +542,8 @@ struct PendingCommand {
 
 fn operation_name(operation: CommandOperation) -> &'static str {
     match operation {
+        CommandOperation::PrepareAcceptance => "prepare_acceptance",
+        CommandOperation::CancelAcceptance => "cancel_acceptance",
         CommandOperation::Abort => "abort",
         CommandOperation::Promote => "promote",
         CommandOperation::ResolvePending => "resolve",

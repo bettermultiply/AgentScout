@@ -387,6 +387,29 @@ pub trait Backend: Send + Sync {
         self.branch(parent, child)
     }
 
+    /// Shared state needs no copy. Backends must explicitly declare this.
+    fn acceptance_state_is_shared(&self) -> bool {
+        false
+    }
+
+    /// Confirm completion of writers that can outlive an execution request.
+    fn drain_acceptance(&self, _source: &str) -> Result<(), BackendError> {
+        Err(BackendError::new(
+            "backend cannot confirm acceptance writer drain",
+        ))
+    }
+
+    /// Transfer isolated state after the target is paused and source writers drain.
+    fn accept_state(
+        &self,
+        _target: &BackendContext,
+        _source: &str,
+        _full: bool,
+        _part: Option<&crate::protocol::contract::PartSelection>,
+    ) -> Result<FilesystemResult, BackendError> {
+        Err(BackendError::new("backend does not support state transfer"))
+    }
+
     /// 把环境提升为权威环境。默认 no-op，供没有环境侧 promote 语义的 Runtime 继承。
     fn promote(&self, _environment_id: &str) -> Result<(), BackendError> {
         Ok(())
@@ -534,5 +557,4 @@ pub trait Backend: Send + Sync {
         previous()?;
         self.terminate_with_context(context)
     }
-
 }

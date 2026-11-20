@@ -53,9 +53,7 @@ impl SpeculativeTree {
             Some(ActionKind::ToolExecution) => {
                 // 权威侧同一工具 action 的真实到达时刻；若它晚于 Promote，
                 // 结算已经发出，时间为 null，不回填。
-                let finished = branch
-                    .parent_branch_id
-                    .as_ref()
+                let finished = self.chance_parent(branch).or(branch.parent_branch_id.as_deref())
                     .and_then(|parent| self.tool_finished_at_ms.get(parent))
                     .and_then(|actions| {
                         branch
@@ -75,7 +73,7 @@ impl SpeculativeTree {
             Some(ActionKind::ModelInference) => {
                 let operation = branch.execution_position.operation_id.as_deref();
                 let fast = self.fast_model_usage(branch, operation);
-                let authority = branch.parent_branch_id.as_ref().zip(operation).and_then(
+                let authority = self.chance_parent(branch).or(branch.parent_branch_id.as_deref()).zip(operation).and_then(
                     |(parent, operation)| {
                         self.model_usage
                             .get(parent)?

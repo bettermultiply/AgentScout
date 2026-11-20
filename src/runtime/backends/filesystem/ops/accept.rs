@@ -2,7 +2,222 @@
 
 use super::*;
 
+fn regular_file(node: &Node) -> Result<(), BackendError> {
+    if node.kind == NodeKind::File && !node.metacopy && !node.opaque
+        && node.redirect.is_none() && node.mode & 0o7000 == 0
+        && let Some(path) = &node.source
+        && fs::symlink_metadata(path).map_err(error)?.nlink() == 1
+    {
+        Ok(())
+    } else {
+        Err(BackendError::new("selective acceptance requires a plain regular file"))
+    }
+}
+
+fn same_file(left: Option<&Node>, right: &Node) -> Result<bool, BackendError> {
+    use std::io::{BufRead, BufReader};
+    let Some(left) = left else { return Ok(false) };
+    if left.kind != right.kind || left.mode != right.mode || left.size != right.size {
+        return Ok(false);
+    }
+    let mut left = BufReader::new(fs::File::open(left.source.as_ref().unwrap()).map_err(error)?);
+    let mut right = BufReader::new(fs::File::open(right.source.as_ref().unwrap()).map_err(error)?);
+    loop {
+        let a = left.fill_buf().map_err(error)?;
+        let b = right.fill_buf().map_err(error)?;
+        let count = a.len().min(b.len());
+        if count == 0 {
+            return Ok(a.is_empty() && b.is_empty());
+        }
+        if a[..count] != b[..count] {
+            return Ok(false);
+        }
+        left.consume(count);
+        right.consume(count);
+    }
+}
+
+fn selected_file_delta(
+    paths: &[String],
+    base_layers: &[PathBuf],
+    source: &MountUnit,
+    target: &MountUnit,
+) -> Result<(View, Vec<crate::protocol::contract::FilesystemConflict>), BackendError> {
+    let mut delta = View::new();
+    let mut conflicts = Vec::new();
+    for path in paths {
+        for parent in ancestors(path) {
+            for entry in [resolve_path_in_layers(base_layers, source, &parent)?,
+                resolve_path_in_environment(source, &parent)?,
+                resolve_path_in_environment(target, &parent)?] {
+                if !entry.is_some_and(|node| node.kind == NodeKind::Dir && !node.opaque && node.redirect.is_none()) {
+                    return Err(BackendError::new(format!("unsupported parent directory for {path}: {parent}")));
+                }
+            }
+        }
+        let base = resolve_path_in_layers(base_layers, source, path)?;
+        let ours = resolve_path_in_environment(target, path)?;
+        let theirs = resolve_path_in_environment(source, path)?.ok_or_else(|| {
+            BackendError::new(format!("selected source file missing: {path}"))
+        })?;
+        for node in base.iter().chain(ours.iter()).chain(std::iter::once(&theirs)) {
+            regular_file(node).map_err(|error| BackendError::new(format!("{path}: {error}")))?;
+        }
+        if same_file(ours.as_ref(), &theirs)? {
+            continue;
+        }
+        let target_matches_base = match &base {
+            Some(base) => same_file(ours.as_ref(), base)?,
+            None => ours.is_none(),
+        };
+        if !target_matches_base {
+            conflicts.push(crate::protocol::contract::FilesystemConflict {
+                path: path.clone(),
+                kind: "content".into(),
+                reason: "selected file differs from both fork base and candidate".into(),
+                ..Default::default()
+            });
+        } else {
+            delta.insert(path.clone(), theirs);
+        }
+    }
+    Ok((delta, conflicts))
+}
+
 impl FilesystemBackend {
+    pub(in crate::runtime::backends::filesystem) fn accept_environment_state(
+        &self,
+        target: &BackendContext,
+        source: &str,
+        full: bool,
+        part: Option<&crate::protocol::contract::PartSelection>,
+    ) -> Result<FilesystemResult, BackendError> {
+        use crate::protocol::contract::{Acceptance, PartSelection};
+        let source_environment = Self::resolve_environment(&*self.lock()?, source)?;
+        let base = source_environment
+            .base_snapshot_id
+            .as_deref()
+            .ok_or_else(|| BackendError::new("source has no fork base"))?;
+        let handle = self.process.process_handle(&target.environment_id);
+        if self.process.is_running(&target.environment_id)? && handle.is_none() {
+            return Err(BackendError::new("target mount namespace is unavailable"));
+        }
+        let merge = |scopes: &[PathScope]| {
+            self.accept(
+                base,
+                source,
+                &target.environment_id,
+                scopes,
+                handle.as_ref().map(|h| h.inner_pid),
+                handle.as_ref().map(|h| h.mount_namespace),
+            )
+        };
+        let selective = |files: &[String], preflight| {
+            self.accept_selection(
+                base,
+                source,
+                &target.environment_id,
+                &[],
+                handle.as_ref().map(|h| (h.inner_pid, h.mount_namespace)),
+                Some(files),
+                preflight,
+            )
+        };
+        if let Some(PartSelection::Results { results }) = part {
+            if !PartSelection::valid_results(results) {
+                return Err(BackendError::new("invalid part result dependencies"));
+            }
+            // Check every selection before replay, including a fallback from full.
+            for result in results.iter().filter(|result| !result.files.is_empty()) {
+                selective(&result.files, true)?;
+            }
+        }
+        let mut report = FilesystemResult::default();
+        if full {
+            match merge(&[]) {
+                Ok(mut result) if result.confirmation.published => {
+                    result.acceptance = Some(Acceptance::Full);
+                    return Ok(result);
+                }
+                Ok(result) => report = result,
+                Err(error) if part.is_some() && !error.is_partial() => {
+                    report
+                        .conflicts
+                        .push(crate::protocol::contract::FilesystemConflict {
+                            kind: "accept".into(),
+                            reason: error.to_string(),
+                            ..Default::default()
+                        });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let scopes = match part {
+            None => return Ok(report),
+            Some(PartSelection::Scopes(scopes)) => scopes,
+            Some(PartSelection::Results { results }) => {
+                let mut committed = Vec::new();
+                for result in results {
+                    if result.files.is_empty() {
+                        committed.push(result.id.clone());
+                        continue;
+                    }
+                    match selective(&result.files, false) {
+                        Ok(receipt) if receipt.confirmation.published => {
+                            report.confirmation.published = true;
+                            committed.push(result.id.clone());
+                        }
+                        Ok(receipt) => report.conflicts.extend(receipt.conflicts),
+                        Err(error) if !error.is_partial() => report.conflicts.push(
+                            crate::protocol::contract::FilesystemConflict {
+                                kind: "accept".into(),
+                                reason: format!("result {}: {error}", result.id),
+                                ..Default::default()
+                            },
+                        ),
+                        Err(error) => return Err(error),
+                    }
+                }
+                if !committed.is_empty() {
+                    report.acceptance = Some(Acceptance::PartResults { results: committed });
+                }
+                return Ok(report);
+            }
+        };
+        let mut committed = Vec::new();
+        for scope in scopes.iter().copied() {
+            if committed.contains(&scope) {
+                continue;
+            }
+            if source_environment
+                .scope_target(scope)
+                .and_then(|path| source_environment.mount_by_target(&path))
+                .is_none()
+            {
+                continue;
+            }
+            match merge(&[scope]) {
+                Ok(result) if result.confirmation.published => committed.push(scope),
+                Ok(result) => report.conflicts.extend(result.conflicts),
+                Err(error) if error.cleanup_failures.is_empty() => {
+                    report
+                        .conflicts
+                        .push(crate::protocol::contract::FilesystemConflict {
+                            kind: "accept".into(),
+                            reason: error.to_string(),
+                            ..Default::default()
+                        });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if scopes.is_empty() || !committed.is_empty() {
+            report.confirmation.published = !committed.is_empty();
+            report.acceptance = Some(Acceptance::Part { scopes: committed });
+        }
+        Ok(report)
+    }
+
     /// Three-way merge `source` into `target` using `base` as the common
     /// ancestor.  Data is staged outside the live upper and swapped only after
     /// the merge is fully materialized.
@@ -15,6 +230,24 @@ impl FilesystemBackend {
         target_mount_pid: Option<u32>,
         target_mount_namespace: Option<u64>,
     ) -> Result<FilesystemResult, BackendError> {
+        let mount = match (target_mount_pid, target_mount_namespace) {
+            (Some(pid), Some(namespace)) => Some((pid, namespace)),
+            (None, _) => None,
+            _ => return Err(BackendError::new("target environment has no recorded sandbox mount namespace")),
+        };
+        self.accept_selection(base, source, target, scope, mount, None, false)
+    }
+
+    fn accept_selection(
+        &self,
+        base: &str,
+        source: &str,
+        target: &str,
+        scope: &[PathScope],
+        target_mount: Option<(u32, u64)>,
+        files: Option<&[String]>,
+        preflight: bool,
+    ) -> Result<FilesystemResult, BackendError> {
         let scopes = normalize_scopes(scope)?;
         let target_environment = {
             let state = self.lock()?;
@@ -25,14 +258,8 @@ impl FilesystemBackend {
                 "target filesystem environment must be suspended before accept",
             ));
         }
-        let safe_root = match target_mount_pid {
-            Some(pid) => {
-                let expected = target_mount_namespace.ok_or_else(|| {
-                    BackendError::new(
-                        "target environment has no recorded sandbox mount namespace; \
-                         Processes must supply it from process_handle()",
-                    )
-                })?;
+        let safe_root = match target_mount {
+            Some((pid, expected)) => {
                 let actual = fs::metadata(format!("/proc/{pid}/ns/mnt"))
                     .map_err(error)?
                     .ino();
@@ -62,7 +289,25 @@ impl FilesystemBackend {
             let source = Self::resolve_environment(&state, source)?;
             (base, source)
         };
-        let mounts = source_environment.selected_mounts(&scopes)?;
+        let mut selected_paths = BTreeMap::<PathBuf, Vec<String>>::new();
+        let mounts = if let Some(files) = files {
+            for file in files {
+                let path = Path::new(file);
+                let source_mount = source_environment.mount_for_path(path);
+                let target_mount = target_environment.mount_for_path(path);
+                let mount = source_mount.filter(|source| {
+                    target_mount.is_some_and(|target| target.target == source.target)
+                }).ok_or_else(|| BackendError::new(format!("unmatched managed mount for {file}")))?;
+                let relative = path.strip_prefix(&mount.target).unwrap().to_str().unwrap();
+                if relative.is_empty() {
+                    return Err(BackendError::new(format!("cannot accept a mount point as a file: {file}")));
+                }
+                selected_paths.entry(mount.target.clone()).or_default().push(relative.into());
+            }
+            selected_paths.keys().map(|path| source_environment.mount_by_target(path).unwrap().clone()).collect()
+        } else {
+            source_environment.selected_mounts(&scopes)?
+        };
         let mut conflicts = Vec::new();
         let mut prepared = Vec::new();
         for mount in &mounts {
@@ -75,6 +320,13 @@ impl FilesystemBackend {
                         mount.target.display()
                     ))
                 })?;
+            let base_layers = Self::snapshot_mount_layers(&base_record, &source_environment, mount);
+            if let Some(paths) = selected_paths.get(&mount.target) {
+                let (delta, file_conflicts) = selected_file_delta(paths, &base_layers, mount, target_mount)?;
+                conflicts.extend(file_conflicts.into_iter().map(|conflict| prefix_conflict(&mount.target, conflict)));
+                prepared.push((mount.clone(), target_mount.clone(), delta, Vec::new(), Vec::new()));
+                continue;
+            }
             let base_layer = mount.layer_upper(&base_record.path);
             // Chain layout lists the base snapshot layer in the root lower
             // chain and its upper holds only this branch's changes, so the
@@ -93,7 +345,6 @@ impl FilesystemBackend {
                 // missing layer is an empty base view.
                 self.upper_delta_from_base(mount, &base_record.path)?
             };
-            let base_layers = Self::snapshot_mount_layers(&base_record, &source_environment, mount);
             conflicts.extend(
                 merge_delta_layers(
                     &delta,
@@ -130,7 +381,7 @@ impl FilesystemBackend {
                 source_maps,
             ));
         }
-        if !conflicts.is_empty() {
+        if preflight || !conflicts.is_empty() {
             let mut result = FilesystemResult::default();
             result.conflicts = conflicts;
             return Ok(result);
@@ -203,7 +454,13 @@ impl FilesystemBackend {
                 return Err(error);
             }
         }
-        journal.sync()?;
+        if let Err(mut error) = journal.sync() {
+            let (failures, _) = journal.rollback();
+            if !failures.is_empty() {
+                error.add_cleanup_failure("filesystem", failures.join(", "));
+            }
+            return Err(error);
+        }
         journal.cleanup();
 
         let mut result = FilesystemResult::default();

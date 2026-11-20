@@ -715,7 +715,9 @@ impl SpeculativeTree {
                 );
             }
             // A business result may already have consumed this command.
-            if !matches!(command, AgentCommand::StartCandidate { .. }) { return Ok(vec![]); }
+            if !matches!(command, AgentCommand::StartCandidate { .. }) {
+                return Ok(vec![]);
+            }
         }
         self.handle_branch_failed(branch, reason)
     }
@@ -813,6 +815,50 @@ impl SpeculativeTree {
 
     /// Keep the command/status dispatch visible; each transition body is a
     /// named method.
+    pub(in crate::control_plane) fn has_live_environment_dependents(&self, branch: &str) -> bool {
+        // A full acceptance retains the source Environment on the retired
+        // parent record while the winning session or its descendants use it.
+        if !self.retained_source_environments.contains(branch) {
+            return false;
+        }
+        let mut ancestors = vec![branch];
+        while let Some(parent) = ancestors.pop() {
+            for child in self
+                .branches
+                .values()
+                .filter(|child| child.parent_branch_id.as_deref() == Some(parent))
+            {
+                if child.status != BranchStatus::Cleaned
+                    || child.execution_state.runtime != RuntimeExecutionState::Cleaned
+                {
+                    return true;
+                }
+                ancestors.push(&child.branch_id);
+            }
+        }
+        false
+    }
+
+    pub(super) fn cancel_acceptance(
+        &mut self,
+        branch: &str,
+        reason: &str,
+    ) -> io::Result<Vec<AgentCommand>> {
+        let suspended = self.pending_acceptance.take().is_some_and(|(_, record)| record["suspended"] == true);
+        let authority_branch_id = self.chance_parent(self.branch(branch)?)
+            .ok_or_else(|| invalid_input("missing acceptance parent"))?.to_owned();
+        let mut commands =
+            self.discard_candidate_subtree(branch, DiscardedReason::Failed, reason, true)?;
+        if !self.stopping {
+            if suspended {
+                self.pending_acceptance = Some((branch.into(), serde_json::json!({"resume_parent": authority_branch_id})));
+            } else {
+                commands.push(self.make_cancel_acceptance(&authority_branch_id)?);
+            }
+        }
+        Ok(commands)
+    }
+
     fn apply_command_result(
         &mut self,
         branch_id: &str,
@@ -827,6 +873,118 @@ impl SpeculativeTree {
                     "Agent abort {status:?}: {}",
                     reason.unwrap_or("no reason reported")
                 )))
+            }
+            (CommandOperation::PrepareAcceptance, CommandStatus::Applied)
+                if branch_status == BranchStatus::Promoting
+                    && self.pending_acceptance.as_ref().is_some_and(|(id, record)| {
+                        id == branch_id && record["interrupted"] != true
+                    })
+                    && self.acceptance_target(self.branch(branch_id)?).is_some()
+                    && self.acceptance_progress_compatible(self.branch(branch_id)?) =>
+            {
+                if let Some((id, record)) = self.pending_acceptance.as_mut()
+                    && id == branch_id
+                {
+                    let field = if record["suspended"] == true { "prepared" } else { "parked" };
+                    record[field] = Value::Bool(true);
+                }
+                Ok(vec![])
+            }
+            (CommandOperation::PrepareAcceptance, status)
+                if branch_status == BranchStatus::Promoting =>
+            {
+                self.cancel_acceptance(
+                    branch_id,
+                    &format!(
+                        "Authority progress incompatible or Agent could not pause: {status:?}"
+                    ),
+                )
+            }
+            (CommandOperation::CancelAcceptance, CommandStatus::Applied) => Ok(vec![]),
+            (CommandOperation::CancelAcceptance, status) => Err(io::Error::other(format!(
+                "Agent acceptance cancellation {status:?}: {}",
+                reason.unwrap_or("no reason reported")
+            ))),
+            (CommandOperation::Promote, status)
+                if self
+                    .pending_acceptance
+                    .as_ref()
+                    .is_some_and(|(id, record)| {
+                        id == branch_id && record.get("outcome").is_some()
+                    }) =>
+            {
+                if status != CommandStatus::Applied {
+                    return Err(io::Error::other(
+                        "Agent could not apply committed Runtime acceptance",
+                    ));
+                }
+                let (_, record) = self.pending_acceptance.take().unwrap();
+                let old = self.chance_parent(self.branch(branch_id)?)
+                    .ok_or_else(|| invalid_input("missing acceptance parent"))?.to_owned();
+                let part = record["disposition"] == "Part";
+                let invalidated = self.authority_branch_id.as_deref() != Some(&old)
+                    && self.acceptance_target(self.branch(branch_id)?).is_none();
+                if !part {
+                    let target = self.branch_mut(&old)?.environment_id.take();
+                    let source = std::mem::replace(&mut self.branch_mut(branch_id)?.environment_id, target);
+                    self.branch_mut(&old)?.environment_id = source;
+                    self.retained_source_environments.insert(old.clone());
+                }
+                if invalidated {
+                    return self.discard_candidate_subtree(
+                        branch_id,
+                        DiscardedReason::AncestorInvalidated,
+                        "Speculative acceptance target was invalidated",
+                        true,
+                    );
+                }
+                if part {
+                    self.record_accepted_chance(branch_id, "Part acceptance applied")?;
+                    self.queue_settlement(branch_id, true)?;
+                    let mut commands = self.discard_candidate_subtree(
+                        branch_id,
+                        DiscardedReason::NotSelected,
+                        "Part acceptance applied",
+                        true,
+                    )?;
+                    let siblings: Vec<_> = self
+                        .pending_candidates()
+                        .into_iter()
+                        .filter(|id| {
+                            self.branches[id].chance_id == self.branches[branch_id].chance_id
+                        })
+                        .collect();
+                    for sibling in siblings {
+                        commands.extend(self.discard_candidate(
+                            &sibling,
+                            DiscardedReason::NotSelected,
+                            "Part acceptance selected another candidate",
+                        )?);
+                    }
+                    if !self.stopping {
+                        commands.push(self.make_cancel_acceptance(&old)?);
+                    }
+                    return Ok(commands);
+                }
+                let mut commands = if self.authority_branch_id.as_deref() == Some(&old) {
+                    self.apply_promote(branch_id)?
+                } else {
+                    let previous_status = serde_json::from_value(record["previous_status"].clone())
+                        .map_err(io::Error::other)?;
+                    self.apply_local_full_acceptance(branch_id, &old, previous_status)?
+                };
+                if self.branch(branch_id)?.execution_state.failure.is_some()
+                    && self.authority_branch_id.as_deref() != Some(branch_id)
+                {
+                    commands.extend(self.discard_candidate(
+                        branch_id,
+                        DiscardedReason::Failed,
+                        "Accepted speculative continuation failed",
+                    )?);
+                } else if !self.stopping {
+                    commands.push(self.make_cancel_acceptance(branch_id)?);
+                }
+                Ok(commands)
             }
             (CommandOperation::Promote, CommandStatus::Applied)
                 if branch_status == BranchStatus::Promoting =>
@@ -855,6 +1013,40 @@ impl SpeculativeTree {
         }
     }
 
+    fn apply_local_full_acceptance(
+        &mut self,
+        winner: &str,
+        parent: &str,
+        previous_status: BranchStatus,
+    ) -> io::Result<Vec<AgentCommand>> {
+        let parent_record = self.branch(parent)?.clone();
+        let outer_chance = parent_record.chance_id.ok_or_else(|| invalid_input("missing outer Chance"))?;
+        let inner_chance = self.branch(winner)?.chance_id.clone().ok_or_else(|| invalid_input("missing inner Chance"))?;
+        self.record_accepted_chance(winner, "Full acceptance applied within speculative parent")?;
+        self.queue_settlement(winner, true)?;
+
+        // Preserve the historical fork links: the parent record now owns the
+        // retained source Environment. The winner takes over the parent's
+        // unresolved Chance, while its descendants keep their current owners.
+        self.chance_mut(&inner_chance)?.branch_ids.retain(|id| id != winner);
+        self.chance_mut(&outer_chance)?.branch_ids.push(winner.to_owned());
+        let branch = self.branch_mut(winner)?;
+        branch.chance_id = Some(outer_chance);
+        branch.execution_position.operation_id = parent_record.execution_position.operation_id;
+        let status = if matches!(previous_status, BranchStatus::Blocked(_)) {
+            previous_status
+        } else if branch.execution_state.turn_active {
+            BranchStatus::Running
+        } else {
+            BranchStatus::Finished
+        };
+        if let Some(speculation) = self.speculations.remove(parent) {
+            self.speculations.insert(winner.to_owned(), speculation);
+        }
+        self.change_status(winner, status, "Full acceptance applied within speculative parent")?;
+        self.retire_acceptance_parent(winner, parent)
+    }
+
     fn apply_promote(&mut self, branch_id: &str) -> io::Result<Vec<AgentCommand>> {
         let old_authority = self
             .authority_branch_id
@@ -868,40 +1060,41 @@ impl SpeculativeTree {
         if !self.recovering && !self.branch(branch_id)?.execution_state.turn_active {
             self.task_finishing = true;
         }
-        if let Some(chance_id) = self.branch(branch_id)?.chance_id.clone()
-            && let Some(assumption) = self.own_assumption(self.branch(branch_id)?).cloned()
-        {
-            self.change_chance_stage(
-                &chance_id,
-                ChanceStage::Accepted(assumption.proposal_id),
-                "Promotion applied",
-            )?;
-        }
-        // A model failure that arrived while Promote was in flight is now a
-        // failure of the new authority, not a reason to discard the candidate.
-        self.change_status(
-            &old_authority,
-            BranchStatus::Discarding,
-            "Authority replaced",
-        )?;
-        let mut commands = vec![self.make_discard_command(&old_authority)?];
-        // Only the confirmed switch invalidates the old authority's other
-        // continuations.
+        self.record_accepted_chance(branch_id, "Promotion applied")?;
+        self.retire_acceptance_parent(branch_id, &old_authority)
+    }
+
+    fn retire_acceptance_parent(&mut self, winner: &str, parent: &str) -> io::Result<Vec<AgentCommand>> {
+        self.change_status(parent, BranchStatus::Discarding, "Parent continuation replaced")?;
+        let mut commands = vec![self.make_discard_command(parent)?];
         let obsolete: Vec<_> = self
             .pending_candidates()
             .into_iter()
-            .filter(|id| self.branches[id].parent_branch_id.as_deref() == Some(&old_authority))
+            .filter(|id| id != winner && self.chance_parent(&self.branches[id]) == Some(parent))
             .collect();
         for id in obsolete {
             if self.pending_candidates().contains(&id) {
                 commands.extend(self.discard_candidate(
                     &id,
                     DiscardedReason::AncestorInvalidated,
-                    "Sibling authority promotion confirmed",
+                    "Parent continuation replaced",
                 )?);
             }
         }
         Ok(commands)
+    }
+
+    fn record_accepted_chance(&mut self, branch_id: &str, reason: &str) -> io::Result<()> {
+        if let Some(chance_id) = self.branch(branch_id)?.chance_id.clone()
+            && let Some(assumption) = self.own_assumption(self.branch(branch_id)?).cloned()
+        {
+            self.change_chance_stage(
+                &chance_id,
+                ChanceStage::Accepted(assumption.proposal_id),
+                reason,
+            )?;
+        }
+        Ok(())
     }
 
     fn apply_promote_failure(

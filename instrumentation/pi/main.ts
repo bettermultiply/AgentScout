@@ -142,6 +142,25 @@ let recoveryPaused=false;
 let pauseRequested=false;
 const parkedModels=new Set();
 const pauseReleases=new Set<()=>void>();
+const acceptancePauses = new Map();
+const acceptanceInputs = new Map();
+function releaseAcceptance(branch) {
+    const pause = acceptancePauses.get(branch);
+    acceptancePauses.delete(branch);
+    pause?.resolve();
+}
+async function acceptanceBoundary(branch, signal) {
+    while (acceptancePauses.has(branch)) {
+        const pause = acceptancePauses.get(branch);
+        await new Promise<void>((resolve, reject) => {
+            const abort = () => reject(Error('Acceptance interrupted'));
+            signal?.addEventListener('abort', abort, {once:true});
+            pause.promise.then(resolve, reject).finally(() => signal?.removeEventListener('abort', abort));
+            if (signal?.aborted) abort();
+        });
+    }
+    if (signal?.aborted || cancelled.has(branch) || closing) throw Error('Branch execution interrupted');
+}
 async function pauseBoundary(signal){
     if(!pauseRequested)return;
     await new Promise<void>((resolve,reject)=>{
@@ -230,6 +249,9 @@ async function stopSession(branch) {
     if(session)await notifications.drain(session);
     syncTranscript(branch);
     session?.dispose();sessions.delete(branch);modelActions.delete(branch);
+    releaseAcceptance(branch);
+    acceptanceInputs.delete(branch);
+    ascProxy.unbind(branch);
     tree.stop(branch);tree.settle();
 }
 function releaseCandidateWaiters(branch) {
@@ -337,8 +359,15 @@ async function finishActions(branch,status) {
 }
 function tools(branch) {
     const detect=bytes=>require(resolve(root,'packages/coding-agent/src/utils/mime.ts')).detectSupportedImageMimeType(bytes);
-    const builtins=environmentTools(ascProxy,branch,detect,taskId);
+    const execution = {
+        operation: async (...args) => {
+            await acceptanceBoundary(branch, args[5]);
+            return ascProxy.operation(...args);
+        },
+    };
+    const builtins=environmentTools(execution,branch,detect,taskId);
     return [...builtins,...runtimeTools.map(spec=>({...spec,label:spec.name,parameters:Type.Unsafe(spec.parameters),execute:async(operation,args,signal,onUpdate)=>{
+        await acceptanceBoundary(branch, signal);
         const value=await ascProxy.execute(branch,operation,spec.name,args,{task_id:taskId,tool_call_id:operation},signal,onUpdate);
         executionResults.set(key(branch,operation),value);
         return value.result?.content?value.result:{content:[{type:'text',text:text(value.result)}],details:undefined};
@@ -352,6 +381,7 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     parkedModels.add(branch);
     await pauseBoundary(signal);
     await modelRestores.get(branch);
+    await acceptanceBoundary(branch, signal);
     syncTranscript(branch);
     // Model inference does not pass the tool effect gate; admission and extent
     // remain owned by the generic access layer.
@@ -386,6 +416,13 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     modelHolds.delete(key(branch,actionId));
     if(closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
     await pauseBoundary(signal);
+    await acceptanceBoundary(branch, signal);
+    for (const input of acceptanceInputs.get(branch) ?? []) {
+        if (!context.messages.some(message => message.role === 'user' && message.content === input)) {
+            context.messages.push({role:'user', content:input, timestamp:Date.now()});
+        }
+    }
+    acceptanceInputs.delete(branch);
     parkedModels.delete(branch);
     const startedAt=Date.now();
     const queue=modelActions.get(branch)??[];
@@ -422,6 +459,7 @@ function install(session,branch) {
         pendingHooks.set(hookKey,{branch,toolCall:structuredClone(context.toolCall),args:structuredClone(context.args),assistantMessage:structuredClone(context.assistantMessage)});
         try {
         await pauseBoundary(signal);
+        await acceptanceBoundary(branch, signal);
         const previous=await before?.(context,signal);
         if(previous?.block||signal?.aborted){pendingHooks.delete(key(branch,context.toolCall.id));return previous;}
         let saved, checkpoint;
@@ -448,7 +486,7 @@ function install(session,branch) {
             arguments:context.args,
             op:{kind:context.toolCall.name,name:context.toolCall.name,arguments:context.args,authority:branch===authority,has_predictor:await access.hasPredictor(branch)},
             contractContext:{arguments:context.args,runtime_capabilities:runtimeTools,isolated:!runtimeTools.some(t=>t.name===context.toolCall.name)},
-            admit:()=>branch===authority,
+            admit:()=>branch===authority || !runtimeTools.some(tool => tool.name === context.toolCall.name),
             admissionFacts:()=>({checkpoint:prepareCheckpoint()}),
             admitted:suspendedHooks.get(hookKey)?.admitted??false,
             signal,
@@ -462,6 +500,7 @@ function install(session,branch) {
         toolHolds.delete(hookKey);
         if(signal?.aborted)throw Error('Tool cancelled');
         await pauseBoundary(signal);
+        await acceptanceBoundary(branch, signal);
         const toolCheckpoint=prepareCheckpoint();
         const hook=pendingHooks.get(hookKey);if(hook)hook.started=true;
         await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
@@ -540,7 +579,7 @@ async function handle(command) {
     const branch=command.branch_id;
     // Hold bookkeeping (local Policy, effect/pause/extent gates) belongs to the
     // generic access layer; each product only connects its own execution points.
-    if(command.command!=='start_candidate')await access.control(command);
+    if(!['start_candidate','promote'].includes(command.command))await access.control(command);
     switch(command.command){
         case 'model': {
             try {
@@ -580,7 +619,7 @@ async function handle(command) {
                     snapshotResources:snapshotResources(snapshot.sources),
                     executionConfig:{model:model??null,modelPattern:modelPattern??null,thinkingLevel,runtimeTools},
                     additionalModels:additionalModels??null,
-                    access:access.snapshot(),generations:[...generations],results:[...results],
+                    access:access.snapshot(),generations:[...generations],results:[...results],acceptanceInputs:[...acceptanceInputs],
                     cancelled:[...cancelled],reportedEntries:[...reportedEntries],commands:commandRecords,
                     commandPrefix,commandAhead:[...commandAhead],
                     suspendedHooks:[...suspendedHooks],candidateSetups:[...candidateSetups],
@@ -626,7 +665,11 @@ async function handle(command) {
                     const [owner,operation]=JSON.parse(id),source=sources.get(checkpoint.manager);
                     if(!source||!record.tree.branches.some(([branch])=>branch===owner))throw Error('Recovery checkpoint owner missing');
                     const entry=source.entries.find(entry=>entry.id===checkpoint.treeTail);
-                    if(entry?.type!=='message'||JSON.stringify(entry.message)!==JSON.stringify(checkpoint.saved.at(-1))||!entry.message.content?.some(part=>part.type==='toolCall'&&part.id===operation))throw Error('Recovery checkpoint context mismatch');
+                    const exact=entry?.type==='message'&&JSON.stringify(entry.message)===JSON.stringify(checkpoint.saved.at(-1));
+                    const boundOperation=checkpoint.model
+                        ? checkpoint.checkpoint?.opaqueId===`${owner}:${operation}:${checkpoint.saved.length}`
+                        : entry?.message?.content?.some(part=>part.type==='toolCall'&&part.id===operation);
+                    if(!exact||!boundOperation)throw Error('Recovery checkpoint context mismatch');
                 }
                 const restored=SessionTree.restore(record.tree,SessionManager,sessionFile);
                 const managers=restored.recoveryManagers;
@@ -635,6 +678,7 @@ async function handle(command) {
                 access.restore(record.access);
                 for(const [id,value] of record.generations)generations.set(id,value);
                 for(const [id,value] of record.results)results.set(id,value);
+                for(const [id,inputs] of record.acceptanceInputs??[])acceptanceInputs.set(id,inputs);
                 for(const value of record.cancelled)cancelled.add(value);
                 for(const value of record.reportedEntries)reportedEntries.add(value);
                 commandPrefix=record.commandPrefix??0;
@@ -820,10 +864,59 @@ async function handle(command) {
             const id=key(branch,command.operation_id),waiter=waiters.get(id);if(waiter){waiters.delete(id);waiter(command.outcome)}else results.set(id,command.outcome);
             return;
         }
-        case 'promote':
+        case 'prepare_acceptance': {
+            const parent = command.authority_branch_id;
+            if (parent === branch || [parent, branch].some(id => cancelled.has(id) || !sessions.has(id))) {
+                throw Error('Acceptance sessions unavailable');
+            }
+            if (!command.target_suspended) {
+                if ([parent, branch].some(id => acceptancePauses.has(id))) throw Error('Acceptance already pending');
+                for (const id of [parent, branch]) acceptancePauses.set(id, Promise.withResolvers());
+                return;
+            }
+            if ([parent, branch].some(id => !acceptancePauses.has(id))) throw Error('Acceptance pause missing');
+            // The control plane has confirmed the target Environment is suspended.
+            // A parked candidate turn can contain independent descendants.
+            // Only an already-started inference owned by this session drains here.
+            while ([...activeActions.values()].some(action => action.branch_id === branch && action.action_kind === 'model_inference')) {
+                if (cancelled.has(branch) || cancelled.has(parent) || closing || !acceptancePauses.has(parent)) throw Error('Acceptance interrupted');
+                await new Promise(resolve => setTimeout(resolve, 5));
+            }
+            return;
+        }
+        case 'cancel_acceptance':
+            if (branch === authority && tree.accepted?.has(branch)) {
+                await access.control({command:'promote',branch_id:branch});
+            }
+            releaseAcceptance(branch);
+            return;
+        case 'promote': {
             if(cancelled.has(branch)||!sessions.has(branch))throw Error('Branch unavailable');
-            tree.accepted??=new Set();tree.accepted.add(branch);
-            authority=branch;tree.promote(branch);tree.settle();
+            const parent = command.parent_branch_id ?? authority;
+            if (command.part) {
+                if (!sessions.has(parent) || !acceptancePauses.has(parent)) throw Error('Target acceptance pause missing');
+                if (command.notification) {
+                    const inputs = acceptanceInputs.get(parent) ?? [];
+                    acceptanceInputs.set(parent, [...inputs, command.notification]);
+                }
+                return;
+            }
+            if (command.execution_access) {
+                if (!acceptancePauses.has(branch) || !acceptancePauses.has(parent)) throw Error('Full acceptance pause missing');
+                if (environments.get(parent) !== command.execution_access.environment_id) throw Error('Full acceptance target mismatch');
+                ascProxy.unbind(parent);
+                environments.delete(parent);
+                ascProxy.bind(branch, command.execution_access);
+                environments.set(branch, command.execution_access.environment_id);
+                const inputs = acceptanceInputs.get(parent);
+                if (inputs?.length) acceptanceInputs.set(branch, [...inputs, ...(acceptanceInputs.get(branch) ?? [])]);
+                acceptanceInputs.delete(parent);
+            } else {
+                await access.control(command);
+            }
+            tree.accept(branch, parent, parent === authority);
+            if (parent === authority) authority = branch;
+            tree.settle();
             if(command.notification!==undefined){
                 try {
                     await notifications.accept(sessions.get(branch),command);
@@ -837,6 +930,7 @@ async function handle(command) {
                 }
             }
             return;
+        }
         case 'ui_prompt_answer':
             interaction.answer(branch,command.prompt_id,command.answer,command.cancelled,command.reason);return;
         case 'get_commands': {
@@ -871,11 +965,11 @@ async function handle(command) {
     }
 }
 async function dispatch(command){
-    const operation=['abort','promote','resolve_pending','discard','cleanup'].includes(command.command)?command.command:undefined;
+    const operation=['abort','prepare_acceptance','cancel_acceptance','promote','resolve_pending','discard','cleanup'].includes(command.command)?command.command:undefined;
     let reason;
     const acknowledgement=status=>({message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status,generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{})});
     try{
-        if(saving&&!['abort','save','suspend_recovery','cancel_save','resolve_pending','promote','discard','cleanup','start_candidate'].includes(command.command))throw Error('Save in progress; command not applied');
+        if(saving&&!['abort','save','suspend_recovery','cancel_save','cancel_acceptance','resolve_pending','promote','discard','cleanup','start_candidate'].includes(command.command))throw Error('Save in progress; command not applied');
         const generation=generations.get(command.branch_id);
         if(generation!==undefined&&command.generation!==undefined&&generation!==command.generation)throw Error('Stale command generation');
         if(command.generation!==undefined)generations.set(command.branch_id,command.generation);
@@ -925,7 +1019,7 @@ try{
             // A candidate may wait for sibling tool results. It must not hold
             // up resolve_pending / cleanup on the transport's command queue.
             // Save must interrupt immediately even if setup is awaiting a tool.
-            const result=old?.result??(['save','suspend_recovery','ui_prompt_answer'].includes(command.command)
+            const result=old?.result??(['save','suspend_recovery','ui_prompt_answer','prepare_acceptance'].includes(command.command)
                 ?dispatch(command):command.command==='start_candidate'
                 ?commandQueue.then(()=>dispatch(command))
                 :(commandQueue=commandQueue.then(()=>dispatch(command))));

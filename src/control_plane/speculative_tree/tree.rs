@@ -180,7 +180,8 @@ impl SpeculativeTree {
             && self.branches.values().all(|branch| {
                 branch.role == BranchRole::Authority
                     || (branch.status == BranchStatus::Cleaned
-                        && branch.execution_state.runtime == RuntimeExecutionState::Cleaned)
+                        && (branch.execution_state.runtime == RuntimeExecutionState::Cleaned
+                            || self.has_live_environment_dependents(&branch.branch_id)))
             })
     }
     pub fn drain_observations(
@@ -432,8 +433,13 @@ impl SpeculativeTree {
     }
 
     pub(super) fn branch_mut(&mut self, branch_id: &str) -> io::Result<&mut BranchRecord> {
-        let revision = self.policy_record_revisions.entry(branch_id.to_owned()).or_default();
-        *revision = revision.checked_add(1).expect("Branch record revision exhausted");
+        let revision = self
+            .policy_record_revisions
+            .entry(branch_id.to_owned())
+            .or_default();
+        *revision = revision
+            .checked_add(1)
+            .expect("Branch record revision exhausted");
         self.branches
             .get_mut(branch_id)
             .ok_or_else(|| invalid_input("branch does not exist"))
@@ -471,6 +477,8 @@ impl SpeculativeTree {
             },
         );
         let kind = match operation {
+            CommandOperation::PrepareAcceptance => OperationKind::PrepareAcceptance,
+            CommandOperation::CancelAcceptance => OperationKind::CancelAcceptance,
             CommandOperation::Abort => OperationKind::Abort,
             CommandOperation::Promote => OperationKind::Promote,
             CommandOperation::Discard => OperationKind::Discard,
@@ -491,6 +499,44 @@ impl SpeculativeTree {
         })
     }
 
+    pub(super) fn make_cancel_acceptance(
+        &mut self,
+        authority_branch_id: &str,
+    ) -> io::Result<AgentCommand> {
+        let generation = self.branch(authority_branch_id)?.generation;
+        let command_id = self.register(
+            authority_branch_id,
+            CommandOperation::CancelAcceptance,
+            None,
+            generation,
+        )?;
+        Ok(AgentCommand::CancelAcceptance {
+            branch_id: authority_branch_id.into(),
+            command_id,
+            generation,
+        })
+    }
+
+    pub(super) fn make_prepare_acceptance(&mut self, branch_id: &str, target_suspended: bool) -> io::Result<AgentCommand> {
+        let generation = self.branch(branch_id)?.generation;
+        let authority_branch_id = self.acceptance_target(self.branch(branch_id)?)
+            .ok_or_else(|| invalid_input("acceptance target is no longer eligible"))?
+            .to_owned();
+        let command_id = self.register(
+            branch_id,
+            CommandOperation::PrepareAcceptance,
+            None,
+            generation,
+        )?;
+        Ok(AgentCommand::PrepareAcceptance {
+            branch_id: branch_id.into(),
+            authority_branch_id,
+            target_suspended,
+            command_id,
+            generation,
+        })
+    }
+
     pub(super) fn make_promote_command(
         &mut self,
         branch_id: &str,
@@ -501,6 +547,9 @@ impl SpeculativeTree {
         Ok(AgentCommand::Promote {
             branch_id: branch_id.to_string(),
             notification,
+            parent_branch_id: None,
+            execution_access: None,
+            part: false,
             command_id,
             generation,
         })

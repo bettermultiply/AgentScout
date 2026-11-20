@@ -8,7 +8,7 @@ Instrumentation 上报通用 action 生命周期及 Agent/Branch 元事件，控
 
 用户端呈现稳定的 AScoutAgent 视图，与具体 Agent 执行实体分离。control plane 确认合法 Promote 后，接入实现更新该视图对应的权威执行及输入、输出和中断路由；不通过切换或重建用户会话完成接替。用户端不新增一级架构侧面，也不拥有 Branch 接受裁决权。
 
-候选承接后续执行时继续使用候选环境；Instrumentation 与 Runtime 保持执行、环境及必要状态交接的一致性，嵌套接受仍受祖先约束。Agent 常用 Ctrl-C 或退出终止任务；Ctrl-C 保留程序和 session，结束候选并等待相关写入及物化处理后，在同一对话中接下一轮。AScout 的独立暂停接口保留树、候选和环境；具体边界见 [Agent 接入设计](design/agent-integration.md) §5。
+Full 接受保留候选 session，后续执行使用 AuB 合并后的环境。Part 接受保留 AuB session，并交付实际提交的结果。嵌套接受仍受祖先约束。Agent 常用 Ctrl-C 或退出终止任务；Ctrl-C 保留程序和 session，结束候选并等待相关写入及物化处理后，在同一对话中接下一轮。AScout 的独立暂停接口保留树、候选和环境；具体边界见 [Agent 接入设计](design/agent-integration.md) §5。
 
 工具与模型推理均可由 Policy 选择 eager（权威调用与候选并行）或 speculative-first（权威调用在执行前等待，独立候选先行）。候选被接受后 Promote 其 session 并取消旧 Parent，不向旧调用注入候选结果；全部候选不可接受时原调用只放行一次。Parent 已放行并取得真实结果后可以立即继续，不以候选验证结束阻塞结果交付。工具准入与结果兼容性由 Policy 结合接入能力判断，operation 归属与结果配对由 Mechanism 保证。
 

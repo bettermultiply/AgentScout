@@ -2,6 +2,7 @@
 //! 不拥有 Tree 或第二份投机状态，可以服务多棵树。
 
 use super::*;
+use crate::control_plane::gateway::agent::protocol::{ActionKind, ActionStatus};
 
 impl SpeculationCoordinator {
     pub fn perform(
@@ -93,9 +94,18 @@ impl SpeculationCoordinator {
                         .cloned()
                         .unwrap_or(Value::Null),
                 )
-                .map(|(compatible, verdict, notification, validated_at_ms)| {
-                    ControlResult::Disposition(compatible, verdict, notification, validated_at_ms)
-                })
+                .map(
+                    |(compatible, verdict, notification, validated_at_ms, full, part)| {
+                        ControlResult::AcceptanceDisposition(
+                            compatible,
+                            verdict,
+                            notification,
+                            validated_at_ms,
+                            full,
+                            part,
+                        )
+                    },
+                )
                 .map_err(|error| error.to_string())
             }
             ControlOperation::Establish(command) => {
@@ -145,6 +155,107 @@ impl SpeculationCoordinator {
                 } else {
                     return Err("Runtime cannot create a Candidate Environment".into());
                 }
+            }
+            ControlOperation::SuspendAcceptance(candidate) => {
+                let branch = tree.branch(candidate).map_err(|error| error.to_string())?;
+                let parent = tree.acceptance_target(branch).ok_or("acceptance target is no longer eligible")?;
+                call(environment_for(parent)?, Operation::SuspendEnvironment)
+                    .map(|_| ControlResult::Completed)
+            }
+            ControlOperation::ResumeAcceptance(parent) => {
+                call(environment_for(parent)?, Operation::ResumeEnvironment)
+                    .map(|_| ControlResult::Completed)
+            }
+            ControlOperation::Promote(candidate, record) if record.get("full").is_some() => {
+                use crate::protocol::contract::{Acceptance, PartResult, PartSelection, ResultStatus};
+                let branch = tree.branch(candidate).map_err(|error| error.to_string())?;
+                let parent = tree.chance_parent(branch).ok_or("missing acceptance parent")?;
+                let target = environment_for(parent)?;
+                let transfer = || {
+                if tree.acceptance_target(branch) != Some(parent)
+                    || !tree.acceptance_progress_compatible(branch)
+                {
+                    return Ok(ControlResult::Acceptance(None, None, Some("acceptance target is no longer eligible".into())));
+                }
+                let full = record["full"] == true;
+                let part = if let Some(results) = record["part"]["results"].as_array() {
+                    let results = results.iter().map(|result| serde_json::from_value::<PartResult>(json!({
+                        "id": result["id"], "files": result["files"],
+                    }))).collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+                    if !PartSelection::valid_results(&results) {
+                        return Err("invalid part result dependencies".into());
+                    }
+                    Some(PartSelection::Results { results })
+                } else {
+                    record["part"].get("scopes").cloned()
+                        .map(serde_json::from_value).transpose()
+                        .map_err(|error| error.to_string())?.map(PartSelection::Scopes)
+                };
+                let result = runtime
+                    .call(
+                        target,
+                        Operation::AcceptEnvironment {
+                            source_environment_id: environment()?.into(),
+                            full,
+                            part: part.clone(),
+                            target_suspended: true,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                match result.status {
+                    ResultStatus::Completed if result.environment_id == target => {
+                        let filesystem =
+                            result.filesystem.ok_or("Runtime acceptance data missing")?;
+                        match &filesystem.acceptance {
+                            Some(Acceptance::Full) if !full => {
+                                return Err("Runtime returned unapproved full acceptance".into());
+                            }
+                            Some(Acceptance::Part { scopes })
+                                if !matches!(&part, Some(PartSelection::Scopes(approved))
+                                    if scopes.iter().all(|scope| approved.contains(scope))) =>
+                            {
+                                return Err("Runtime returned unapproved part acceptance".into());
+                            }
+                            Some(Acceptance::PartResults { results })
+                                if !matches!(&part, Some(PartSelection::Results { results: approved })
+                                    if !results.is_empty()
+                                        && results.iter().collect::<std::collections::BTreeSet<_>>().len() == results.len()
+                                        && results.iter().all(|id| approved.iter().any(|result| &result.id == id))) =>
+                            {
+                                return Err("Runtime returned unapproved part results".into());
+                            }
+                            _ => {}
+                        }
+                        if result
+                            .execution_access
+                            .as_ref()
+                            .is_some_and(|access| access.environment_id != target)
+                        {
+                            return Err("Runtime acceptance execution access has the wrong Environment identity".into());
+                        }
+                        let reason = (!filesystem.conflicts.is_empty())
+                            .then(|| format!("Filesystem conflicts: {:?}", filesystem.conflicts));
+                        Ok(ControlResult::Acceptance(
+                            filesystem.acceptance,
+                            result.execution_access,
+                            reason,
+                        ))
+                    }
+                    ResultStatus::Failed
+                    | ResultStatus::Unsupported
+                    | ResultStatus::NotApplicable => {
+                        Ok(ControlResult::Acceptance(None, None, result.reason))
+                    }
+                    _ => Err(format!(
+                        "Runtime acceptance outcome is uncertain: {:?}",
+                        result.reason
+                    )),
+                }
+                };
+                let result = transfer();
+                call(target, Operation::ResumeEnvironment)
+                    .map_err(|error| format!("Could not resume acceptance target: {error}"))?;
+                result
             }
             ControlOperation::Promote(_, _) => call(environment()?, Operation::PromoteEnvironment)
                 .map(|_| ControlResult::Completed),
@@ -278,10 +389,7 @@ impl SpeculationCoordinator {
         engine: &PolicyEngine,
         tool: &ToolPending,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        let authority = tree
-            .authority_branch_id
-            .as_ref()
-            .and_then(|id| tree.branches.get(id));
+        let authority = tree.branches.get(&tool.branch_id);
         let candidates: Vec<_> = tree
             .pending_candidates()
             .iter()
@@ -348,7 +456,18 @@ impl SpeculationCoordinator {
         operation_id: &str,
         evidence: &Value,
         outcome: &Value,
-    ) -> Result<(bool, String, Option<String>, Option<u64>), Box<dyn std::error::Error>> {
+    ) -> Result<
+        (
+            bool,
+            String,
+            Option<String>,
+            Option<u64>,
+            bool,
+            Option<Value>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let parent = tree.chance_parent(&tree.branches[candidate_id]);
         let result = engine.evaluate(
             policy,
             Decision::Match,
@@ -357,7 +476,7 @@ impl SpeculationCoordinator {
                 "match_context": {
                     "operation_id": operation_id,
                     "proposal_pending": proposal.payload.is_null(),
-                    "authority": match_facts(tree, tree.authority_branch_id.as_deref(), operation_id, Some(outcome)),
+                    "authority": match_facts(tree, parent, operation_id, Some(outcome)),
                     "candidate": match_facts(tree, Some(candidate_id), operation_id, Some(&proposal.payload)),
                 }
             }),
@@ -370,6 +489,33 @@ impl SpeculationCoordinator {
             .and_then(|duration| u64::try_from(duration.as_millis()).ok());
         let verdict = result["verdict"].as_str().unwrap_or("error").to_string();
         let compatible = verdict == "compatible";
+        let candidate_execution = tree
+            .transcripts
+            .get(candidate_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let parent_execution = parent
+            .and_then(|parent| tree.transcripts.get(parent))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let inherited = candidate_execution
+            .iter()
+            .zip(parent_execution)
+            .take_while(|(candidate, parent)| candidate == parent)
+            .count();
+        let mut candidate_results: Vec<_> = tree.action_facts.get(candidate_id).into_iter()
+            .flat_map(|facts| facts.values())
+            .filter(|fact| fact.status == ActionStatus::Succeeded
+                && fact.action_kind == ActionKind::ToolExecution)
+            .map(|fact| json!({"action_id": fact.action_id, "result": fact.result, "evidence": fact.evidence}))
+            .collect();
+        let candidate_execution = &candidate_execution[inherited..];
+        candidate_results.extend(
+            candidate_execution
+                .iter()
+                .filter(|entry| entry["role"] == "assistant" && entry["stopReason"] == "stop")
+                .map(|entry| json!({"result": entry["content"]})),
+        );
         let disposition = engine.evaluate(
             policy,
             Decision::Dispose,
@@ -378,7 +524,10 @@ impl SpeculationCoordinator {
                 "resolution": if compatible {"accepted"} else if verdict == "indeterminate" {"indeterminate"} else if verdict == "error" {"error"} else {"rejected"},
                 "context": {
                     "match": result,
-                    "authority_outcome": outcome
+                    "authority_outcome": outcome,
+                    "candidate_proposal": proposal.payload,
+                    "candidate_execution": candidate_execution,
+                    "candidate_results": candidate_results
                 }
             }),
         )?;
@@ -388,14 +537,16 @@ impl SpeculationCoordinator {
             .and_then(|action| action.get("notification"))
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let promote = disposition["actions"]
+        let action = disposition["actions"]
             .as_array()
-            .is_some_and(|actions| actions.iter().any(|action| action["intent"] == "Promote"));
+            .and_then(|actions| actions.iter().find(|action| action["intent"] == "Promote"));
         Ok((
-            compatible && promote,
+            compatible && action.is_some(),
             verdict,
             notification,
             validated_at_ms,
+            action.is_some_and(|action| action["full"] != false),
+            action.and_then(|action| action.get("part")).cloned(),
         ))
     }
 }

@@ -166,7 +166,7 @@ def extent(data, *, policy_config, capabilities):
 
 当前是最小接线：extent 在 Pi 接入的工具与模型执行点按 action 计数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolve_pending` 或取消释放；effect 对 candidate 工具效果求值，隔离能力与 Policy 同时允许时执行，否则 `block`/`deny`，模型推理不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。
 
-嵌套 Chance 已按 Chance 语义接通：权威等待点只要求父 Branch 仍存活（当前权威或候选），父 Branch 不是全局权威不再使 Chance 失效，候选 Branch 上再次 `admit` 的 Chance 与根 Branch 上的 Chance 一样走 Pending、Running、Resolving、Accepted/Discarded。嵌套候选 Branch 的 `AssumptionSet` 携带祖先未确认的 Proposal；祖先 Chance 未 Accepted 前它没有提交资格，match 成功也停留到可提交时再按同一 Promote 流程处置。父 Branch 进入 Discarding/Discarded 时，其上未收敛的 Chance 以 `Discarded(AncestorInvalidated)` 收敛，这是嵌套失效的唯一传播路径；候选 Branch 的外部效果仍受 effect 闸门约束。尚未覆盖的是 Runtime 侧的嵌套执行承载和候选状态重新挂载，当前只保证 control plane 状态、提交资格与失效传播。
+嵌套 Chance 使用它所属父 Branch 的真实执行和等待点来验证。内层 Full 可把候选状态合入仍处于投机的父环境，保留胜者 session 及其后代，并让胜者承接原父 Branch 的外层 Chance。Part 只把回执确认的结果交给原父 session，并抛弃内层候选及后代。两者都保留祖先未决 Proposal，且祖先否定仍会丢弃相应的投机延续。文件级结果依赖、暂停顺序和后端限制见 [Runtime 生命周期](runtime-lifecycle.md#full-与-part-接受)。
 
 ## 实现差距
 

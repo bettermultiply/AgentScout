@@ -100,11 +100,7 @@ pub fn validate_bindings(
     if tree.local_policy_digest() != Some(policy_digest) {
         return Err(io::Error::other("Recovery Policy changed"));
     }
-    if tree
-        .runtime_binding()
-        .and_then(|v| v.get("config_path"))
-        != Some(&json!(config_path))
-    {
+    if tree.runtime_binding().and_then(|v| v.get("config_path")) != Some(&json!(config_path)) {
         return Err(io::Error::other("Recovery Runtime binding changed"));
     }
     let config_digest = digest(config_path)?;
@@ -447,7 +443,8 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
         if matches!(
             branch.status,
             BranchStatus::Cleaned | BranchStatus::Discarded
-        ) {
+        ) && !tree.has_live_environment_dependents(&branch.branch_id)
+        {
             continue;
         }
         let Some(env) = branch.environment_id.as_deref() else {

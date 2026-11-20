@@ -234,15 +234,15 @@ MatchResult = {
 dispose(branch, resolution, context) -> DispositionPlan
 ```
 
-`context.match` 提供比较结果，`context.authority_outcome` 提供对应 Chance／operation 的真实返回值，不以 verifier evidence 替代。仅 Promote action 可携带可选 `notification` 非空白字符串，正文由 Policy 构造；缺省不追加记录。交付与持久化边界见 [Agent 接入设计](agent-integration.md) §3，不新增 Decision。
+`context.match` 提供比较结果，`context.authority_outcome` 提供对应 Chance／operation 的真实返回值。Part 可从 Candidate 的受控可见执行记录发现结果，也可使用只列明确结果的输入。Policy 可以同时使用两种输入，二者都须判断结果依据、依赖状态及 AuB 进展是否相容，然后在 Runtime 移交前接受。Full 的可选通知由 Policy 构造。Part 的反馈以实际提交的结果和状态为准。
 
 `resolution` 表示为什么进入处置，而不是具体怎么处置：
 `resolution =[accepted, rejected, indeterminate, error, cancelled, preempted, extent_reached, failed]`
 
 `DispositionPlan` 可以包含一个或多个处置意图：
 
-- **Reuse**：已完成的候选结果通过验证后直接复用；
-- **Promote**：将仍在运行的候选 Branch 转为权威身份并继续执行；
+- **Reuse**：采用候选已验证结果的处置意图。接入的 part 接受保留 AuB 的执行延续。
+- **Promote**：full 接受后使用 SpB 的执行延续和 AuB 合入后的环境。
 - **Salvage**：提取安全的部分进展，交给权威路径或后续过程；
 - **Re-execute**：使用权威结果重新执行必要工作；
 - **Discard**：丢弃候选工作及其未确认产物；
@@ -331,7 +331,7 @@ AssumptionSet(B2) = {(E1, p1), (E2, p2)}
 
 每个候选 Branch 携带其路径上的未决 Proposal 引用集合：`AssumptionSet = frozenset[(chance_id, proposal_id)]`
 
-`AssumptionSet == ∅` 表示工作单元是权威工作。Proposal 被确认时，从依赖它的工作单元中移除对应引用；集合变空的工作单元才具备提交条件。若父 Proposal 被确认，原父 Branch 结束其投机身份，其执行延续成为权威路径；仍携带其他未决 Proposal 的后代 Branch 保留原有身份、隔离环境和执行进展，仅将结构上的父级改挂到该权威执行延续之下，不创建新的 Branch，也不迁移 Runtime 状态。后代 Branch 仍须等自身 `AssumptionSet` 清空后，才具备将结果和效果纳入权威状态的资格。Proposal 被否定时，依赖它的后续子图失效；control plane 向受影响的 Branch 直接发送取消命令，各 Branch 作为独立执行个体停止自身工作并完成本地及受管效果清理，不要求一个集中式机制统一遍历和回收整棵子树。只有父 Branch 进入 `Salvage` 时，后代 Branch 的部分进展才可作为该父 Branch salvage 的输入，不能脱离父 Branch 独立 salvage。非空 `AssumptionSet` 产生的数据只能流向同样携带未决 Proposal ID 的容器，不能直接进入权威上下文。
+`AssumptionSet == ∅` 表示工作单元没有未决 Proposal 依赖。确认 Proposal 只解除对应引用的义务。向全局权威状态提交要求祖先依赖全部确认。嵌套 Chance 可以在其直接父级内接受，通过父级自身的结果或获准的等待点验证，且父级须携带相同的未决祖先引用。Full 保留内层胜者及其独立后代，胜者承接外层 Chance。Part 保留原父级，只交付实际接受的结果并丢弃内层子树。任一祖先 Proposal 被否定时，仍依赖它的延续和后代均失效。control plane 向受影响的 Branch 发送取消命令，各 Branch 独立完成停止和清理。只有父 Branch 进入 `Salvage` 时，后代 Branch 的部分进展才可作为该父 Branch salvage 的输入。
 
 组合与嵌套通过四类连接共同实现：树结构归属、假设依赖、用户输入传播和生命周期控制。
 

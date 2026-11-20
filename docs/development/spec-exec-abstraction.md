@@ -156,11 +156,11 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 
 典型过程是：主 Agent 正在推理，预测路径提前执行工具；主 Agent 稍后给出相同调用，只需要接收提前执行的结果，并保留自己的推理和上下文。若提前执行产生受管状态变化，还需要确认和采用对应状态，而不是采用预测器自己的推理轨迹。
 
-现有条款并非完全没有入口：`policy-decisions.md` §2.7 定义 Reuse，`agent-integration.md` §2.1 允许跳过原 operation 并沿原调用返回结果，`effect-management.md` §1.3 允许对 Outcome 增加复用约束。但 `glossary.md` 的层间映射表将 `Reuse / Promote` 一并映射为 `accept`，accept 定义再次将二者等同；`branch-semantics.md` §4.2、§4.5 则规定 Accept 为 single-winner replacement，并明确不传播 parent 分叉后的任意 Agent context。因此这里不只是少了一个实现：按现有 accept 解释 Reuse，会与“保留原调用方并返回结果”的路径冲突。需要显式澄清 Reuse 是否必须经过整 Branch Accept，以及它如何关闭候选的生命周期。
+已确认的 part 接受保留 AuB 的执行延续，仅采用 Policy 选中的结果和所需受管状态，并在移交后丢弃候选及全部后代。Full 接受可采用候选的执行延续。两者都须保留 AuB 已有进展。[Branch 语义](../design/branch-semantics.md#45-accept-与-winner-continuation)
 
 **反例**：主路径从 H 推理得到 `(reasoning R, call A)`；候选只从 H 提前执行 A。整 Branch 替换可能丢掉 R，或把预测路径的上下文当成主路径；只返回结果则必须解释候选的假设何时解除、结果属于谁、在飞调用如何移交，以及候选资源如何收敛。任一解释都不能只靠 Policy 自律。
 
-**建议，尚未批准**：先补齐已有 Reuse 的正式语义，明确其是否允许主执行保留身份、经受控通道只采用已授权的结果。与 Promote/整 Branch replacement 区分，而不立即引入新实体或新 decision。纯结果复用和带状态变更的复用分开要求能力；不能从“返回值匹配”推出“副作用可以转移”。保留 single-winner 对互斥执行延续的约束，不允许多个不兼容世界同时生效。
+单次裁决只接受一个候选。纯结果复用和带状态变更的复用需要分别确认结果依据及状态依赖。当前实现范围见 [Runtime 生命周期](runtime-lifecycle.md#full-与-part-接受)。
 
 **受影响文档**：mental-model §2–3、design-model §2.1/§3.1、Policy dispose、Branch resolution/accept、Instrumentation 返回路径与效果约束。Runtime 环境接口是否要变，须在确定具体复用语义后再判断，不先增加私有操作。
 

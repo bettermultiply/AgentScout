@@ -11,6 +11,7 @@ export class SessionTree {
         this.tails=new Map();
         this.branches=new Map();
         this.inputs=new Map();
+        this.acceptanceParents=new Map();
         this.originalEntries=new Map(manager.getEntries().filter(e=>!(e.type==='custom'&&e.customType==='authority'&&e.data?.branch_id)).map(e=>[e.id,structuredClone(e)]));
         const entries=manager.getEntries(),last=entries.at(-1),marker=[...entries].reverse().find(entry=>entry.type==='custom'&&entry.customType==='authority'&&entry.data?.branch_id&&entry.data?.parentId);
         if(marker){this.authority=marker.data.branch_id;this.tails.set(this.authority,marker.data.parentId)}
@@ -68,6 +69,21 @@ export class SessionTree {
         this.authority=branchId;
     }
 
+    accept(branchId, parent, global) {
+        this.accepted ??= new Set();
+        let inherited = branchId;
+        const entries = this.branches.get(branchId)?.manager.getBranch() ?? [];
+        do {
+            this.accepted.add(inherited);
+            const input = this.inputs.get(inherited);
+            const first = input && entries.find(entry => entry.parentId === input.pairedTail);
+            if (first) input.first = first.id;
+            inherited = this.acceptanceParents.get(inherited);
+        } while (inherited);
+        if (global) this.promote(branchId);
+        else this.acceptanceParents.set(branchId, parent);
+    }
+
     /** Explicit control-plane authority takes precedence over a previous run. */
     adoptAuthority(branchId) { this.authority=branchId; }
 
@@ -108,7 +124,8 @@ export class SessionTree {
         return {authority:this.authority,manager:sourceFile(this.manager.getSessionFile()),sources,
             branches:[...this.branches].map(([id,{manager,stopped}])=>[id,{file:sourceFile(manager.getSessionFile()),stopped}]),
             inputs:[...this.inputs].map(([id,input])=>[id,{...input,source:input.source?sourceFile(input.source.getSessionFile()):undefined}]),
-            tails:[...this.tails],originalEntries:[...this.originalEntries],accepted:[...(this.accepted??[])]};
+            tails:[...this.tails],originalEntries:[...this.originalEntries],accepted:[...(this.accepted??[])],
+            acceptanceParents:[...this.acceptanceParents]};
     }
 
     static restore(record, SessionManager, sessionFile) {
@@ -165,6 +182,7 @@ export class SessionTree {
         }));
         tree.tails=new Map(record.tails);
         tree.originalEntries=new Map(record.originalEntries);tree.accepted=new Set(record.accepted);
+        tree.acceptanceParents=new Map(record.acceptanceParents ?? []);
         // Keep the saved-file identity map for checkpoints whose source is no
         // longer a live branch but is still needed by a valid continuation.
         tree.recoveryManagers=managers;

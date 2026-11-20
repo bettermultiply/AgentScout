@@ -386,6 +386,9 @@ fn error(error: impl std::fmt::Display) -> BackendError {
 }
 
 impl Backend for NleBackend {
+    fn acceptance_state_is_shared(&self) -> bool {
+        true
+    }
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
         // Lifecycle belongs to each Environment, not the shared workload world.
         // Include it in the bridge's existing atomic save publication.

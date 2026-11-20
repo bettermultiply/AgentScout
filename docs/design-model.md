@@ -34,7 +34,7 @@ Gateway 统一承接 Instrumentation、UI 与 Runtime 的通信，负责接入�
 
 一个 session 对应一个 AScoutAgent 和一棵 Speculative Tree。task 是 Agent 的一轮工作；Agent 完成本轮工作并开始等待用户输入时，task 完成，多轮 task 在同一控制域中继续。长期设计允许修改 Policy；当前首版同一 session 加载的 Policy 固定，不实现修改或切换，范围见 [Policy 开发说明](development/policy-engine.md)。Runtime 向 control plane 报告物化完成或失败，物化失败等同操作失败；control plane 必须等物化成功后才能宣告任务成功，物化前提见 [Runtime 设计](design/runtime.md)。
 
-候选被接受并承接后续执行时继续使用候选环境，仍受祖先依赖与效果约束。Agent 常用 Ctrl-C 或退出终止任务，结束候选及相关写入后物化；Ctrl-C 保留程序和 session，待处理完成后在同一对话中接下一轮，物化失败须显示失败，不能宣告成功。暂停由 AScout 独立接口提供，保留树、候选和环境等待继续。
+Full 接受保留候选 session，使用 AuB 合并后的环境。Part 保留 AuB session，只采用选中的结果和所需状态。两者均受祖先依赖与效果约束。Agent 常用 Ctrl-C 或退出终止任务，结束候选及相关写入后物化；Ctrl-C 保留程序和 session，待处理完成后在同一对话中接下一轮，物化失败须显示失败，不能宣告成功。暂停由 AScout 独立接口提供，保留树、候选和环境等待继续。
 
 ### 2.1 投机执行过程
 
@@ -74,7 +74,7 @@ Edge 是描述投机如何进行的抽象模型，给出这一通用过程的形
 
 九类 Policy Decision 的语义定义在 Edge 模型上，运行时作用于具体的 Chance。Policy Decision 是 Policy 可以根据任务、上下文、资源和 Runtime 能力作出的可替换决策，通过对不同 Policy Decision 的组合可以生成不同的执行策略。单个 Chance 上的局部决策、跨 Chance 的全局选择和已启动工作的调整由九类 policy decision 刻画：`admit`、`select`、`rebalance`、`extent`、`predict`、`launch`、`effect`、`match`、`dispose`。对每个 decision 的详细描述见 [Policy Decisions 设计](design/policy-decisions.md)。
 
-组合与嵌套：同一 Chance 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的投机机会（admit 后成为新的 Chance），由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定或发生变化都会使依赖它的后续工作失效；当前阶段不修复或重新对齐这类 Branch。父 Proposal 被确认时，原父 Branch 的执行延续成为权威路径，仍有未决依赖的后代 Branch 保留原有隔离环境和执行进展并重新挂到该权威执行延续之下；后代 Branch 只有在自身依赖清空后才具备提交资格。AScout 以树形、single-winner 和受控信息流约束这些关系。Proposal 依赖、确认与否定、Branch 取消、父 Branch salvage 以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
+组合与嵌套：同一 Chance 可以生成多个并行候选；候选 Branch 在继续执行时也可能遇到新的投机机会（admit 后成为新的 Chance），由此形成嵌套。嵌套工作依赖自身以及祖先路径上尚未确认的 Proposal，任一前提被否定或发生变化都会使依赖它的后续工作失效；当前阶段不修复或重新对齐这类 Branch。父级仍在投机时，内层结果可由携带相同未决依赖的直接父级接受。Full 延续保留后代与隔离环境，并承接父级的外层依赖。只有外层依赖清空后，结果才能进入全局权威路径。AScout 以树形、single-winner 和受控信息流约束这些关系。Proposal 依赖、确认与否定、Branch 取消、父 Branch salvage 以及用户输入传播的完整语义见 [Policy Decisions 设计](design/policy-decisions.md) §4。
 
 ### 3.2 状态与效果
 

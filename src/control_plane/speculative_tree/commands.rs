@@ -105,7 +105,9 @@ impl SpeculativeTree {
     }
 
     pub fn next_prompt(&mut self) -> io::Result<Option<AgentCommand>> {
-        if self.recovering { return Ok(None); }
+        if self.recovering {
+            return Ok(None);
+        }
         let Some(prompt) = self.queued_prompts.front().cloned() else {
             return Ok(None);
         };
@@ -235,6 +237,11 @@ impl SpeculativeTree {
     pub fn interrupt(&mut self) -> io::Result<Vec<AgentCommand>> {
         self.cancel_ui_prompts(None, "Execution interrupted");
         self.queued_prompts.clear();
+        if let Some((_, record)) = self.pending_acceptance.as_mut()
+            && record.get("outcome").is_none()
+        {
+            record["interrupted"] = Value::Bool(true);
+        }
         for operation in self
             .branches
             .values_mut()
@@ -273,18 +280,42 @@ impl SpeculativeTree {
         Ok(commands)
     }
 
+    pub(super) fn acceptance_in_flight(&self) -> bool {
+        self.pending_work.values().any(|work| match work {
+            ControlOperation::Promote(_, record) => record.get("full").is_some(),
+            ControlOperation::SuspendAcceptance(_) | ControlOperation::ResumeAcceptance(_) => true,
+            _ => false,
+        })
+            || self.pending_acceptance.as_ref().is_some_and(|(_, record)| record.get("outcome").is_some())
+    }
+
     pub fn begin_shutdown(&mut self) -> io::Result<Vec<AgentCommand>> {
         self.cancel_ui_prompts(None, "Session shutdown");
-        if self.stopping {
+        if !self.stopping {
+            self.stopping = true;
+            self.shutdown_deadline = Some(now_ms() + 10_000);
+            self.queued_prompts.clear();
+        }
+        self.shutdown_cleanup()
+    }
+
+    pub(super) fn shutdown_cleanup(&mut self) -> io::Result<Vec<AgentCommand>> {
+        if self.acceptance_in_flight() {
             return Ok(Vec::new());
         }
-        self.stopping = true;
-        self.shutdown_deadline = Some(now_ms() + 10_000);
-        self.queued_prompts.clear();
+        self.pending_acceptance = None;
         let ids: Vec<_> = self
             .branches
             .values()
-            .filter(|branch| branch.status != BranchStatus::Cleaned)
+            .filter(|branch| {
+                !matches!(
+                    branch.status,
+                    BranchStatus::Discarding
+                        | BranchStatus::Discarded
+                        | BranchStatus::Cleaning
+                        | BranchStatus::Cleaned
+                )
+            })
             .filter(|branch| {
                 !self.pending_commands.values().any(|command| {
                     command.branch_id == branch.branch_id

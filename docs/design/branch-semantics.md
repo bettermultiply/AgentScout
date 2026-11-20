@@ -53,9 +53,9 @@ AssumptionSet = frozenset[Assumption]
 
 `AssumptionSet == ∅` 表示当前工作单元是权威工作；非空表示它仍携带未验证的 Proposal 依赖。Proposal 被确认时，从依赖它的工作单元中移除对应引用；集合变空的工作单元才具备提交条件。非空 `AssumptionSet` 产生的数据不能直接进入权威上下文。`chance_id` 属于被 `admit` 接纳的 Chance；Branch 只保存自己所属的 `chance_id`，Proposal 内容与验证依据属于 Chance，不在 Branch 上重复保存。
 
-Chance 具有与 Branch 不同的状态语义。`ChanceStage` 表达投机机会从待选到收敛的过程：Pending 表示已 `admit`、等待 `select`；Running 表示已被选中，正在预测、执行或取得权威值；Resolving 表示权威值已到，正在 `match` 与处置；Accepted(proposal_id) 表示某个 Proposal 对应的结果成为权威延续；Discarded(reason) 表示机会收敛为抛弃，原因取 MatchRejected、NotSelected、AncestorInvalidated、BudgetExhausted 或 Failed。与 Chance 并行，`AuthorityState` 表达权威值是否被请求与取得：NotRequested、Fetching、Arrived、Unavailable；`launch` 为 false 只表示暂不取权威值，不取消已创建的 Proposal 或 Branch。
+Chance 具有与 Branch 不同的状态语义。`ChanceStage` 表达投机机会从待选到收敛的过程：Pending 表示已 `admit`、等待 `select`；Running 表示已被选中，正在预测、执行或取得权威值；Resolving 表示权威值已到，正在 `match` 与处置；Accepted(proposal_id) 表示该 Chance 已采用一个 Proposal 的结果；Discarded(reason) 表示机会收敛为抛弃，原因取 MatchRejected、NotSelected、AncestorInvalidated、BudgetExhausted 或 Failed。与 Chance 并行，`AuthorityState` 表达权威值是否被请求与取得：NotRequested、Fetching、Arrived、Unavailable；`launch` 为 false 只表示暂不取权威值，不取消已创建的 Proposal 或 Branch。
 
-Chance 的权威值由它所依附的父 Branch 自己的真实执行产生。父 Branch 不必是整棵 Tree 的当前权威，只要仍作为权威或候选存活；因此候选 Branch 上再次 `admit` 的嵌套 Chance 与根 Branch 上的 Chance 使用同一套状态、验证、提交和失效规则。嵌套候选 Branch 的 `AssumptionSet` 同时携带祖先未确认的 Proposal；祖先 Proposal 未确认前它没有提交资格。父 Proposal 被否定、承载它的 Branch 被抛弃时，该 Branch 上所有未收敛的 Chance 以 `AncestorInvalidated` 收敛，依赖它们的后代 Branch 随 Branch 抛弃流程取消和清理。
+Chance 的权威值由它所依附的父 Branch 自己的真实执行产生。父 Branch 不必是整棵 Tree 的当前权威，只要仍作为权威或候选存活；因此候选 Branch 上再次 `admit` 的嵌套 Chance 使用同一套状态、验证和失效规则。嵌套候选 Branch 的 `AssumptionSet` 同时携带祖先未确认的 Proposal。确认内层 Proposal 后，只允许向携带相同未决依赖的直接父级接受结果。向全局权威提交仍要求所有祖先 Proposal 已确认。父 Proposal 被否定、承载它的 Branch 被抛弃时，该 Branch 上所有未收敛的 Chance 以 `AncestorInvalidated` 收敛，依赖它们的后代 Branch 随 Branch 抛弃流程取消和清理。
 
 Branch 自身的 `BranchStatus` 合并生命周期与运行状态：Created、Running、Blocked(reason)、Finished、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned。Blocked 的原因取 ExtentReached、Rebalanced 或 EffectGate，同一时刻只保留最近一次挡住它的 Decision；Finished 表示执行已跑完、等待裁决。Blocked 与 Running 可以随对应 Decision 来回切换，但 Blocked 不使 Branch 失效。
 
@@ -83,7 +83,7 @@ Barrier 必须登记或排空 in-flight operations；少于请求数量的显式
 
 ### 4.2 运行、等待与暂停
 
-在 speculation window 内，control plane 根据 Policy 和当前执行事实协调 parent 的权威 operation、outcome 发布、candidate 推进与 resolution，不让 parent 与 candidates 同时推进同一份后续业务。若没有可接受 candidate，control plane 安排 parent 从真实 outcome 继续；若接受 candidate，则执行 single-winner replacement，不执行 parent/candidate state merge。
+在 speculation window 内，control plane 根据 Policy 和当前执行事实协调 parent 的权威 operation、outcome 发布、candidate 推进与 resolution。接受要求 Proposal 有效且 candidate 进展与 parent 相容。没有可接受 candidate 时，parent 从真实 outcome 继续。一次裁决只接受一个 candidate。
 
 Parent execution 可以在等待 outcome、提交条件或 resolution 事实时暂停，并在事件到达后恢复；具体调度由 control plane 根据 Policy 和执行承载能力编排。Child 的生命周期不由 parent execution 是否持续占用 CPU 决定。
 
@@ -91,29 +91,25 @@ Parent execution 意外丢失时，children 不会因此自动成为 winner。co
 
 ### 4.3 Commit
 
-control plane 可以将 candidate 的完整 Branch 标记为达到提交条件，即使其中仍有活跃 descendants。Branch 可以在 outcome 尚未到达时进入 conditional commit 状态；未验证的 Proposal 作为 unresolved obligation 随 subtree 保留，在 obligation 验证前不能 Accept。这里的 commit 是 control plane 维护的生命周期状态和固定状态入口，不要求默认 Agent 主动发起请求。
+control plane 可以将 candidate 的完整 Branch 标记为达到提交条件，即使其中仍有活跃 descendants。Branch 可以在 outcome 尚未到达时进入 conditional commit 状态。未验证的 Proposal 作为 unresolved obligation 随 subtree 保留，在 obligation 验证前不能提交到不携带它的上下文。这里的 commit 是 control plane 维护的生命周期状态和固定状态入口，不要求默认 Agent 主动发起请求。
 
-Accept 只针对已经达到 control plane 提交条件的 candidate。Candidate 的 commit summary/evidence 由 control plane 和 Instrumentation 根据执行事实形成并通过受控通道封存；已经披露的信息不能通过 discard 撤销。
+Accept 要求该 Chance 已满足 control plane 的裁决条件。接受范围止于该 Chance 的父级，未决的祖先 obligation 随保留的延续继续有效。Candidate 的 commit summary/evidence 由 control plane 和 Instrumentation 根据执行事实形成并通过受控通道封存；已经披露的信息不能通过 discard 撤销。
 
 ### 4.4 Resolution barrier
 
-`Resolution barrier` 是 control plane 依据 Policy 的 `match`/`dispose` 意图执行 Accept、fallback、discard 或其他 resolution 时的短暂且原子的执行边界。它暂停受影响 executions，验证 obligations、Proposal 和提交条件，转换 Speculative Tree 与状态所有权，失效并清理 losers，随后恢复 winner subtree 或 parent。
+`Resolution barrier` 在 Policy 接受后暂停受影响的执行。先暂停 parent，再等 candidate 自己已经开始的调用和写者收敛。暂停期间关闭新调用和写入的准入。Runtime 确认移交结果后，control plane 才允许胜者或原 parent 继续。
 
 Proposal 必须声明与真实 outcome 的 compatibility 条件，可以是 exact payload、只依赖受保证字段的 predicate，或受控 virtual-value mapping。实际 payload 无法按声明条件兼容时，control plane 必须将 candidate 导向 discard 或重新执行；AScout 不修补已经基于错误具体值完成的任意计算。
 
 ### 4.5 Accept 与 winner continuation
 
-Accept 是 resolution 为 `accepted` 时的落实，不等于必然替换 parent。按处置意图分为 `Promote` 和 `Reuse`。
+Accept 分为 full 和 part。两者都将获准的状态从 SpB 合入 AuB，保留 AuB 已有进展。Policy 必须先接受所选方式。full 只有在 Policy 也预先接受 part 时才能降为 part。
 
-`Promote` 后 candidate 保留自己的 Branch identity，并替换 parent 在 Speculative Tree 中的位置。若 parent 是 root，candidate 成为新的 root；否则 candidate 连接到原 parent 的 parent。旧 parent 和 candidate 的 sibling subtrees 失效，candidate 原有 descendants 及其内部关系保持不变。
+Full 合入 SpB 的全部变更，保留 SpB Branch、session 和独立 descendants。SpB 承接该 Chance 的胜者延续，后续调用使用 AuB 合入后的环境和 Backend。旧 AuB session 结束，原 SpB 环境和仍有依赖的资源在最后一个依赖释放后回收。旧 AuB 的进展若无法由该延续保留，则拒绝 full。Full 无需独立 descendants 完成，后代仍承担各自未决 Proposal。
 
-Candidate 承接后续执行时保留并继续使用自己的环境，不默认把其改动复制回 parent。环境保留不能绕过 commit/discard、single-winner 或必要状态交接；嵌套接受不能清除祖先未决依赖，也不能据此取得整棵树的权威或物化资格。
+Part 只移交 Policy 选中的结果及其所需状态。允许尽力移交，并以 Runtime 实际提交的内容描述结果。AuB 保留原 Branch 与 session，SpB 和全部 descendants 丢弃。原调用是否继续由既有等待点与实际结果决定。
 
-Promote 不以 candidate 会话或当前模型请求结束为前提；已满足提交、依赖和效果条件的在飞 candidate 可以在保留执行进展的情况下转为权威延续。用户端维持同一 AScoutAgent 视图，只更新该视图对应的权威执行及受控输入输出路由；不能因用户会话切换而取消或重启 winner。此保证不取消 resolution barrier，也不豁免旧 parent 和其他 loser 的停止、效果收敛与清理责任。
-
-`Reuse` 只把 candidate 已验证的 outcome 和按声明需要移交的受管状态交给现有权威延续；现有延续保留自己的 Branch identity、推理和上下文，candidate 自身在交接完成后清理。Reuse 不合并任意 Agent context，不转移未声明状态；未决 Proposal 必须先按既有规则确认或否定，带状态变更的复用还必须满足 Effect Management 的等价和移交条件。Reuse 不自动改变 descendant 的假设或挂载关系：只有现有权威延续能够提供 descendant 所需基础和依赖时，descendant 才按既有规则保留，否则取消或清理。其他 candidate 仍按 single-winner 失效，不能因为 Reuse 让多个互斥结果同时生效。
-
-在 `Promote` 中，candidate 按各状态类别规则已经可见的 parent state、已提交生效的 external effect 和已验证 outcome 必须随 winner 延续。正确的状态交接是机制必须保证的条件，不能仅靠 Policy 通知或路由切换代替。parent 在 Branch 创建后的任意进程内存、Agent context 或评测 scratch 不要求传播；按状态类别完成必要交接不等于任意 parent/candidate state merge。
+接受的目标是该 Chance 的直接父级。直接父级是全局权威时，Full 让胜者承接权威执行。直接父级仍为投机时，Full 让胜者承接父级的外层 Chance 并保留祖先依赖，Part 则让原父级继续承担这些依赖。外层拒绝会抛弃依赖其 Proposal 的延续及后代。只有外层确认后才能向外层移交。在此之前，未决依赖不能进入权威上下文，也不能触发外部效果的释放。
 
 单一最终权威 session 不等于同一个运行中的 Agent session。Winner 保留自己的 session 和执行进展，不合并旧 Parent 的任意后续上下文。最终历史以真实结果整理，保留预测输入节点，并将其第一条后续记录改接对应真实结果；恢复所得上下文可能不同于原始运行上下文。历史旁支保留不改变 single-winner。是否追加真实结果通知由 Policy 决定，默认完全不追加；通知不能替代必要状态交接。
 

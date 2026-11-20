@@ -26,6 +26,21 @@ pub struct BaseRuntime {
     /// 参与者；失败时记录仍持有环境状态的参与者，供后续清理。
     /// cleanup/terminate 后仍保留，用于解释最终状态。
     participants: Mutex<HashMap<String, Vec<String>>>,
+    control_operations: Mutex<BTreeSet<String>>,
+}
+
+pub(super) struct ControlAdmission<'a> {
+    active: &'a Mutex<BTreeSet<String>>,
+    environments: BTreeSet<String>,
+}
+
+impl Drop for ControlAdmission<'_> {
+    fn drop(&mut self) {
+        let mut active = self.active.lock().unwrap();
+        for environment in &self.environments {
+            active.remove(environment);
+        }
+    }
 }
 
 impl BaseRuntime {
@@ -39,6 +54,7 @@ impl BaseRuntime {
                 backend,
             }],
             policy: BackendPolicy::single(backend_id),
+            control_operations: Mutex::default(),
             lifecycle: Arc::new(Lifecycle::default()),
             agent_supervisor: AgentSupervisor::default(),
             participants: Mutex::new(HashMap::new()),
@@ -56,6 +72,7 @@ impl BaseRuntime {
             id: id.into(),
             connections,
             policy,
+            control_operations: Mutex::default(),
             lifecycle: Arc::new(Lifecycle::default()),
             agent_supervisor: AgentSupervisor::default(),
             participants: Mutex::new(HashMap::new()),
@@ -107,6 +124,22 @@ impl BaseRuntime {
         self.lifecycle.enter(false)
     }
 
+    pub(super) fn admit_control(
+        &self,
+        environments: impl IntoIterator<Item = String>,
+    ) -> Result<ControlAdmission<'_>, &'static str> {
+        let environments: BTreeSet<_> = environments.into_iter().collect();
+        let mut active = self.control_operations.lock().unwrap();
+        if !active.is_disjoint(&environments) {
+            return Err("an environment already has an active control operation");
+        }
+        active.extend(environments.iter().cloned());
+        Ok(ControlAdmission {
+            active: &self.control_operations,
+            environments,
+        })
+    }
+
     pub(super) fn launch_agent(
         &self,
         context: &BackendContext,
@@ -119,6 +152,93 @@ impl BaseRuntime {
         // Already admitted starts are drained before resource cleanup.
         let _startup = self.enter_operation().map_err(BackendError::new)?;
         self.start_environment_execution(context, launch)
+    }
+
+    pub(super) fn accept_environment(
+        &self,
+        target: &BackendContext,
+        source: &str,
+        full: bool,
+        part: Option<&crate::protocol::contract::PartSelection>,
+        target_suspended: bool,
+        wait: impl Fn(&str),
+    ) -> Result<FilesystemResult, BackendError> {
+        use crate::protocol::contract::{Acceptance, PartSelection};
+        let source_context = BackendContext::new(source);
+        if target_suspended {
+            if self.aggregate_state(&target.environment_id) != Some(EnvironmentState::Suspended) {
+                return Err(BackendError::new("acceptance target is not suspended"));
+            }
+        } else {
+            self.ensure_available(target)?;
+        }
+        if let Some(PartSelection::Results { results }) = part
+            && !PartSelection::valid_results(results)
+        {
+            return Err(BackendError::new("invalid part result dependencies"));
+        }
+        self.ensure_available(&source_context)?;
+        let participants = self.participants_for(&target.environment_id);
+        if participants != self.participants_for(source) {
+            return Err(BackendError::new(
+                "accept requires matching Backend participants",
+            ));
+        }
+        let participants = participants.ok_or_else(|| BackendError::new("unknown target"))?;
+        let isolated: Vec<_> = self
+            .connections
+            .iter()
+            .filter(|connection| {
+                participants.contains(&connection.id)
+                    && !connection.backend.acceptance_state_is_shared()
+            })
+            .collect();
+        if !target_suspended {
+            wait(&target.environment_id);
+            self.suspend_with_context(target)?;
+        }
+        wait(source);
+        let results_only = part.filter(|selection| selection.results_only());
+        let receipt = |selection: &PartSelection| FilesystemResult {
+            acceptance: Some(selection.results_only_receipt()),
+            ..Default::default()
+        };
+        let mut result = (|| {
+            for connection in &isolated {
+                connection.backend.drain_acceptance(source)?;
+            }
+            if !full && let Some(selection) = results_only {
+                Ok(receipt(selection))
+            } else if isolated.len() > 1 {
+                results_only.map(receipt).ok_or_else(|| BackendError::new(
+                    "state transfer across multiple isolated Backends is unsupported",
+                ))
+            } else if let Some(connection) = isolated.first() {
+                match connection.backend.accept_state(target, source, full, part) {
+                    Err(error) if full && results_only.is_some() && !error.is_partial() => {
+                        Ok(receipt(results_only.unwrap()))
+                    }
+                    receipt => receipt,
+                }
+            } else if full {
+                Ok(FilesystemResult {
+                    acceptance: Some(Acceptance::Full),
+                    ..Default::default()
+                })
+            } else {
+                Err(BackendError::new(
+                    "the selected filesystem scopes have no isolated Backend",
+                ))
+            }
+        })();
+        if !target_suspended && let Err(resume) = self.resume_with_context(target) {
+            let mut failure = result
+                .err()
+                .unwrap_or_else(|| BackendError::new("could not resume acceptance target"));
+            failure.add_cleanup_failure("runtime", resume.to_string());
+            result = Err(failure);
+        }
+        result
     }
 
     pub(super) fn branch_environment(

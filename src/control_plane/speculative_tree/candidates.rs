@@ -44,9 +44,8 @@ impl SpeculativeTree {
         let transcript_index = self.branch(parent)?.execution_position.transcript_index;
         let parent_assumptions = self.branch(parent)?.assumption_set.clone();
         let parent_status = self.branch(parent)?.status;
-        // The Chance's authority value is produced by its parent Branch itself,
-        // so a nested Chance on a live candidate is created like one on the
-        // authority. AssumptionSet still blocks commit until ancestors resolve.
+        // The Chance's authority value is produced by its parent Branch.
+        // Inherited assumptions constrain where a result may be transferred.
         if !parent_status.is_live_authority() && !parent_status.is_live_candidate() {
             return Err(invalid_input("parent branch cannot create a candidate"));
         }
@@ -162,6 +161,12 @@ impl SpeculativeTree {
             return false;
         };
         if !self.pending_candidates().iter().any(|id| id == candidate)
+            || self.pending_acceptance.is_some()
+            || self.pending_work.values().any(|work| matches!(work, ControlOperation::ResumeAcceptance(_)))
+            || self
+                .pending_commands
+                .values()
+                .any(|command| command.operation == CommandOperation::CancelAcceptance)
             || self
                 .branches
                 .values()
@@ -169,7 +174,10 @@ impl SpeculativeTree {
         {
             return false;
         }
-        let chance = branch.chance_id.as_ref().and_then(|id| self.chances.get(id));
+        let chance = branch
+            .chance_id
+            .as_ref()
+            .and_then(|id| self.chances.get(id));
         // With the authority held, Policy may judge a real Proposal using its
         // own acceptance rule. Never fabricate a Proposal for an unfinished
         // alternate-model inference. An in-flight launch must settle first.
@@ -199,31 +207,126 @@ impl SpeculativeTree {
         else {
             return true;
         };
-        let Some(authority) = self
-            .authority_branch_id
-            .as_deref()
-            .and_then(|id| self.branches.get(id))
-        else {
+        let Some(authority) = self.branches.get(&chance.parent_branch_id) else {
             return true;
         };
         authority.pending_operations.iter().any(|operation| {
             operation.kind == OperationKind::Tool
                 && operation.status == OperationStatus::Requested
                 && operation.operation_id != chance.operation_id
-                && self.active_actions.get(&authority.branch_id)
+                && self
+                    .active_actions
+                    .get(&authority.branch_id)
                     .and_then(|actions| actions.get(&operation.operation_id))
                     .is_none_or(|action| action.action_kind == ActionKind::ToolExecution)
         })
     }
 
+    pub(crate) fn acceptance_progress_compatible(&self, candidate: &BranchRecord) -> bool {
+        let Some(chance) = candidate
+            .chance_id
+            .as_ref()
+            .and_then(|id| self.chances.get(id))
+        else {
+            return false;
+        };
+        let parent = &chance.parent_branch_id;
+        let origin_finished = self
+            .action_facts
+            .get(parent)
+            .and_then(|facts| facts.get(&chance.operation_id));
+        let cutoff = origin_finished
+            .map(|origin| origin.timestamp_ms)
+            .or_else(|| {
+                // A speculative-first operation can be validated by Policy before
+                // it starts. The original Agent call must still be held.
+                if chance.authority != AuthorityState::NotRequested {
+                    return None;
+                }
+                self.branches
+                    .get(parent)?
+                    .pending_operations
+                    .iter()
+                    .find(|operation| {
+                        operation.operation_id == chance.operation_id
+                            && operation.status == OperationStatus::Requested
+                    })?
+                    .requested_at
+            });
+        let Some(cutoff) = cutoff else { return false };
+        !self.authority_advanced_past(candidate)
+            && !self
+                .active_actions
+                .get(parent)
+                .is_some_and(|actions| actions.keys().any(|id| id != &chance.operation_id))
+            && !self.action_facts.get(parent).is_some_and(|facts| {
+                facts
+                    .values()
+                    .any(|fact| fact.action_id != chance.operation_id && fact.timestamp_ms > cutoff)
+            })
+    }
+
+    pub(crate) fn chance_parent(&self, candidate: &BranchRecord) -> Option<&str> {
+        let chance = self.chances.get(candidate.chance_id.as_ref()?)?;
+        Some(&chance.parent_branch_id)
+    }
+
+    pub(crate) fn acceptance_target(&self, candidate: &BranchRecord) -> Option<&str> {
+        let chance = self.chances.get(candidate.chance_id.as_ref()?)?;
+        if chance.stage.is_terminal() {
+            return None;
+        }
+        let parent = self.branches.get(&chance.parent_branch_id)?;
+        if self.authority_branch_id.as_ref() == Some(&parent.branch_id) {
+            return (parent.status.is_live_authority()
+                && !self.ancestor_assumptions_unresolved(candidate))
+                .then_some(&parent.branch_id);
+        }
+
+        // The speculative target must carry the same outer assumptions.
+        // Its own Proposal must exist so a full acceptance can carry it on.
+        if parent.role != BranchRole::Candidate
+            || !parent.status.is_decidable()
+            || self.branch_proposal(&parent.branch_id).is_none()
+            || !self.active_branch_ids().contains(&parent.branch_id)
+        {
+            return None;
+        }
+        let unresolved = |assumption: &&Assumption| !self.assumption_confirmed(assumption);
+        let inherited = candidate.assumption_set.iter().filter(|assumption| {
+            Some(&assumption.chance_id) != candidate.chance_id.as_ref()
+        }).filter(unresolved);
+        if !inherited.clone().all(|assumption| parent.assumption_set.contains(assumption))
+            || !parent.assumption_set.iter().filter(unresolved).all(|assumption| inherited.clone().any(|item| item == assumption))
+            || parent.assumption_set.iter().any(|assumption| {
+                self.chances.get(&assumption.chance_id).is_none_or(|chance| match &chance.stage {
+                    ChanceStage::Accepted(id) => id != &assumption.proposal_id,
+                    ChanceStage::Discarded(_) => true,
+                    _ => false,
+                })
+            })
+        {
+            return None;
+        }
+        Some(&parent.branch_id)
+    }
+
     pub fn can_promote(&self, candidate: &str, compatible: bool) -> bool {
+        self.can_accept(candidate, compatible, false)
+    }
+
+    pub(super) fn can_accept(&self, candidate: &str, compatible: bool, transfer: bool) -> bool {
         compatible
+            && self.pending_acceptance.is_none()
+            && !self.pending_work.values().any(|work| matches!(work, ControlOperation::ResumeAcceptance(_)))
+            && !self.pending_commands.values().any(|command| command.operation == CommandOperation::CancelAcceptance)
             && self.branch_proposal(candidate).is_some()
             && self.branches.get(candidate).is_some_and(|branch| {
                 branch.role == BranchRole::Candidate
                     && branch.status.is_decidable()
-                    && branch.parent_branch_id == self.authority_branch_id
-                    && !self.ancestor_assumptions_unresolved(branch)
+                    && self.acceptance_target(branch).is_some_and(|parent| {
+                        transfer || Some(parent) == self.authority_branch_id.as_deref()
+                    })
                     && !self.authority_advanced_past(branch)
             })
             && !self
@@ -245,6 +348,8 @@ impl SpeculativeTree {
             .filter(|branch| {
                 branch.branch_id != self.authority_branch_id.as_deref().unwrap_or_default()
                     && matches!(branch.status, BranchStatus::Cleaned)
+                    && (branch.environment_id.is_none()
+                        || branch.execution_state.runtime == RuntimeExecutionState::Cleaned)
                     && !self
                         .pending_commands
                         .values()
@@ -286,11 +391,24 @@ impl SpeculativeTree {
         why: DiscardedReason,
         reason: &str,
     ) -> io::Result<Vec<AgentCommand>> {
+        self.discard_candidate_subtree(branch_id, why, reason, false)
+    }
+
+    pub(super) fn discard_candidate_subtree(
+        &mut self,
+        branch_id: &str,
+        why: DiscardedReason,
+        reason: &str,
+        after_acceptance: bool,
+    ) -> io::Result<Vec<AgentCommand>> {
         let candidate = self
             .branches
             .get(branch_id)
             .ok_or_else(|| invalid_input("candidate branch does not exist"))?;
-        if candidate.role != BranchRole::Candidate || !candidate.status.is_live_candidate() {
+        if candidate.role != BranchRole::Candidate
+            || !(candidate.status.is_live_candidate()
+                || (after_acceptance && candidate.status == BranchStatus::Promoting))
+        {
             return Err(invalid_input("branch is not a live candidate"));
         }
         let mut ids = BTreeSet::from([branch_id.to_string()]);
@@ -312,7 +430,10 @@ impl SpeculativeTree {
         let mut commands = Vec::new();
         let mut chance_ids = BTreeSet::new();
         for id in ids {
-            if self.branch(&id)?.status.is_live_candidate() {
+            let status = self.branch(&id)?.status;
+            if status.is_live_candidate()
+                || (after_acceptance && id == branch_id && status == BranchStatus::Promoting)
+            {
                 self.change_status(&id, BranchStatus::Discarding, reason)?;
                 commands.push(self.make_discard_command(&id)?);
                 chance_ids.extend(self.branch(&id)?.chance_id.clone());
@@ -326,6 +447,7 @@ impl SpeculativeTree {
 
     /// Accept a candidate: request the authority switch. The Chance becomes
     /// `Accepted` only when the Agent confirms the promotion.
+    #[cfg(test)]
     pub fn accept_candidate(&mut self, branch_id: &str) -> io::Result<Vec<AgentCommand>> {
         let candidate = self
             .branches

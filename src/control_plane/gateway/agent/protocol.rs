@@ -25,6 +25,8 @@ pub enum BlockedReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandOperation {
+    PrepareAcceptance,
+    CancelAcceptance,
     Abort,
     Promote,
     ResolvePending,
@@ -203,8 +205,27 @@ pub enum AgentCommand {
         workspace: PathBuf,
         prompt: String,
     },
+    PrepareAcceptance {
+        branch_id: String,
+        authority_branch_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        target_suspended: bool,
+        command_id: String,
+        generation: u64,
+    },
+    CancelAcceptance {
+        branch_id: String,
+        command_id: String,
+        generation: u64,
+    },
     Promote {
         branch_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_branch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_access: Option<crate::protocol::contract::ExecutionAccess>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        part: bool,
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",

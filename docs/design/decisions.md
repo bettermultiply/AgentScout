@@ -12,10 +12,9 @@
 结论：覆盖型状态以最新可见修改为准。
 为什么：Ancestor state 是 child 执行环境的一部分，因此 ancestor 后产生的修改应自然进入 descendants，同时维持 sibling 隔离。
 
-## D-007：Single winner，不做 merge
+## D-007：Single winner
 
-结论：单次裁决只选一个直接子树，不合并。
-为什么：AScout 选择完整的计算延续，不定义跨文件、计算状态和全局服务的通用 merge 协议。
+结论：单次裁决只接受一个直接子树。获准状态从该子树合入 AuB，并保留 AuB 已有进展。
 
 ## D-008：允许提交包含活跃 descendants 的 subtree
 
@@ -24,8 +23,7 @@
 
 ## D-009：Accept 将树位置重定向到 winner
 
-结论：Promote 保留胜者身份并替换树位置。
-为什么：接受的是完整 candidate subtree，而不是把 candidate 压平回 parent identity。保留 winner identity 和 descendants 可以让 Accept 成为树指向变换，并避免强制 bottom-up。
+结论：Full 保留胜者 Branch 与 session，后续调用转入 AuB 合并后的环境。Part 保留 AuB Branch 与 session，提交选中的结果及所需状态，丢弃 SpB 和全部后代。Policy 可以从 SpB 受控可见执行记录主动发现结果，也可以只从 SpB 或工具明确给出的结果中选择。两种选择范围可以并存，由 Policy 决定。两者都须判断结果依据和依赖状态与 AuB 相容，并在移交前接受。
 
 ## D-015：Branch 与 Branch Root 如何区分？
 

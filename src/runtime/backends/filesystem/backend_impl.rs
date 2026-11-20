@@ -342,6 +342,26 @@ impl Backend for FilesystemBackend {
         })
     }
 
+    fn drain_acceptance(&self, source: &str) -> Result<(), BackendError> {
+        self.drain_holder(source, false)?;
+        if self.process.writer_active(source)? {
+            return Err(BackendError::new(
+                "source still has Runtime-managed writers",
+            ));
+        }
+        Ok(())
+    }
+
+    fn accept_state(
+        &self,
+        target: &BackendContext,
+        source: &str,
+        full: bool,
+        part: Option<&crate::protocol::contract::PartSelection>,
+    ) -> Result<FilesystemResult, BackendError> {
+        self.accept_environment_state(target, source, full, part)
+    }
+
     fn promote(&self, id: &str) -> Result<(), BackendError> {
         let state = self.environment()?;
         let environment = state

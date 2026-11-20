@@ -65,7 +65,7 @@ impl BackendOperation {
             Operation::EstablishEnvironment => Self::Establish,
             Operation::OperateEnvironment { .. } => Self::Operate,
             Operation::BranchEnvironment { .. } => Self::Branch,
-            Operation::PromoteEnvironment => Self::Promote,
+            Operation::PromoteEnvironment | Operation::AcceptEnvironment { .. } => Self::Promote,
             Operation::SuspendEnvironment => Self::Suspend,
             Operation::ResumeEnvironment => Self::Resume,
             Operation::TerminateEnvironment => Self::Terminate,

@@ -44,7 +44,7 @@ Available 或 Suspended；cleanup 只接受 Terminated。这样 Suspended 环境
 保持相同的 Runtime 生命周期语义。filesystem 的额外检查只存在于其 Backend 和
 参与 Environment 的 backend 依照配置顺序协作。
 
-runtime proxy 接入工作的对象是 Runtime 环境。所有合格 runtime proxy 都必须支持 `establish_environment`、`operate_environment`、`promote_environment`、`suspend_environment`、`resume_environment`、`terminate_environment` 和 `cleanup_environment`；`branch_environment` 是可选能力，只表示派生独立子环境。`promote_environment` 没有环境侧语义时也必须接受并成功返回，不能把 no-op 当作不支持。Runtime 也可以声明需要在真实环境中执行的环境工具；control plane 用 `tool_context` 查询预测所需上下文，Instrumentation 经独立执行连接直接调用工具，不由 control plane 中转执行，也不解释工具业务语义。能力声明描述这些操作对不同环境内容形成的实际隔离保证，以及 Branch 之间的非干扰保证。
+runtime proxy 接入工作的对象是 Runtime 环境。基本操作包括 `establish_environment`、`operate_environment`、`suspend_environment`、`resume_environment`、`terminate_environment` 和 `cleanup_environment`。`branch_environment` 只表示可以派生独立子环境。环境接受通过 `accept_environment` 完成，目标为该 Chance 的直接父级环境，支持范围由 Backend 的共享或隔离状态处理能力决定。暂停顺序和文件级 part 回执见 [Runtime 生命周期](runtime-lifecycle.md#full-与-part-接受)。Runtime 可以声明环境工具。control plane 用 `tool_context` 查询预测所需上下文，Instrumentation 直接在独立执行连接调用工具。
 
 先确认以下事实：
 
@@ -90,7 +90,7 @@ Branch 非干扰声明按内容类别给出机制、覆盖入口、范围和限�
 
 - `establish_environment` 完成后，必须能证明环境已经可用，才能返回完成；
 - `operate_environment` 需要返回实际建立、执行或拒绝的结果；
-- `promote_environment` 完成时表示 Candidate 环境已成为权威环境；共享底层环境的实现可以 no-op，但失败必须如实返回，control plane 不会在失败后切换 Agent authority；
+- `accept_environment` 返回已完成的 full、实际提交的 part 范围，或失败。Control plane 根据回执继续胜者或 AuB。
 - `branch_environment` 是可选能力：声明支持时，必须返回一个与父环境、与其他 sibling 互不影响的独立环境；父环境保持可用；派生范围如实报告；不支持时必须返回 `Unsupported`，不得用共享别名伪装；
 - 共享环境中的 Branch 非干扰必须覆盖所有可能影响权威路径或其他 Branch 的入口；无法可靠识别或阻止的入口不得纳入已验证范围；
 - `suspend_environment` 必须阻止新的环境操作，并说明未完成工作；

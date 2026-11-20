@@ -11,7 +11,7 @@
 | 23 | `src/control_plane/speculative_tree/mod.rs` 保存 generation、execution_position、chance_id、assumption_set、pending_operations、execution_state；Chance 保存 authority_outcome 与 authority_evidence。 | 后续需审查能力、约束与 Runtime 对齐信息是否满足目标契约。 |
 | 28 | `src/control_plane/speculative_tree/actions.rs` 按 epoch 调度 Rebalance，处理 pause／resume／preempt；`instrumentation/core/index.ts` 实现 hold。 | 不能笼统说 rebalance 未实现；效果复用与保留等扩展需分别检查。 |
 | 29 | `webui/src/components/ChatPane.tsx` 已有多行 textarea；`MessageView.tsx` 展示文字、思考、工具调用和结果。 | 尚无 Markdown 渲染，图片等仍以未展示内容呈现。 |
-| 33 | `src/control_plane/speculative_tree/tests/nested.rs` 覆盖活跃祖先假设阻止提交和祖先丢弃失效。 | 单元回归不等于端到端祖先丢弃回放；该端到端覆盖仍为验证缺口。 |
+| 33 | 手工事件和 loopback 伪模型覆盖局部 full/part、外层接受及拒绝。后代继续和失效由手工树验证。 | 深层并发及恢复期间的组合路径仍需专项验证。 |
 | 36 | `src/runtime/process/` 有进程身份、冻结、终止与清理，control plane 已有 generation。 | 完整资源租约、跨重启恢复及执行延续方式仍不能据此认定完成。 |
 
 2026-11-14 补记：公共 `chance_created` 已有源侧投机开始时间，`proposal_validated` 已提供真实验证时刻，`chance_stage_changed` 的 Accepted 已关联所用验证 id；这两项不再是观察协议缺口。树形几何和 NLE 地图已有实现，完整交付与统计验收仍是单独事项。

@@ -318,6 +318,7 @@ impl Replay {
 #[derive(Default)]
 struct Table {
     generations: HashMap<String, u64>,
+    paused: std::collections::HashSet<String>,
     cancelling: std::collections::HashSet<String>,
     draining: std::collections::HashSet<String>,
     entries: HashMap<(String, String), Arc<Entry>>,
@@ -363,6 +364,25 @@ impl Commands {
             listener: Some(listener_thread),
         })
     }
+    pub(super) fn pause_admission<'a>(
+        &'a self,
+        environments: &[&str],
+    ) -> Result<PausedAdmission<'a>, &'static str> {
+        let mut table = self.entries.lock().unwrap();
+        let unique: std::collections::HashSet<_> = environments.iter().copied().collect();
+        if unique.len() != environments.len()
+            || unique.iter().any(|id| table.paused.contains(*id) || table.cancelling.contains(*id))
+        {
+            return Err("environment execution is already gated");
+        }
+        let environments: Vec<_> = environments.iter().map(|id| (*id).to_owned()).collect();
+        table.paused.extend(environments.iter().cloned());
+        Ok(PausedAdmission {
+            commands: self,
+            environments,
+        })
+    }
+
     pub(super) fn access(&self, environment: &str) -> ExecutionAccess {
         ExecutionAccess {
             transport: "unix-json-lines".into(),
@@ -385,6 +405,43 @@ impl Commands {
         }
     }
 }
+pub(super) struct PausedAdmission<'a> {
+    commands: &'a Commands,
+    environments: Vec<String>,
+}
+
+impl PausedAdmission<'_> {
+    pub(super) fn wait(&self, environment: &str) {
+        let active: Vec<_> = self
+            .commands
+            .entries
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|((owner, _), _)| owner == environment)
+            .map(|(_, entry)| entry.clone())
+            .collect();
+        for entry in active {
+            drop(
+                entry
+                    .ready
+                    .wait_while(entry.terminal.lock().unwrap(), |value| value.is_none())
+                    .unwrap(),
+            );
+        }
+    }
+}
+
+impl Drop for PausedAdmission<'_> {
+    fn drop(&mut self) {
+        let mut table = self.commands.entries.lock().unwrap();
+        for environment in &self.environments {
+            table.paused.remove(environment);
+        }
+    }
+}
+
 impl Drop for Commands {
     fn drop(&mut self) {
         self.stop();
@@ -482,7 +539,7 @@ fn serve(
             let owner = environment.clone();
             let active: Vec<_> = {
                 let mut table = entries.lock().unwrap();
-                if !table.draining.insert(owner.clone()) {
+                if table.paused.contains(&owner) || !table.draining.insert(owner.clone()) {
                     return send(
                         &mut stream,
                         &json!({"event":"rejected","reason":"Environment cancellation in progress"}),
@@ -557,7 +614,8 @@ fn serve(
                     return reject(&mut stream, &"Runtime is shutting down");
                 }
                 let owner = key.0.clone();
-                if table.cancelling.contains(&owner)
+                if table.paused.contains(&owner)
+                    || table.cancelling.contains(&owner)
                     || generation != *table.generations.get(&owner).unwrap_or(&0)
                 {
                     return send(

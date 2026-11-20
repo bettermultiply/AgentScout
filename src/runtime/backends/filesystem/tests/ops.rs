@@ -669,14 +669,52 @@ fn round_trip(root: tempfile::TempDir, expect_btrfs: bool) {
                 .all(|change| change.path != child_path)
         );
 
+        write_upper(
+            &backend,
+            "root",
+            &workspace.join("authority-progress.txt"),
+            "keep",
+        );
         backend.suspend("root").unwrap();
         let accept = backend
-            .accept(&base, "child", "root", &[PathScope::Workspace], None, None)
+            .accept_environment_state(&BackendContext::new("root"), "child", true, None)
             .unwrap();
+        assert_eq!(
+            accept.acceptance,
+            Some(crate::protocol::contract::Acceptance::Full)
+        );
         assert!(accept.conflicts.is_empty());
         assert!(accept.confirmation.published);
-        assert!(!accept.confirmation.target_paused);
         assert!(upper_at(&backend, "root", &workspace.join("child.txt")).exists());
+        assert_eq!(
+            fs::read_to_string(upper_at(
+                &backend,
+                "root",
+                &workspace.join("authority-progress.txt")
+            ))
+            .unwrap(),
+            "keep"
+        );
+
+        let conflicting_path = workspace.join("child.txt");
+        write_upper(&backend, "root", &conflicting_path, "authority wins");
+        let target = BackendContext::new("root");
+        let rejected = backend
+            .accept_environment_state(&target, "child", true, None)
+            .unwrap();
+        assert!(rejected.acceptance.is_none());
+        assert!(!rejected.conflicts.is_empty());
+        let downgraded = backend
+            .accept_environment_state(&target, "child", true, Some(&crate::protocol::contract::PartSelection::Scopes(vec![])))
+            .unwrap();
+        assert_eq!(
+            downgraded.acceptance,
+            Some(crate::protocol::contract::Acceptance::Part { scopes: vec![] })
+        );
+        assert_eq!(
+            fs::read_to_string(upper_at(&backend, "root", &conflicting_path)).unwrap(),
+            "authority wins"
+        );
     }
 
     backend.terminate("child").unwrap();

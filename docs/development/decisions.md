@@ -1,5 +1,11 @@
 # 开发决策
 
+## Runtime 的 full 与 part 接受
+
+Full 与 part 都先由 Policy 接受。Proposal 有效且候选进展与 AuB 相容时，Runtime 才从 SpB 向 AuB 移交状态。Full 保留 SpB session 与后代，并让后续调用使用 AuB 合并后的环境。Part 保留原 AuB session，按实际提交内容反馈，并丢弃 SpB 与全部后代。Full 只能降为事先获准的 part。此前继续使用候选环境的决定由本条取代。
+
+已确认两种 part 选择范围。Policy 可以主动检查 SpB 的受控可见执行记录来发现结果，也可以使用只列 SpB 或工具明确给出的结果的快速选项。两者可以并存，由 Policy 选择。快速选项仅缩小搜索范围，结果依据、依赖状态和 AuB 进展仍须相容，且均须先接受再合入。实现边界见 [Runtime 生命周期](runtime-lifecycle.md#full-与-part-接受)。
+
 ## Agent 协议与 Speculative Tree 分离
 
 原 `src/control_plane/agent_control/` 已迁移至 `src/control_plane/speculative_tree/`。Agent 消息、命令、握手能力、线封装及其共享值类型归 `src/control_plane/gateway/agent/protocol.rs`；Tree 在 `speculative_tree/messages.rs` 检查并应用消息，继续持有状态、未决命令和恢复转换。这样 Gateway 能接入并交付消息而不依赖 Tree 实现，Tree 仍决定状态如何变化。仅迁移 Rust 模块与定义，不更改消息编码、恢复快照格式或执行行为。
@@ -625,6 +631,10 @@ Chance、芽、叶茎、叶片进入同一随React Flow变换的SVG组，尺寸�
 ### 废弃
 
 - 废弃把 Branch 作为垂直绝对槽位、把模型调用画成独立分支、以及按真实毫秒线性展开整棵树的做法；这些方案会破坏树干语义或使长任务不可读。
+
+## 2026-11-16：嵌套 full/part 的接受范围
+
+内层 Chance 的 full/part 可以向直接父级移交。父级仍在投机时，移交只作用于父级的隔离环境和会话路径，保留外层未决 Proposal。随后只有外层接受才能向外层提交。暂停顺序和文件级结果协议见 [Runtime 生命周期](runtime-lifecycle.md#full-与-part-接受)。
 
 ## 2026-11-10：嵌套 Chance 接通与提交资格
 

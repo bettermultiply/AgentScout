@@ -160,6 +160,16 @@ pub enum Operation {
     },
     /// 把 Candidate 的环境提升为权威环境。共享环境 Runtime 可以是 no-op。
     PromoteEnvironment,
+    /// Transfer state from a direct child into this environment.
+    AcceptEnvironment {
+        source_environment_id: String,
+        full: bool,
+        /// None means Policy did not authorize part. Empty means results only.
+        part: Option<PartSelection>,
+        /// The caller owns a preceding SuspendEnvironment and the matching resume.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        target_suspended: bool,
+    },
     SuspendEnvironment,
     ResumeEnvironment,
     TerminateEnvironment,
@@ -203,6 +213,54 @@ pub enum PathScope {
     Tmp,
 }
 
+/// Legacy mount selection or explicit Policy results with file dependencies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PartSelection {
+    Scopes(Vec<PathScope>),
+    Results { results: Vec<PartResult> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartResult {
+    pub id: String,
+    pub files: Vec<String>,
+}
+
+impl PartSelection {
+    pub fn results_only(&self) -> bool {
+        match self {
+            Self::Scopes(scopes) => scopes.is_empty(),
+            Self::Results { results } => results.iter().all(|result| result.files.is_empty()),
+        }
+    }
+
+    pub fn valid_results(results: &[PartResult]) -> bool {
+        let mut ids = std::collections::BTreeSet::new();
+        !results.is_empty() && results.iter().all(|result| {
+            !result.id.trim().is_empty() && ids.insert(&result.id) && {
+                let mut files = std::collections::BTreeSet::new();
+                result.files.iter().all(|path| {
+                    path.starts_with('/') && !path.contains('\0')
+                        && path[1..].split('/').all(|part| !matches!(part, "" | "." | ".."))
+                        && files.insert(path)
+                })
+            }
+        })
+    }
+
+    pub fn results_only_receipt(&self) -> Acceptance {
+        match self {
+            Self::Scopes(_) => Acceptance::Part { scopes: vec![] },
+            Self::Results { results } => Acceptance::PartResults {
+                results: results.iter().filter(|result| result.files.is_empty())
+                    .map(|result| result.id.clone()).collect(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FilesystemConfirmation {
     #[serde(default)]
@@ -240,8 +298,18 @@ pub struct FilesystemConflict {
     pub theirs: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Acceptance {
+    Full,
+    Part { scopes: Vec<PathScope> },
+    PartResults { results: Vec<String> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FilesystemResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<Acceptance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
