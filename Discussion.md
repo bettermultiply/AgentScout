@@ -39,7 +39,7 @@
 | 30 | 退出、异常清理与接受竞态 | 启动握手阶段信号、Runtime 故障注入、独立环境端到端退出；异常退出后受管 Agent／工具进程的停止、残留资源归属确认与清理，不能误清理无关资源；Promote 在途时 Parent 开始下一操作、Agent 确认前候选取消。不要求异常退出后重新启动并继续原任务。 | 实现／验证缺口；已有 Shutdown／SIGINT／SIGTERM 验证不重复列为未实现；[参考负载](docs/development/reference-workload.md)、[Runtime 生命周期](docs/development/runtime-lifecycle.md) |
 | 33 | 嵌套端到端覆盖 | 活跃祖先 Candidate 被 Discard 后的嵌套 Chance 端到端执行、自然重复键与消费顺序；嵌套失效已有单元回归，不能替代端到端验证。 | 剩余端到端验证；[回放](docs/development/replay.md) |
 | 34 | `has_predictor` 的来源 | 不应由已编译 Policy 是否含 `predict` 决定。先记下，暂不展开。 | 用户要求只记录 |
-| 35 | 观察与统计 | 未命中造成的权威额外延迟、校验耗时与模型投机生产路径；长运行折叠／内存成本、像普通 chatbot 一样通过列表回看以前聊天。树布局缓存已有实现，剩余细粒度复用和长运行性能验证见 WebUI。 | 数据／实现缺口；[观察](docs/development/observation.md)、[WebUI](docs/development/web-ui.md#性能目标与实现差距2026-11-14) |
+| 35 | 观察与统计 | 未命中造成的权威额外延迟、校验耗时与模型投机生产路径；长运行折叠／内存成本、像普通 chatbot 一样通过列表回看以前聊天。树图已复用未变化的节点与几何，剩余长运行性能验证见 WebUI。 | 数据／实现缺口；[观察](docs/development/observation.md)、[WebUI](docs/development/web-ui.md#性能目标与实现差距2026-11-14) |
 | 36 | 原生插件接入与当前实现缺陷 | 留待 Instrumentation 讨论。普通插件不能承接并行候选、待决工具恢复和 session 继续，因此当前保留 SDK 宿主；命令发现已改用原生 `getCommands()`。模型完成通知顺序已修，仍依赖新增的模型执行 Hook。`before_provider_request` 上的取消不能保证请求尚未发出。插件直接使用宿主文件或进程接口不自动获得 Branch 视图，此项已作为当前设计妥协接受。`executeTool()` 不单独进入会话记录只说明工具内部调用没有独立边界；嵌套投机是 Branch 之间的嵌套，不把该现象重新列为嵌套投机缺陷。 | 用户要求先记录、暂不展开 |
 
 ### 必要前提

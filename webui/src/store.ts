@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import { eventStreamUrl, fetchStateEventSet } from './api'
-import { applyEvent, emptyRunState, foldEvents } from './fold'
-import type { RunState } from './fold'
+import { applyEvent, emptyRunState, foldEvents, type RunState, type TaskState } from './fold'
 import type { ObservationEvent, UiPromptEvent, CommandsListedEvent, UiNotificationEvent } from './types'
 import { buildTree, type TreeGraph } from './components/treeGraph'
 import { cachedLayoutTree, clearCachedTreeLayout } from './tree/geometry'
@@ -100,10 +99,19 @@ function pickTask(state: RunState, current: string | null): string | null {
 }
 
 export const useAppStore = create<AppStore>((set, get) => {
+  let previousTask: TaskState | null = null
+
   function graphFor(state: RunState, taskId: string | null, tuning = get().treeTuning) {
     const task = taskId ? state.tasks[taskId] ?? null : null
-    if (!task) clearCachedTreeLayout()
-    return buildTree(task, tuning, cachedLayoutTree)
+    const { treeGraph, treeTuning } = get()
+    const previous = previousTask
+    previousTask = task
+    if (!task && previous) clearCachedTreeLayout()
+    if (tuning === treeTuning && (task === previous || (task && previous &&
+      task.taskId === previous.taskId && task.branches === previous.branches &&
+      task.branchOrder === previous.branchOrder && task.chances === previous.chances &&
+      task.authority === previous.authority))) return treeGraph
+    return buildTree(task, tuning, cachedLayoutTree, task?.taskId === previous?.taskId ? treeGraph : undefined)
   }
   function openSource(after: number, currentGeneration: number): void {
     closeSource()
@@ -183,7 +191,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       } catch { return DEFAULT_TUNING }
     })(),
     setTreeTuning(tuning) {
-      set({ treeTuning: tuning, treeGraph: graphFor(get().state, get().selectedTaskId, tuning) })
+      const { state, selectedTaskId, treeTuning } = get()
+      if ((Object.keys(DEFAULT_TUNING) as Array<keyof TreeTuning>).every(key => Object.is(treeTuning[key], tuning[key]))) return
+      set({ treeTuning: tuning, treeGraph: graphFor(state, selectedTaskId, tuning) })
     },
     state: emptyRunState(),
     connection: 'idle',
@@ -206,9 +216,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       started = false
       generation += 1
       closeSource()
+      previousTask = null
       clearCachedTreeLayout()
-      set({ treeGraph: { nodes: [], latestNodeId: null, error: null } })
-      set({ connection: 'idle', uiPrompts: {} })
+      set({ treeGraph: { nodes: [], latestNodeId: null, error: null }, connection: 'idle', uiPrompts: {} })
     },
 
     async resync() {

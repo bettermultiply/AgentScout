@@ -9,7 +9,7 @@ export interface TreeGraph {
 }
 
 /** Turn the folded task state into React Flow nodes. */
-export function buildTree(task: TaskState | null, tuning: TreeTuning, layout = layoutTree): TreeGraph {
+export function buildTree(task: TaskState | null, tuning: TreeTuning, layout = layoutTree, previous?: TreeGraph): TreeGraph {
   if (!task) return { nodes: [], latestNodeId: null, error: null }
   const path = authorityPath(task)
   let geometry: ReturnType<typeof layoutTree>
@@ -24,6 +24,8 @@ export function buildTree(task: TaskState | null, tuning: TreeTuning, layout = l
   }
 
   const nodes: BranchFlowNode[] = []
+  const previousNodes = new Map(previous?.nodes.map(node => [node.id, node]))
+  const drawn = new Set<string>()
   const depth = new Map<string, number>()
   const branchDepth = (branchId: string): number => {
     const cached = depth.get(branchId)
@@ -44,26 +46,32 @@ export function buildTree(task: TaskState | null, tuning: TreeTuning, layout = l
     const isAuthorityPath = path.has(branchId)
     const isCurrentAuthority = task.authority === branchId
 
-    nodes.push({
-      id: `branch:${branchId}`,
+    const id = `branch:${branchId}`
+    const old = previousNodes.get(id)
+    const zIndex = 100 - branchDepth(branchId)
+    const oldData = old?.data
+    const childForks = oldData?.geometry === layout && oldData.childForks.every((fork, i) =>
+      fork.chance === (task.chances[layout.chanceCircles[i].chanceId] ?? null))
+      ? oldData.childForks
+      : layout.chanceCircles.map(circle => ({ ...circle, chance: task.chances[circle.chanceId] ?? null }))
+    const data = oldData && oldData.branch === branch && oldData.geometry === layout && oldData.tuning === tuning &&
+      oldData.isAuthorityPath === isAuthorityPath && oldData.isCurrentAuthority === isCurrentAuthority && oldData.childForks === childForks
+      ? oldData : { branch, geometry: layout, tuning, isAuthorityPath, isCurrentAuthority, childForks }
+
+    nodes.push(old && old.data === data && old.zIndex === zIndex ? old : {
+      id,
       type: 'branch',
-      position: { x: layout.x, y: layout.y },
+      position: old && old.position.x === layout.x && old.position.y === layout.y ? old.position : { x: layout.x, y: layout.y },
       width: layout.width,
       height: layout.height,
-      data: {
-        branch,
-        geometry: layout,
-        tuning,
-        isAuthorityPath,
-        isCurrentAuthority,
-        childForks: layout.chanceCircles.map(circle => ({ ...circle, chance: task.chances[circle.chanceId] ?? null })),
-      },
+      data,
       draggable: false,
       selectable: false,
       focusable: false,
       // Parent outlines protect the uninterrupted trunk silhouette.
-      zIndex: 100 - branchDepth(branchId),
+      zIndex,
     })
+    drawn.add(branchId)
 
     if (branch.lastEventSequence > latestSequence) {
       latestSequence = branch.lastEventSequence
@@ -71,5 +79,14 @@ export function buildTree(task: TaskState | null, tuning: TreeTuning, layout = l
     }
   }
 
-  return { nodes, latestNodeId, error: null }
+  for (const chance of Object.values(task.chances)) {
+    if (chance.lastEventSequence > latestSequence && drawn.has(chance.parentBranchId)) {
+      latestSequence = chance.lastEventSequence
+      latestNodeId = `branch:${chance.parentBranchId}`
+    }
+  }
+
+  const sameNodes = previous && nodes.length === previous.nodes.length && nodes.every((node, i) => node === previous.nodes[i])
+  if (sameNodes && previous.error === null && previous.latestNodeId === latestNodeId) return previous
+  return { nodes: sameNodes ? previous.nodes : nodes, latestNodeId, error: null }
 }

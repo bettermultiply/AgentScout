@@ -44,6 +44,20 @@ function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
   const root=!branch.parentBranchId
   const show=(event:React.MouseEvent<Element>,group:CallGroup|null,chance:ChanceState|null=null)=>setHover({x:event.clientX,y:event.clientY,group,chance})
   const open=(group?:CallGroup)=>openBranch(branch.branchId,group?{kind:group.kind,actionId:group.events[0]?.action_id??null,sequences:group.events.map(e=>e.sequence)}:undefined)
+  const callTarget = (group: CallGroup) => ({
+    role: 'button',
+    tabIndex: 0,
+    'aria-label': `${group.kind === 'model' ? '模型调用' : '工具调用'}：事件 ${group.firstSequence}`,
+    onMouseEnter: (event: React.MouseEvent<SVGGElement>) => show(event, group),
+    onMouseLeave: () => setHover(null),
+    onClick: (event: React.MouseEvent<SVGGElement>) => { event.stopPropagation(); open(group) },
+    onKeyDown: (event: React.KeyboardEvent<SVGGElement>) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return
+      event.preventDefault()
+      event.stopPropagation()
+      if (!event.repeat) open(group)
+    },
+  })
   const branchEntry = root ? {} : {
     onMouseEnter: (e: React.MouseEvent<SVGElement>) => show(e, null),
     onMouseLeave: () => setHover(null),
@@ -77,32 +91,26 @@ function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
           // pink stems grow out of a white trunk with no pink Branch to explain
           // them.
           const sectionTone: typeof tone = aborted ? 'aborted' : tone
-          const leaves=section.leaves
           return <g key={section.id} className={`tree-twig-group tree-ink-${sectionTone}`} data-anchor-x={shape.anchor.x} data-anchor-y={shape.anchor.y}
-            data-center-x={p.x} data-center-y={p.y} data-half-width={p.width/2} role="button" tabIndex={0}
-            aria-label={`${section.twig?'模型调用':'工具调用'}：事件 ${section.twig?.firstSequence??leaves[0]?.firstSequence}`}
-            onMouseEnter={e=>show(e,section.twig??leaves[0])} onMouseLeave={()=>setHover(null)}
-            onClick={e=>{e.stopPropagation();open(section.twig??leaves[0])}}
-            onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open(section.twig??leaves[0])}}}>
-            <path className="tree-twig-visual" data-length={shape.length} d={shape.outline!.d} />
-            <circle className="tree-twig-visual" cx={shape.cap!.cx} cy={shape.cap!.cy} r={shape.cap!.r} />
-            <g transform={shape.transform}>
-              {leaves.length===0
-                ? <circle className="tree-model-tip" cx={shape.tip.x} cy={shape.tip.y} r={shape.tipRadius} />
-                : shape.leaves.map(leaf=>{
-                    const tool=leaf.tool
-                    return <g key={tool.id} className={`tree-leaf-group tone-${tool.tone}`} transform={leaf.transform}
-                      role="button" tabIndex={0} aria-label={`工具调用：事件 ${tool.firstSequence}`}
-                      onMouseEnter={e=>{e.stopPropagation();show(e,tool)}} onMouseLeave={()=>setHover(null)}
-                      onClick={e=>{e.stopPropagation();open(tool)}}
-                      onKeyDown={e=>{if(e.key==='Enter'){e.stopPropagation();open(tool)}}}>
-                      <path className="tree-leaf-petiole" style={{strokeWidth:leaf.petiole.stroke}} d={leaf.petiole.d} />
-                      <ellipse className="tree-leaf-visual" style={{strokeWidth:leaf.stroke,opacity:FIXED_GEOMETRY.leafOpacity}} data-length={leaf.size} data-width={leaf.width}
-                        cx={leaf.ellipse.cx} cy={leaf.ellipse.cy} rx={leaf.ellipse.rx} ry={leaf.ellipse.ry} />
-                      <path className="tree-leaf-vein" style={{strokeWidth:leaf.vein.stroke}} d={leaf.vein.d} />
-                    </g>
-                  })}
+            data-center-x={p.x} data-center-y={p.y} data-half-width={p.width/2}>
+            <g className="tree-twig-target" {...callTarget(section.twig)}>
+              <path className="tree-twig-visual" data-length={shape.length} d={shape.outline!.d} />
+              <circle className="tree-twig-visual" cx={shape.cap!.cx} cy={shape.cap!.cy} r={shape.cap!.r} />
+              {section.leaves.length === 0 && <g transform={shape.transform}>
+                <circle className="tree-model-tip" cx={shape.tip.x} cy={shape.tip.y} r={shape.tipRadius} />
+              </g>}
             </g>
+            {shape.leaves.length > 0 && <g transform={shape.transform}>
+              {shape.leaves.map(leaf => {
+                const tool = leaf.tool
+                return <g key={tool.id} className={`tree-leaf-group tone-${tool.tone}`} transform={leaf.transform} {...callTarget(tool)}>
+                  <path className="tree-leaf-petiole" style={{strokeWidth:leaf.petiole.stroke}} d={leaf.petiole.d} />
+                  <ellipse className="tree-leaf-visual" style={{strokeWidth:leaf.stroke,opacity:FIXED_GEOMETRY.leafOpacity}} data-length={leaf.size} data-width={leaf.width}
+                    cx={leaf.ellipse.cx} cy={leaf.ellipse.cy} rx={leaf.ellipse.rx} ry={leaf.ellipse.ry} />
+                  <path className="tree-leaf-vein" style={{strokeWidth:leaf.vein.stroke}} d={leaf.vein.d} />
+                </g>
+              })}
+            </g>}
           </g>
         })}
         {g.validationEnd ? <line className="tree-validation-end" x1={g.validationEnd.x1} y1={g.validationEnd.y1} x2={g.validationEnd.x2} y2={g.validationEnd.y2}
