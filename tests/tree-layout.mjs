@@ -118,6 +118,35 @@ for (const starts of [[0], [0, 0, 0, 1000, 2000], [0, 1000, 2000, 3000, 4000]]) 
   })
 }
 
+test('Chance uses parent geometry for multiple candidates and child geometry for one', () => {
+  const base = { task_id: 'chance-dot' }
+  const events = [
+    { event: 'branch_created', branch_id: 'root', role: 'authority' },
+    { event: 'model_usage', branch_id: 'root', started_at_ms: 0, duration_ms: 10 },
+    { event: 'chance_created', branch_id: 'root', parent_branch_id: 'root', chance_id: 'fork', speculation_started_at_ms: 4000 },
+    { event: 'branch_created', branch_id: 'alpha', parent_branch_id: 'root', chance_id: 'fork', role: 'candidate' },
+    { event: 'branch_created', branch_id: 'beta', parent_branch_id: 'root', chance_id: 'fork', role: 'candidate' },
+    { event: 'model_usage', branch_id: 'root', started_at_ms: 10000, duration_ms: 10 },
+    { event: 'model_usage', branch_id: 'alpha', started_at_ms: 10000, duration_ms: 10 },
+  ].map((event, i) => ({ ...base, timestamp_ms: i, sequence: i + 1, ...event }))
+  const task = foldEvents(events).tasks[base.task_id]
+  const dot = (branchOrder, candidateIds) => {
+    const layout = layoutTree({ ...task, branchOrder }, DEFAULT_TUNING)
+    const parent = layout.get('root')
+    assert.equal(parent.chanceCircles.length, 1)
+    const [circle] = parent.chanceCircles
+    const sample = sampleGeometry(parent, parent.chancePositions.get('fork'))
+    const childId = candidateIds.length === 1 ? candidateIds[0] : null
+    const { x, y } = childId ? parent.forkPoints.get(childId) : sample
+    const width = childId ? layout.get(childId).trunkWidths[0] : sample.width
+    assert.deepEqual(circle, { chanceId: 'fork', candidateBranchIds: candidateIds, x, y, radius: width * DEFAULT_TUNING.chanceRadiusRatio })
+  }
+  dot(['root', 'alpha', 'beta'], ['alpha', 'beta'])
+  dot(['root', 'beta', 'alpha'], ['alpha', 'beta'])
+  dot(['root', 'alpha'], ['alpha'])
+  dot(['root'], [])
+})
+
 test('tree failure heading does not misdiagnose an unpaired tool as missing timestamps', async () => {
   const task = taskWithCalls()
   task.branches.authority.events[1].event = 'tool_finished'

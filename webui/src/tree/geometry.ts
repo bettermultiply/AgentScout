@@ -1,4 +1,4 @@
-import type { BranchState, TaskState } from '../fold'
+import type { BranchState, ChanceState, TaskState } from '../fold'
 import { groupBranchCalls, pairCalls, requiredStart, type CallGroup, type CallUnit } from './calls'
 import { DEFAULT_TUNING, FIXED_GEOMETRY, childAngleOf, ranged, type TreeTuning } from './tuning'
 import { chooseForkSide } from './forkSide'
@@ -94,7 +94,7 @@ export interface BranchGeometry {
   trunk: PathGeometry
   connection?: PathGeometry & { rootWidth: number }
   bud: { transform: string; angle: number; base: Point; tip: Point; ellipse: EllipseGeometry }
-  chanceCircles: Array<{ chanceId: string; branchId: string; x: number; y: number; radius: number }>
+  chanceCircles: Array<{ chanceId: string; candidateBranchIds: string[]; x: number; y: number; radius: number }>
   validationEnd: { x1: number; y1: number; x2: number; y2: number; validatedAtMs: number } | null
 }
 
@@ -299,6 +299,9 @@ export function treeLayoutStats() { return { ...activeTreeLayouts.stats } }
 
 /** Refresh call facts without copying sampled paths or retaining old event payloads. */
 function withCalls(g: BranchGeometry, calls: CallGroup[]): BranchGeometry {
+  // Groups currently contain one immutable observation each. A non-call
+  // observation can change the Branch without changing any call payload.
+  if (g.calls.length === calls.length && g.calls.every((call, i) => call.events[0] === calls[i].events[0])) return g
   const byId = new Map(calls.map(call => [call.id, call]))
   return { ...g, calls, sections: g.sections.map(section => ({ ...section,
     twig: byId.get(section.twig.id)!, leaves: section.leaves.map(call => byId.get(call.id)!),
@@ -317,9 +320,24 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
   // Final visible sides and their source positions, scoped to this layout.
   const boundaries = new WeakMap<BranchGeometry, ConnectionSides>()
   const branches = task.branchOrder.map(id => task.branches[id]).filter(Boolean)
-  const children = (id: string) => branches.filter(b => b.parentBranchId === id)
+  const childrenByParent = new Map<string, BranchState[]>()
+  const chancesByParent = new Map<string, ChanceState[]>()
+  const taskChances = Object.values(task.chances)
+  for (const branch of branches) {
+    if (branch.parentBranchId === null) continue
+    const siblings = childrenByParent.get(branch.parentBranchId) ?? []
+    siblings.push(branch)
+    childrenByParent.set(branch.parentBranchId, siblings)
+  }
+  for (const chance of taskChances) {
+    const siblings = chancesByParent.get(chance.parentBranchId) ?? []
+    siblings.push(chance)
+    chancesByParent.set(chance.parentBranchId, siblings)
+  }
+  const children = (id: string) => childrenByParent.get(id) ?? []
+  const chancesFor = (id: string) => chancesByParent.get(id) ?? []
   const cutoff = (branch: BranchState): number | null => {
-    const accepted = Object.values(task.chances).filter(c => c.parentBranchId === branch.branchId && typeof c.stage === 'object' && 'accepted' in c.stage)
+    const accepted = chancesFor(branch.branchId).filter(c => typeof c.stage === 'object' && 'accepted' in c.stage)
     if (accepted.length > 1) throw new Error(`Branch ${branch.branchId} 有多个已接受的 Chance，无法确定截止点`)
     if (!accepted.length) return null
     const chance = accepted[0]
@@ -346,7 +364,7 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
   // Attachment direction, root widths and Chance lookup can change even on
   // another branch. Conservatively invalidate the tree's structural changes.
   const structureKey = JSON.stringify([branches.map(b => [b.branchId, b.parentBranchId, b.chanceId]),
-    Object.values(task.chances).map(c => [c.chanceId, c.parentBranchId])])
+    taskChances.map(c => [c.chanceId, c.parentBranchId])])
   const workloadKey = JSON.stringify(branches.map(b => [b.branchId, count(b)]))
   const globalKey = JSON.stringify([structureKey, workloadKey])
   let revision = 0
@@ -361,9 +379,8 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
     const starts = allCalls.map(call => requiredStart(call, `Branch ${branch.branchId} 的调用`))
     const end = cutoffs.get(branch.branchId) ?? null
     const calls = end === null ? allCalls : allCalls.filter(call => call.startMs! <= end)
-    const units = pairCalls(calls)
     const kids = children(branch.branchId)
-    const chances = Object.values(task.chances).filter(chance => chance.parentBranchId === branch.branchId)
+    const chances = chancesFor(branch.branchId)
     // Every value read by geometry, including full descendant workload and the
     // parent's final visible boundary. No assumption that growth affects a tail.
     const key = inputKey([tuningKey, root, initialAngle, startWidth,
@@ -372,13 +389,14 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       kids.map(child => [child.branchId, child.chanceId, count(child),
         groupBranchCalls(child).map(c => [c.firstSequence, c.startMs]),
         cutoffs.get(child.branchId),
-        Object.values(task.chances).filter(c => c.parentBranchId === child.branchId).map(c => [c.chanceId, c.speculationStartedAtMs])]),
+        chancesFor(child.branchId).map(c => [c.chanceId, c.speculationStartedAtMs])]),
       chances.map(c => [c.chanceId, c.speculationStartedAtMs]),
       attach ? [next.get(attach.parent.branchId)?.revision, attach.center, attach.distance, attach.width, attach.side, attach.heading] : null])
     const cached = previous.get(branch.branchId)
     if (cached?.key === key && cached.globalKey === globalKey) {
-      const geometry = withCalls(cached.raw, calls)
-      geometry.forkPoints = new Map(cached.raw.forkPoints)
+      // A changed child can write its fork point. Keep cached geometry immutable.
+      const raw = withCalls(cached.raw, calls)
+      const geometry = { ...raw, forkPoints: new Map(raw.forkPoints) }
       result.set(branch.branchId, geometry)
       boundaries.set(geometry, cached.boundary)
       hits.set(branch.branchId, cached)
@@ -394,6 +412,7 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       }
       return
     }
+    const units = pairCalls(calls)
     if (stats) stats.computedBranches++
     computed = true
 
@@ -661,9 +680,17 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
     place(branch, { x: 0, y: 0 }, 0, tuning.rootWidth)
   }
 
-  // Conservative bounds in both axes. Quadratic curves stay in their control
-  // hull; rotations cannot exceed the control hull's largest radius. Include
-  // wide leaves, petioles, all strokes, buds and Chance circles, not just tips.
+  const candidatesByChance = new Map<string, string[]>()
+  for (const branch of branches) {
+    if (branch.chanceId === null) continue
+    const ids = candidatesByChance.get(branch.chanceId) ?? []
+    ids.push(branch.branchId)
+    candidatesByChance.set(branch.chanceId, ids)
+  }
+  for (const ids of candidatesByChance.values()) ids.sort()
+
+  // Conservative bounds include the full outlines, strokes, leaves, buds,
+  // and Chance circles, not just tips.
   for (const geometry of result.values()) {
     const hit = hits.get(geometry.branchId)
     if (hit) {
@@ -706,11 +733,12 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       add({ x: geometry.validationEnd.x2, y: geometry.validationEnd.y2 }, 1)
     }
     for (const [chanceId, distance] of geometry.chancePositions) {
-      const child = branches.find(b => b.chanceId === chanceId)
+      const candidateBranchIds = candidatesByChance.get(chanceId) ?? []
+      const onlyChild = candidateBranchIds.length === 1 ? candidateBranchIds[0] : null
       const sample = sampleGeometry(geometry, distance)
-      const point = geometry.forkPoints.get(child?.branchId ?? '') ?? sample
-      const width = result.get(child?.branchId ?? '')?.trunkWidths[0] ?? sample.width
-      const circle = { chanceId, branchId: child?.branchId ?? geometry.branchId, ...point, radius: width * tuning.chanceRadiusRatio }
+      const { x, y } = (onlyChild ? geometry.forkPoints.get(onlyChild) : undefined) ?? sample
+      const width = (onlyChild ? result.get(onlyChild)?.trunkWidths[0] : undefined) ?? sample.width
+      const circle = { chanceId, candidateBranchIds, x, y, radius: width * tuning.chanceRadiusRatio }
       geometry.chanceCircles.push(circle)
       add(circle, circle.radius)
     }

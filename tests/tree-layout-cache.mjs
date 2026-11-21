@@ -156,6 +156,15 @@ test('errors replace success and removed tasks/branches release cached entries',
   console.log(`100 revisions retain ${cache.stats.entries} entries (one per current branch)`)
 })
 
+test('latest Chance locates its drawn parent and yields to a newer Branch', () => {
+  const task = fixture()
+  task.chances['chance-a'].lastEventSequence = 100
+  task.chances.orphan = { ...task.chances['chance-a'], chanceId: 'orphan', parentBranchId: 'missing', lastEventSequence: 102 }
+  assert.equal(buildTree(task, DEFAULT_TUNING).latestNodeId, 'branch:root')
+  task.branches.a.lastEventSequence = 101
+  assert.equal(buildTree(task, DEFAULT_TUNING).latestNodeId, 'branch:a')
+})
+
 test('store updates while hidden/detail, returns latest without recomputation and releases on stop', async () => {
   globalThis.window = { localStorage: { getItem: () => null, setItem() {} }, matchMedia: () => ({ matches: false }) }
   try {
@@ -172,17 +181,37 @@ test('store updates while hidden/detail, returns latest without recomputation an
     useAppStore.getState().ingestEvent({ event: 'model_usage', task_id: 'cache', branch_id: 'b', sequence: 52, timestamp_ms: 16000, model: 'fixture', total_tokens: 1, cost: null, started_at_ms: 16000, finished_at_ms: 16500, duration_ms: 500 })
     const hidden = treeLayoutStats()
     const graph = useAppStore.getState().treeGraph
+    let sequence = 52
+    for (const event of [
+      { event: 'ui_notification', task_id: 'cache', message: 'notice' },
+      { event: 'run_status', task_id: 'cache', connected: true },
+      { event: 'branch_created', task_id: 'other', branch_id: 'a', parent_branch_id: null, role: 'authority' },
+    ]) {
+      useAppStore.getState().ingestEvent({ sequence: ++sequence, timestamp_ms: 17000, ...event })
+      assert.strictEqual(useAppStore.getState().treeGraph, graph, event.event)
+    }
+    useAppStore.getState().setTreeTuning({ ...DEFAULT_TUNING })
+    assert.strictEqual(useAppStore.getState().treeGraph, graph)
     assert.equal(graph.nodes.find(n => n.id === 'branch:b').data.geometry.sections.length, 3)
-    useAppStore.getState().ingestEvent({ event: 'conversation_updated', task_id: 'cache', branch_id: 'b', sequence: 53, timestamp_ms: 17000 })
+    useAppStore.getState().ingestEvent({ event: 'conversation_updated', task_id: 'cache', branch_id: 'b', sequence: ++sequence, timestamp_ms: 17000 })
     assert.equal(treeLayoutStats().computedBranches, hidden.computedBranches)
     assert.equal(treeLayoutStats().layouts, hidden.layouts)
-    assert.equal(useAppStore.getState().treeGraph.latestNodeId, 'branch:b')
+    const updated = useAppStore.getState().treeGraph
+    assert.equal(updated.latestNodeId, 'branch:b')
+    assert.equal(updated.nodes[2].data.branch.conversationUpdatedSequence, sequence)
+    assert.strictEqual(updated.nodes[2].data.geometry, graph.nodes[2].data.geometry)
+    assert.strictEqual(updated.nodes[0], graph.nodes[0])
+    assert.strictEqual(updated.nodes[1], graph.nodes[1])
     useAppStore.getState().setTreeTuning({ ...DEFAULT_TUNING, rootWidth: 12 })
     assert.deepEqual(useAppStore.getState().treeGraph, buildTree(useAppStore.getState().state.tasks.cache, { ...DEFAULT_TUNING, rootWidth: 12 }))
     const tuned = treeLayoutStats()
-    useAppStore.getState().ingestEvent({ event: 'proposal_validated', task_id: 'cache', chance_id: 'chance-a', proposal_id: 'p', validation_id: 91, validated_at_ms: 5000, sequence: 54, timestamp_ms: 18000 })
-    useAppStore.getState().ingestEvent({ event: 'chance_stage_changed', task_id: 'cache', chance_id: 'chance-a', stage: { accepted: 'p' }, validation_id: 91, reason: null, sequence: 55, timestamp_ms: 19000 })
+    useAppStore.getState().ingestEvent({ event: 'proposal_validated', task_id: 'cache', chance_id: 'chance-a', proposal_id: 'p', validation_id: 91, validated_at_ms: 5000, sequence: ++sequence, timestamp_ms: 18000 })
+    const validated = useAppStore.getState().treeGraph
+    assert.equal(validated.nodes[0].data.childForks.find(f => f.chance.chanceId === 'chance-a').chance.validations[91].proposalId, 'p')
+    assert.equal(validated.latestNodeId, 'branch:root')
+    useAppStore.getState().ingestEvent({ event: 'chance_stage_changed', task_id: 'cache', chance_id: 'chance-a', stage: { accepted: 'p' }, validation_id: 91, reason: null, sequence: ++sequence, timestamp_ms: 19000 })
     const acceptedGraph = useAppStore.getState().treeGraph
+    assert.equal(acceptedGraph.latestNodeId, 'branch:root')
     assert.equal(acceptedGraph.nodes.find(n => n.id === 'branch:root').data.geometry.validationEnd.validatedAtMs, 5000)
     assert.deepEqual(acceptedGraph, buildTree(useAppStore.getState().state.tasks.cache, { ...DEFAULT_TUNING, rootWidth: 12 }))
     const returnCount = treeLayoutStats().computedBranches
@@ -191,10 +220,42 @@ test('store updates while hidden/detail, returns latest without recomputation an
     assert.equal(treeLayoutStats().computedBranches, returnCount)
     assert.ok(returnCount >= tuned.computedBranches)
     assert.equal(useAppStore.getState().treeGraph.nodes.find(n => n.id === 'branch:b').data.geometry.sections.length, 3)
+    useAppStore.getState().selectTask('other')
+    assert.equal(treeLayoutStats().entries, 1)
+    assert.equal(useAppStore.getState().treeGraph.nodes[0].data.branch.role, 'authority')
+    useAppStore.getState().selectTask('cache')
+    assert.equal(treeLayoutStats().entries, 3)
+    assert.deepEqual(useAppStore.getState().treeGraph, acceptedGraph)
     const beforeStop = treeLayoutStats().computedBranches
     useAppStore.getState().stop()
     assert.equal(treeLayoutStats().entries, 0)
     assert.equal(useAppStore.getState().treeGraph.nodes.length, 0)
-    console.log(`layout counters: initial=${before.computedBranches}, hidden=${hidden.computedBranches}, return=${returnCount}, stop=${beforeStop}; layouts=${hidden.layouts}`)
+    console.log(`layout counters: initial=${before.computedBranches}, hidden=${hidden.computedBranches}, return=${returnCount}; layouts=${hidden.layouts}`)
+    assert.equal(treeLayoutStats().computedBranches, beforeStop)
+
+    // Drive restoration through the normal state-event-set entry point.
+    const { fetch, EventSource } = globalThis
+    let events = [{ event: 'branch_created', task_id: 'cache', branch_id: 'a', parent_branch_id: null,
+      role: 'authority', chance_id: null, sequence: 1, timestamp_ms: 100 }]
+    try {
+      globalThis.fetch = async () => Response.json({ events, sequence: events.at(-1)?.sequence ?? 0 })
+      globalThis.EventSource = class { addEventListener() {} close() {} }
+      useAppStore.getState().setPanelOpen(false)
+      await useAppStore.getState().resync()
+      const restored = useAppStore.getState().treeGraph
+      assert.equal(restored.nodes.length, 1)
+      assert.equal(restored.nodes[0].data.branch.role, 'authority')
+      assert.equal(restored.nodes[0].data.tuning.rootWidth, 12)
+      events = []
+      await useAppStore.getState().resync()
+      assert.equal(useAppStore.getState().selectedTaskId, null)
+      assert.equal(useAppStore.getState().treeGraph.nodes.length, 0)
+      assert.equal(treeLayoutStats().entries, 0)
+    } finally {
+      useAppStore.getState().stop()
+      globalThis.fetch = fetch
+      if (EventSource === undefined) delete globalThis.EventSource
+      else globalThis.EventSource = EventSource
+    }
   } finally { delete globalThis.window }
 })

@@ -1457,7 +1457,7 @@ select {
 }
 
 /* Model petioles carry tool leaf clusters at their tips. */
-.tree-twig-group,
+.tree-twig-target,
 .tree-leaf-group {
   cursor: pointer;
   outline: none;
@@ -1479,7 +1479,7 @@ select {
   stroke-width: 1;
   opacity: 1;
   stroke-linejoin: round;
-  pointer-events: none;
+  pointer-events: all;
 }
 
 .tree-leaf-vein {
@@ -1525,7 +1525,7 @@ select {
 }
 
 .tree-twig-group:hover .tree-twig-visual,
-.tree-twig-group:focus-visible .tree-twig-visual {
+.tree-twig-target:focus-visible .tree-twig-visual {
   opacity: 1;
 }
 
