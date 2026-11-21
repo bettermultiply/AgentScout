@@ -1,4 +1,4 @@
-import { ReasonIcon, StatusIcon } from '../icons'
+import { ReasonIcon } from '../icons'
 
 function TwigSample() {
   return (
@@ -17,33 +17,24 @@ export function Legend() {
         <section>
           <h4>大枝（一个 Branch）</h4>
           <p className="legend-note">
-            初始 Branch 保持直立；子枝从父枝 Chance 的逻辑时间位置长出，各自按稳定方向逐渐回正。权威切换只改变样式，不移动枝干。枝长取该 Branch 从创建到最后一个事件的逻辑时间；枝粗取该点之后（含子枝）还剩多少调用。分支名不显示。
+            根枝初始直立。子枝从源侧准入时间对应的父枝中心线长出。枝长取相邻调用的开始时间差，枝粗取该位置之后（含子枝）的剩余调用量。悬停枝干、叶茎、叶片或芽时，该枝和后代会移到前景。点击枝干或芽可进入详情。
           </p>
           <ul>
             <li>
               <span className="legend-trunk legend-trunk-authority" aria-hidden="true" />
-              当前权威：近白（浅色主题近黑）实色，最粗
+              当前权威为暖灰色，深色主题下为浅暖灰
             </li>
             <li>
               <span className="legend-trunk legend-trunk-finished" aria-hidden="true" />
-              历史权威：同色略淡，主干从种子到当前始终连着
+              历史权威沿用暖灰色，颜色更淡
             </li>
             <li>
               <span className="legend-trunk legend-trunk-candidate" aria-hidden="true" />
-              投机候选：粉紫，细于父枝
+              投机候选为灰绿色
             </li>
             <li>
               <span className="legend-trunk legend-trunk-abandoned" aria-hidden="true" />
-              未采纳：灰色、整枝约 40% 透明，叶片变枯
-            </li>
-            <li>
-              <span className="legend-head" aria-hidden="true">
-                <StatusIcon status="running" size={10} />
-                <span className="legend-head-reason">
-                  <ReasonIcon reason="tool" size={6} />
-                </span>
-              </span>
-              主干起点：点击进入详情顶部；子枝不直接长在父干上，不画根盘
+              未采纳枝及其叶片为灰色，枝与叶保留 40% 不透明度
             </li>
           </ul>
         </section>
@@ -66,42 +57,35 @@ export function Legend() {
               <span className="legend-leaf tone-success" aria-hidden="true">
                 <span className="leaf-shape" />
               </span>
-               成功：权威枝上实心绿，候选枝上实心玫红
+              成功为实心，权威枝上为暖灰，候选枝上为灰绿
             </li>
             <li>
               <span className="legend-leaf tone-danger" aria-hidden="true">
                 <span className="leaf-shape" />
               </span>
-               失败：实心红
+               失败为实心暖红
             </li>
             <li>
               <span className="legend-leaf tone-cancelled" aria-hidden="true">
                 <span className="leaf-shape leaf-hollow" />
               </span>
-               取消：空心灰，半透明
+               取消为空心灰
             </li>
             <li>
               <span className="legend-leaf tone-timeout" aria-hidden="true">
                 <span className="leaf-shape leaf-hollow" />
               </span>
-               超时：空心琥珀
+               超时为空心琥珀色
             </li>
           </ul>
           <p className="legend-note">
-            工具叶片长在弯曲叶茎上，沿叶茎方向排列；第一次模型调用之前的工具使用相同轮廓。候选 Branch 上的成功叶取枝的玫红，失败、取消、超时仍用红、空心灰、空心琥珀，整枝不再出现绿枝粉叶的割裂。悬停显示工具名、状态与耗时，点击定位到详情中的这次调用。枝未采纳时所有叶片一起变枯，不再单独显示工具状态。
-          </p>
-        </section>
-        <section>
-          <h4>结算标记</h4>
-          <p className="legend-note">
-            枝头旁的 ✓ 表示命中，红色 ✕ 表示未命中；悬停枝头查看实测与估计结算，不合并、不补零。
+            尖叶沿弯曲的叶茎排列。悬停显示工具名、状态与耗时，点击定位到详情中的这次调用。枝未采纳时叶片统一为灰色，取消和超时仍为空心。
           </p>
         </section>
         <section>
           <h4>投机原因与 Chance</h4>
           <p className="legend-note">
-            头部原因徽标来自 <code>branch_created.speculation_kind</code>；Chance
-            字段来自 <code>chance_created</code> 与后续阶段事件。
+            <span className="legend-chance" aria-hidden="true" /> 圆环标出 Chance，可悬停查看，有且仅有一个候选时可点击进入该候选详情。投机原因来自 <code>branch_created.speculation_kind</code>。
           </p>
           <ul>
             <li>

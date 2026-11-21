@@ -14,9 +14,13 @@
   --text: #16212c;
   --text-soft: #33485b;
   --muted: #607285;
-  --tree-abandoned: #52606e;
-  --tree-dry: #8a7a5c;
-  --leaf-candidate: #a83a7e;
+  --tree-authority: #504a43;
+  --tree-authority-leaf: #716d61;
+  --tree-candidate: #526a5d;
+  --leaf-candidate: #667d69;
+  --tree-abandoned: #757573;
+  --tree-failed: #a05e50;
+  --tree-chance: #56796e;
   --accent: #0a6c68;
   --accent-strong: #07524f;
   --accent-contrast: #ffffff;
@@ -45,9 +49,13 @@
     --text: #e4edf6;
     --text-soft: #c3d1de;
     --muted: #92a4b6;
-    --tree-abandoned: #9aa8b8;
-    --tree-dry: #9c8a6e;
-    --leaf-candidate: #f0a2d2;
+    --tree-authority: #e2dacf;
+    --tree-authority-leaf: #beb6a5;
+    --tree-candidate: #96af9c;
+    --leaf-candidate: #a8bfa8;
+    --tree-abandoned: #92928e;
+    --tree-failed: #bb8171;
+    --tree-chance: #8fb5a7;
     --accent: #62dccd;
     --accent-strong: #9af4e9;
     --accent-contrast: #052220;
@@ -1111,51 +1119,32 @@ select {
 
 .legend-trunk-authority {
   width: 9px;
-  background: color-mix(in srgb, var(--text) 85%, var(--accent));
+  background: var(--tree-authority);
 }
 
 .legend-trunk-candidate {
   width: 4.5px;
-  background: color-mix(in srgb, var(--text-soft) 65%, var(--accent));
-  opacity: 0.62;
+  background: var(--tree-candidate);
 }
 
 .legend-trunk-finished {
   width: 7px;
-  background: color-mix(in srgb, color-mix(in srgb, var(--text) 85%, var(--accent)) 72%, var(--surface));
+  background: color-mix(in srgb, var(--tree-authority) 72%, var(--surface));
 }
 
 .legend-trunk-abandoned {
   width: 4.5px;
-  background: var(--muted);
+  background: var(--tree-abandoned);
   opacity: 0.4;
 }
 
-.legend-head {
-  position: relative;
-  flex: none;
-  width: 16px;
-  height: 16px;
+.legend-chance {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 3px;
+  border: 1.5px solid var(--tree-chance);
   border-radius: 50%;
-  border: 1.5px solid var(--accent);
-  background: var(--surface);
-  color: var(--accent);
-  display: grid;
-  place-items: center;
-}
-
-.legend-head-reason {
-  position: absolute;
-  right: -4px;
-  bottom: -3px;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 1px solid var(--accent);
-  background: var(--surface-raised);
-  color: var(--accent);
-  display: grid;
-  place-items: center;
 }
 
 .legend-twig {
@@ -1295,27 +1284,25 @@ select {
   pointer-events: none;
 }
 
+.tree-canvas:has(.tree-subtree-active) .react-flow__node-branch:not(.tree-subtree-active) {
+  opacity: .2;
+}
+
 .tree-chance {
-  fill: #008b9a;
-  stroke: none;
-  stroke-width: 0;
-  opacity: 1;
-  pointer-events: all;
-  cursor: pointer;
+  r: max(var(--chance-radius), calc(3px / var(--tree-zoom, 1)));
+  fill: var(--surface);
+  stroke: var(--tree-chance);
+  stroke-width: calc(1.5px / var(--tree-zoom, 1));
+  pointer-events: visiblePainted;
 }
 
-.tree-chance-hit {
-  fill: transparent;
-  stroke: transparent;
-  pointer-events: all;
-  cursor: pointer;
-}
-
+.tree-trunk,
 .tree-empty-bud {
-  fill: currentColor;
-  stroke: none;
-  opacity: 1;
+  pointer-events: visiblePainted;
+  cursor: pointer;
 }
+
+.tree-empty-bud { fill: currentColor; }
 
 .head-child {
   opacity: 0;
@@ -1338,22 +1325,13 @@ select {
 
 .tree-trunk-cap { fill: currentColor; stroke: none; pointer-events: none; }
 
-.tree-ink-authority { color: #16212c; }
-/* Historical authority is a paler solid, not a translucent one: a translucent
-   trunk would let the child's colour show through at every junction. */
-.tree-ink-authority-finished { color: color-mix(in srgb, #16212c 72%, var(--surface)); }
-.tree-ink-candidate { color: #8f2d72; }
-.tree-ink-aborted { color: #52606e; }
-/* Aborted work is the only ink that dries out and fades as a whole. */
+.tree-ink-authority { color: var(--tree-authority); }
+/* A solid tint protects the trunk silhouette at junctions. */
+.tree-ink-authority-finished { color: color-mix(in srgb, var(--tree-authority) 72%, var(--surface)); }
+.tree-ink-candidate { color: var(--tree-candidate); }
+.tree-ink-aborted { color: var(--tree-abandoned); }
 .tree-ink.tree-ink-aborted { opacity: 0.4; }
-.tree-head-hit { stroke: transparent; fill: none; pointer-events: stroke; cursor: pointer; }
 .tree-model-tip { fill: currentColor; }
-@media (prefers-color-scheme: dark) {
-  .tree-ink-authority { color: #f4f8fc; }
-  .tree-ink-authority-finished { color: color-mix(in srgb, #f4f8fc 72%, var(--surface)); }
-  .tree-ink-candidate { color: #e98acb; }
-  .tree-ink-aborted { color: #9aa8b8; }
-}
 
 .tree-trunk-live {
   animation: none;
@@ -1461,7 +1439,7 @@ select {
 .tree-leaf-group {
   cursor: pointer;
   outline: none;
-  pointer-events: auto;
+  pointer-events: visiblePainted;
 }
 
 .tree-twig-visual {
@@ -1479,7 +1457,6 @@ select {
   stroke-width: 1;
   opacity: 1;
   stroke-linejoin: round;
-  pointer-events: all;
 }
 
 .tree-leaf-vein {
@@ -1487,7 +1464,6 @@ select {
   stroke-width: 1px;
   stroke-linecap: round;
   opacity: 1;
-  pointer-events: none;
 }
 
 .tree-leaf-petiole {
@@ -1496,17 +1472,12 @@ select {
   fill: none;
 }
 
-/* Tool status is its own channel: hue and fill, never branch tint alone. */
-.tree-leaf-group.tone-success { color: var(--success); }
-.tree-leaf-group.tone-danger { color: var(--danger); }
-.tree-leaf-group.tone-cancelled { color: var(--muted); }
+/* Tool status remains visible through hue and fill. */
+.tree-leaf-group.tone-success, .legend-leaf.tone-success { color: var(--tree-authority-leaf); }
+.tree-leaf-group.tone-danger, .legend-leaf.tone-danger { color: var(--tree-failed); }
+.tree-leaf-group.tone-cancelled, .legend-leaf.tone-cancelled { color: var(--tree-abandoned); }
 .tree-leaf-group.tone-timeout { color: var(--warning); }
-
-/* A successful call on a candidate Branch takes the candidate's own hue, so a
-   pink Branch never grows green leaves. Other tool states keep their colour. */
-.tree-twig-group.tree-ink-candidate .tree-leaf-group.tone-success {
-  color: var(--leaf-candidate);
-}
+.tree-ink-candidate .tree-leaf-group.tone-success { color: var(--leaf-candidate); }
 
 /* Cancelled and timed-out calls are hollow, so an abort reads without colour. */
 .tree-leaf-group.tone-cancelled .tree-leaf-visual,
@@ -1517,11 +1488,11 @@ select {
 }
 
 /* Everything on an aborted Branch dries out, including otherwise green leaves. */
-.tree-ink-aborted .tree-leaf-group { color: var(--tree-dry); }
+.tree-ink-aborted .tree-leaf-group { color: var(--tree-abandoned); }
 .tree-ink-aborted .tree-leaf-group.tone-cancelled .tree-leaf-visual,
 .tree-ink-aborted .tree-leaf-group.tone-timeout .tree-leaf-visual {
   fill: none;
-  stroke: var(--tree-dry);
+  stroke: var(--tree-abandoned);
 }
 
 .tree-twig-group:hover .tree-twig-visual,
