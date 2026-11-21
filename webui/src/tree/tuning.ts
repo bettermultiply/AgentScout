@@ -7,7 +7,7 @@ export const FIXED_GEOMETRY = Object.freeze({
 
 const EXTRA_DEFAULTS = {
   stemTauMs: 1000, leafTauMs: 1000, leafReferenceMs: 12000,
-  leafWidthRatio: .45, leafWidthRandom: 0, leafWidthMin: .3, leafWidthMax: .6,
+  leafWidthRatio: .3, leafWidthRandom: 0, leafWidthMin: .3, leafWidthMax: .6,
   stemAngle: 20, stemAngleRandom: 0, stemAngleMin: 10, stemAngleMax: 30,
   stemBend: 1, stemBendRandom: 0, stemBendMin: .5, stemBendMax: 1.5,
   childAngleMin: 30, childAngleMax: 90,
@@ -84,11 +84,6 @@ export function ranged(t: TreeTuning, prefix: 'leafWidth' | 'stemAngle' | 'stemB
   if (!t[`${prefix}Random`]) return t[prefix === 'leafWidth' ? 'leafWidthRatio' : prefix]
   const a = t[`${prefix}Min`], b = t[`${prefix}Max`]
   return Math.min(a, b) + Math.abs(b - a) * stableRandom(`${id}/${prefix}`)
-}
-
-export function childAngleOf(t: TreeTuning, id: string): number {
-  const a = t.childAngleMin, b = t.childAngleMax
-  return Math.min(a, b) + Math.abs(b - a) * stableRandom(`${id}/childAngle`)
 }
 
 /**

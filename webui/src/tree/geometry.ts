@@ -1,7 +1,7 @@
 import type { BranchState, ChanceState, TaskState } from '../fold'
 import { groupBranchCalls, pairCalls, requiredStart, type CallGroup, type CallUnit } from './calls'
-import { DEFAULT_TUNING, FIXED_GEOMETRY, childAngleOf, ranged, type TreeTuning } from './tuning'
-import { chooseForkSide } from './forkSide'
+import { DEFAULT_TUNING, FIXED_GEOMETRY, ranged, type TreeTuning } from './tuning'
+import { placeForks } from './forkSide'
 import { makeWidthAt } from './widthProfile'
 import { startLead } from './startLead'
 import { placeStems } from './stemPlacement'
@@ -27,7 +27,6 @@ import { connectionSide, connectSides, type ConnectionSides } from '../geometry/
  */
 export const NODE_HALF_WIDTH = FIXED_GEOMETRY.nodeOrigin
 export const NODE_WIDTH = NODE_HALF_WIDTH * 2
-export const HEAD_CENTER_Y = 0
 
 export interface BranchSection {
   id: string
@@ -54,7 +53,7 @@ interface LeafGeometry {
   transform: string
   size: number
   width: number
-  ellipse: EllipseGeometry
+  outline: PathGeometry
   stroke: number
   petiole: PathGeometry
   vein: PathGeometry
@@ -223,8 +222,16 @@ function stemGeometry(p: BranchSection, t: TreeTuning, tiltDeg: number, anchor: 
     const size = leafLength(tool.durationMs, t)
     const width = size * ranged(t, 'leafWidth', tool.id)
     const line = (a: number, b: number, stroke: number): PathGeometry => ({ d: `M ${a} 0 L ${b} 0`, points: [{ x: a, y: 0 }, { x: b, y: 0 }], stroke })
+    const base = t.petioleLength, end = base + size
+    // Control points at the midpoint give a pointed outline with full width
+    // 2 * (3/4) * controlHeight at the middle of the leaf.
+    const middle = base + size / 2, controlHeight = width * 2 / 3
+    const outline = connectionPath({ start: { x: base, y: 0 }, segments: [
+      { kind: 'cubic', c1: { x: middle, y: -controlHeight }, c2: { x: middle, y: -controlHeight }, end: { x: end, y: 0 } },
+      { kind: 'cubic', c1: { x: middle, y: controlHeight }, c2: { x: middle, y: controlHeight }, end: { x: base, y: 0 } },
+    ] })
     return { tool, at, angle: leafAngle, transform: transform(at, leafAngle), size, width, stroke: FIXED_GEOMETRY.leafStrokeWidth,
-      ellipse: { cx: t.petioleLength + size / 2, cy: 0, rx: size / 2, ry: width / 2 },
+      outline,
       petiole: line(0, t.petioleLength, FIXED_GEOMETRY.petioleWidth),
       vein: line(t.petioleLength + size * FIXED_GEOMETRY.veinStart, t.petioleLength + size * FIXED_GEOMETRY.veinEnd, FIXED_GEOMETRY.veinWidth) }
   })
@@ -477,7 +484,7 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       }
     }
     // Build the local growth path before choosing its parent-side anchor.
-    // Placement must use the direction actually drawn, not the requested angle.
+    // A single-candidate Chance uses the direction actually drawn.
     if (attach) {
       const direction = points.length > 1
         ? { x: points[1].x - points[0].x, y: points[1].y - points[0].y }
@@ -538,14 +545,10 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
     }
     const widthAt = makeWidthAt(work, total, startWidth, tuning)
 
-    const childPlacements = kids.map(child => {
+    const childPlacements = placeForks(kids.map(child => {
       const distance = chancePositions.get(child.chanceId ?? '') ?? 0
-      const point = at(distance), localHeading = headingAt(distance)
-      const pRight = Math.max(0, Math.min(1, .5 - (point.x - NODE_HALF_WIDTH) / (2 * tuning.recenterRange)))
-      const preferred = hash(child.branchId + '/side') < pRight ? 1 : -1
-      const angleDeg = childAngleOf(tuning, child.branchId)
-      return { child, distance, angleDeg, ...chooseForkSide({ heading: localHeading, angleDeg, preferred }) }
-    })
+      return { child, distance, heading: headingAt(distance) }
+    }), tuning.childAngleMin, tuning.childAngleMax)
     const sections = contentOf(branch, units, distanceOfCall).map(section => {
       const finished = section.twig.events[0]?.finished_at_ms
       const finish = typeof finished === 'number' && Number.isFinite(finished) ? finished : section.twig.startMs! + (section.twig.durationMs ?? 0)
@@ -724,7 +727,7 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       if (!shape.leaves.length) ellipsePoints({ cx: shape.tip.x, cy: shape.tip.y, rx: shape.tipRadius, ry: shape.tipRadius }).forEach(point => add(stemPoint(point), 0))
       for (const leaf of shape.leaves) {
         const leafPoint = (point: Point) => stemPoint(rotate(point, leaf.angle, leaf.at))
-        ellipsePoints(leaf.ellipse).forEach(point => add(leafPoint(point), leaf.stroke / 2))
+        leaf.outline.points.forEach(point => add(leafPoint(point), leaf.stroke / 2))
         for (const path of [leaf.petiole, leaf.vein]) path.points.forEach(point => add(leafPoint(point), path.stroke / 2))
       }
     }
