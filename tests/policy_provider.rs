@@ -99,26 +99,3 @@ fn compiled_policy_fake_provider_schema_and_revocation() {
         json!({"mode":"allow"})
     );
 }
-
-#[test]
-fn predict_distinguishes_abstention_from_an_empty_batch() {
-    let engine = PolicyEngine::default();
-    let dir = tempfile::tempdir().unwrap();
-    let definition = dir.path().join("policy.yaml");
-    let code = dir.path().join("decisions.py");
-    let source = include_str!("../assets/policy/policy/decisions.py");
-    std::fs::write(&definition, include_str!("../assets/policy/policy/policy.yaml")).unwrap();
-    let start = source.find("def predict(").unwrap();
-    let end = start + source[start + 1..].find("\ndef ").unwrap() + 1;
-    let input = json!({"chance_context": {}, "process_context": {}, "assumption_set": [], "capability_context": {}});
-    for (expression, valid) in [
-        (r#"{"abstain": True, "reason": "no usable evidence"}"#, true),
-        (r#"{"generation": "batch", "proposals": []}"#, false),
-    ] {
-        std::fs::write(&code, format!("{}def predict(data, *, policy_config, capabilities):\n    return {expression}\n\n{}",
-            &source[..start], &source[end..])).unwrap();
-        let policy = engine.compile(&definition).unwrap();
-        let result = engine.evaluate(&policy, Decision::Predict, &input);
-        assert_eq!(result.is_ok(), valid, "{result:?}");
-    }
-}

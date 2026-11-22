@@ -1,5 +1,4 @@
 import {spawnControl, runPath} from './control-plane-fixture.mjs';
-// Real Pi + real NLE + local OpenAI fixture. No external model requests.
 import fs from 'node:fs';
 import http from 'node:http';
 import {spawn,execFileSync} from 'node:child_process';
@@ -41,8 +40,7 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem','int
   fs.writeFileSync(root+'/runtime.json',JSON.stringify({control_address:config.control_address,adapter_instance:'multiple',backends:[{id:'first',type:'nle',config},{id:'second',type:'nle',config:{...config,seed:8}}],policy:{default:['first','second'],routes:[{operation:'invoke_tool',backends:['first'],output_backend:'first'}]}}));
  }
   let policy=fs.readFileSync(project+'/assets/policy/policy/policy.yaml','utf8').replace('max_chances: 0','max_chances: 1').replace('      scenarios: []\n    feasibility_pass:', '      scenarios: [{}]\n    feasibility_pass:').replace('  predict:\n    file: decisions.py\n    function: predict\n    policy_config:\n      scenarios: []','  predict:\n    file: decisions.py\n    function: predict\n    policy_config:\n      candidates: ["moved", "blocked"]');
-  // Full acceptance uses the last action in the batch, so the earlier sibling
-  // can complete without advancing the authority past the selected action.
+  // Put the selected action last so its sibling can complete without advancing authority past it.
   policy=policy.replace('scenarios: [{}]', 'scenarios: [{when: {kind: nle_action}}]');
   fs.writeFileSync(root+'/policy/policy.yaml',policy);
  const nleVerifier=fs.readFileSync(project+'/assets/policy/nle/decisions.py','utf8').split('def _actual_outcome(')[1].split('def dispose(')[0];
@@ -51,8 +49,7 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem','int
  const children=[];
  t.after(()=>{for(const p of children)if(p.exitCode===null)p.kill('SIGKILL');fake.closeAllConnections();fake.close()});
  const wait=async(fn,label)=>{const end=Date.now()+30000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,20))}throw Error('Timeout '+label+' '+root)};
-  // The writer may be between writes of a JSON line. Only complete records
-  // are observable; malformed complete records still fail this regression.
+  // Skip only the trailing partial JSON line from a concurrent append.
   const events=()=>fs.existsSync(runPath(root, 'events.jsonl'))?fs.readFileSync(runPath(root, 'events.jsonl'),'utf8').split('\n').slice(0,-1).filter(Boolean).map(JSON.parse):[];
  const post=async body=>(await fetch(`http://127.0.0.1:${port}/api/request`,{method:'POST',headers:{origin:`http://127.0.0.1:${port}`,'content-type':'application/json'},body:JSON.stringify(body)})).status;
   const start=async resume=>{
@@ -61,9 +58,7 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem','int
   p.stderr.on('data',b=>fs.appendFileSync(root+'/stderr.log',b));
    await wait(async()=>{assert.equal(p.exitCode,null,fs.existsSync(root+'/stderr.log')?fs.readFileSync(root+'/stderr.log','utf8'):'');try{return(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).ok&&(!resume||events().filter(e=>e.message==='recovery_loaded').length>loaded)}catch{return false}},'start');return p;
   };
-  // Pause publishes a generation without exiting. End only this fixture's
-  // controller afterwards; adapter EOF reaps its owned processes. Shutdown
-  // intentionally terminates/materializes the task and is not a save request.
+  // Wait for the pause generation before ending the fixture. Shutdown would materialize the task.
   const endPaused=async p=>{
    assert.equal(p.exitCode,null,'Pause keeps the controller alive');
    const done=once(p,'exit');p.kill('SIGKILL');await done;assert.equal(p.signalCode,'SIGKILL');
@@ -153,7 +148,6 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem','int
   await wait(()=>events().filter(e=>e.message==='task_completed').length>completedBeforeInput,'continued task completes');
   assert.ok(!requests.some(r=>r.messages.some(m=>m.role==='user'&&JSON.stringify(m.content).includes('/continue'))),'continue is a control command, not model input');
  const texts=fs.readFileSync(runPath(root, 'session.jsonl'),'utf8');assert.match(texts,/candidate advanced after recovery/);
- // Candidate model requests must contain paired real sibling results, not abort errors.
  const candidateRequests=requests.slice(1,failureMode==='continue'?count:undefined).filter(r=>r.messages.some(m=>m.role==='tool'&&['moved','blocked'].includes(m.content)));
  assert.ok(candidateRequests.length>=1&&candidateRequests.length<=2,'only surviving candidates require inference');
   for(const request of candidateRequests){const results=request.messages.filter(m=>m.role==='tool');assert.equal(results.length,2);assert.ok(!JSON.stringify(results).includes('cancelled'));}
@@ -166,8 +160,7 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem','int
    const write=events().find(e=>e.message==='action_started'&&e.action_id==='promoted-write');
    assert.ok(write&&write.branch_id!=='authority','file tool belongs to promoted Branch');
   }
-   // This path has submitted a new, finite task. Pause during finishing is
-   // intentionally ignored, so wait for its publication receipt first.
+   // Pause is ignored during finishing. Wait for the new task's publication receipt.
    if(failureMode==='continue')await wait(()=>events().filter(e=>e.message==='task_completed').length>completedBeforeInput,'continued input task materialized');
    await pause();await endPaused(p);
   const afterManifest=JSON.parse(fs.readFileSync(runPath(root, 'recovery.json')));

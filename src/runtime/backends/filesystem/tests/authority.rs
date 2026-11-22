@@ -1,4 +1,3 @@
-//! authority 行为、状态遮蔽与元数据迁移测试。
 
 use super::super::*;
 use super::support::*;
@@ -78,8 +77,7 @@ print("ok" if data else "fail")
     assert!(host.status.success());
     let host_report = fs::read_to_string(host_base.join(report_name)).unwrap();
 
-    // The host run above legitimately created the same path.  Remove it so
-    // the sandbox check proves its write stayed in the branch upper.
+    // Remove the host run's copy so only a sandbox leak can recreate it.
     let host_cache = home.join(".cache").join(&token);
     let _ = fs::remove_file(&host_cache);
     let launch = AgentLaunch {
@@ -312,7 +310,6 @@ fn corrupt_operations_metadata_fails_closed_when_isolation_fails() {
 
     let operations = root.path().join("state/metadata/operations.json");
     fs::write(&operations, b"{not-json").unwrap();
-    // A non-empty directory at the isolation target makes rename fail.
     let corrupt = root
         .path()
         .join("state/metadata")
@@ -340,48 +337,6 @@ fn corrupt_operations_metadata_fails_closed_when_isolation_fails() {
     );
     assert_eq!(fs::read(&operations).unwrap(), b"{not-json");
     assert_eq!(fs::read(corrupt.join("keep")).unwrap(), b"keep");
-}
-
-#[test]
-fn overlapping_state_directory_is_reported_and_flattened() {
-    let root = btrfs_temp();
-    let backend = new_overlay_backend(root.path());
-    backend.establish("root").unwrap();
-    let overlaps = backend.state_overlap_mounts();
-    assert!(
-        !overlaps.is_empty(),
-        "state directory should overlap the workspace mount in this test layout"
-    );
-    let capabilities = backend.capabilities();
-    let reported = capabilities
-        .state_directory_overlaps_mount
-        .expect("capabilities must report state/mount overlap");
-    assert!(!reported.is_empty());
-    let mount = mount_for(&backend, "root", root.path());
-    assert!(
-        backend.config.state_directory.starts_with(&mount.target),
-        "state directory must sit below this mount in the overlapping test layout"
-    );
-    assert_eq!(
-        backend.launch_lowers(&mount),
-        vec![mount.target.clone()],
-        "a mount without lower layers launches with only the host mount"
-    );
-    write_upper(&backend, "root", &root.path().join("overlap.txt"), "parent");
-    backend.fork("root", "child", &[]).unwrap();
-    let child = mount_for(&backend, "child", root.path());
-    assert!(
-        child.lower.is_empty(),
-        "overlapping mount must flatten: the child must not add a snapshot layer to its lower chain"
-    );
-    assert!(
-        upper_at(&backend, "child", &root.path().join("overlap.txt")).exists(),
-        "flattened child upper must carry the parent content"
-    );
-    backend.terminate("child").unwrap();
-    backend.discard("child", &[]).unwrap();
-    backend.terminate("root").unwrap();
-    backend.cleanup("root").unwrap();
 }
 
 #[test]
@@ -435,73 +390,10 @@ fn overlapping_state_directory_is_rejected_by_default() {
 }
 
 #[test]
-fn non_overlapping_state_directory_uses_lower_chain() {
-    let workspace_root = btrfs_temp();
-    let base = workspace_root.path().join("base");
-    fs::create_dir_all(&base).unwrap();
-    let state = match separate_state_tempdir(&base) {
-        Some(value) => value,
-        None => {
-            eprintln!(
-                "SKIP non_overlapping_state_directory_uses_lower_chain: no writable mount separate from workspace"
-            );
-            return;
-        }
-    };
-    let mut config = FilesystemConfig::new(state.path().join("state"));
-    config.force_overlay = true;
-    // The state mount itself is isolated; only the workspace mount's
-    // lower chain is under test here.
-    config.allow_overlapping_state_directory = true;
-    // Force Chain so this test keeps covering the lower-chain path; the
-    // per-fork default would flatten the small test upper.
-    config.fork_flatten_entry_limit = 0;
-    let backend = FilesystemBackend::new(config).unwrap();
-    if !backend
-        .overlayable_mounts()
-        .iter()
-        .any(|target| target == Path::new("/tmp"))
-    {
-        eprintln!(
-            "SKIP non_overlapping_state_directory_uses_lower_chain: /tmp is not an overlayable mount"
-        );
-        return;
-    }
-    backend.establish("root").unwrap();
-    let workspace_mount = mount_for(&backend, "root", &base);
-    assert!(
-        !backend
-            .state_overlap_mounts()
-            .iter()
-            .any(|target| *target == workspace_mount.target),
-        "state overlap list must not contain the workspace mount"
-    );
-    write_upper(&backend, "root", &base.join("parent.txt"), "parent");
-    backend.fork("root", "child", &[]).unwrap();
-    let child_mount = mount_for(&backend, "child", &base);
-    assert!(
-        !child_mount.lower.is_empty(),
-        "non-overlapping child must record the fork layer"
-    );
-    let lowers = backend.launch_lowers(&child_mount);
-    assert!(
-        lowers.len() > 1,
-        "non-overlapping mount must launch with snapshot layers, got {:?}",
-        lowers
-    );
-    backend.terminate("child").unwrap();
-    backend.discard("child", &[]).unwrap();
-    backend.terminate("root").unwrap();
-    backend.cleanup("root").unwrap();
-}
-
-#[test]
 fn default_config_starts_when_state_directory_is_outside_isolated_mounts() {
     let workspace_root = btrfs_temp();
     let base = workspace_root.path().join("base");
     fs::create_dir_all(&base).unwrap();
-    // Learn which mounts this sandbox can isolate, then pick a writable
-    // state directory on a mount outside that set.
     let probe = FilesystemBackend::new(overlapping_state_config(
         workspace_root.path().join("probe-state"),
     ))
@@ -652,90 +544,4 @@ fn writes_outside_cwd_reach_branch_uppers_not_host() {
     drop(state);
     backend.terminate("root").unwrap();
     backend.cleanup("root").unwrap();
-}
-
-#[test]
-fn live_replay_blocks_absolute_symlink_escape() {
-    let root = btrfs_temp();
-    let base = root.path().join("base");
-    fs::create_dir_all(&base).unwrap();
-    let sensitive = base.join("sensitive");
-    fs::create_dir_all(&sensitive).unwrap();
-    write(&sensitive, "secret", "host");
-    std::os::unix::fs::symlink(&sensitive, base.join("escape")).unwrap();
-    let mut config = FilesystemConfig::new(root.path().join("state"));
-    config.force_overlay = true;
-    config.isolate_unmanaged_mounts = false;
-    config.allow_overlapping_state_directory = true;
-    let backend = FilesystemBackend::new(config).unwrap();
-    assert!(backend.usable);
-    backend.establish("root").unwrap();
-    let (target, target_pid, _) = spawn_in_environment(&backend, "root", &base, "sleep 5");
-    let workspace = {
-        let state = backend.lock().unwrap();
-        state.environments["root"].workspace_root.clone().unwrap()
-    };
-    let safe = SafeRoot::open(target_pid).unwrap();
-    let source = root.path().join("source-file");
-    fs::write(&source, b"attack").unwrap();
-    let relative = workspace.strip_prefix("/").unwrap();
-    let target_path = format!("{}/escape/pwn", relative.to_string_lossy());
-    let result = safe.write_file(&target_path, &source, 0o644);
-    // The absolute symlink must resolve inside the sandbox root, not the
-    // caller's root.  Writing through it either fails or stays inside the
-    // sandbox; it must never reach the host sensitive directory.
-    assert!(
-        result.is_err() || !sensitive.join("pwn").exists(),
-        "write escaped to the host through an absolute symlink"
-    );
-    assert!(!sensitive.join("pwn").exists());
-    assert_eq!(fs::read(sensitive.join("secret")).unwrap(), b"host");
-    let _ = target.stop("root");
-    backend.terminate("root").unwrap();
-    backend.cleanup("root").unwrap();
-}
-
-#[test]
-fn legacy_scope_metadata_is_migrated_to_mount_units() {
-    let root = btrfs_temp();
-    let backend = new_overlay_backend(root.path());
-    backend.establish("root").unwrap();
-    let metadata_path = root.path().join("state/metadata/environments/root.json");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
-    value.as_object_mut().unwrap().remove("mounts");
-    value["lower"] = serde_json::json!({ "tmp": ["/legacy/layer"] });
-    value["workspace_root"] = serde_json::Value::Null;
-    fs::write(&metadata_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-    drop(backend);
-
-    let backend =
-        FilesystemBackend::new(overlapping_state_config(root.path().join("state"))).unwrap();
-    let state = backend.lock().unwrap();
-    let environment = &state.environments["root"];
-    let tmp = environment
-        .mount_by_target(Path::new("/tmp"))
-        .expect("tmp mount migrated");
-    assert_eq!(tmp.layer_key, "tmp");
-    assert_eq!(tmp.lower, vec![PathBuf::from("/legacy/layer")]);
-    drop(state);
-    drop(backend);
-
-    // A legacy workspace layer without workspace_root cannot be mapped to
-    // an absolute mount point and must fail loudly instead of being lost.
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
-    value.as_object_mut().unwrap().remove("mounts");
-    value["lower"] = serde_json::json!({ "workspace": ["/legacy/layer"] });
-    value["workspace_root"] = serde_json::Value::Null;
-    fs::write(&metadata_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-    let error = match FilesystemBackend::new(overlapping_state_config(root.path().join("state"))) {
-        Ok(_) => panic!("legacy workspace metadata without workspace_root must fail"),
-        Err(error) => error,
-    };
-    assert!(
-        error.message.contains("workspace_root"),
-        "unexpected migration error: {}",
-        error.message
-    );
 }

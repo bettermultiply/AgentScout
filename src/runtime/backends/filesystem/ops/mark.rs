@@ -1,9 +1,7 @@
-//! mark 数据面操作。
 
 use super::*;
 
 impl FilesystemBackend {
-    /// Take a read-only snapshot of the branch's current state.
     pub fn mark(
         &self,
         snapshot: &str,
@@ -72,8 +70,6 @@ impl FilesystemBackend {
         let created = (|| -> Result<(), BackendError> {
             match self.mechanism {
                 FilesystemMechanism::Btrfs => {
-                    // Snapshot volumes; only their upper subtree contributes
-                    // to the recorded filesystem view.
                     fs::create_dir_all(&layer_path).map_err(error)?;
                     let mut chains = Vec::new();
                     for mount in &selected {
@@ -89,9 +85,6 @@ impl FilesystemBackend {
                     self.run_fork_chains(&mut profile, chains)?;
                 }
                 FilesystemMechanism::Overlay => {
-                    // Independent clone of each non-empty selected mount upper
-                    // only.  Empty uppers are represented by an empty view and
-                    // do not get a layer at all.
                     let staging = staging_path(&layer_path);
                     let built = (|| -> Result<(), BackendError> {
                         fs::create_dir_all(&staging).map_err(error)?;
@@ -161,8 +154,6 @@ impl FilesystemBackend {
             self.refresh_references(&mut state)
         })?;
         let durable = profile.run("persist", || {
-            // Only the new snapshot changed in this operation; persisting the
-            // whole snapshot set would make mark O(historical snapshots).
             self.persist_snapshot(&record)?;
             self.persist_environment(&updated)?;
             Ok::<_, BackendError>(())

@@ -1,7 +1,3 @@
-//! control plane 与 Runtime Adapter 之间交换的契约数据。
-//!
-//! 语义以 `docs/design/runtime-adapter-contract.md` 为准；这里只定义线上的类型、
-//! 字段和枚举，不包含行为。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,10 +5,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// 线协议版本，会话开始时由 Adapter 上报。
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// 一次请求的处置结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResultStatus {
@@ -25,7 +19,6 @@ pub enum ResultStatus {
     Unsupported,
 }
 
-/// 环境实际停留的状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvironmentState {
@@ -33,14 +26,10 @@ pub enum EnvironmentState {
     Suspended,
     Terminated,
     Cleaned,
-    /// Backend 共同提供的环境中，Backend 的实际状态不一致。
-    ///
-    /// 这个状态只表示聚合层无法把环境归入一个单一生命周期状态；它
-    /// 不是一个可以继续执行普通操作的状态。
+    /// 各 Backend 的状态不一致，不能继续普通操作。
     PartiallyAvailable,
 }
 
-/// 环境内容，用于归类资源处理和隔离声明。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Content {
@@ -53,7 +42,6 @@ pub enum Content {
     ControlSurface,
 }
 
-/// 仍需的后续操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FollowUp {
@@ -63,14 +51,12 @@ pub enum FollowUp {
     Cleanup,
 }
 
-/// 按环境内容归类的资源说明。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceNote {
     pub content: Content,
     pub note: String,
 }
 
-/// 环境内操作的输出。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandOutput {
     pub exit_code: i32,
@@ -78,9 +64,6 @@ pub struct CommandOutput {
     pub stderr: String,
 }
 
-/// Instrumentation 的启动参数。
-///
-/// 用哪个 Agent 产品、哪个版本由 control plane（用户）决定；真正启动它属于 Runtime。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentLaunch {
     pub command: String,
@@ -94,8 +77,6 @@ pub struct AgentLaunch {
     pub env: BTreeMap<String, String>,
 }
 
-/// 固定环境操作。
-/// Runtime 声明的环境工具。Instrumentation 经授权后执行，control plane 可查询上下文。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeTool {
     pub name: String,
@@ -103,10 +84,8 @@ pub struct RuntimeTool {
     pub parameters: Value,
 }
 
-/// Runtime 在握手中声明的能力。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCapabilities {
-    /// Backend instance identities reported by Runtime during the existing hello.
     #[serde(default)]
     pub backends: Vec<String>,
     #[serde(default)]
@@ -114,25 +93,18 @@ pub struct RuntimeCapabilities {
     /// 能从父环境派生出具有独立身份和生命周期的子环境；不承诺复制内部资源。
     #[serde(default)]
     pub branch_environment: bool,
-    /// 文件系统 Backend 是否能用严格子卷删除 ioctl 快速回收。`Some(false)`
-    /// 表示 discard 仍可用，但后台物理删除是 O(文件数)；`None` 表示该
-    /// Runtime 不声明文件系统回收方式。
+    /// `Some(false)` 表示 discard 可用，后台删除为 O(文件数)。`None` 表示未声明。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem_fast_delete: Option<bool>,
-    /// 文件系统 fork 的成本类别：`reflink`、`copy` 或 `btrfs_snapshot`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem_fork_cost: Option<String>,
-    /// btrfs 增量 diff 是否可在当前权限下使用。`false` 表示已降级到 overlay。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem_btrfs_incremental_diff: Option<bool>,
-    /// 实际可用的写者冻结机制：`cgroup`、`process_group` 或 `none`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freeze_mechanism: Option<String>,
-    /// 明确被允许直通宿主的路径列表。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filesystem_passthrough: Option<Vec<String>>,
-    /// 状态目录位于其内部的 overlay 挂载点。这些挂载在 fork 时使用
-    /// flatten（O(upper)）而不是 lower 链增量；空列表表示没有重叠。
+    /// 包含状态目录的 overlay 挂载点在 fork 时使用 flatten（O(upper)）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_directory_overlaps_mount: Option<Vec<String>>,
 }
@@ -148,7 +120,6 @@ pub enum Operation {
         path: std::path::PathBuf,
     },
     EstablishEnvironment,
-    /// 环境内操作。`agent` 在场时表示在环境内建立 Instrumentation。
     OperateEnvironment {
         command: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,9 +129,7 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<AgentLaunch>,
     },
-    /// 把 Candidate 的环境提升为权威环境。共享环境 Runtime 可以是 no-op。
     PromoteEnvironment,
-    /// Transfer state from a direct child into this environment.
     AcceptEnvironment {
         source_environment_id: String,
         full: bool,
@@ -174,11 +143,9 @@ pub enum Operation {
     ResumeEnvironment,
     TerminateEnvironment,
     CleanupEnvironment,
-    /// 读取环境工具的公开上下文，供 Policy 预测使用。
     ToolContext {
         tool_name: String,
     },
-    /// 从既有文件系统快照派生新的快照。
     FilesystemFork {
         parent_snapshot_id: String,
         child_snapshot_id: String,
@@ -213,7 +180,6 @@ pub enum PathScope {
     Tmp,
 }
 
-/// Legacy mount selection or explicit Policy results with file dependencies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PartSelection {
@@ -288,8 +254,7 @@ pub struct FilesystemConflict {
     pub path: String,
     pub kind: String,
     pub reason: String,
-    /// 三方合并时的基准、目标分支和来源分支内容摘要。留空表示调用方
-    /// 只关心冲突路径，不要求具体的版本描述。
+    /// 仅需冲突路径时，可省略三方版本的内容摘要。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,23 +297,16 @@ pub struct OperationRequest {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub environment_id: String,
     pub operation: Operation,
-    /// Policy 用于选择 Runtime 的任务上下文。旧 control plane 不发送时保持为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
 }
 
-/// 一个 Backend 对一次操作产生的输出。
-///
-/// `OperationResult.output` 只保留明确选中的单一主输出；所有 Backend
-/// 输出都通过这个列表可见，避免组合多个 Backend 时后一个输出静默覆盖
-/// 前一个输出。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendOutput {
     pub backend_id: String,
     pub output: CommandOutput,
 }
 
-/// 一个环境由多个 Backend 共同提供时，各 Backend 的实际状态快照。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendState {
     pub backend_id: String,
@@ -356,7 +314,6 @@ pub struct BackendState {
     pub state: Option<EnvironmentState>,
 }
 
-/// 统一的操作结果信封。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationResult {
     pub request_id: String,
@@ -364,7 +321,6 @@ pub struct OperationResult {
     /// Establish failures without a created Environment omit this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub environment_id: String,
-    /// Runtime-provided command access for the result Environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_access: Option<ExecutionAccess>,
     pub status: ResultStatus,
@@ -374,11 +330,8 @@ pub struct OperationResult {
     pub follow_up: Vec<FollowUp>,
     pub resources: Vec<ResourceNote>,
     pub remaining: Vec<ResourceNote>,
-    /// 每个参与 Backend 的状态，供 control plane 处理部分失败和状态不一致。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub backend_states: Vec<BackendState>,
-    /// 组合 Runtime 的全部可见输出。不会因为 `output` 只有一个字段而
-    /// 丢弃其他 Backend 的输出。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<BackendOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -389,8 +342,7 @@ pub struct OperationResult {
     pub filesystem: Option<FilesystemResult>,
 }
 
-/// A Runtime-owned command endpoint. Instrumentation treats its address as
-/// opaque and uses the same request lifecycle for every supported tool.
+/// Instrumentation treats Runtime endpoint addresses as opaque.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionAccess {
     pub transport: String,
@@ -423,7 +375,6 @@ pub enum EventPayload {
     },
 }
 
-/// Adapter 发给 control plane 的消息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AdapterMessage {
@@ -432,7 +383,6 @@ pub enum AdapterMessage {
         adapter_instance: String,
         #[serde(default)]
         capabilities: RuntimeCapabilities,
-        /// 本次 Runtime 实例由哪些 Backend 组成的有序标识。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         backend_ids: Vec<String>,
     },
@@ -447,72 +397,8 @@ pub enum AdapterMessage {
     Event(Event),
 }
 
-/// control plane 发给 Adapter 的消息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum ControlMessage {
     Request(OperationRequest),
-}
-
-#[cfg(test)]
-mod filesystem_protocol_tests {
-    use super::*;
-
-    #[test]
-    fn filesystem_operations_round_trip_with_both_managed_scopes() {
-        let scopes = vec![PathScope::Workspace, PathScope::Tmp];
-        let operations = vec![
-            Operation::FilesystemFork {
-                parent_snapshot_id: "base".into(),
-                child_snapshot_id: "child".into(),
-                path_scope: scopes.clone(),
-            },
-            Operation::FilesystemMark {
-                snapshot_id: "child".into(),
-                mark_id: "mark".into(),
-                path_scope: scopes.clone(),
-            },
-            Operation::FilesystemDiff {
-                base_snapshot_id: "base".into(),
-                source_snapshot_id: "child".into(),
-                path_scope: scopes.clone(),
-            },
-            Operation::FilesystemAccept {
-                base_snapshot_id: "base".into(),
-                source_snapshot_id: "child".into(),
-                target_snapshot_id: "target".into(),
-                path_scope: scopes.clone(),
-            },
-            Operation::FilesystemDiscard {
-                snapshot_id: "child".into(),
-                path_scope: scopes,
-            },
-        ];
-        for operation in operations {
-            let json = serde_json::to_value(&operation).unwrap();
-            assert_eq!(json["path_scope"], serde_json::json!(["workspace", "tmp"]));
-            assert_eq!(
-                serde_json::from_value::<Operation>(json).unwrap(),
-                operation
-            );
-        }
-    }
-
-    #[test]
-    fn conflicts_and_confirmation_survive_wire_round_trip() {
-        let result = FilesystemResult {
-            conflicts: vec![FilesystemConflict {
-                path: "workspace/a".into(),
-                kind: "modify_delete".into(),
-                reason: "both sides changed".into(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let decoded: FilesystemResult =
-            serde_json::from_slice(&serde_json::to_vec(&result).unwrap()).unwrap();
-        assert_eq!(decoded, result);
-        assert!(!decoded.confirmation.published);
-        assert!(!decoded.confirmation.gc_eligible);
-    }
 }

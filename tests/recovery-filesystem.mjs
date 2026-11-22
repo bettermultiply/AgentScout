@@ -1,5 +1,4 @@
 import {spawnControl, runPath} from './control-plane-fixture.mjs';
-// Real control plane, Pi, bubblewrap and shell; local fixture only.
 import fs from 'node:fs';
 import http from 'node:http';
 import {spawn,execFileSync} from 'node:child_process';
@@ -35,7 +34,7 @@ test('filesystem main entry restores managed upper with current host lower and r
  })});await new Promise(r=>fake.listen(0,'127.0.0.1',r));
   const port=await new Promise(r=>{const s=http.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p))})});
   const runtimePort=await new Promise(r=>{const s=http.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p))})});
- fs.writeFileSync(root+'/pi/models.json',JSON.stringify({providers:{recovery:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
+ fs.writeFileSync(root+'/models.json',JSON.stringify({providers:{recovery:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
  fs.copyFileSync(project+'/assets/policy/policy/policy.yaml',root+'/policy/policy.yaml');fs.copyFileSync(project+'/assets/policy/policy/decisions.py',root+'/policy/decisions.py');
  fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_address:`127.0.0.1:${runtimePort}`,adapter_instance:'fs',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,filesystem:{state_directory:root+'/fs-state',isolated_paths:[runPath(root, 'workspace')],passthrough_rw:[root]}}));
  const config=JSON.parse(fs.readFileSync(root+'/runtime.json'));
@@ -47,7 +46,7 @@ test('filesystem main entry restores managed upper with current host lower and r
   const wait=async(fn,label)=>{const deadline=Date.now()+30000;while(Date.now()<deadline){if(await fn())return;await new Promise(r=>setTimeout(r,20))}try{fs.writeFileSync(root+'/timeout-state.json',JSON.stringify(await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json(),null,2))}catch{}throw Error('Timeout '+label+' '+root)};
  const post=async body=>fetch(`http://127.0.0.1:${port}/api/request`,{method:'POST',headers:{origin:`http://127.0.0.1:${port}`,'content-type':'application/json'},body:JSON.stringify(body)});
   const loadedCount=()=>fs.existsSync(runPath(root, 'events.jsonl'))?fs.readFileSync(runPath(root, 'events.jsonl'),'utf8').split('\n').filter(line=>line&&JSON.parse(line).message==='recovery_loaded').length:0;
-  const launch=resume=>{const previous=loadedCount();const p=spawnControl(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','recovery/fixture',...(resume?['--resume']:[])],{env:{...process.env,TMPDIR:root+'/tmp',ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','ignore','pipe']});p.recoveryCount=resume?previous:null;children.push(p);p.stderr.on('data',b=>fs.appendFileSync(root+'/stderr.log',b));return p};
+  const launch=resume=>{const previous=loadedCount();const p=spawnControl(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','recovery/fixture','--models',root+'/models.json',...(resume?['--resume']:[])],{env:{...process.env,TMPDIR:root+'/tmp',ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','ignore','pipe']});p.recoveryCount=resume?previous:null;children.push(p);p.stderr.on('data',b=>fs.appendFileSync(root+'/stderr.log',b));return p};
   const ready=async p=>wait(async()=>{assert.equal(p.exitCode,null,fs.readFileSync(root+'/stderr.log','utf8'));try{return(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).ok&&(p.recoveryCount===null||loadedCount()>p.recoveryCount)}catch{return false}},'ready');
   const stop=async p=>{
    const previous=fs.existsSync(runPath(root, 'recovery.json'))?fs.readFileSync(runPath(root, 'recovery.json'),'utf8'):null;
@@ -96,15 +95,11 @@ test('filesystem main entry restores managed upper with current host lower and r
  fs.writeFileSync(extension,'export default ()=>{return 1}');p=launch(true);await once(p,'exit');assert.equal(p.exitCode,1);assert.match(fs.readFileSync(root+'/stderr.log','utf8'),/resources changed/);assert.equal(requests,2);fs.writeFileSync(extension,'export default ()=>{}');
   p=launch(true);await ready(p);await new Promise(r=>setTimeout(r,200));assert.equal(requests,2,'no automatic inference');await post({action:'prompt',prompt:'continue fixture'});await post({action:'continue'});await wait(()=>requests===4,'continued shell');await stop(p);
  const find=(dir,name)=>{for(const e of fs.readdirSync(dir,{withFileTypes:true})){if(e.name==='work')continue;const path=dir+'/'+e.name;if(e.isDirectory()){const found=find(path,name);if(found)return found}else if(e.name===name)return path}};
-  // Contract explicitly changed by the user on 2026-11-14: ordinary lower
-  // uses current host data; managed upper and saved sources stay independent.
   const continued=find(root+'/fs-state','continued');assert.ok(continued);assert.equal(fs.readFileSync(continued,'utf8'),'mutated original lowersaved lowerfirst');assert.equal(digest(generation),original);
  const finalEvents=fs.readFileSync(runPath(root,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
  assert.equal(finalEvents.filter(e=>e.message==='action_started'&&e.action_id==='boundary2').length,1,'continue executes the saved before-tool call once');
  assert.ok(finalEvents.some(e=>e.message==='turn_completed'),'a model with no next action completes its turn during Pause');
   fs.writeFileSync(runPath(root, 'recovery.json'),manifest);p=launch(true);await ready(p);await wait(()=>fs.readFileSync(runPath(root, 'events.jsonl'),'utf8').includes('recovery_loaded'),'old generation loaded');await new Promise(r=>setTimeout(r,200));assert.equal(requests,4);await stop(p);
-  // Shutdown has its own terminate/materialize/cleanup path. It must finish
-  // successfully without replacing the generation just validated above.
   const preserved=fs.readFileSync(runPath(root, 'recovery.json'),'utf8');
   p=launch(true);await ready(p);await new Promise(r=>setTimeout(r,200));
   const done=once(p,'exit');await post({action:'shutdown'});await done;

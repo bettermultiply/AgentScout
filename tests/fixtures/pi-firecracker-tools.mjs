@@ -1,5 +1,3 @@
-// Invoked only by the exact no-model Firecracker test. Independent Pi adapters,
-// AscProxy, receiver, Runtime and guest; no SDK tool implementations.
 import assert from 'node:assert/strict';
 import {mkdtempSync,symlinkSync,rmSync} from 'node:fs';
 import {createRequire} from 'node:module';
@@ -20,7 +18,6 @@ const nested=`${relative}/pi-boundary/nested/file`;
 assert.match(text(await run('write',{path:nested,content:'alpha\nbeta\n'})),/Successfully wrote/);
 assert.equal(Buffer.from((await generic('read_file',{path:`${workspace}/${nested}`})).value.bytes).toString(),'alpha\nbeta\n');
 assert.equal(text(await run('bash',{command:'pwd'})),`${workspace}\n`);
-// The host alias intentionally targets a different file than the guest alias.
 const host=mkdtempSync('/tmp/opencode/pi-vm-alias-');
 try {
     symlinkSync('/root/host-only-target',`${host}/alias`);
@@ -46,8 +43,7 @@ await assert.rejects(run('bash',{command:`sleep 30`,timeout:0.1}),/timed out|tim
 const controller=new AbortController();
 await assert.rejects(run('bash',{command:`echo ready; sleep 30; echo leaked > ${cwd}/pi-boundary/cancelled`},controller.signal,v=>{if(text(v).includes('ready'))controller.abort()}),/cancel|abort|interrupted/i);
 assert.equal(text(await run('bash',{command:`test ! -e ${cwd}/pi-boundary/cancelled; printf reused`})),'reused');
-// Diagnostic, not a claimed guarantee: the intermediate parent exits before
-// proc sampling, so setsid's writer can be adopted by the guest subreaper.
+// The intermediate parent can exit before proc sampling, leaving the guest subreaper as parent.
 const detached=new AbortController();
 await assert.rejects(run('bash',{command:`setsid sh -c '(sleep 0.4; echo leaked > ${cwd}/pi-boundary/detached) </dev/null >/dev/null 2>&1 & exit 0' </dev/null >/dev/null 2>&1 & sleep 0.1; echo ready; sleep 30`},detached.signal,v=>{if(text(v).includes('ready'))detached.abort()}),/cancel|abort|interrupted/i);
 const detachedCancellationEscape=text(await run('bash',{command:`sleep 0.5; if test -f ${cwd}/pi-boundary/detached; then printf escaped; else printf stopped; fi`}))==='escaped';
@@ -55,7 +51,6 @@ console.log(JSON.stringify({diagnostic:'individual-cancel detached descendant ow
 await run('bash',{command:`setsid sh -c 'sleep 0.4; echo leaked > ${cwd}/pi-boundary/drain-leak' </dev/null >/dev/null 2>&1 &`});
 await proxy.cancel('pi-tools');
 assert.equal(text(await run('bash',{command:`sleep 0.5; if test -f ${cwd}/pi-boundary/drain-leak; then printf leaked; else printf drained; fi`})),'drained','BaseRuntime must forward backend-required writer drain');
-// Direct generic calls use the existing guest workspace without Pi path conversion.
 await generic('write_file',{path:'ascout-relative-stage',bytes:Buffer.from([97,98])});
 assert.deepEqual(Array.from((await generic('read_file',{path:'ascout-relative-stage'})).value.bytes),[97,98]);
 await generic('replace_text',{path:'ascout-relative-stage',replacements:[{old_text:'ab',new_text:'cd'}]});

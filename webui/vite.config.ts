@@ -1,9 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// The control plane binds loopback and validates Host plus same-origin JSON
-// requests. The dev proxy therefore keeps the control plane's Host/Origin
-// instead of forwarding the Vite origin.
+// Use the control plane's Host and Origin to satisfy its same-origin checks.
 const target = process.env.ASCOUT_WEB_TARGET ?? 'http://127.0.0.1:8080'
 const origin = new URL(target).origin
 

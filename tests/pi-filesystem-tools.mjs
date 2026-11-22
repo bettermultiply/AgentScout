@@ -1,4 +1,3 @@
-// Complete operations against the real namespace holder; no SDK tools or model.
 import fs from 'node:fs';
 import {join} from 'node:path';
 import assert from 'node:assert/strict';

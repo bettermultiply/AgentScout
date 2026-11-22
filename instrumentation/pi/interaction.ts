@@ -4,23 +4,17 @@ type Report = (message: Record<string, unknown>) => Promise<void>;
 type Kind = 'confirm' | 'select' | 'input' | 'editor';
 type Pending = { branch: string; kind: Kind; resolve: (answer: any) => void };
 
-/**
- * Explicit dismissal resolves instead of rejecting, matching Pi RPC's cancel
- * values: confirmation is `false`, selection/text is `undefined`. Silence is
- * not dismissal: an unanswered prompt remains pending without a timeout.
- */
+/** Match Pi RPC's dismissal values. Unanswered prompts have no timeout. */
 function dismissed(kind: Kind): any {
     return kind === 'confirm' ? false : undefined;
 }
 
-/** Text-only extension UI; no Policy or product command semantics. */
 export class Interaction {
     private pending = new Map<string, Pending>();
     private closed = new Set<string>();
     private shuttingDown = false;
     private report: Report;
     constructor(report: Report) { this.report = report; }
-    /** End outstanding prompts after discard, interrupt, pause or shutdown. */
     cancel(branch?: string) {
         if (branch === undefined) this.shuttingDown = true;
         else this.closed.add(branch);
@@ -57,8 +51,6 @@ export class Interaction {
                 if (opts?.signal?.aborted) { abort(); return; }
                 void this.report({ message: 'ui_prompt_requested', branch_id: branch, prompt_id, kind, title,
                     message_text: null, options: [], placeholder: null, prefill: null, ...fields })
-                    // Delivery failure cancels the prompt; user silence does
-                    // not run this path and never supplies a default answer.
                     .catch(() => finish(dismissed(kind)));
             });
         };

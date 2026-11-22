@@ -72,8 +72,6 @@ function TreeCanvas({ graph, tuning, onTuning }: { graph: TreeGraph; tuning: Tre
       active.add(branchId)
       for (const child of children.get(branchId) ?? []) pending.push(child)
     }
-    // Depth still orders the active nodes among themselves. This shift exceeds
-    // the span of the base z-indices without changing any node geometry.
     return nodes.map(node => active.has(node.data.branch.branchId)
       ? { ...node, className: 'tree-subtree-active', zIndex: (node.zIndex ?? 0) + nodes.length }
       : node)
@@ -99,8 +97,7 @@ function TreeCanvas({ graph, tuning, onTuning }: { graph: TreeGraph; tuning: Tre
   }, [flowStore])
 
   useEffect(() => {
-    // Re-hit after React Flow applies observation/tuning changes, never in
-    // response to our own re-stacking or browser-generated enter/leave events.
+    // Recheck the hit only on observation/tuning changes to avoid restacking feedback.
     const frame = requestAnimationFrame(refreshHit)
     return () => cancelAnimationFrame(frame)
   }, [nodes])
@@ -109,7 +106,6 @@ function TreeCanvas({ graph, tuning, onTuning }: { graph: TreeGraph; tuning: Tre
     const canvas = canvasRef.current
     if (initialFitHandled.current || !viewportInitialized || !canvas) return
 
-    // Node rectangles already contain the full ink, including stems without leaves.
     const bounds = getNodesBounds(nodes)
     const fit = () => {
       if (initialFitHandled.current) return true

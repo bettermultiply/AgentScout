@@ -4,8 +4,6 @@ import { useAppStore } from './src/store'
 import { DEFAULT_TUNING, treeLayoutStats } from './src/tree'
 import './src/styles.css'
 
-// Seconds on a shared clock. Candidate starts and tool timings are hand authored.
-// Each turn is [model start, model duration, tools]; a tool may open a Chance.
 const dense = ['主枝', [
   [0.7, 2.8, [['查看目录', 3.9, 5.2, [
     ['找入口', [
@@ -121,7 +119,6 @@ store.setTreeTuning({ ...DEFAULT_TUNING })
 events.forEach((event, index) => store.ingestEvent({ ...event, sequence: index + 1 }))
 store.selectTask(denseTask)
 
-// Branch details can read the same offline fixtures without a backend.
 window.fetch = async input => {
   const match = typeof input === 'string' && input.match(/^\/api\/branches\/([^/]+)\/conversation$/)
   if (!match) throw new Error('离线演示没有此接口')

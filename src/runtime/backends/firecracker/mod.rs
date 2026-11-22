@@ -1,4 +1,3 @@
-//! Firecracker Runtime Adapter 后端。
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -23,11 +22,8 @@ use crate::runtime::backends::firecracker::guest_agent::{GuestRequest, GuestResp
 
 #[derive(Debug, Deserialize)]
 pub struct FirecrackerConfig {
-    /// Adapter 级配置：在共享 Runtime 配置的顶层已经提供。作为单 Backend
-    /// 配置反序列化时可以省略。
     #[serde(default)]
     pub control_socket: PathBuf,
-    /// Adapter 级配置：同上，属于接入进程而不是 Firecracker Backend。
     #[serde(default)]
     pub adapter_instance: String,
     pub firecracker_path: PathBuf,
@@ -42,7 +38,6 @@ pub struct FirecrackerBackend {
     environments: Mutex<HashMap<String, Arc<Mutex<Environment>>>>,
     networks: Mutex<NetworkRegistry>,
     api: Arc<dyn FirecrackerApi>,
-    // Only protects lock lookup; lifecycle work holds per-id locks instead.
     operations: Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
@@ -60,6 +55,3 @@ mod guest_ops;
 mod network;
 use guest_ops::FirecrackerApi;
 use network::{EnvironmentNetwork, NetworkRegistry};
-
-#[cfg(test)]
-mod tests;

@@ -72,7 +72,7 @@ Runtime 仍通过 OperateEnvironment 的 AgentLaunch 实际启动 Agent，负责
 | `cargo test --lib`（审查收尾含 session 路径清理） | 148 通过；`/tmp/opencode/gateway-review-lib.log` |
 | `node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` | 5 通过，本轮收尾复跑；`/tmp/opencode/gateway-review-recovery.log` |
 | `node /tmp/opencode/replay-ts-run1.mjs` | 已有兼容 run-1 两轮各 40/40 hits/consumed、misses/exhausted/unconsumed/cancel_timeouts=0；两输入完成、23 成功/17 取消；正常退出码 0。`/tmp/opencode/gateway-compatible-replay-final.log`，产物 `/tmp/opencode/replay-ts-run1-oxCwIm`。本验证说明 Gateway 与已兼容请求格式的输入通信正常，不替代机制的全部端到端验收。 |
-| `cargo test --test policy` | 1 通过；`/tmp/opencode/gateway-rust-policy.log` |
+| 当时的 Policy 集成检查 | 1 通过；`/tmp/opencode/gateway-rust-policy.log` |
 | `cargo build --bins` | 通过；`/tmp/opencode/gateway-build-final.log` |
 | `node --test tests/pi-access.mjs tests/pi-notification.mjs tests/pi-notification-adapter.mjs tests/pi-recovery-binding.mjs tests/pi-recovery-sources.mjs` | 18 通过；`/tmp/opencode/gateway-pi.log`，包括 Instrumentation EOF／写失败，不等于 control plane Gateway 的全部故障注入 |
 | `node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` | 5 通过，最终代码重跑仍 5 通过；`/tmp/opencode/gateway-recovery-final.log`，本地伪模型、真实 Pi／Runtime、保存重试与恢复、进程清理 |

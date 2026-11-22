@@ -1,4 +1,3 @@
-// Local fixture launcher: isolated configuration, no user-home writes.
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
@@ -17,8 +16,6 @@ export function spawnControl(binary, fixtureArgs, options) {
   fs.mkdirSync(path.join(home,'.config/ascout'), {recursive:true});
   fs.writeFileSync(path.join(home,'.config/ascout/config.toml'),
     `policy_dir = ${JSON.stringify(path.dirname(path.dirname(policy)))}\nruns_dir = ${JSON.stringify(path.join(root,'runs'))}\ndefault_policy = ${JSON.stringify(path.basename(path.dirname(policy)))}\n`);
-  // The run workspace now lives under runs; cover it in the fake Runtime's
-  // filesystem configuration, alongside fixture-owned host paths.
   const runtimePath = options.env.ASCOUT_RUNTIME_CONFIG;
   if (runtimePath) {
     const runtime = JSON.parse(fs.readFileSync(runtimePath, 'utf8'));

@@ -1,5 +1,4 @@
 import {spawnControl, runPath} from './control-plane-fixture.mjs';
-// Real control plane -> Runtime -> Pi, saved failing Policy, loopback SSE only.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -114,12 +113,12 @@ def dispose(data, *, policy_config, capabilities):
     t.after(()=>{if(selective)fs.writeFileSync(root+'/stop-writer','');fake.closeAllConnections();fake.close()});
     async function freePort(){const server=http.createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;await new Promise(r=>server.close(r));return port;}
     const port=await freePort(),runtimePort=await freePort();
-    fs.writeFileSync(root+'/pi/models.json',JSON.stringify({providers:{fixture:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'local-fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
+    fs.writeFileSync(root+'/models.json',JSON.stringify({providers:{fixture:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'local-fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
     const filesystem=(nested || mode === 'part' || process.env.ASCOUT_TEST_ACCEPTANCE_FS==='1')&&speculativeFirst
         ?{state_directory:root+'/fs-state',isolated_paths:[runPath(root,'workspace')],passthrough_rw:[root]}
         :undefined;
     fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_address:`127.0.0.1:${runtimePort}`,adapter_instance:'predictor-fact',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,action_delay_seconds:1,env_id:'NetHackScore-v0',filesystem}));
-    const argv=[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','fixture/fixture','--thinking','off'];
+    const argv=[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','fixture/fixture','--models',root+'/models.json','--thinking','off'];
     fs.writeFileSync(root+'/command.json',JSON.stringify({argv,model_endpoint:`http://127.0.0.1:${fake.address().port}/v1`,saved_policy_digest:saved.digest}));
     const p=spawnControl(project+'/target/debug/ascout-control-plane',argv,{env:{...process.env,ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','pipe','pipe']});
     for(const stream of [p.stdout,p.stderr])stream.on('data',b=>fs.appendFileSync(root+'/control.log',b));

@@ -1,4 +1,3 @@
-//! Runtime startup configuration and compatibility normalization.
 
 use std::{error::Error, fs, path::Path, sync::Arc};
 
@@ -110,7 +109,6 @@ fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str, Box<dyn
         .ok_or_else(|| format!("runtime config missing {field}").into())
 }
 
-// Translate the legacy assembly input into ordered routes before any instance starts.
 fn add_legacy_filesystem_routes(policy: &mut BackendPolicy) {
     use BackendOperation::*;
     let original = policy.routes.clone();

@@ -12,7 +12,6 @@ import type { ChildProcessByStdio, SpawnOptionsWithoutStdio } from 'node:child_p
 import type { Readable } from 'node:stream';
 type Probe = ChildProcessByStdio<null, Readable, Readable> & {output: string; errors: string; done: Promise<number | null>};
 
-// The parent needs only Node. The child loads the existing Pi source/dependencies.
 const pi = process.env.PI_ROOT || "/home/betmul/BETMUL/AgentScout-suit/pi";
 const expectedCalls = [
   { type: "toolCall", id: "call_alpha", name: "alpha", arguments: { x: 1, nested: { z: "甲", a: true } } },
@@ -102,7 +101,6 @@ if (process.argv[2] === "--pi-child") {
       entry("custom", "tip", "continuation", { customType: "authority", data: { branch_id: "authority", parentId: "continuation" } }),
     ];
     if (process.argv[2]) {
-      // Optional existing B1-PI native run: export it without touching sources.
       for (const name of ["session.jsonl", "events.jsonl"]) fs.copyFileSync(path.join(process.argv[2], name), path.join(root, name));
     } else {
       fs.writeFileSync(path.join(root, "session.jsonl"), session.map(e => JSON.stringify(e)).join("\n") + "\n");
@@ -132,8 +130,6 @@ if (process.argv[2] === "--pi-child") {
     }
     await stop(server);
 
-    // Separate HTTP checks isolate report accounting, including keys never requested
-    // and remaining rows for a partially consumed key. Pi exclusively drives the above loop.
     try {
       const contexts = Object.fromEntries(["unrequested", "partial", "exhausted", "unknown"].map(s => [s, [{ role: "user", content: s }]]));
       const keys = Object.fromEntries(Object.entries(contexts).map(([s, ms]) => [s, requestKey(ms)]));

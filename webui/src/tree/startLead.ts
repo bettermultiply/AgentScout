@@ -1,6 +1,5 @@
 type Point = { x: number; y: number }
 
-/** Extend only the drawing sequence; the growth path and its widths stay intact. */
 export function startLead(points: Point[], widths: number[], initialAngle: number, ratio: number): { points: Point[]; widths: number[] } {
   if (points.length < 2 || ratio <= 0) return { points, widths }
   const dx = points[1].x - points[0].x, dy = points[1].y - points[0].y

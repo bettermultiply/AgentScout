@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/** External replay driver. AScout owns execution, persistence and shutdown. */
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -78,7 +77,6 @@ async function shutdown() {
   if (closing) return;
   closing = true;
   if (child && !childExited) {
-    // SIGTERM takes AScout's normal Shutdown/save path, including during startup.
     child.kill('SIGTERM');
   } else cleanup();
 }

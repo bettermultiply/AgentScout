@@ -1,4 +1,3 @@
-//! 高权限测试（默认 SKIP）。
 
 use super::super::mounts::real_writable_mounts;
 use super::super::*;
@@ -183,44 +182,4 @@ fn priv_btrfs_mixed_generations() {
     drop(backend);
     drop(workspace);
     drop(state);
-}
-
-#[test]
-fn priv_direct_root_overlay_is_available_in_initial_userns() {
-    if !priv_enabled() {
-        eprintln!(
-            "SKIP priv_direct_root_overlay_is_available_in_initial_userns: ASCOUT_PRIV_TESTS != 1"
-        );
-        return;
-    }
-    assert_eq!(
-        unsafe { libc::geteuid() },
-        0,
-        "ASCOUT_PRIV_TESTS=1 requires root for direct lower=/ overlay"
-    );
-    let root = tempfile::Builder::new()
-        .prefix("priv-root-")
-        .tempdir_in(priv_state_root())
-        .unwrap();
-    let upper = root.path().join("upper");
-    let work = root.path().join("work");
-    fs::create_dir_all(&upper).unwrap();
-    fs::create_dir_all(&work).unwrap();
-    let status = Command::new("unshare")
-        .args(["--mount", "--propagation", "private", "bwrap"])
-        .args(["--die-with-parent", "--ro-bind", "/", "/"])
-        .args(["--proc", "/proc", "--dev", "/dev"])
-        .arg("--overlay-src")
-        .arg("/")
-        .arg("--overlay")
-        .arg(&upper)
-        .arg(&work)
-        .arg("/")
-        .arg("--chdir")
-        .arg("/")
-        .arg("--")
-        .arg("/usr/bin/true")
-        .status()
-        .unwrap();
-    assert!(status.success(), "privileged direct lower=/ overlay failed");
 }

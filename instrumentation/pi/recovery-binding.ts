@@ -5,7 +5,6 @@ import {execFileSync} from 'node:child_process';
 import {checksum} from './recovery.ts';
 import {createRequire} from 'node:module';
 
-/** Bind Pi-resolved resources before extension execution on resume. */
 export async function recoveryBinding(piRoot,workspaces) {
     const resources=new Map();
     function fingerprint(path,required=false) {
@@ -25,17 +24,13 @@ export async function recoveryBinding(piRoot,workspaces) {
         fingerprint(path);
         if(!existsSync(path))return;
         JSON.parse(readFileSync(path,'utf8'));
-        // Declaration syntax and package filters belong to Pi's resolver.
     }
     const require=createRequire(resolve(piRoot,'package.json'));
     const {getAgentDir,DefaultPackageManager,SettingsManager}=require(resolve(piRoot,'packages/coding-agent/src/index.ts'));
-    // Let Pi resolve its configured directory, including an explicit
-    // PI_CODING_AGENT_DIR, rather than maintaining a second copy of that rule.
     const agentDir=resolve(getAgentDir());
     const resolved=[];
     for(const cwd of [...new Set(workspaces)].sort()) {
         const manager=new DefaultPackageManager({cwd,agentDir,settingsManager:SettingsManager.create(cwd,agentDir)});
-        // Recovery never installs or runs extension code during validation.
         const paths=await manager.resolve(async()=> 'error');
         if(paths.installFailures?.length)throw Error(`Recovery package resolution failed: ${JSON.stringify(paths.installFailures)}`);
         resolved.push({cwd,paths});
@@ -44,7 +39,6 @@ export async function recoveryBinding(piRoot,workspaces) {
             fingerprint(resource.path,true);
             if(resource.metadata.packageRoot) {
                 fingerprint(resource.metadata.packageRoot,true);
-                // Installed dependencies are part of the executable package.
                 const dependencies=join(resource.metadata.packageRoot,'node_modules');
                 if(existsSync(dependencies))for(const name of readdirSync(dependencies).sort())fingerprint(join(dependencies,name),true);
             }
@@ -80,8 +74,7 @@ export function snapshotResources(sources,expected) {
         const commit=retained?.commit??git('rev-parse','--verify',`${data.ref}^{commit}`);
         if(git('rev-parse','--verify',`${commit}^{tree}`)!==data.tree)throw Error(`Rollback snapshot tree changed: ${data.ref}`);
         git('cat-file','-e',`${data.tree}^{tree}`);
-        // Keep objects reachable independently of an extension's session-start GC.
-        // No checkout/reset is performed and an existing ref is never overwritten.
+        // Pin objects independently of the extension's session-start GC.
         const retainedRef=`refs/ascout/recovery/${checksum(gitDirectory+'\0'+data.ref+'\0'+commit)}`;
         if(expected) {
             if(git('rev-parse','--verify',retainedRef)!==commit)throw Error(`Retained rollback snapshot changed: ${retainedRef}`);

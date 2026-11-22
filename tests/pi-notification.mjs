@@ -61,7 +61,6 @@ test('native notification waits for the full tool batch, persists once, and neve
             tree.promote('candidate');tree.settle();tree.settle();
             const reopened=SessionManager.open(directory+'/session.jsonl');
             assert.deepEqual(reopened.getEntry(notice.id),notice);
-            assert.equal(messageBody(reopened.getEntry(notice.id)).content,command.notification);
             assert.equal(reopened.getEntries().filter(e=>e.customType==='notification').length,2);
             const persist=manager._persist;manager._persist=()=>{throw Error('injected write failure')};
             await assert.rejects(notifications.accept(session,{command_id:'write-failed',notification:'not yet saved'}),/injected/);

@@ -95,7 +95,6 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ---------------------------------------------------------- NLE map replay --- */
 .nle-map-page { min-height: 100dvh; padding: clamp(20px, 4vw, 52px); background: radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--accent-soft) 72%, transparent), transparent 34%), var(--bg); }
 .nle-map-header { max-width: 1320px; margin: 0 auto 24px; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
 .nle-map-header h1 { margin: 2px 0 4px; font-size: clamp(25px, 3vw, 38px); letter-spacing: -.03em; }
@@ -167,7 +166,6 @@ select {
   color: var(--muted);
 }
 
-/* ---------------------------------------------------------------- shell --- */
 
 .app {
   height: 100dvh;
@@ -238,7 +236,6 @@ select {
   border-radius: 8px;
 }
 
-/* ------------------------------------------------------------ chat pane --- */
 
 .chat-pane {
   display: grid;
@@ -494,7 +491,6 @@ select {
   color: inherit;
 }
 
-/* ------------------------------------------------------------ messages --- */
 
 .conversation-scroll {
   min-height: 0;
@@ -711,7 +707,6 @@ select {
   font-size: 13px;
 }
 
-/* ------------------------------------------------------------ composer --- */
 
 .composer {
   padding: 12px clamp(16px, 3.4vw, 44px) 16px;
@@ -807,7 +802,6 @@ select {
   font-size: 10.5px;
 }
 
-/* --------------------------------------------------------- panel shell --- */
 
 .speculation-panel {
   display: grid;
@@ -1229,7 +1223,6 @@ select {
   padding: 0 13px 26px;
 }
 
-/* --------------------------------------------------------------- tree ---- */
 
 .tree-canvas {
   position: relative;
@@ -1309,7 +1302,6 @@ select {
   pointer-events: none;
 }
 
-/* Branch forks and trunks use exactly the same solid rounded strokes. */
 .tree-fork {
   fill: none;
   stroke-linejoin: round;
@@ -1326,7 +1318,6 @@ select {
 .tree-trunk-cap { fill: currentColor; stroke: none; pointer-events: none; }
 
 .tree-ink-authority { color: var(--tree-authority); }
-/* A solid tint protects the trunk silhouette at junctions. */
 .tree-ink-authority-finished { color: color-mix(in srgb, var(--tree-authority) 72%, var(--surface)); }
 .tree-ink-candidate { color: var(--tree-candidate); }
 .tree-ink-aborted { color: var(--tree-abandoned); }
@@ -1434,7 +1425,6 @@ select {
   color: var(--muted);
 }
 
-/* Model petioles carry tool leaf clusters at their tips. */
 .tree-twig-target,
 .tree-leaf-group {
   cursor: pointer;
@@ -1472,14 +1462,12 @@ select {
   fill: none;
 }
 
-/* Tool status remains visible through hue and fill. */
 .tree-leaf-group.tone-success, .legend-leaf.tone-success { color: var(--tree-authority-leaf); }
 .tree-leaf-group.tone-danger, .legend-leaf.tone-danger { color: var(--tree-failed); }
 .tree-leaf-group.tone-cancelled, .legend-leaf.tone-cancelled { color: var(--tree-abandoned); }
 .tree-leaf-group.tone-timeout { color: var(--warning); }
 .tree-ink-candidate .tree-leaf-group.tone-success { color: var(--leaf-candidate); }
 
-/* Cancelled and timed-out calls are hollow, so an abort reads without colour. */
 .tree-leaf-group.tone-cancelled .tree-leaf-visual,
 .tree-leaf-group.tone-timeout .tree-leaf-visual {
   fill: none;
@@ -1487,7 +1475,6 @@ select {
   stroke-width: 1.1;
 }
 
-/* Everything on an aborted Branch dries out, including otherwise green leaves. */
 .tree-ink-aborted .tree-leaf-group { color: var(--tree-abandoned); }
 .tree-ink-aborted .tree-leaf-group.tone-cancelled .tree-leaf-visual,
 .tree-ink-aborted .tree-leaf-group.tone-timeout .tree-leaf-visual {
@@ -1522,7 +1509,6 @@ select {
   opacity: 1;
 }
 
-/* Leaves: tool calls on the trunk or on a model twig. */
 .tree-twig-parts {
   position: absolute;
   inset: 0;
@@ -1857,7 +1843,6 @@ select {
   }
 }
 
-/* ------------------------------------------------------------- details --- */
 
 .branch-details {
   display: flex;
@@ -2051,7 +2036,6 @@ select {
   color: var(--danger);
 }
 
-/* ------------------------------------------------------------ motion ----- */
 
 @keyframes node-pulse {
   0% {
@@ -2093,7 +2077,6 @@ select {
   }
 }
 
-/* --------------------------------------------------------- responsive ---- */
 
 @media (max-width: 1020px) {
   .panel-resizer {

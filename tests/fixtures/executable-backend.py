@@ -119,7 +119,7 @@ for raw in source:
     if op == 'cancel':
         if active is not None and key(request) == active[0]:
             active[1].set()
-        continue  # No separate response, even if the worker has already finished.
+        continue
     if active is not None:
         active[2].join()
         active = None

@@ -1,4 +1,3 @@
-//! 环境、挂载单元、快照与持久化元数据（含旧元数据迁移）。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -8,38 +7,23 @@ use serde::{Deserialize, Serialize};
 use crate::protocol::contract::{EnvironmentState, FilesystemResult, PathScope};
 use crate::runtime::backend::BackendError;
 
-/// One overlay mount unit.  The isolation unit is the filesystem mount point,
-/// not a fixed `Workspace`/`Tmp` scope: every mounted filesystem that can be
-/// overlaid gets its own upper, work and immutable lower chain.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MountUnit {
-    /// Canonical absolute mount point, for example `/home` or `/var/tmp`.
     pub(crate) target: PathBuf,
-    /// Host directory this mount mirrors when the sandbox mount point is not a
-    /// host path, for example a workspace published to `/app`.  It is the
-    /// bottom overlay layer and the publication destination.  None means the
-    /// target itself is the host directory.
+    /// Host lower and publication target. None uses the mount target itself.
     #[serde(default)]
     pub(crate) base: Option<PathBuf>,
-    /// Saved independent bottom layer. The target remains the sandbox mount point.
     #[serde(default)]
     pub(crate) saved_base: Option<PathBuf>,
-    /// Writable upper tree for this environment and mount.
     pub(crate) upper: PathBuf,
-    /// Overlay work tree for this environment and mount.
     pub(crate) work: PathBuf,
-    /// Immutable lower layers, bottom to top.  Each layer is a snapshot layer
-    /// root; the mount's subtree inside it is `layer_key/upper`.
+    /// Immutable lowers in bottom-to-top order, each containing `layer_key/upper`.
     #[serde(default)]
     pub(crate) lower: Vec<PathBuf>,
-    /// Relative directory inside a snapshot layer root that holds this
-    /// mount's upper tree.  Snapshot volumes use `mounts/<hash>/volume`; migrated metadata
-    /// may still use `workspace` or `tmp`.
+    /// New snapshots use `mounts/<hash>/volume`; migrated keys may be `workspace` or `tmp`.
     #[serde(default = "default_layer_key")]
     pub(crate) layer_key: String,
-    /// True when `upper.parent()` is a btrfs subvolume that can be used as the
-    /// source of a snapshot.  Empty child mounts get plain directories, so a
-    /// later fork must fall back to cloning instead of snapshotting them.
+    /// Empty child mounts may be plain directories and need cloning on the next fork.
     #[serde(default = "default_volume_is_subvolume")]
     pub(crate) volume_is_subvolume: bool,
 }
@@ -71,25 +55,16 @@ pub(crate) struct Environment {
     pub(crate) state: EnvironmentState,
     pub(crate) snapshot_id: String,
     pub(crate) parent_snapshot_id: Option<String>,
-    /// Read-only speculation point that is the three-way merge base.
     pub(crate) base_snapshot_id: Option<String>,
-    /// Optional request filter retained for contract compatibility.  Data
-    /// plane operations default to every mount when the filter is empty or
-    /// contains both legacy scopes.
+    /// An empty filter or both legacy scopes select every mount.
     pub(crate) scopes: Vec<PathScope>,
-    /// Authoritative per-mount overlay units, keyed by normalized absolute
-    /// mount point.
     pub(crate) mounts: BTreeMap<String, MountUnit>,
-    /// Mark identifier to immutable snapshot identifier.
     pub(crate) marks: BTreeMap<String, String>,
-    /// Absolute host workspace path observed at Agent launch.
     pub(crate) workspace_root: Option<PathBuf>,
 }
 
 impl Environment {
     pub(crate) fn mount_for_path(&self, path: &Path) -> Option<&MountUnit> {
-        // Prefer the longest matching mount point so nested mounts win over
-        // their parent.
         self.mounts
             .values()
             .filter(|mount| path.starts_with(&mount.target))
@@ -143,9 +118,7 @@ impl Environment {
             }
         }
         if mounts.is_empty() {
-            // A request filter that cannot be resolved before launch is a
-            // superset operation rather than an error: selecting all mounts
-            // never loses a requested write.
+            // An unresolved filter selects all mounts to avoid losing requested writes.
             let mut mounts: Vec<_> = self.mounts.values().cloned().collect();
             mounts.sort_by(|left, right| left.target.cmp(&right.target));
             return Ok(mounts);
@@ -160,10 +133,7 @@ pub(crate) struct SnapshotRecord {
     pub(crate) snapshot_id: String,
     pub(crate) path: PathBuf,
     pub(crate) read_only: bool,
-    /// Layer chain whose view this snapshot represents.  The snapshot path is
-    /// the top delta layer; the chain below it supplies inherited state.
     pub(crate) lower: BTreeMap<String, Vec<PathBuf>>,
-    /// Logical owners: environment base/lower references and mark identifiers.
     pub(crate) refs: BTreeSet<String>,
 }
 
@@ -209,9 +179,7 @@ impl EnvironmentMetadata {
         let root = self.root.unwrap_or(root);
         let mut mounts = self.mounts;
         if mounts.is_empty() && !self.lower.is_empty() {
-            // Explicit one-way migration from the scope layout.  A workspace
-            // layer without a recorded launch root cannot be mapped to an
-            // absolute mount point; refuse instead of silently dropping data.
+            // Legacy workspace layers need a recorded launch root for migration.
             for (key, layers) in &self.lower {
                 let target = match key.as_str() {
                     "workspace" => self.workspace_root.clone().ok_or_else(|| {
@@ -292,9 +260,7 @@ impl SnapshotMetadata {
     }
 }
 
-/// Durable result of one filesystem operation.  The identifier is the
-/// Adapter-supplied operation id; a replay with the same generation returns
-/// this record instead of executing the operation again.
+/// Reuse the durable result for the same Adapter operation ID and generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct OperationRecord {
     pub(crate) operation: String,

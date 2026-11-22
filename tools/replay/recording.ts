@@ -1,4 +1,3 @@
-/** Read native session/events without writing to the source. */
 import fs from "node:fs";
 import path from "node:path";
 import { requestKey, replyParts, sessionContext } from "./normalize.ts";
@@ -63,8 +62,7 @@ function chain(id: string | null | undefined) {
   }
   return result;
 }
-// Injected batches retain their original links. Restore only the first edge
-// after the batch; it can belong to a custom/compaction/edit entry, not a reply.
+// Only the first post-batch edge needs repair, and it need not be a reply.
 for (const [branch, c] of candidates) {
   const ids = transcripts.get(branch) ?? [];
   if (!ids.length) continue;

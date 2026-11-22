@@ -1,5 +1,3 @@
-//! SpeculationCoordinator：推动处理、调用 Policy 并发出操作。
-//! 不拥有 Tree 或第二份投机状态，可以服务多棵树。
 
 use super::*;
 use crate::control_plane::gateway::agent::protocol::{ActionKind, ActionStatus};
@@ -75,9 +73,6 @@ impl SpeculationCoordinator {
                     .as_ref()
                     .and_then(|id| tree.chances.get(id))
                     .ok_or("candidate Chance is missing")?;
-                // A Candidate without a Proposal has nothing to compare. Do not
-                // invent a null Proposal and send it through Policy Match: the
-                // missing Proposal is itself the truthful terminal fact.
                 let Some(proposal) = tree.branch_proposal(candidate) else {
                     return Ok(ControlResult::Disposition(
                         false,
@@ -347,8 +342,6 @@ impl SpeculationCoordinator {
             engine.evaluate(policy, decision, data)
         }
     }
-    /// `select` sees every Pending Chance and returns an ordered subset.
-    /// Chances it leaves out stay Pending.
     pub fn select(
         &self,
         tree: &SpeculativeTree,
@@ -450,8 +443,6 @@ impl SpeculationCoordinator {
         Ok(ControlResult::Predictions(result["proposals"].as_array().unwrap().clone()))
     }
 
-    /// `launch` decides whether the authority value is fetched now. `false`
-    /// only defers the fetch.
     pub(super) fn launch_allowed(
         &self,
         tree: &SpeculativeTree,
@@ -485,7 +476,6 @@ impl SpeculationCoordinator {
         Ok(allowed == true)
     }
 
-    /// `rebalance` adjusts started candidate work: pause, resume or preempt.
     pub fn rebalance(
         &self,
         tree: &SpeculativeTree,

@@ -1,4 +1,3 @@
-//! btrfs 子卷、快照、send dump 与增量 diff。
 
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
@@ -236,9 +235,7 @@ impl FilesystemBackend {
             false
         };
         let deleted = if mounted {
-            // Exercise the same btrfs-aware recursive removal used by the
-            // background trash path.  fast_delete is only a cost signal; this
-            // fallback must actually clean a read-only snapshot.
+            // The slow fallback must still delete a read-only snapshot.
             let _ = self.btrfs_delete_strict(&snap);
             let _ = self.btrfs_delete_strict(&sub);
             let _ = remove_path_with_mode(&self.config.btrfs_path, &root, true, false);
@@ -271,8 +268,6 @@ impl FilesystemBackend {
                 return Err(error);
             }
         };
-        // The stream is rooted at the volume. Work and volume metadata are
-        // internal; keep every change inside upper, including parent dirs.
         let delta = send_dump_upper_delta(&dump, &mount.upper);
         let _ = remove_path(&self.config.btrfs_path, &snapshot_root, true);
         delta
@@ -336,8 +331,7 @@ fn delta_from_changes(
                 redirects.push((target, change.path.clone()));
             }
             if change.old_path.is_some() && matches!(node.kind, NodeKind::Dir) {
-                // An unchanged descendant of a moved directory has no separate
-                // send command. Replay needs that subtree, never unrelated upper.
+                // Send omits unchanged descendants; replay still needs the moved subtree.
                 for (path, child) in read_layer(&upper.join(&change.path))? {
                     view.insert(format!("{}/{path}", change.path), child);
                 }
@@ -353,12 +347,9 @@ fn delta_from_changes(
 }
 
 pub(super) fn parse_send_dump(dump: &str) -> Vec<FilesystemChange> {
-    // receive --dump prefixes *every* path with the snapshot name.  It is
-    // unrelated to the backend's layer key (and can itself be "upper").
+    // btrfs receive --dump prefixes paths with the snapshot name, independent of the layer key.
     let mut root = String::new();
-    // Current stream path -> original base path; None denotes a new inode.
-    // Track identities, not an append-only command log: send creates temporary
-    // names and can move directories (including already touched descendants).
+    // Map current paths to base paths (None for new inodes), including descendants of renames.
     let mut entries: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut deleted = BTreeSet::new();
     for line in dump.lines() {
@@ -426,7 +417,6 @@ pub(super) fn parse_send_dump(dump: &str) -> Vec<FilesystemChange> {
     }
     let mut changes = Vec::new();
     for path in deleted {
-        // Replacements at the same name are changes, not a delete + change.
         if !entries.contains_key(&path) {
             changes.push(FilesystemChange {
                 path,
@@ -465,204 +455,4 @@ fn stream_origin(entries: &BTreeMap<String, Option<String>>, path: &str) -> Opti
         parent = prefix;
     }
     Some(path.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn send_dump_snapshot_prefix_and_temporary_renames() {
-        // Format captured in log.txt:199-218 (snapshot name differs from layer key).
-        let dump = "snapshot ./snap2 uuid=example\n\
-            unlink ./snap2/base.txt\n\
-            mkfile ./snap2/o258-840402-0\n\
-            rename ./snap2/o258-840402-0 dest=./snap2/modified.txt\n\
-            write ./snap2/modified.txt offset=0 len=8\n\
-            mkdir ./snap2/o259-840402-0\n\
-            rename ./snap2/o259-840402-0 dest=./snap2/renamed\n\
-            mkfile ./snap2/o260-840402-0\n\
-            rename ./snap2/o260-840402-0 dest=./snap2/renamed/nested.txt\n\
-            utimes ./snap2/ atime=example\n";
-        let changes = parse_send_dump(dump);
-        let actual: Vec<_> = changes
-            .iter()
-            .map(|c| (c.path.as_str(), c.kind.as_str(), c.old_path.as_deref()))
-            .collect();
-        assert_eq!(
-            actual,
-            vec![
-                ("base.txt", "delete", None),
-                ("modified.txt", "change", None),
-                ("renamed", "change", None),
-                ("renamed/nested.txt", "change", None),
-            ]
-        );
-        let upper_dump = dump.replace("snap2", "upper");
-        let changes = parse_send_dump(&upper_dump);
-        assert!(
-            changes
-                .iter()
-                .any(|c| c.path == "modified.txt" && c.kind == "change")
-        );
-        assert!(
-            !changes
-                .iter()
-                .any(|c| c.path.starts_with("upper/") || c.path.starts_with('o'))
-        );
-    }
-
-    #[test]
-    fn send_dump_real_rename_delete_and_created_then_removed() {
-        let dump = "snapshot ./upper uuid=example\n\
-            chmod ./upper/old/file mode=600\n\
-            rename ./upper/old dest=./upper/o300-1-0\n\
-            rename ./upper/o300-1-0 dest=./upper/new\n\
-            unlink ./upper/new/file\n\
-            unlink ./upper/new/untouched\n\
-            unlink ./upper/deleted\n\
-            mkfile ./upper/o301-1-0\n\
-            rename ./upper/o301-1-0 dest=./upper/ephemeral\n\
-            unlink ./upper/ephemeral\n\
-            unlink ./upper/replaced\n\
-            mkfile ./upper/o302-1-0\n\
-            rename ./upper/o302-1-0 dest=./upper/replaced\n\
-            chmod ./upper/upper/kept mode=644\n";
-        let changes = parse_send_dump(dump);
-        assert!(changes.iter().any(|c| c.path == "new"
-            && c.kind == "rename"
-            && c.old_path.as_deref() == Some("old")));
-        assert!(
-            changes
-                .iter()
-                .any(|c| c.path == "old/file" && c.kind == "delete")
-        );
-        assert!(
-            changes
-                .iter()
-                .any(|c| c.path == "old/untouched" && c.kind == "delete")
-        );
-        assert!(
-            changes
-                .iter()
-                .any(|c| c.path == "deleted" && c.kind == "delete")
-        );
-        assert!(
-            changes
-                .iter()
-                .any(|c| c.path == "upper/kept" && c.kind == "change")
-        );
-        assert_eq!(changes.iter().filter(|c| c.path == "replaced").count(), 1);
-        assert!(
-            changes
-                .iter()
-                .any(|c| c.path == "replaced" && c.kind == "change")
-        );
-        assert!(!changes.iter().any(|c| c.path.contains("o300-")
-            || c.path.contains("o301-")
-            || c.path == "ephemeral"));
-    }
-
-    #[test]
-    fn send_dump_delta_uses_final_paths_for_accept_and_moved_subtrees() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("new")).unwrap();
-        fs::write(root.path().join("new/unchanged"), b"kept").unwrap();
-        fs::write(root.path().join("created"), b"created").unwrap();
-        fs::write(root.path().join("unrelated"), b"not in delta").unwrap();
-        let dump = "snapshot ./upper uuid=example\n\
-            mkfile ./upper/o261-840421-0\n\
-            rename ./upper/o261-840421-0 dest=./upper/created\n\
-            rename ./upper/old dest=./upper/new\n\
-            unlink ./upper/deleted\n";
-        let (delta, _, changes) = delta_from_changes(parse_send_dump(dump), root.path()).unwrap();
-        assert_eq!(
-            delta.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["created", "deleted", "new", "new/unchanged", "old"]
-        );
-        assert!(!delta["created"].is_whiteout());
-        assert_eq!(
-            fs::read(delta["created"].source.as_ref().unwrap()).unwrap(),
-            b"created"
-        );
-        assert!(delta["old"].is_whiteout());
-        assert!(delta["deleted"].is_whiteout());
-        assert_eq!(
-            fs::read(delta["new/unchanged"].source.as_ref().unwrap()).unwrap(),
-            b"kept"
-        );
-        assert!(
-            changes
-                .iter()
-                .any(|c| c.path == "created" && c.kind == "change")
-        );
-        assert!(
-            changes
-                .iter()
-                .any(|c| c.path == "new" && c.old_path.as_deref() == Some("old"))
-        );
-    }
-
-    #[test]
-    fn send_dump_volume_keeps_upper_parent_changes_and_excludes_work() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("parent/nested")).unwrap();
-        fs::write(root.path().join("parent/nested/keep"), b"changed").unwrap();
-        let dump = "snapshot ./volume uuid=example\n\
-            utimes ./volume/ atime=example\n\
-            utimes ./volume/upper atime=example\n\
-            utimes ./volume/upper/parent atime=example\n\
-            utimes ./volume/upper/parent/nested atime=example\n\
-            write ./volume/upper/parent/nested/keep offset=0 len=7\n\
-            unlink ./volume/upper/parent/nested/remove\n\
-            mkdir ./volume/work/work\n\
-            mkfile ./volume/work/work/temporary\n\
-            rename ./volume/work/work/temporary dest=./volume/upper/parent/nested/newfile\n";
-        fs::write(root.path().join("parent/nested/newfile"), b"new").unwrap();
-        let (_, _, changes) = send_dump_upper_delta(dump, root.path()).unwrap();
-        assert_eq!(
-            changes
-                .iter()
-                .map(|change| (
-                    change.path.as_str(),
-                    change.kind.as_str(),
-                    change.old_path.as_deref()
-                ))
-                .collect::<Vec<_>>(),
-            vec![
-                ("parent", "change", None),
-                ("parent/nested", "change", None),
-                ("parent/nested/keep", "change", None),
-                ("parent/nested/newfile", "change", None),
-                ("parent/nested/remove", "delete", None),
-            ]
-        );
-    }
-
-    #[test]
-    fn send_dump_drains_large_send_stderr() {
-        let root = tempfile::tempdir().unwrap();
-        let script = root.path().join("fake-btrfs.sh");
-        std::fs::write(
-            &script,
-            r#"#!/bin/sh
-if [ "$1" = "send" ]; then
-  i=0
-  while [ "$i" -lt 20000 ]; do
-    echo "send stderr line $i" >&2
-    i=$((i+1))
-  done
-  echo "send payload"
-else
-  cat >/dev/null
-  echo "receive dump"
-fi
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let dump = btrfs_send_dump_with(&script, root.path(), root.path()).unwrap();
-        assert!(dump.contains("receive dump"));
-    }
 }

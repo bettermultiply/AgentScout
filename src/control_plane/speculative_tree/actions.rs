@@ -1,10 +1,8 @@
-//! SpeculativeTree 的控制操作与动作投影。
 
 use super::*;
 use crate::protocol::contract::RuntimeCapabilities;
 use serde_json::json;
 
-/// 一个 Chance 的等待点：权威 Branch 在哪个 operation 上等待哪个工具结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolPending {
     pub chance_id: String,
@@ -16,7 +14,6 @@ pub struct ToolPending {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlOperation {
-    /// 对给定的 Pending Chance 求值 `select`。
     Select(Vec<String>),
     Predict(ToolPending),
     Launch(ToolPending),
@@ -84,7 +81,6 @@ pub enum ControlResult {
         Option<crate::protocol::contract::ExecutionAccess>,
         Option<String>,
     ),
-    /// `(branch_id, action)` pairs returned by `rebalance`.
     Rebalance(Vec<(String, String)>),
     Completed,
     Environment(String, Option<crate::protocol::contract::ExecutionAccess>),
@@ -241,10 +237,6 @@ impl SpeculativeTree {
                 "speculative admission does not use the delivered local Policy",
             ));
         }
-        // Admission says the action exists and will be paired with its
-        // ActionFinished; it does not say the tool has started. The adapter
-        // measures the real start time in ActionStarted, so no start time is
-        // synthesized here from the admission timestamp.
         self.register_action(
             &branch_id,
             operation_id.clone(),
@@ -261,9 +253,6 @@ impl SpeculativeTree {
             )?);
             return Ok(actions);
         }
-        // A Chance may be admitted on any Branch that still exists in the
-        // speculation, not only on the current authority: the nested Chance's
-        // authority value is that Branch's own real execution result.
         let branch_live = self.branches.get(&branch_id).is_some_and(|branch| {
             branch.status.is_live_authority() || branch.status.is_live_candidate()
         });
@@ -276,9 +265,6 @@ impl SpeculativeTree {
         {
             return Ok(actions);
         }
-        // Admission was decided by the adapter that sent this explicit request.
-        // The control plane does not re-run it; it only records the accepted
-        // opportunity as a Pending Chance. `select` runs from `progress`.
         let local_id = if let Some(fast) = &fast_start {
             let id = fast["chance_id"].as_str().filter(|id| {
                 id.strip_prefix("chance-local-").is_some_and(|suffix| {
@@ -495,9 +481,7 @@ impl SpeculativeTree {
             .is_some_and(|chance| &chance.stage == stage && self.chance_waiting_live(chance))
     }
 
-    /// Chances `select` leaves out stay Pending, but the Agent's pending tool
-    /// call still needs its real result: the authority value is fetched
-    /// without speculation.
+    /// Unselected Chances stay Pending while the authority fetches the real tool result.
     fn complete_select(
         &mut self,
         ids: Vec<String>,
@@ -598,8 +582,6 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    /// `launch=true` authorizes the authority call itself; `false` only defers
-    /// it, leaving the Chance's authority state at `NotRequested`.
     fn complete_launch(
         &mut self,
         tool: ToolPending,
@@ -633,9 +615,7 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    /// `rebalance` pauses, resumes or preempts started candidate work. Pause
-    /// and resume are commands; the Branch becomes `Blocked(Rebalanced)` only
-    /// when the Agent Adapter reports that it actually holds the Branch.
+    /// `Blocked(Rebalanced)` requires an adapter hold receipt, even after a pause command.
     fn complete_rebalance(
         &mut self,
         result: Result<ControlResult, String>,
@@ -762,16 +742,10 @@ impl SpeculativeTree {
         };
         self.record_authority_outcome(&chance_id, outcome.clone(), Some(evidence.clone()))?;
         self.record_public_nle_map_action(&branch_id, &operation_id, &evidence)?;
-        // Tool Candidates already own a Proposal when they are created: the
-        // predicted result is the thing being compared. A still-running
-        // Candidate is therefore not cancelled here; validation decides it
-        // against the authoritative value. Model Candidates have no Proposal
-        // until their model call finishes and are closed by the Agent message
-        // path when the authority arrives first.
+        // Tool Candidates already own a Proposal, so they can run through validation.
         let chance = self.chance_mut(&chance_id)?;
         chance.tool_continuation_pending = live;
         if !chance.stage.is_terminal() && chance.branch_ids.is_empty() {
-            // No Proposal was tested; nothing was speculated on this Chance.
             self.change_chance_stage(
                 &chance_id,
                 ChanceStage::Discarded(DiscardedReason::NotSelected),
@@ -786,7 +760,6 @@ impl SpeculativeTree {
         }
         self.complete_operation(&branch_id, Some(&operation_id), OperationStatus::Succeeded)?;
         if live {
-            // The extent hold ends once the authority value is handed back.
             if self.branch(&branch_id)?.status
                 == BranchStatus::Blocked(BlockedReason::ExtentReached)
             {
@@ -820,8 +793,6 @@ impl SpeculativeTree {
         let operation = chance.operation_id.clone();
         let parent_retired = self.branch(&parent)?.status.is_discarding_or_later();
         if parent_retired || chance.stage.is_terminal() {
-            // A Full acceptance retires the parent in the same transition that
-            // marks the Chance accepted. Part keeps the parent alive.
             if !parent_retired {
                 actions.commands.push(self.resolve_pending(
                     &parent,
@@ -902,11 +873,6 @@ impl SpeculativeTree {
         if verdict == "wait" || (verdict == "indeterminate" && !salvage) {
             return Ok(());
         }
-        // A Candidate without a Proposal cannot be compared. This happens on
-        // a failed/cancelled model call and also when the authority value
-        // arrived before the Candidate produced its result. Its truthful
-        // terminal fact is enough to close its lifecycle, but it must not be
-        // sent through Policy with a fabricated null Proposal.
         if proposal.is_none() {
             let record = json!({
                 "branch_id": candidate,
@@ -977,10 +943,7 @@ impl SpeculativeTree {
                 self.schedule(ControlOperation::Promote(candidate, record), actions);
             }
         } else if compatible && transfer.is_none() && self.ancestor_assumptions_unresolved(self.branch(&candidate)?) {
-            // The nested Proposal matches, but the Branch still depends on an
-            // unconfirmed ancestor Proposal. Keep it alive without commit
-            // eligibility; `progress` will validate it again after the
-            // ancestor resolves.
+            // A matching nested Proposal waits for ancestor validation before it can commit.
             actions.records.push(json!({
                 "branch_id": candidate,
                 "hypothesis": self.branch_proposal(&candidate).map(|proposal| &proposal.payload),
@@ -1137,9 +1100,6 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    /// Drive each Chance forward: `select` over the Pending ones, `launch`
-    /// for those waiting to fetch the authority value, and the authority
-    /// fetch itself once its candidate environments exist.
     fn progress_chances(&mut self, actions: &mut ControlActions) -> io::Result<()> {
         let selectable = self.selectable_chances();
         if !selectable.is_empty()
@@ -1185,8 +1145,6 @@ impl SpeculativeTree {
                 continue;
             }
             if chance.authority == AuthorityState::NotRequested && chance.stage.is_terminal() {
-                // Every candidate is gone, but the Agent's call still needs
-                // its real result.
                 self.authorize_authority(&id, actions)?;
             }
             let chance = self.chance(&id)?;

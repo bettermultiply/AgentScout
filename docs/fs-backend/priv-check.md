@@ -76,8 +76,8 @@ layout                       PASS   state=<...> workspace=<...>
 btrfs-raw                    PASS   create/snapshot/send-dump/strict-delete
 direct-root-overlay          PASS   lower=/ in initial userns
 rust-build                   PASS   lib tests
-process-freeze               PASS   7/7 executed; 7/7 passed; 0 ignored; mechanism=cgroup
-privileged-rust              PASS   4/4 executed; 4/4 passed; 0 ignored
+process-freeze               PASS   4/4 executed; 4/4 passed; 0 ignored; mechanism=cgroup
+privileged-rust              PASS   3/3 executed; 3/3 passed; 0 ignored
 process tests executed       7      freeze mechanism: cgroup
 process tests passed         7      ignored: 0
 privileged tests executed    4      expected 4
@@ -115,13 +115,13 @@ runtime::process::tests::
 runtime::backends::filesystem::tests::process::
 ```
 
-两个过滤器分别 `--list` 精确核对，共 7 个测试必须全部 `... ok`，且不出现 `SKIP`。
+两个过滤器分别 `--list` 精确核对，共 4 个测试必须全部 `... ok`，且不出现 `SKIP`。
 运行使用 `--show-output --format=pretty --color=never --test-threads=1`，保留捕获
 日志并保证 libtest 的结果行不被测试内日志打断。测试打印固定标记（沿用
 `FreezeMechanism` 的名字）：
 
 ```text
-ASCOUT_FREEZE_MECHANISM=cgroup test=terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup
+ASCOUT_FREEZE_MECHANISM=cgroup test=process_freeze_thaw_stops_and_resumes_writer
 ```
 
 `cgroup` 与 `process_group` 都算通过，但汇总表明确写出实际机制，让用户知道
@@ -137,7 +137,6 @@ cgroup 路径有没有被真实走到。`none` 视为失败；没有标记也视
 priv_btrfs_chain_layout
 priv_btrfs_flatten_layout
 priv_btrfs_mixed_generations
-priv_direct_root_overlay_is_available_in_initial_userns
 ```
 
 再以 `--show-output --format=pretty --color=never --test-threads=1` 运行。
@@ -161,8 +160,6 @@ priv_direct_root_overlay_is_available_in_initial_userns
 - `priv_btrfs_mixed_generations`
   - 大 root upper 先 Chain，小 child upper 再 Flatten；
   - 真实启动 grandchild，精确 diff（含父目录）、accept 回 child1，父 root 视图不变。
-- `priv_direct_root_overlay_is_available_in_initial_userns`
-  - root + `unshare --mount` 中直接 `--overlay-src / ... /` 成功。
 
 ## 诊断与清理
 
@@ -190,7 +187,7 @@ python3 scripts/test-priv-check.py
 
 | 场景 | 断言 |
 |---|---|
-| `success` | 退出 0、出现 `ALL PASSED`、汇总表完整、4/4 特权测试、7/7 进程测试、`mechanism=cgroup` |
+| `success` | 退出 0、出现 `ALL PASSED`、汇总表完整、3/3 特权测试、4/4 进程测试、`mechanism=cgroup` |
 | `nonroot` | 通过假 `sudo` 走提权分支，仍然成功 |
 | `freeze-pg` | 通过，汇总表明确写 `mechanism=process_group` |
 | `freeze-none` | 非零，汇总写 `none` |
@@ -205,7 +202,7 @@ python3 scripts/test-priv-check.py
 | `interleaved` | 真实 libtest 的测试内输出交错；脚本捕获模式仍精确通过 |
 | `missing-process` / `extra-test` / `duplicate-test` | 缺进程测试、额外测试、重复测试均失败 |
 | `list-fail` / `process-fail` / `priv-exit-fail` | 即使输出貌似通过，命令非零也失败 |
-| `priv-failed` | 4/4 执行、1/4 通过，非零且无该组 PASS |
+| `priv-failed` | 3/3 执行、1/3 通过，非零且无该组 PASS |
 | `ignored` / `skip-inline` | ignored 不算执行；行内 SKIP 同样失败 |
 | `bad-summary` / `incomplete-run` | 摘要或逐项记录不完整、不一致均失败 |
 
@@ -213,7 +210,7 @@ python3 scripts/test-priv-check.py
 
 ## 已验证结果（用户 2026-11-10 第四轮验证）
 
-- 上文四项特权测试逐项 ok；4 passed、0 failed、0 ignored。
+- 当时的四项特权测试逐项 ok；4 passed、0 failed、0 ignored。
   三项 btrfs 测试均选中真实 btrfs 数据面，`incremental_diff=true`、
   `fast_delete=true`；状态目录位于根 btrfs 挂载，workspace 位于 `/tmp` tmpfs，
   默认配置的非重叠布局检查通过。

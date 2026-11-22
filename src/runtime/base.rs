@@ -1,4 +1,3 @@
-//! Own backend instances and coordinate their work for each Environment.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -22,9 +21,7 @@ pub struct BaseRuntime {
     policy: BackendPolicy,
     lifecycle: Arc<Lifecycle>,
     agent_supervisor: AgentSupervisor,
-    /// 每个环境参与过 establish/branch 的 Backend id 集合。成功时记录全部
-    /// 参与者；失败时记录仍持有环境状态的参与者，供后续清理。
-    /// cleanup/terminate 后仍保留，用于解释最终状态。
+    /// 部分创建失败时仅保留仍持有资源的参与者。清理后保留记录以解释最终状态。
     participants: Mutex<HashMap<String, Vec<String>>>,
     control_operations: Mutex<BTreeSet<String>>,
 }
@@ -44,7 +41,6 @@ impl Drop for ControlAdmission<'_> {
 }
 
 impl BaseRuntime {
-    /// Construct a Runtime for a caller supplying a single backend.
     pub fn new(id: impl Into<String>, backend: Arc<dyn Backend>) -> Self {
         let backend_id = backend.backend_id().to_owned();
         Self {
@@ -61,7 +57,6 @@ impl BaseRuntime {
         }
     }
 
-    /// Construct a Runtime for callers already supplying instances.
     pub fn with_policy(
         id: impl Into<String>,
         connections: Vec<BackendConnection>,
@@ -148,8 +143,7 @@ impl BaseRuntime {
         let _operation = self.enter_operation().map_err(BackendError::new)?;
         let fragment = self.launch_fragment(context, launch)?;
         self.agent_supervisor.launch(launch, &fragment.env)?;
-        // Reserve environment startup under the same lock that closes admission.
-        // Already admitted starts are drained before resource cleanup.
+        // Reserve startup under the admission lock so cleanup waits for it.
         let _startup = self.enter_operation().map_err(BackendError::new)?;
         self.start_environment_execution(context, launch)
     }
@@ -559,8 +553,6 @@ impl BaseRuntime {
         if failed.is_empty() {
             Ok(())
         } else {
-            // 清理会尽力覆盖所有选中的 Backend，不因为单个失败就跳过后续；
-            // 因此 `remaining` 保持为空，失败以 `cleanup_failures` 如实上报。
             Err(BackendError {
                 created_environment_id: None,
                 message: format!("Runtime cleanup partially failed: {}", messages.join("; ")),
@@ -597,8 +589,7 @@ impl BaseRuntime {
     }
 
     fn aggregate_state(&self, environment_id: &str) -> Option<EnvironmentState> {
-        // 有参与者记录时以参与者为准：任一参与者缺状态或状态不一致都判为
-        // PartiallyAvailable，避免某个参与建立但未报告状态的 Backend 被静默丢弃。
+        // 参与者缺状态也算 PartiallyAvailable，不能将其从汇总中略去。
         if let Some(participants) = self.participants_for(environment_id) {
             let mut states = Vec::with_capacity(participants.len());
             for id in &participants {
@@ -628,7 +619,6 @@ impl BaseRuntime {
                 .then_some(first)
                 .or(Some(EnvironmentState::PartiallyAvailable));
         }
-        // 未知环境不观察或操作未绑定的 Backend。
         None
     }
 
@@ -656,7 +646,6 @@ impl BaseRuntime {
     }
 }
 
-// Store each registered backend and the Environment participation order.
 struct RoutedRecovery<'a>(&'a BaseRuntime);
 
 fn normalize_outputs(
@@ -816,7 +805,6 @@ impl Backend for BaseRuntime {
 
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
         let _operation = self.enter_operation().map_err(BackendError::new)?;
-        // Failed save attempts also use the preserving shutdown path.
         self.lifecycle.preserve();
         super::recovery::Component::save_after(&RoutedRecovery(self), path, &mut || Ok(()))
     }

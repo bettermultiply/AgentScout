@@ -1,4 +1,3 @@
-//! 三方合并与冲突检测。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,97 +24,12 @@ pub(crate) fn conflict(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn target_upper_has_changes_under(upper: &View, path: &str) -> bool {
-    let prefix = format!("{path}/");
-    upper.keys().any(|key| key.starts_with(&prefix))
-}
-
-/// Path-based equivalent used by accept: it checks only the target upper
-/// subtree at `path` instead of materializing the whole target upper.
 pub(crate) fn target_upper_path_has_changes(upper: &Path, path: &str) -> bool {
     let target = upper.join(path);
     match fs::read_dir(&target) {
         Ok(mut entries) => entries.next().is_some(),
         Err(_) => false,
     }
-}
-
-#[cfg(test)]
-pub(crate) fn merge_delta(
-    delta: &View,
-    redirects: &[(String, String)],
-    base_maps: &[View],
-    target_maps: &[View],
-    target_upper: &View,
-) -> Vec<FilesystemConflict> {
-    let mut conflicts = Vec::new();
-    for (path, node) in delta {
-        let base = resolve_node(base_maps, path);
-        let target = resolve_node(target_maps, path);
-        let target_changed = !equivalent(target.as_ref(), base.as_ref());
-        if node.is_whiteout() {
-            if target_changed && target.is_some() {
-                conflicts.push(conflict(
-                    path,
-                    "delete_modify",
-                    base.as_ref(),
-                    target.as_ref(),
-                    None,
-                ));
-            }
-            continue;
-        }
-        if target_changed && !equivalent(target.as_ref(), Some(node)) {
-            let kind = if target.is_none() {
-                "modify_delete"
-            } else if base.is_none() {
-                "add_add"
-            } else {
-                "content"
-            };
-            conflicts.push(conflict(
-                path,
-                kind,
-                base.as_ref(),
-                target.as_ref(),
-                Some(node),
-            ));
-        }
-        if matches!(node.kind, NodeKind::Dir)
-            && node.opaque
-            && target_upper_has_changes_under(target_upper, path)
-            && !conflicts.iter().any(|value| value.path == *path)
-        {
-            conflicts.push(conflict(
-                path,
-                "opaque_replace",
-                base.as_ref(),
-                target.as_ref(),
-                Some(node),
-            ));
-        }
-    }
-    for (old, new) in redirects {
-        let base_old = resolve_node(base_maps, old);
-        let target_old = resolve_node(target_maps, old);
-        let base_new = resolve_node(base_maps, new);
-        let target_new = resolve_node(target_maps, new);
-        if !equivalent(target_old.as_ref(), base_old.as_ref())
-            || !equivalent(target_new.as_ref(), base_new.as_ref())
-        {
-            conflicts.push(conflict(
-                new,
-                "rename",
-                base_new.as_ref(),
-                target_new.as_ref(),
-                delta.get(old),
-            ));
-        }
-    }
-    conflicts.sort_by(|left, right| left.path.cmp(&right.path));
-    conflicts.dedup_by(|left, right| left.path == right.path && left.kind == right.kind);
-    conflicts
 }
 
 pub(crate) fn merge_delta_layers(

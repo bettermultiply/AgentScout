@@ -1,4 +1,3 @@
-//! mountinfo 候选、逐挂载 overlay 与 LaunchFragment 产出。
 
 use std::path::Path;
 
@@ -71,12 +70,7 @@ impl FilesystemBackend {
         ok
     }
 
-    /// A mount whose subtree contains the backend state directory cannot use
-    /// snapshot layers below that same mount as overlay lowerdirs: OverlayFS
-    /// rejects overlapping lower directories.  Such layouts are refused by
-    /// default; only the internal `allow_overlapping_state_directory` switch
-    /// keeps the flatten fallback (parent upper copied into child upper, layers
-    /// used as diff metadata only).
+    /// OverlayFS rejects overlapping lowerdirs. The internal opt-in uses Flatten instead.
     pub(super) fn state_overlap_mounts(&self) -> Vec<PathBuf> {
         self.overlayable_mounts()
             .into_iter()
@@ -84,10 +78,6 @@ impl FilesystemBackend {
             .collect()
     }
 
-    /// Fail before any environment, upper directory, or metadata is created
-    /// when the state directory sits inside a mount that this run would
-    /// isolate.  Flattening would hide that deployment error, so it is only
-    /// allowed through the internal test/diagnostic switch.
     pub(super) fn ensure_state_directory_outside_isolated_mounts(
         &self,
         targets: impl IntoIterator<Item = PathBuf>,
@@ -127,7 +117,6 @@ impl FilesystemBackend {
         lowers
     }
 
-    /// Prepare the mounts and tool plan for a new filesystem holder.
     pub fn launch_fragment(
         &self,
         context: &BackendContext,
@@ -146,8 +135,6 @@ impl FilesystemBackend {
         self.fragment_for_environment(&environment, launch, true)
     }
 
-    /// Load the environment, record the Agent workspace root and add mount
-    /// units that appeared after establish.
     fn launch_environment(
         &self,
         context: &BackendContext,
@@ -207,9 +194,6 @@ impl FilesystemBackend {
         Ok(environment)
     }
 
-    /// Add mount units that appeared after establish (or were absent from
-    /// migrated legacy metadata).  Every writable overlayable mount is a
-    /// normal isolation unit, not a special workspace/tmp case.
     fn discover_mounts(&self, environment: &mut Environment) -> Result<(), BackendError> {
         for target in self.overlayable_mounts() {
             if !target.is_dir() {
@@ -245,7 +229,6 @@ impl FilesystemBackend {
         Ok(())
     }
 
-    /// Create storage for mount units discovered by `discover_mounts`.
     fn provision_discovered_mounts(
         &self,
         environment: &mut Environment,
@@ -301,16 +284,13 @@ impl FilesystemBackend {
             .join("holder-sockets")
             .join(&environment.id);
         fs::create_dir_all(&holder_dir).map_err(error)?;
-        // `/run` is part of the read-only host-root view in bubblewrap.  Use a
-        // dedicated root-level mount point so the holder socket is created in
-        // the assembled namespace rather than in that read-only tree.
+        // `/run` is read-only in bubblewrap's host-root view.
         fragment.holder_bind = Some((holder_dir, PathBuf::from("/dev/ascout-holder")));
         fragment
             .mounts
             .extend(crate::runtime::launch_plan::base_mount_entries());
         let mut mounts = environment.selected_mounts(&environment.scopes)?;
-        // Parents must be mounted before nested child mounts so a later
-        // parent overlay cannot hide an already-mounted child overlay.
+        // A later parent overlay would hide a child mounted first.
         mounts.sort_by_key(|mount| mount.target.components().count());
         let mut covered: BTreeSet<PathBuf> = BTreeSet::new();
         for mount in &mounts {
@@ -350,7 +330,6 @@ impl FilesystemBackend {
         Ok(fragment)
     }
 
-    /// Everything writable that we did not overlay stays read-only.
     fn append_unmanaged_mounts(&self, fragment: &mut LaunchFragment, covered: &BTreeSet<PathBuf>) {
         for target in if self.config.isolate_unmanaged_mounts {
             real_writable_mounts()
@@ -375,7 +354,6 @@ impl FilesystemBackend {
         }
     }
 
-    /// Hide our own state (upper/work/snapshots/metadata) from the Agent.
     fn append_state_masks(&self, fragment: &mut LaunchFragment) {
         fragment.mounts.push(MountEntry::Tmpfs {
             target: self.config.state_directory.clone(),

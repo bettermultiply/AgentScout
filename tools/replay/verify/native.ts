@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// Regression for the reproduced authority-session export failure. No model calls.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -18,7 +17,6 @@ const session = [
   { type: "session", version: 3, id: "header" },
   message("u", null, { role: "user", content: "start" }),
   message("a", "u", calls),
-  // Actual parallel results finish in reverse tool-call order.
   message("r-b", "a", result("op-b", "actual-b")),
   message("r-a", "r-b", result("op-a", "actual-a")),
   message("p-a", "a", result("op-a", "predicted-a")),
@@ -61,7 +59,6 @@ assert.equal(out.length, 3);
 assert.equal(out[1].key, requestKey([calls, result("op-a", "edited-prediction"), result("op-b", "sibling-b"), { role: "user", content: "accepted" }]));
 assert.equal(out[2].key, requestKey([next, result("op-c", "predicted-c")]));
 assert.deepEqual(["session.jsonl", "events.jsonl"].map(f => fs.readFileSync(`${root}/${f}`, "utf8")), before, "source files mutated");
-// Missing and contradictory native references must fail, never guess a key.
 events.push(transcript("next", "other", 0)); write();
 exported = spawnSync(process.execPath, ["tools/replay/export.ts", root], { encoding: "utf8" });
 assert.notEqual(exported.status, 0); assert.match(exported.stderr, /Ambiguous transcript owner/);

@@ -1,4 +1,3 @@
-//! Compile once, then evaluate the artifact without loading the author YAML again.
 use std::{
     env, fs,
     io::{self, Read},

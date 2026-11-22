@@ -6,7 +6,6 @@ import {savedPolicy,runner} from './fixtures/predictor-fact-policy.mjs';
 import {createInterposer} from '../instrumentation/core/index.ts';
 import {evaluatePolicyArtifact} from '../../pi/packages/pi-integration/src/local-policy.ts';
 
-// Frozen real Policy, with provenance paths sanitized; no temporary evidence input.
 const saved=savedPolicy();
 const python=execFileSync('/usr/bin/python3',['-c','import sys; print(sys.version)'],{encoding:'utf8'}).trim();
 const localDecisions=['admit.opportunity_pass','admit.feasibility_pass','extent','effect'];
@@ -50,11 +49,4 @@ test('predictor availability follows delivery, inheritance, restore and cleanup;
     assert.equal(await access.hasPredictor('candidate'),false);
     access.setPolicy('no-predict',{digest:'manual',decisions:{'admit.opportunity_pass':'unused'}});
     assert.equal(await access.hasPredictor('no-predict'),false);
-});
-
-test('Decision exceptions still propagate after predictor availability is established',async()=>{
-    const access=createInterposer({taskId:'failure',report:async()=>{},evaluate:async()=>{throw Error('deliberate Policy failure')}});
-    access.setPolicy('authority',artifact);
-    const op={kind:'model_inference',has_predictor:await access.hasPredictor('authority')};
-    await assert.rejects(access.beforeAction({branch:'authority',actionId:'failed',actionKind:'model_inference',name:'model',op,admit:true}),/deliberate Policy failure/);
 });

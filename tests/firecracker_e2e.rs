@@ -1,7 +1,3 @@
-//! 直接覆盖真实 Firecracker 的端到端测试。
-//!
-//! 这些测试不使用 mock 或替代后端。每个测试只操作 `rootfs.ext4` 的独立副本，
-//! 并允许在相应功能尚未实现时保持失败。
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -255,9 +251,7 @@ impl Drop for AdapterHarness {
     }
 }
 
-/// 删除本测试 state directory 对应子网的宿主 iptables 规则。
-///
-/// 不能按 `10.213.` 前缀删除：同一宿主上可能有其他测试或环境。
+/// 仅删除本测试子网的规则，同机其他环境也可能使用 `10.213.` 前缀。
 fn cleanup_stale_host_rules(state_directory: &Path) {
     let subnets = test_subnets(state_directory);
     if subnets.is_empty() {
@@ -343,7 +337,6 @@ fn real_microvm_completes_the_full_lifecycle_over_vsock() {
         .unwrap();
     assert_completed_in_state(&created, EnvironmentState::Available);
     let environment = created.environment_id.as_str();
-    // Retain the establish smoke check before exercising guest operations.
     harness.firecracker_process(environment);
     let access = created.execution_access.as_ref().unwrap();
     let generic = |n: u64, operation: &str, arguments: serde_json::Value, body: Option<Vec<u8>>| {

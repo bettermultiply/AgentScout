@@ -1,4 +1,3 @@
-//! Process-owned, fixed-format system runtime log.
 use std::{
     fs::{File, OpenOptions},
     io::{self, Write},

@@ -1,4 +1,3 @@
-//! Presentation folding and conversations. Ledger owns all observation events.
 use ascout::control_plane::coordination::execution::{PresentationUpdate, PresentationUpdates};
 use ascout::control_plane::gateway::agent::protocol::BranchRole;
 pub use ascout::control_plane::gateway::ui::Request;

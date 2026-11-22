@@ -1,4 +1,3 @@
-/** Pure geometry: no renderer, application state or tuning dependencies. */
 export interface Point { x: number; y: number }
 export interface Cubic { start: Point; c1: Point; c2: Point; end: Point }
 export type PathSegment = { kind: 'line'; end: Point } | ({ kind: 'cubic' } & Omit<Cubic, 'start'>)
@@ -30,7 +29,6 @@ export function ellipseSides(base: Point, direction: Point, length: number, widt
     { start: p(length / 2, s * width / 2), c1: p(length * (1 + k) / 2, s * width / 2), c2: p(length, s * width * k / 2), end: p(length, 0) },
   ]) as [Cubic[], Cubic[]]
 }
-/** The visible capsule of a round-stroked zero-longitudinal-length section. */
 export function sectionSides(root: Point, direction: Point, width: number, stroke: number): [Cubic[], Cubic[]] {
   const d = unit({ x: 0, y: 0 }, direction), n = { x: -d.y, y: d.x }, r = stroke / 2
   const p = (x: number, y: number) => along(along(root, d, x), n, y)

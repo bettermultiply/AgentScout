@@ -1,4 +1,3 @@
-//! accept 数据面操作。
 
 use super::*;
 
@@ -129,7 +128,6 @@ impl FilesystemBackend {
             if !PartSelection::valid_results(results) {
                 return Err(BackendError::new("invalid part result dependencies"));
             }
-            // Check every selection before replay, including a fallback from full.
             for result in results.iter().filter(|result| !result.files.is_empty()) {
                 selective(&result.files, true)?;
             }
@@ -220,9 +218,6 @@ impl FilesystemBackend {
         Ok(report)
     }
 
-    /// Three-way merge `source` into `target` using `base` as the common
-    /// ancestor.  Data is staged outside the live upper and swapped only after
-    /// the merge is fully materialized.
     pub fn accept(
         &self,
         base: &str,
@@ -281,9 +276,7 @@ impl FilesystemBackend {
             }
             None => None,
         };
-        // A None target_mount_pid is the caller's assertion that no process
-        // currently has this environment mounted.  The filesystem backend does
-        // not own process or mount-namespace liveness.
+        // With no target PID, the caller vouches that no process has this Environment mounted.
 
         let (base_record, source_environment) = {
             let state = self.lock()?;
@@ -330,11 +323,6 @@ impl FilesystemBackend {
                 continue;
             }
             let base_layer = mount.layer_upper(&base_record.path);
-            // Chain layout lists the base snapshot layer in the root lower
-            // chain and its upper holds only this branch's changes, so the
-            // cheap delta scan is both correct and sufficient.  Flatten layout
-            // copies the base into the upper and must compare against the
-            // whole base layer instead.
             let in_lower = mount.lower.iter().any(|layer| layer == &base_record.path);
             let (delta, redirects) = if in_lower {
                 self.delta_since(&source_environment, mount, &base_record.path)?
@@ -343,8 +331,7 @@ impl FilesystemBackend {
                     self.btrfs_delta(&source_environment, mount, &base_record.path)?;
                 (delta, redirects)
             } else {
-                // Marks and empty fork bases are not in the lower chain; a
-                // missing layer is an empty base view.
+                // Marks and empty fork bases can be absent from the lower chain.
                 self.upper_delta_from_base(mount, &base_record.path)?
             };
             conflicts.extend(
@@ -358,9 +345,6 @@ impl FilesystemBackend {
                 .into_iter()
                 .map(|conflict| prefix_conflict(&mount.target, conflict)),
             );
-            // Only rename/metacopy handling needs a source-wide view.  The
-            // common modify/delete/create path replays nodes directly from the
-            // delta and never scans the whole source or target upper.
             let needs_source_maps =
                 !redirects.is_empty() || delta.values().any(|node| node.metacopy);
             let source_maps = if needs_source_maps {
@@ -422,10 +406,7 @@ impl FilesystemBackend {
                 }
                 None => ReplayRoot::Upper(&target_mount.upper),
             };
-            // Replay is rollback-capable but not atomic: every overwrite or
-            // delete records the previous target-upper state first.  On a
-            // failure all recorded operations are reversed in reverse order;
-            // concurrent readers may still observe intermediate states.
+            // Replay supports rollback, but concurrent readers can see intermediate writes.
             if let Err(mut error) = replay_delta(
                 &replay_root,
                 &delta,

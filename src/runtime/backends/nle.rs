@@ -1,10 +1,3 @@
-//! NLE workload backend.
-//!
-//! This backend deliberately keeps NetHack-specific details at the external
-//! workload boundary. The generic Adapter sees the environment lifecycle plus
-//! the declared `nle_action` and `nethack_guide` tools via
-//! `tool_context`/`invoke_tool`; game observation formatting and Guidebook
-//! lookup stay in the external bridge.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -32,8 +25,6 @@ pub struct NleConfig {
     pub env_id: Option<String>,
     #[serde(default)]
     pub seed: Option<u64>,
-    /// Simulated action latency.  The workload is slow on purpose so that
-    /// speculation has a window to hide its reasoning in.
     #[serde(default)]
     pub action_delay_seconds: Option<f64>,
 }
@@ -100,8 +91,6 @@ for line in sys.stdin:
         assert!(task.join().unwrap().unwrap_err().cancelled);
     }
 
-    // The fake workload deliberately has shared world state. Lifecycle must
-    // stay in NleBackend, and single-component recovery must restore bindings.
     #[test]
     fn shared_world_lifecycles_and_single_backend_participants_survive_recovery() {
         let root = tempfile::tempdir().unwrap();
@@ -390,8 +379,6 @@ impl Backend for NleBackend {
         true
     }
     fn save_runtime(&self, path: &std::path::Path) -> Result<(), BackendError> {
-        // Lifecycle belongs to each Environment, not the shared workload world.
-        // Include it in the bridge's existing atomic save publication.
         self.request(json!({"op":"save", "path":path,
             "environment_states": &*self.states.lock().unwrap()}))?;
         Ok(())
@@ -557,8 +544,6 @@ impl Backend for NleBackend {
     }
 
     fn promote(&self, environment_id: &str) -> Result<(), BackendError> {
-        // NLE shares one world and has no environment-side promotion; the
-        // operation is still sent so the generic Runtime lifecycle stays intact.
         self.request(json!({"op":"promote", "environment":environment_id}))?;
         Ok(())
     }

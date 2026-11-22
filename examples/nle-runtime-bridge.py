@@ -66,13 +66,10 @@ def fingerprint(environment, observation) -> str:
 
 
 def new_world(gym, env_id, seed=None, initial=None):
-    # Installed NLE has no public native save/restore API. Disable reseeding
-    # and derive time-dependent effects from the explicit initial RNGs.
+    # Disable reseeding to keep reconstruction tied to the initial RNGs.
     if initial is None:
         core = int(seed) if seed is not None else secrets.randbits(63)
-        # None keeps level generation on the core RNG, as seed(core) did
-        # before save/restore was added. A separate random lgen seed changes
-        # the dungeon even when the configured core seed is unchanged.
+        # Keep level generation on the core RNG to reproduce older seeds.
         initial = {"env_id": env_id, "seeds": [core, secrets.randbits(63), False, None],
                    "kwargs": {"fix_moon_phase": True}, "nle_version": importlib.metadata.version("nle")}
     if initial["nle_version"] != importlib.metadata.version("nle"):
@@ -129,7 +126,6 @@ def digest(observation: dict[str, Any]) -> dict[str, Any]:
         if key == "chars":
             result[key] = [row.tobytes().decode("latin-1") for row in value]
         elif key == "message":
-            # NLE pads messages with NUL bytes; expose the visible text.
             data = value.tolist() if hasattr(value, "tolist") else list(value)
             result[key] = bytes(data).split(b"\0", 1)[0].decode("latin-1")
         else:
@@ -176,8 +172,7 @@ def guide_sections(text: str) -> list[tuple[int, str, str]]:
     for match in pattern.finditer(text):
         number = match.group(1)
         head = int(number.split(".")[0])
-        # Ignore numbered prose in the credits and option descriptions that
-        # happens to look like a heading.
+        # Credits and option descriptions can look like numbered headings.
         if head < top_level:
             continue
         top_level = head
@@ -356,8 +351,6 @@ def main() -> int:
                     raise ValueError(f"unknown NLE tool: {tool}")
             elif operation == "promote":
                 world = require(worlds, name)
-                # NLE has one shared world, so promotion has no environment-side
-                # state change. Keep the generic lifecycle operation explicit.
                 reply(sys.stdout, request_id, ok=True, state=environment_states[name])
             elif operation == "observe":
                 world = require(worlds, name)
@@ -375,7 +368,6 @@ def main() -> int:
                 record = {"version": 1, "worlds": records,
                           "environment_states": environment_states,
                           "environments": {key: unique.index(world) for key, world in worlds.items()}}
-                # Verify reconstruction before replacing the previous save.
                 for saved in records:
                     probe = restore_world(gym, saved)
                     probe.environment.close()

@@ -1,4 +1,3 @@
-//! Time data preparation, cold holder launch, and the first framed read.
 use ascout::protocol::contract::AgentLaunch;
 use ascout::runtime::backend::{Backend, BackendContext, CancelHandle};
 use ascout::runtime::backends::filesystem::{FilesystemBackend, FilesystemConfig};

@@ -96,11 +96,11 @@ policy_model_grant:
 
 `model_complete` 通过 capability IPC 请求宿主。control plane 通过 `ModelProviderProcess` 启动 `instrumentation/pi/policy-provider.ts`，并将 `ASCOUT_PI_ROOT` 和可选 `--models` 交给桥接进程。Pi 端侧只收到本地 Decision 的授权和声明输入。`evaluatePolicyArtifact` 的第五参数携带授权 Decision、允许模型、请求额度、可选 `timeoutMs` 和宿主完成函数。未授权求值拒绝模型调用。两侧宿主检查当前请求 ID、Decision、模型、额度、大小及超时。两侧使用 Pi 的模型与凭证配置，`piModelComplete` 禁用自动重试。端侧结束求值时取消 provider 请求，Rust 端超时、取消或失败时终止并回收桥接进程及异常 worker。
 
-真实请求的既有证据 `/tmp/ascout-real.log` 和 `tests/policy-capability-real.mjs` 保留。本轮未运行该脚本，剩余真实请求额度为 0。该历史脚本手工构造 runner 且返回 `{ok:true}`，只证明调用链 smoke，不证明正常 Effect schema 或完整 E2E。
+真实请求的既有证据 `/tmp/ascout-real.log` 仍可查阅。本轮未运行该脚本，剩余真实请求额度为 0。当时的脚本手工构造 runner 且返回 `{ok:true}`，只证明调用链 smoke，不证明正常 Effect schema 或完整 E2E。
 
 `tests/policy_provider.rs` 覆盖正常 YAML 编译、真实隔离 runner、Rust 进程 IPC、Pi provider 桥及 fake Models。`tests/policy-decision-e2e.mjs` 通过真实 control plane、Pi 与 Filesystem Runtime，使用 loopback OpenAI-compatible SSE 验证两侧授权和 Decision 输入。
 
-离线回归通过 `cargo check --all-targets`、`cargo build --bins`、`cargo test --lib --bins --test policy --test policy_provider` 和项目的 Node 离线测试集。Rust 使用 `RUST_TEST_THREADS=1` 串行运行涉及挂载的测试。端到端回归使用本机假模型，其中一笔 `predict` 请求延迟超过 5 秒，以验证声明的超时生效。真实模型请求次数为 0。
+离线回归通过 `cargo check --all-targets`、`cargo build --bins`、当时的 Rust 测试集 和项目的 Node 离线测试集。Rust 使用 `RUST_TEST_THREADS=1` 串行运行涉及挂载的测试。端到端回归使用本机假模型，其中一笔 `predict` 请求延迟超过 5 秒，以验证声明的超时生效。真实模型请求次数为 0。
 
 ### 正常运行的 Policy 留档（2026-11-13）
 
@@ -114,9 +114,9 @@ control plane 在启动 Adapter 前保存 run 内 `policy.json`，复用 `Compil
 
 Runtime 环境变量仍是显式覆盖入口；恢复未指定时使用保存的 Runtime binding，照旧校验路径、内容和能力。普通启动的 Policy Runtime 相对路径仍按启动 cwd 解析，artifact 中另存解析路径，避免误改为 run 目录或 YAML 目录。Runtime 配置文件及环境仍需保留；本轮不复制完整 Runtime。自包含范围为 YAML 与已声明文件，不包括 Python 可执行文件、标准库、动态库、第三方服务或未声明动态依赖；现有隔离与明确拒绝规则不变。
 
-验证：`cargo check --all-targets`、`cargo build --bins --example policy`、`cargo test --test policy`（1/1）、Policy 模块已有测试（3/3）、`node --test tests/recovery-active.mjs`（4/4）通过，无真实模型请求。手构造 `/tmp/opencode/check-policy-record.py` 验证原 YAML/源码逐字一致、声明包相对导入、源删除后求值、已有 artifact 不覆盖及临时文件清理；删除 `/tmp/opencode/recovery-active-owpWLQ/policy` 后不传 Policy/Runtime 覆盖，真实恢复并再次保存通过；追加验证 artifact 篡改、缺失、显式策略 digest 变化、已有运行保护与源码缺失时不发布 artifact/不启动基础设施均通过，最终证据 `/tmp/opencode/policy-record-o7sd7v9d`。该脚本前两轮在恢复握手完成前请求 Shutdown 超时，最终等待本轮 recovery_loaded 后通过；不据此声称启动期退出竞态已修复。
+验证：`cargo check --all-targets`、`cargo build --bins --example policy`、当时的 Policy 集成检查（1/1）、Policy 模块已有测试（3/3）、`node --test tests/recovery-active.mjs`（4/4）通过，无真实模型请求。手构造 `/tmp/opencode/check-policy-record.py` 验证原 YAML/源码逐字一致、声明包相对导入、源删除后求值、已有 artifact 不覆盖及临时文件清理；删除 `/tmp/opencode/recovery-active-owpWLQ/policy` 后不传 Policy/Runtime 覆盖，真实恢复并再次保存通过；追加验证 artifact 篡改、缺失、显式策略 digest 变化、已有运行保护与源码缺失时不发布 artifact/不启动基础设施均通过，最终证据 `/tmp/opencode/policy-record-o7sd7v9d`。该脚本前两轮在恢复握手完成前请求 Shutdown 超时，最终等待本轮 recovery_loaded 后通过；不据此声称启动期退出竞态已修复。
 
-接续独立验证：`cargo test --lib control_plane` 首次 25/26，一项手构造 `CompiledPolicy` fixture 缺少新必需字段；只补齐三个字段后 26/26，无新增测试或兼容默认值。`cargo test --test policy` 1/1；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 5/5（真实 Pi/NLE/FS 与本地假模型）。`python3 /tmp/opencode/policy-save-check.py` 在首个隔离进程调用时（作者文件已读取、编译尚未返回）刻意改写原 YAML 与包脚本，保存内容仍逐字等于实际加载版本；删除整个源码目录后求值、十个绑定、来源、相对 Runtime 解析、basename 输出、重复保存不覆盖、发布失败清理、缺少文件和损坏摘要拒绝均通过，证据 `/tmp/opencode/policy-save-check-79vgyts5`。第一次该手工检查漏传现有必需的 `hook_count` 而失败，补齐输入后通过，未修改生产输入校验。
+接续独立验证：`cargo test --lib control_plane` 首次 25/26，一项手构造 `CompiledPolicy` fixture 缺少新必需字段；只补齐三个字段后 26/26，无新增测试或兼容默认值。当时的 Policy 集成检查 1/1；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 5/5（真实 Pi/NLE/FS 与本地假模型）。`python3 /tmp/opencode/policy-save-check.py` 在首个隔离进程调用时（作者文件已读取、编译尚未返回）刻意改写原 YAML 与包脚本，保存内容仍逐字等于实际加载版本；删除整个源码目录后求值、十个绑定、来源、相对 Runtime 解析、basename 输出、重复保存不覆盖、发布失败清理、缺少文件和损坏摘要拒绝均通过，证据 `/tmp/opencode/policy-save-check-79vgyts5`。第一次该手工检查漏传现有必需的 `hook_count` 而失败，补齐输入后通过，未修改生产输入校验。
 
 `python3 /tmp/opencode/policy-cli-check.py` 通过真实正常启动→主动保存→删除外部 Policy 目录→不传 Policy 默认恢复；完整文件绑定摘要、已有 run 保护、显式不同 Policy 拒绝、缺失 artifact 明确报错及显式补充、篡改拒绝、进程退出均通过，证据 `/tmp/opencode/policy-cli-check-4zcbwh9l`。此检查只配置不可连接的本地假模型端点，不发送 prompt 或模型请求；不代表完整交互回放已实现。
 
@@ -220,7 +220,7 @@ def extent(data, *, policy_config, capabilities):
 
 2026-10-23 在当前 Linux 主机上完成真实示例验证：九类 Decision 的十个入口均执行 Python；改变 YAML 参数影响结果；原始源码被修改、YAML 被移除后，固定产物仍可求值；重复键、全局参数、别名、缺失 Decision、越界路径、不支持能力和 Fidelity 被拒绝；文件、网络和进程访问探针受限；`print` 不破坏结果管道；无限循环被 CPU 限制终止，长时间 sleep 被 wall time 限制终止；声明的包和文本资源可实际导入及读取。这些不是完整安全审计或性能结论。
 
-实际遇到 bubblewrap 不支持 `--preserve-fds` 的兼容性问题后，新增 `tests/policy.rs`，先复现失败，再改为借标准输出传递结果管道、由可信 bootstrap 分离协议与诊断。测试使用真实 bubblewrap 和 Python，不替换 backend。
+实际遇到 bubblewrap 不支持 `--preserve-fds` 的兼容性问题后，通过 Policy 编译复现失败，再改为借标准输出传递结果管道、由可信 bootstrap 分离协议与诊断。测试使用真实 bubblewrap 和 Python，不替换 backend。
 
 ## Chance id 的当前实现
 
@@ -253,6 +253,6 @@ control plane 从 `~/.config/ascout/config.toml` 读取 `policy_dir`、`runs_dir
 
 Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Policy 已引用的 Runtime 配置，以单个 `backend` 或 `backends` 数组中各项的 `id` 对照 Runtime hello 的 `capabilities.backends`；没有引用 Runtime 或配置未声明 backend 时不检查。此检查不改变 Policy 摘要或编译产物结构。失败走既有 Adapter teardown。接口解析仍属于 Runtime，不构成环境保证验证。
 
-调用方迁移：主入口、回放入口和五份本地 fixture 已切换到配置/session 路径，fixture 使用私有 HOME 配置、不写用户主目录。fixture 在启动 Runtime 前同步复制 workspace，消除 stderr 通知后的复制竞态。恢复中的 `launch evaluation: Broken pipe` 根因是缓存 worker 的 `--die-with-parent` 随创建线程退出杀死进程；由 Worker 的 Drop 负责清理后，新增线程退出回归测试通过（原实现先复现失败，日志 `/tmp/ascout-worker-before.log`）。最终 `cargo check --all-targets`、`cargo test --lib --bins --test policy` 通过；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 6/6 通过，日志 `/tmp/ascout-recovery-final.log`。回放新 session 必须选 `--policy NAME`，不加载源 session artifact；下游外部脚本仍需按新接口核查。
+调用方迁移：主入口、回放入口和五份本地 fixture 已切换到配置/session 路径，fixture 使用私有 HOME 配置、不写用户主目录。fixture 在启动 Runtime 前同步复制 workspace，消除 stderr 通知后的复制竞态。恢复中的 `launch evaluation: Broken pipe` 根因是缓存 worker 的 `--die-with-parent` 随创建线程退出杀死进程；由 Worker 的 Drop 负责清理后，新增线程退出回归测试通过（原实现先复现失败，日志 `/tmp/ascout-worker-before.log`）。最终 `cargo check --all-targets`、当时的 Rust 测试集 通过；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 6/6 通过，日志 `/tmp/ascout-recovery-final.log`。回放新 session 必须选 `--policy NAME`，不加载源 session artifact；下游外部脚本仍需按新接口核查。
 
 `predict.chance_context` 携带工具参数，`process_context` 携带 `observation` 与 `steps_completed`。策略可用 `history: {mode: transcript_tail, max_entries: 30}` 声明历史投影，或用 `match.outcome: tool_output` 声明真实输出。`rebalance` 的每条分支视图提供 `branch_id`、`chance_id`、`steps_completed`、`tool_counts`、`tokens_used` 和 `age_ms`。

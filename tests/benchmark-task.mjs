@@ -1,5 +1,4 @@
 import {spawnControl, runPath} from './control-plane-fixture.mjs';
-// Real Terminal-Bench task, FS/Pi/control plane, and local scripted SSE only.
 import fs from 'node:fs';
 import http from 'node:http';
 import {spawn, spawnSync} from 'node:child_process';
@@ -105,9 +104,6 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
    const predictBinding=policyArtifact.decisions.predict;
    assert.ok(predictBinding,'compiled Policy contains predict binding');
     assert.ok(predictBinding.policy_config.scenarios.some(s=>s.when?.tool_name==='model'&&s.predict==='branch_model'&&s.model==='fixture/fast'),'artifact predict scenario selects branch_model fixture/fast for tool_name=model');
-   // A tool command must run in the Branch overlay, never against the host
-  // workspace. The host path may only change when materialization publishes
-  // the Authority delta.
   let leakedBeforePublish=false;
   const watcher=setInterval(()=>{
    if(events().some(e=>e.message==='materialization_started')){clearInterval(watcher);return}
@@ -137,8 +133,7 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
      const finished=recorded.find(e=>e.message==='action_finished'&&e.branch_id===candidate.branch_id&&e.action_id===started.action_id);
      assert.ok(finished,'candidate action_finished '+label);
      assert.ok(finished.timestamp_ms>=started.timestamp_ms,'candidate action timestamps are ordered '+label);
-     // Pi can report cancellation Usage after clearing the action id. That
-     // branch has exactly one model inference; require its sole Usage fact.
+     // If cancellation clears the action ID, use the branch's sole Usage fact.
      const usages=observations.filter(e=>e.event==='model_usage'&&e.branch_id===candidate.branch_id&&e.model==='fast');
      const usage=usages.find(e=>e.action_id===started.action_id)??(scenario==='authority_first'&&usages.length===1&&usages[0].action_id===null?usages[0]:null);
      assert.ok(usage,'candidate fast model_usage '+label);
@@ -156,14 +151,10 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
       assert.ok(validations[0].sequence>proposals[0].sequence,'Match follows ProposalAdded '+label);
       assert.equal(typeof validations[0].validation_id,'number','Match validation id '+label);
       assert.equal(typeof validations[0].validated_at_ms,'number','Match completion timestamp '+label);
-      // The existing Match policy rejects an empty tool-call result, even
-      // when both models finish with "done". Only matching tool calls promote.
       const compatible=scenario==='match'&&proposals[0].payload.tool_calls.length>0;
       assert.equal(disposition.verdict,compatible?'compatible':'incompatible','Match verdict '+label);
       assert.equal(disposition.disposition,compatible?'Promote':'Discard','completed candidate disposition '+label);
      }else{
-      // No completed candidate result means no Proposal to Match. Do not
-      // fabricate ProposalAdded/ProposalValidated for cancellation or failure.
       assert.equal(finished.status,scenario==='fast_failure'?'failed':'cancelled','candidate failure/cancellation fact '+label);
       assert.equal(proposals.length,0,'unfinished/failed candidate produces no Proposal '+label);
       assert.equal(validations.length,0,'no Match completion without a Proposal '+label);
@@ -185,8 +176,7 @@ test(`FS backend recovers original Terminal-Bench files with ${scenario}`,{timeo
  assert.ok(bodies.some(body=>body.messages.some(message=>message.role==='user'&&(message.content===prompt||(Array.isArray(message.content)&&message.content.some(part=>part.text===prompt))))),'original instruction appears unchanged in model requests');
  const bwrap=spawnSync('which',['bwrap'],{encoding:'utf8'});
  assert.equal(bwrap.status,0,'bubblewrap must be installed');
- // A host without /app cannot create it under a read-only / bind. Recreate
- // that view with read-only top-level binds inside a disposable tmpfs root.
+ // A tmpfs root makes /app possible even when absent from the read-only host root.
  const mounts=fs.existsSync('/app')?['--ro-bind','/','/']:['--tmpfs','/'];
  if(!fs.existsSync('/app')){
   for(const entry of fs.readdirSync('/').filter(name=>!['app','dev','proc'].includes(name))){

@@ -1,4 +1,3 @@
-//! Component saves are private to one generation. Validate all bytes before loading any backend.
 use super::backend::{Backend, BackendError};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -113,7 +112,6 @@ pub(super) fn load(
         && root["components"][0]["id"] == "inner"
         && root["components"][1]["id"] == "data-plane"
     {
-        // Read the previous index format without instantiating a nested Runtime.
         let outer = component_files(path, &root, &["inner", "data-plane"])?;
         let inner = record(&outer[0])?;
         let mut files = component_files(&outer[0], &inner, &ids[..ids.len() - 1])?;

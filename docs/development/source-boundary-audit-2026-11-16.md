@@ -46,7 +46,7 @@
 | `cargo check --all-targets` | 通过 | `/tmp/opencode/boundary13-check.log` |
 | `cargo build --bins` | 通过，整链回归使用重建的二进制 | `/tmp/opencode/boundary13-build.log` |
 | `cargo test --lib` | 171 通过，覆盖 control plane、恢复与 Runtime | `/tmp/opencode/boundary13-lib-tests.log` |
-| `cargo test --lib --test policy`（最终复核） | 171 项库测试及 1 项 Policy 集成测试通过 | `/tmp/opencode/boundary13-final-tests.log` |
+| Rust 库与 Policy 检查（最终复核） | 171 项库测试及 1 项 Policy 集成测试通过 | `/tmp/opencode/boundary13-final-tests.log` |
 | `node --test tests/pi-access.mjs tests/pi-recovery-binding.mjs tests/pi-recovery-sources.mjs` | 8 通过；真实 Pi 协议、资源绑定与独立恢复源，无真实模型 | `/tmp/opencode/boundary13-pi-tests.log` |
 | `node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` | 6 通过；在飞工具和候选、保存失败重试、继续、多 Backend、文件系统恢复及代码变化拒绝；真实 Pi／Runtime，本地伪模型 | `/tmp/opencode/boundary13-recovery-tests.log` |
 | `cargo test` | 库／二进制测试通过；Firecracker 集成 7 项因当前绝对 Unix socket 路径过长在建立环境阶段失败，未到达模型请求，不声称全量通过 | `/tmp/opencode/boundary13-all-tests.log` |

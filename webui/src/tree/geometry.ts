@@ -9,22 +9,6 @@ import { ordinaryOutline } from './ordinaryOutline'
 import { ellipseSides, sectionSides, outlineCurves, type ClosedPath, type Cubic } from '../geometry/curves'
 import { connectionSide, connectSides, type ConnectionSides } from '../geometry/connection'
 
-/**
- * Static, observation-time geometry. A Branch owns its path; there is no subtree
- * packing.
- *
- * Length is summed in segments: one segment per pair of consecutive call starts,
- * `K * ln(1 + interval / tau)`. The first call sits at distance 0 and a Branch
- * never grows a tail beyond its last call.
- *
- * Direction is a stepwise walk relative to the previous segment. At the middle
- * of a Branch the two sides are equally likely; the further the next segment
- * would land to one side, the more likely the walk turns back. A Branch may lean
- * but never grows sideways or upward.
- *
- * Width is a function of the calls that still happen at or below a point
- * (including descendant Branches), scaled by the configured root width.
- */
 export const NODE_HALF_WIDTH = FIXED_GEOMETRY.nodeOrigin
 export const NODE_WIDTH = NODE_HALF_WIDTH * 2
 
@@ -33,7 +17,6 @@ export interface BranchSection {
   twig: CallGroup
   leaves: CallGroup[]
   side: -1 | 1
-  /** Distance along the Branch where the stem leaves the trunk. */
   y: number
   x: number
   tx: number
@@ -83,11 +66,9 @@ export interface BranchGeometry {
   offsetY: number
   initialAngle: number
   height: number
-  /** Absolute parent-branch Chance positions, used only for authority styling. */
   forkPoints: Map<string, { x: number; y: number }>
   chancePositions: Map<string, number>
   pathPoints: Array<{ x: number; y: number }>
-  /** Arc length (summed log intervals) at each path point. */
   pathDistances: number[]
   trunkWidths: number[]
   trunk: PathGeometry
@@ -97,12 +78,10 @@ export interface BranchGeometry {
   validationEnd: { x1: number; y1: number; x2: number; y2: number; validatedAtMs: number } | null
 }
 
-/** Stem length in tree units: one model call, no pixel compensation. */
 export function stemLength(durationMs: number | null, tuning: TreeTuning = DEFAULT_TUNING): number {
   return tuning.stemK * Math.log1p((durationMs ?? 0) / tuning.stemTauMs)
 }
 
-/** Leaf length in tree units; tool duration only changes the size. */
 export function leafLength(durationMs: number | null, tuning: TreeTuning = DEFAULT_TUNING): number {
   const share = Math.min(1, Math.log1p((durationMs ?? 0) / tuning.leafTauMs) / Math.log1p(tuning.leafReferenceMs / tuning.leafTauMs))
   return tuning.leafMin + (tuning.leafMax - tuning.leafMin) * share
@@ -147,7 +126,6 @@ function normalAt(points: Point[], index: number, initialAngle: number): Point {
     : { x: -Math.cos(initialAngle), y: Math.sin(initialAngle) }
 }
 
-/** The same outer-edge interpolation as trunkOutline; no modified trunk. */
 function trunkSide(g: BranchGeometry, side: number): Cubic[] {
   const direction = { x: Math.sin(g.initialAngle), y: Math.cos(g.initialAngle) }
   if (!g.calls.length) return ellipseSides(g.bud.base, direction, g.bud.ellipse.rx * 2, g.bud.ellipse.ry * 2)[side === 1 ? 0 : 1]
@@ -171,7 +149,6 @@ function connectionPath(path: ClosedPath): PathGeometry {
   return { d: `${parts.join(' ')} Z`, points, stroke: 0 }
 }
 
-/** One closed outline with a full-width flat end. */
 export function trunkOutline(points: Point[], widths: number[], initialAngle = 0, crossSectionStroke = 1): PathGeometry {
   const left: Point[] = []
   const right: Point[] = []
@@ -180,8 +157,7 @@ export function trunkOutline(points: Point[], widths: number[], initialAngle = 0
     left.push({ x: point.x + nx * widths[index] / 2, y: point.y + ny * widths[index] / 2 })
     right.push({ x: point.x - nx * widths[index] / 2, y: point.y - ny * widths[index] / 2 })
   })
-  // A single call (or several calls at one time) has no longitudinal length,
-  // but still owns a width. Draw that cross-section, without inventing a tail.
+  // A zero-length branch still has a cross-section at its call position.
   if (points.length === 1) return {
     d: `M ${left[0].x} ${left[0].y} L ${right[0].x} ${right[0].y}`,
     points: [left[0], right[0]], stroke: crossSectionStroke,
@@ -223,8 +199,7 @@ function stemGeometry(p: BranchSection, t: TreeTuning, tiltDeg: number, anchor: 
     const width = size * ranged(t, 'leafWidth', tool.id)
     const line = (a: number, b: number, stroke: number): PathGeometry => ({ d: `M ${a} 0 L ${b} 0`, points: [{ x: a, y: 0 }, { x: b, y: 0 }], stroke })
     const base = t.petioleLength, end = base + size
-    // Control points at the midpoint give a pointed outline with full width
-    // 2 * (3/4) * controlHeight at the middle of the leaf.
+    // At t = 1/2 the half-width is 3/4 of the control height.
     const middle = base + size / 2, controlHeight = width * 2 / 3
     const outline = connectionPath({ start: { x: base, y: 0 }, segments: [
       { kind: 'cubic', c1: { x: middle, y: -controlHeight }, c2: { x: middle, y: -controlHeight }, end: { x: end, y: 0 } },
@@ -304,10 +279,7 @@ export function cachedLayoutTree(task: TaskState, tuning: TreeTuning = DEFAULT_T
 export function clearCachedTreeLayout() { activeTreeLayouts.clear() }
 export function treeLayoutStats() { return { ...activeTreeLayouts.stats } }
 
-/** Refresh call facts without copying sampled paths or retaining old event payloads. */
 function withCalls(g: BranchGeometry, calls: CallGroup[]): BranchGeometry {
-  // Groups currently contain one immutable observation each. A non-call
-  // observation can change the Branch without changing any call payload.
   if (g.calls.length === calls.length && g.calls.every((call, i) => call.events[0] === calls[i].events[0])) return g
   const byId = new Map(calls.map(call => [call.id, call]))
   return { ...g, calls, sections: g.sections.map(section => ({ ...section,
@@ -324,7 +296,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
   previous = new Map<string, LayoutEntry>(), next = new Map<string, LayoutEntry>(),
   stats?: { computedBranches: number; computedWalks: number; layouts: number }): Map<string, BranchGeometry> {
   const result = new Map<string, BranchGeometry>()
-  // Final visible sides and their source positions, scoped to this layout.
   const boundaries = new WeakMap<BranchGeometry, ConnectionSides>()
   const branches = task.branchOrder.map(id => task.branches[id]).filter(Boolean)
   const childrenByParent = new Map<string, BranchState[]>()
@@ -368,8 +339,7 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
   const hits = new Map<string, LayoutEntry>()
   let computed = false
   const tuningKey = inputKey(tuning)
-  // Attachment direction, root widths and Chance lookup can change even on
-  // another branch. Conservatively invalidate the tree's structural changes.
+  // Attachments and widths depend on other branches too, so invalidate on tree structure changes.
   const structureKey = JSON.stringify([branches.map(b => [b.branchId, b.parentBranchId, b.chanceId]),
     taskChances.map(c => [c.chanceId, c.parentBranchId])])
   const workloadKey = JSON.stringify(branches.map(b => [b.branchId, count(b)]))
@@ -388,8 +358,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
     const calls = end === null ? allCalls : allCalls.filter(call => call.startMs! <= end)
     const kids = children(branch.branchId)
     const chances = chancesFor(branch.branchId)
-    // Every value read by geometry, including full descendant workload and the
-    // parent's final visible boundary. No assumption that growth affects a tail.
     const key = inputKey([tuningKey, root, initialAngle, startWidth,
       branch.parentBranchId, branch.chanceId, end,
       allCalls.map(c => [c.id, c.kind, c.firstSequence, c.startMs, c.durationMs, c.events[0]?.finished_at_ms]),
@@ -408,8 +376,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       boundaries.set(geometry, cached.boundary)
       hits.set(branch.branchId, cached)
       next.set(branch.branchId, { ...cached, raw: geometry })
-      // Descendants still inspect their own inputs; an unchanged parent does
-      // not imply unchanged model durations or payloads on a child.
       for (const child of kids) {
         const old = previous.get(child.branchId)
         if (!old) throw new Error('缺少子枝布局缓存')
@@ -423,8 +389,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
     if (stats) stats.computedBranches++
     computed = true
 
-    // One step per call interval. Each step has its own log length and turns
-    // relative to the previous one; nothing outside the calls splits a step.
     const walkKey = inputKey([initialAngle, tuning.segmentK, tuning.segmentTauMs,
       tuning.recenterRange, tuning.turnStepDeg, tuning.maxLeanDeg, tuning.sampleGap,
       allCalls.map(c => [c.firstSequence, c.startMs])])
@@ -483,8 +447,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
         pointDistances.push(totalLength)
       }
     }
-    // Build the local growth path before choosing its parent-side anchor.
-    // A single-candidate Chance uses the direction actually drawn.
     if (attach) {
       const direction = points.length > 1
         ? { x: points[1].x - points[0].x, y: points[1].y - points[0].y }
@@ -501,8 +463,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
     }
     const distanceOfCall = new Map(allCalls.map((call, index) => [call.id, callDistances[index]]))
 
-    // Chances and completion points share the original time mapping, capped by
-    // the accepted Proposal's validation point when there is one.
     const chancePositions = new Map<string, number>()
     const distanceAtTime = (time: number): number => Math.min(totalLength, fullDistanceAtTime(time))
     for (const chance of chances) {
@@ -532,7 +492,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       return Math.atan2(after.x - before.x, after.y - before.y)
     }
 
-    // Width follows the work left at or below a point.
     const work = [
       ...calls.map(call => ({ d: distanceOfCall.get(call.id) ?? 0, n: 1 })),
       ...kids.map(child => ({ d: chancePositions.get(child.chanceId ?? '') ?? 0, n: count(child) })),
@@ -622,12 +581,10 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       })), positions)) as ConnectionSides
     } else {
       boundary = [connectionSide(trunkSide(geometry, 1)), connectionSide(trunkSide(geometry, -1))]
-      // Centre the zero-length section's coordinate on its visible side.
       for (const side of boundary) { const half = side.positions.at(-1)! / 2; side.positions = side.positions.map(p => p - half) }
     }
     result.set(branch.branchId, geometry)
 
-    // Empty buds keep their ordinary outline at the centre-line origin.
     if (attach && geometry.calls.length) {
       const { parent, center } = attach
       const convert = (p: Point): Point => ({ x: p.x - center.x + NODE_HALF_WIDTH, y: p.y - center.y })
@@ -641,7 +598,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       }
     }
 
-    // The branch outline is final here; hidden ordinary root sides are gone.
     boundaries.set(geometry, boundary)
     for (const section of sections) {
       const shape = section.shape!, [origin, control, tip] = shape.path.points
@@ -692,8 +648,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
   }
   for (const ids of candidatesByChance.values()) ids.sort()
 
-  // Conservative bounds include the full outlines, strokes, leaves, buds,
-  // and Chance circles, not just tips.
   for (const geometry of result.values()) {
     const hit = hits.get(geometry.branchId)
     if (hit) {
@@ -702,10 +656,8 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       next.get(geometry.branchId)!.final = final
       continue
     }
-    // Keep the unshifted coordinates for child attachment on the next update.
     next.get(geometry.branchId)!.raw = { ...geometry, chanceCircles: [] }
-    // Sample counts can exceed the engine's function-argument limit even for
-    // legal tuning values. Accumulate bounds without spreading point arrays.
+    // Even legal sample counts can exceed the engine's argument limit if spread.
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
     const add = (point: Point, radius: number) => {
       minX = Math.min(minX, point.x - radius)
@@ -714,8 +666,6 @@ function computeLayout(task: TaskState, tuning: TreeTuning,
       maxY = Math.max(maxY, point.y + radius)
     }
     const ellipsePoints = (e: EllipseGeometry): Point[] => [-1, 1].flatMap(x => [-1, 1].map(y => ({ x: e.cx + x * e.rx, y: e.cy + y * e.ry })))
-    // Transform local bounding rectangles as SVG/DOM does, retaining the same
-    // control points instead of independently reconstructing curve formulas.
     if (geometry.connection) geometry.connection.points.forEach(point => add(point, 0))
     else if (geometry.calls.length) geometry.trunk.points.forEach(point => add(point, geometry.trunk.stroke / 2))
     else ellipsePoints(geometry.bud.ellipse).forEach(point => add(rotate(point, geometry.bud.angle, geometry.bud.base), 0))

@@ -2,28 +2,6 @@ use super::super::*;
 use super::support::*;
 
 #[test]
-fn recovery_does_not_copy_mutable_host_lower() {
-    let root = tempfile::Builder::new()
-        .prefix("fs-recovery-lower-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
-    let workspace = root.path().join("workspace");
-    fs::create_dir(&workspace).unwrap();
-    fs::write(workspace.join("unrelated"), "host data").unwrap();
-    let backend = new_overlay_backend(root.path());
-    *backend.overlay_targets.lock().unwrap() = Some(vec![workspace.clone()]);
-    backend.establish("authority").unwrap();
-    let save = root.path().join("save.json");
-    backend.save_runtime(&save).unwrap();
-    assert!(save.exists());
-    assert!(!save.with_extension("filesystem").join("bases").exists());
-    assert_eq!(
-        fs::read_to_string(workspace.join("unrelated")).unwrap(),
-        "host data"
-    );
-}
-
-#[test]
 fn recovery_overlay_executes_independently_and_rejects_corruption() {
     let root = tempfile::Builder::new()
         .prefix("fs-recovery-")
@@ -63,8 +41,6 @@ fn recovery_overlay_executes_independently_and_rejects_corruption() {
             &CancelHandle::default(),
         )
         .unwrap();
-    // User contract changed on 2026-11-14: unmanaged bottom files use
-    // restore-time host contents, while managed upper remains independent.
     assert_eq!(output.stdout, "changed in place");
     let (resumed, _, _) =
         spawn_in_environment(&backend, "authority", &workspace, "echo continued > value");

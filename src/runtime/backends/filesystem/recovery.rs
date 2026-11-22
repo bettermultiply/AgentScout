@@ -18,7 +18,6 @@ fn sync_saved_tree(path: &Path) -> Result<(), BackendError> {
     Ok(())
 }
 
-// Paths in the saved metadata always name the private generation, never the live upper.
 fn relocate(value: &mut Value, from: &Path, to: &Path) {
     match value {
         Value::String(s) => {
@@ -55,9 +54,7 @@ impl FilesystemBackend {
             .values()
             .map(SnapshotMetadata::from_record)
             .collect();
-        // Ordinary host lowers are locations, not immutable recovery content.
-        // Preserve only owned uppers/layers; load resolves these lowers from
-        // their current host mount while validating all managed recovery data.
+        // Restore host lowers from their current locations. Save only the managed layers and uppers.
         let mut bases = BTreeMap::new();
         for saved in &mut environments {
             let mounts = saved["metadata"]["mounts"]
@@ -345,8 +342,6 @@ impl FilesystemBackend {
     }
 }
 
-// Bind the installed system version without copying the host root. This does
-// not attest arbitrary unmanaged files; explicit mutable data belongs in mounts.
 fn system_binding(bwrap: &Path) -> Result<Value, BackendError> {
     let (program, args) = if Path::new("/usr/bin/pacman").exists() {
         ("/usr/bin/pacman", vec!["-Q"])

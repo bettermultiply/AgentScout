@@ -35,7 +35,7 @@ make
 
 包围盒按每个点及其描边半径逐点累计极值，不把采样数组展开为函数参数；路径局部包围盒与最大叶茎长度也使用有界参数数量的计算。保留全部事件、采样点和轮廓控制点。合法的大 K、小 τ、小采样步长仍会消耗较多内存和绘制时间，本次没有增加采样上限。
 
-回归命令：`node --test tests/tree-layout.mjs`。沿用 Node 内置测试与已有 Vite TypeScript 加载器，不增加测试框架。覆盖默认值、大采样轮廓、完整调用/采样数量和包围盒、时间缺失提示及非时间错误标题。
+本轮测试范围调整后已移除该独立布局回归入口；以下历史覆盖记录保留。
 
 原始 195 模型 / 194 工具样例为 `/tmp/opencode/tree-prototype/events-piecewise.json`。Chromium 修复前，参数组合 `segmentK=300, segmentTauMs=500, sampleGap=4` 与 `segmentK=1000, segmentTauMs=500, sampleGap=1` 都得到：
 
@@ -46,7 +46,7 @@ RangeError: Maximum call stack size exceeded
 
 该行的实际转换后代码是 `const minX = Math.min(...boxes.map((b) => b.x - b.radius));`，对应修复前源码 `geometry.ts:417`。完整堆栈与转换源码保存在 `/tmp/opencode/system-tree-run/original-before.log` 和 `geometry-before.js`；稳定合成回归先失败的记录为 `layout-before.log`。原样例默认有 606 个路径采样点；两组失败参数分别有 63,813 / 848,369 个采样点及 382,874 / 5,090,210 个轮廓控制点，函数参数展开超过引擎限制。
 
-修复后原样例三组参数均在布局及完整页面 DOM 中显示 1 个 Branch、195 根模型叶茎、194 片工具叶片，无 pageerror。证据为同目录 `original-after.log`、`dom-after.log`、`layout-after.log`，脚本为 `layout-repro.cjs`、`layout-dom.cjs`。页面检查用独立 headless 浏览器和拦截的只读样例响应，不触碰用户浏览器存储，不调用模型。`npm run build` 通过并更新 dist，`cargo build` 通过；`node --test tests/tree-layout.mjs tests/nle-map-history.mjs` 共 6 项通过，`git diff --check` 通过。
+修复后原样例三组参数均在布局及完整页面 DOM 中显示 1 个 Branch、195 根模型叶茎、194 片工具叶片，无 pageerror。证据为同目录 `original-after.log`、`dom-after.log`、`layout-after.log`，脚本为 `layout-repro.cjs`、`layout-dom.cjs`。页面检查用独立 headless 浏览器和拦截的只读样例响应，不触碰用户浏览器存储，不调用模型。`npm run build` 通过并更新 dist，`cargo build` 通过；当时的布局和地图检查共 6 项通过，`git diff --check` 通过。
 
 已审查 `count`、`place`、`branchDepth`：它们按 Branch 父子层级递归，复现样例只有一根无父枝，不存在递归深度或循环数据；当前故障链上没有 `push(...array)`。本次不扩展循环或极深树处理。最终提交因 geometry/treeGraph 等依赖尚未跟踪、SpeculationTree/开发文档/dist 含大量既有未提交工作而无法安全隔离，保留工作区等待整轮审查。
 

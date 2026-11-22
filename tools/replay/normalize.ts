@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/** Dependency-free request normalization for external replay tools. */
 import crypto from "node:crypto";
 import type { ContentPart, Entry, Message, ReplyPart } from './types.ts';
 
@@ -28,7 +27,6 @@ function callsOf(message: Message) {
   return Array.isArray(message?.content) ? message.content.filter(p => p.type === 'toolCall') : [];
 }
 
-/** Matches the final context Pi sends to openai-completions. */
 export function requestKey(messages: Message[]) {
   const ms = (Array.isArray(messages) ? messages : []).map(m => m?.role === "custom" ? {...m, role:"user"} : m);
   let ai = -1;
@@ -48,8 +46,7 @@ export function requestKey(messages: Message[]) {
     const user = [...ms].reverse().find(m => m?.role === "user");
     material = textOfContent(user?.content ?? "");
   }
-  // Pi converts custom messages to user content before provider serialization.
-  // Include that context after tool results.
+  // Pi sends custom messages as user context, so include them in the request key.
   const users = tail.filter(m => m?.role === "user");
   if (tools.length && users.length) material = { material, users: users.map(m => textOfContent(m.content)) };
   return crypto.createHash("sha256").update(stable(material)).digest("hex");
@@ -63,13 +60,11 @@ export function replyParts(message: Message): ReplyPart[] {
   return parts.filter(p => p?.type === "text" || p?.type === "toolCall").map(p => p.type === "toolCall" ? { type: "toolCall", id: p.id, name: p.name, arguments: p.arguments ?? {} } : { type: "text", text: p.text ?? "" });
 }
 
-/** Read a current native Pi message entry, never custom state data. */
 export function messageBody(entry: Entry) {
   if (entry.type === "custom_message") return { role: "custom", customType: entry.customType, content: entry.content ?? [], display: entry.display, details: entry.details, timestamp: Date.parse(entry.timestamp ?? '') };
   return entry.type === "message" ? entry.message : {};
 }
 
-/** Current Pi buildSessionProjection + convertToLlm semantics on one native path. */
 export function sessionContext(path: Entry[]) {
   const compaction = path.findLastIndex(e => e.type === "compaction");
   let selected = path;

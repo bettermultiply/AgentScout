@@ -1,4 +1,3 @@
-/** Pi schemas, parameters and result formatting are adapted here, never in Runtime. */
 import {StringDecoder} from 'node:string_decoder';
 import type {AscProxy} from './asc-proxy.ts';
 
@@ -6,7 +5,6 @@ export function environmentTools(proxy:AscProxy,branch:string,detect:(bytes:Uint
     const string={type:'string'};
     const object=(properties:Record<string,unknown>,required:string[])=>({type:'object',properties,required});
     const text=(value:string,details:unknown=undefined)=>({content:[{type:'text',text:value}],details,structuredContent:value});
-    // The bound Environment interprets paths and supplies the default exec cwd.
     const operation=(id:string,name:string,args:unknown,signal?:AbortSignal,output?:(value:any)=>void)=>proxy.operation(branch,id,name,args,{task_id:taskId},signal,output);
     return [
         {name:'read',label:'read',description:'Read text or images. offset is a 1-indexed line number; limit is a line count. Text output is limited to 2000 lines or 50 KiB; use offset to continue.',parameters:object({path:string,offset:{type:'integer',minimum:1},limit:{type:'integer',minimum:0}},['path']),

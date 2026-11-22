@@ -1,4 +1,3 @@
-//! promotion 测试。
 
 use super::super::*;
 use super::support::*;
@@ -484,7 +483,6 @@ fn candidate_completion_only_marks_readiness_and_cleanup_failure_is_not_cleaned(
         tree.branches["candidate"].execution_state.agent,
         AgentExecutionState::Released
     );
-    // A late start fact must not resurrect a released Agent session.
     tree.handle_message(AgentMessage::BranchStarted {
         branch_id: "candidate".into(),
     })

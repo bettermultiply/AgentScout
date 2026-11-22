@@ -1,5 +1,4 @@
-// Hold the sibling at the execution boundary, after Pi's real before-tool
-// hook/checkpoint, without imposing an ordering rule on the Runtime backend.
+// Hold after Pi records the checkpoint, before the sibling enters Runtime execution.
 import fs from 'node:fs';
 import {AscProxy} from '../../instrumentation/pi/asc-proxy.ts';
 const execute=AscProxy.prototype.execute;

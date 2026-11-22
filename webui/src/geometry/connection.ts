@@ -33,7 +33,6 @@ function at(side: ConnectionSide, position: number) {
   return { point: head.end, tangent: unit(tangent), tail, index: lo, value }
 }
 
-/** Direct, bounded root construction. No crossing search or arc integration. */
 export function connectSides(input: {
   parent: ConnectionSides; position: number; anchor: Point; child: ConnectionSides;
   parentDistance: number; childDistance: number; convert?: (p: Point) => Point;
@@ -59,7 +58,6 @@ export function connectSides(input: {
     const p = at(boundary, position + direction * spread)
     const Q = convert(p.point)
     const requested = distance(center.point, anchor) / outward + childDistance
-    // Keep at least half the ordinary side even for short or nearly tangent roots.
     const endPosition = side.positions[0] + Math.min(requested, (side.positions.at(-1)! - side.positions[0]) * .5)
     const end = at(side, endPosition), C = end.point
     const chord = distance(Q, C)

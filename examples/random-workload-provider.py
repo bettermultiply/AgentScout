@@ -45,8 +45,6 @@ class Handler(BaseHTTPRequestHandler):
                     elapsed = time.monotonic() - STARTS[operation]
                     COUNTS[operation] += 1
                     index = COUNTS[operation]
-                # The example delay separates the two speculative model requests
-                # from Parent's request. This is a demonstration, not routing logic.
                 if elapsed < 6:
                     value = results[0]["content"]
                     assert value in ("example", "true", "false"), value

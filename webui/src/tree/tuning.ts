@@ -1,4 +1,3 @@
-// All shape controls, including fixed/range modes, live in this file.
 export const FIXED_GEOMETRY = Object.freeze({
   nodeOrigin: 64,
   petioleWidth: 1.4, leafStrokeWidth: 1, veinWidth: 1,
@@ -86,31 +85,19 @@ export function ranged(t: TreeTuning, prefix: 'leafWidth' | 'stemAngle' | 'stemB
   return Math.min(a, b) + Math.abs(b - a) * stableRandom(`${id}/${prefix}`)
 }
 
-/**
- * Live drawing parameters for the speculation tree. Every value is in tree
- * units, so zoom never changes a proportion.
- */
 export interface TreeTuning extends ExtraTuning {
-  /** Segment length = segmentK * ln(1 + interval / segmentTauMs). */
   segmentK: number
   segmentTauMs: number
-  /** Turn per call interval, in degrees. */
   turnStepDeg: number
-  /** Distance over which the walk is pulled back to the centre line. */
   recenterRange: number
-  /** A Branch may lean but always keeps a downward component. */
   maxLeanDeg: number
-  /** Root width in tree units; independent of the length mapping. */
   rootWidth: number
-  /** Width = root width * (remaining share) ^ widthExponent. */
   widthExponent: number
   /** The last call still needs an edge to grow its stem from. */
   minTrunkWidth: number
-  /** Stem length = stemK * ln(1 + model seconds). */
   stemK: number
   leafMin: number
   leafMax: number
-  /** Maximum filled stem width in tree units. */
   stemWidth: number
 }
 
@@ -150,7 +137,6 @@ export function normalizeTuning(input: unknown): TreeTuning {
   return out
 }
 
-/** One-way cleanup of previously supported URL parameters; never reads values. */
 export function removeTuningParams(params: URLSearchParams): boolean {
   const keys = [
     'k', 'tau', 'turn', 'recenter', 'lean', 'rootw', 'wexp', 'wmin',

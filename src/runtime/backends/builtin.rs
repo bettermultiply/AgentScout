@@ -1,4 +1,3 @@
-//! Declarations for the implementations compiled into this binary.
 
 use std::{error::Error, path::PathBuf, sync::Arc};
 
@@ -39,7 +38,6 @@ pub fn resolve(kind: &str, config: &Value) -> Result<BackendImplementation, Box<
             "filesystem" => {
                 interfaces.push(Filesystem);
                 let config = filesystem_config(config)?;
-                // Usability and performance depend on probes during construction.
                 let capabilities = RuntimeCapabilities {
                     filesystem_passthrough: Some(
                         config

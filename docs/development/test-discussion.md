@@ -1,5 +1,37 @@
 # 测试删除与合并审查
 
+## 本轮语义筛选（基线为开始时的工作区）
+
+E2E Tests 通过实际 CLI、协议或工具入口检查调用方可观察的结果。Deterministic Simulation Tests 用受控的替身、故障或事件序列检查状态转换、恢复和模块间行为。
+
+| 范围 | 筛选前 | 筛选后 |
+| --- | ---: | ---: |
+| Cargo 枚举，含忽略用例 | 134 | 103 |
+| 其中 Rust 库 | 117 | 92 |
+| 其中 Filesystem Backend 库测试 | 62 | 46 |
+| `runtime::process` 库测试 | 6 | 2 |
+| Coordination / Speculative Tree 合计 | 43 | 38 |
+| `tests/*.mjs` 顶层 `test()` 声明 | 58 | 48 |
+| `tests/*.py` 直接测试入口 | 2 | 1 |
+
+Node 按源码声明计数，参数循环和子测试在运行时另外展开。脚本预检模拟仍有 24 个场景，回放仍有 3 个验收入口。外部任务验收 fixture 的 3 项检查保持原样。
+
+- Filesystem 保留从 Runtime 或 holder 请求到隔离视图、发布和清理的路径，以及受控故障下的回滚、回执、失败重试和重启恢复。删除直接状态表引用与布局探测、扫描计数、局部文件及导出检查。进程管理保留注入启动及 cgroup 写失败后的资源回收。特权脚本执行 3 项 btrfs 生命周期和 4 项进程／冻结检查，独立的宿主 `lower=/` 预检和输出核对仍执行。
+- Coordination 和 Speculative Tree 保留手工事件驱动的提交、迟到反馈、取消与恢复。删除直接操作内部完成记录、读写单字段或设置期限后只检查错误的用例。Policy 保留授予与取消跨 provider/worker 的模拟，以及实际控制面决策 E2E。删除 `tests/policy.rs`、混合文件中的直接调用和纯解释器用例，以及只构造 runner 的真实模型冒烟脚本。
+- Pi 保留实际入口、协议取消、原生会话重连和通知交付过程，删除单独的交互等待对象测试。NLE 保留固定轨迹及世界恢复，删除地图历史的局部投影和 Policy 提议顺序检查。回放保留 CLI 导出、HTTP 消费及 Pi 并行续跑，清除直接对规范化函数的断言。保留这些路径使用的 fixtures。
+- 核对通过 `cargo check --offline --all-targets`、`cargo test --offline -- --list`、保留的 Node/回放入口 `node --check`、`bash -n scripts/priv-check.sh` 及 `git diff --check`。Rust 库报告 92 项完成，包含按环境提前返回的特权用例。离线运行另有 3 项 Rust 集成测试、NLE 恢复 1 项、24 个预检模拟场景和 3 个回放入口通过。两份混合 Policy 文件 6/6 通过。Node 重点联合回归报 59 通过、2 失败，失败是 Authority 公开状态子用例及其父用例，Ledger 读取仍报 `missing field timestamp_ms`，发布重试与干净退出已执行。Predictor Fact 的单步 E2E 通过。Filesystem 恢复和已结束 run 的 `--resume` 在修正夹具启动配置后也进入主流程，公开接口均因相同的 Ledger 读取错误断开连接。真实模型、Firecracker 实机和宿主特权预检未执行。运行日志在 `/tmp/ascout-semantic/`。
+
+## Authority、Coding Policy 与 Pi 通知的重复检查
+
+- `tests/authority-filesystem.mjs` 的两个模式共用一次 Control Plane、Runtime 和 Pi 启动。原退出码用例作为同一会话中的独立输入，逐项核对两条工具的开始和完成记录、失败标记、退出 7 提示、两条输出以及三次模型请求。发布后和最终退出时都核对文件内容为 `xy`，以检查后续发布没有重放写入。保留后台写者、部分发布失败与重试、HTTP interrupt、SIGINT、暂停和 SIGTERM 干净退出的检查。原退出码用例单独使用的 HTTP shutdown 仍由 Coding Policy 的三个端到端用例验证。
+- `tests/coding-policy-e2e.mjs` 只在 Promote/Discard 用例检查浏览器地址恰好打印一次，删除已有宿主文件内容佐证的 `second-fix` 成功记录检查。三个端到端用例仍分别检查对应决策、文件结果及通知正文和次数。Reuse 和 Salvage 保留独立运行及各自的 settlement 结果。
+- `tests/pi-notification.mjs` 以重开后的完整条目相等覆盖正文，保留原生 Pi 双工具批次、下一次模型请求可见、空闲无新请求、原生 ID、去重和写失败后重试。`tests/pi-notification-adapter.mjs` 保留九个停止与故障场景。相同命令的重传集中在自然完成及故障用例，仍验证交付前后 ACK、冲突 payload 拒绝和写失败时的重传行为。模型次数统一在结束时核对。
+- 实跑中修正了两处测试夹具启动阻塞。Authority 走显式 `--models`，避免重复加载 `fixture` provider。Adapter 夹具从相邻 Pi 挂入 `packages/pi-integration`，保留伪 SDK 和真实 `SessionManager`。启动失败日志保存在 `/tmp/opencode/test-consolidation-e2e.log` 和 `/tmp/opencode/test-consolidation-notification.log`。
+
+最终以本地伪模型和 SDK double 串行运行 `node --test --test-concurrency=1 tests/authority-filesystem.mjs tests/coding-policy-e2e.mjs tests/pi-notification.mjs tests/pi-notification-adapter.mjs`。Coding Policy 7/7，Pi 通知 10/10。Authority 的发布失败提示断言单独报告失败，父用例也因此标记失败。`/api/observation/state-event-set` 读取 Ledger 时报告 `missing field timestamp_ms` 并断开连接。保留这一公开 API 断言，后续文件发布重试、工具退出状态和输出、无重复写入及 SIGTERM 干净退出均走到并通过。联合输出为 `/tmp/opencode/test-consolidation-final.log`，Authority 证据保存在 `/tmp/opencode/authority-filesystem-hrq9yA`。
+
+四个测试文件的 `node --check` 与全工作区 `git diff --check` 均通过。本次改动限于测试与本记录，保留共享工作区已有改动。未调用真实模型或 subagent，未提交。
+
 ## 权威物化和 Coding Policy 回归
 
 物化的导出和发布优先使用系统 Python，并固定 `PYTHONHASHSEED`。导出沙盒挂载 `/dev`。控制面 Policy 优先采用显式配置的 Python，其次选择系统 Python。污染 `PATH` 的 Rust 用例在旧实现上因误调工作区 Python 而失败，在修复后确认宿主文件被更新。
@@ -52,7 +84,11 @@ Pi 在报告 `branch_started` 前先发完原生会话的继承历史，并修�
 
 本次仅因已发生且可稳定复现的 `has_predictor` 循环依赖新增测试，遵守先红后绿：`tests/predictor-fact.mjs` 以真实失败 session 保存的 Policy 和手工事件复现模型/工具两路，`tests/predictor-fact-e2e.mjs` 以同份 Policy、正常 control plane/真实 Runtime/Pi 和本地 SSE 验证首次请求通过。两个脚本的留档依赖、日志、误断言修正及未通过的已有文件工具测试，均记于 [验证记录](reference-workload.md)。没有引入真实模型调用或通用测试框架，没有改动既有文件工具的并行工作；原真实 E2E 仍未通过，保留原失败证据待主审复核。
 
-## 范围与执行约定
+## 早期合并审查记录
+
+以下各节记录当时的用例与运行结果。当前测试范围和运行结果见本文首节。
+
+### 范围与执行约定
 
 本轮只清理有直接证据的重复测试和重复资源启动，不改产品行为、不修复路径、不移动真实模型测试、不提交。开始时已检查 git 状态与根 AGENTS.md；工作区已有大量修改及未跟踪测试，均按现状保留。仓库内未发现其他 AGENTS.md。
 

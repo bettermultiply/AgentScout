@@ -16,7 +16,6 @@ export interface CallGroup {
   durationMs: number | null
 }
 
-/** A model call paired with the tool calls it issued. */
 export interface CallUnit {
   model: CallGroup
   tools: CallGroup[]
@@ -58,7 +57,6 @@ export function groupBranchCalls(branch: BranchState): CallGroup[] {
   return groups
 }
 
-/** Start time is required; a guessed position is worse than a visible error. */
 export function requiredStart(group: CallGroup, label: string): number {
   if (group.startMs === null || !Number.isFinite(group.startMs)) {
     throw new Error(`${label}缺少开始时间（事件 #${group.firstSequence}），无法确定树的纵向位置`)
@@ -66,7 +64,6 @@ export function requiredStart(group: CallGroup, label: string): number {
   return group.startMs
 }
 
-/** Pair every tool call with the model call that preceded it. */
 export function pairCalls(calls: CallGroup[]): CallUnit[] {
   const units: CallUnit[] = []
   let current: CallUnit | null = null
@@ -83,16 +80,8 @@ export function pairCalls(calls: CallGroup[]): CallUnit[] {
   return units
 }
 
-/**
- * A Branch's visual state. Authority always wins: a finished authority stays
- * white and only fades, so the trunk from the seed to the current Branch reads
- * as one continuous line. Aborted means the Branch was discarded (or cleaned
- * without ever being the authority) and is the only state that dries out.
- */
 export function branchTone(branch: BranchState, isAuthorityPath: boolean, isCurrentAuthority: boolean): BranchTone {
   if (isCurrentAuthority) return 'authority'
-  // A Branch that was the authority, including an older trunk that is already
-  // finished, stays in the authority colour and only goes paler.
   if (isAuthorityPath || branch.role === 'authority' || branch.status === 'promoted' || branch.status === 'promoting') {
     return 'authority-finished'
   }

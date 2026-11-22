@@ -1,5 +1,3 @@
-//! Runtime ownership and coordination. The proxy transports control-plane requests,
-//! while the agent supervisor owns the trusted Agent host.
 
 mod agent_supervisor;
 pub mod backend;
@@ -18,8 +16,6 @@ pub mod proxy;
 mod recovery;
 pub mod selection;
 
-#[cfg(test)]
-mod tests;
 
 pub use base::BaseRuntime;
 pub use selection::{

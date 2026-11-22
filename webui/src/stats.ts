@@ -17,9 +17,7 @@ export interface RunStats {
   activeCandidates: number
   tokens: { value: number | null; completeness: Completeness }
   cost: { value: number | null; completeness: Completeness }
-  /** Measured and estimated time are accumulated separately, never merged. */
   time: SavingsValue
-  /** Measured and estimated money are accumulated separately per currency. */
   money: MoneySavings[]
 }
 
@@ -30,7 +28,6 @@ function branches(task: TaskState | null): BranchState[] {
     .filter((branch): branch is BranchState => Boolean(branch))
 }
 
-/** Add a value to an accumulator that distinguishes measured from estimated. */
 function addAmount(target: SavingsValue, amount: ObservationAmount): void {
   if (amount.measured !== null) {
     target.measured = (target.measured ?? 0) + amount.measured

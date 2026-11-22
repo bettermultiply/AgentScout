@@ -1,4 +1,3 @@
-//! 单层与多层视图的路径解析。
 
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -9,24 +8,6 @@ use super::*;
 
 use super::super::state::MountUnit;
 
-#[cfg(test)]
-thread_local! {
-    /// Per-thread entry counter.  `read_layer`/`walk_layer` are called from
-    /// the calling thread on the accept path (the btrfs subprocess stderr
-    /// drain thread does not walk layers), so a process-global counter would
-    /// let unrelated tests running in parallel pollute this measurement.
-    static READ_LAYER_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_read_layer_entries() {
-    READ_LAYER_ENTRIES.with(|entries| entries.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn read_layer_entries() -> usize {
-    READ_LAYER_ENTRIES.with(std::cell::Cell::get)
-}
 use crate::runtime::backend::BackendError;
 
 pub(crate) fn node_from_metadata(
@@ -83,8 +64,6 @@ pub(crate) fn walk_layer(
         .collect();
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        #[cfg(test)]
-        READ_LAYER_ENTRIES.with(|entries| entries.set(entries.get() + 1));
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(error)?;
         let relative = path
@@ -202,15 +181,12 @@ pub(crate) fn resolve_path_in_layers(
             PathResolution::Node(node) => return Ok(Some(node)),
             PathResolution::Hidden => return Ok(None),
             PathResolution::NotPresent => {
-                // A redirect may have changed the lookup path.  Recompute it
-                // by asking the same probe; no additional state is needed.
                 if let Some(redirected) = redirected_lookup(&upper, &lookup)? {
                     lookup = redirected;
                 }
             }
         }
     }
-    // The bottom of every mount-backed chain is the host mount point itself.
     match resolve_path_in_upper(
         mount
             .saved_base

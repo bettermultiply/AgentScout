@@ -25,8 +25,7 @@ if args.kind == "list":
     if summaries != [(str(len(names)), "0")]:
         errors.append("test listing has a missing or inconsistent summary")
 else:
-    # --show-output captures in-test stdout/stderr; unlike --nocapture these
-    # result records cannot be interrupted by the test's diagnostic writes.
+    # --show-output keeps test diagnostics out of the result records.
     records = re.findall(r"^test ([^\s]+) \.\.\. (ok|FAILED|ignored(?:, .*)?)$",
                          text, re.MULTILINE)
     names = [name for name, _ in records]
@@ -52,7 +51,6 @@ else:
     if passed != len(args.tests) or failed or ignored:
         errors.append(f"expected {len(args.tests)} passes; got {passed} passed, "
                       f"{failed} failed, {ignored} ignored")
-    # Counts remain useful when validation fails; never call passes executions.
     print(executed, passed, ignored)
 
 actual = Counter(names)

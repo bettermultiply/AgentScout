@@ -1,4 +1,3 @@
-/** Fields consumed from Pi's native messages and OpenAI request messages. */
 export interface ContentPart {
   type?: string;
   text?: string;

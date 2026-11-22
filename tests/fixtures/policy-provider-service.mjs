@@ -1,4 +1,3 @@
-// Fake Models only: this fixture never loads credentials or calls a provider.
 import { servePolicyModel } from '../../../pi/packages/pi-integration/src/policy-model-service.ts';
 await servePolicyModel({
  getModel(provider, id) {

@@ -1,7 +1,7 @@
 import {writeExecution} from '../instrumentation/pi/execution-wire.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createServer } from 'node:net';
@@ -21,10 +21,10 @@ test(`runtime result commands and graceful shutdown at ${shutdownAt}`, async t =
     const root = await mkdtemp(join(tmpdir(), 'ascout-pi-'));
     const socketPath = join(root, 'agent.sock');
     await mkdir(join(root, 'packages/coding-agent/src'), { recursive: true });
+    await symlink(join(REAL_PI, 'packages/pi-integration'), join(root, 'packages/pi-integration'), 'dir');
     await mkdir(join(root, 'node_modules/typebox'), { recursive: true });
     await writeFile(join(root, 'package.json'), '{"type":"module"}');
     await writeFile(join(root, 'node_modules/typebox/index.js'), 'exports.Type={Unsafe:x=>x};');
-    // A deterministic SDK double: one turn waits for a real runtime result.
     await writeFile(join(root, 'packages/coding-agent/src/index.ts'), `
  import { SessionManager } from '${REAL_PI}/packages/coding-agent/src/core/session-manager.ts';
  export { SessionManager };
@@ -201,8 +201,7 @@ export async function createAgentSession(options) {
     assert.equal(executions.length,0,'backend must wait for launch authorization');
     if (shutdownAt === 'eof_tool_wait') return finish([],1);
     if (shutdownAt === 'tool_wait') return finish(['authority']);
-    // Rust's JSON encoder sorts object keys; checkpoint identity must not depend
-    // on insertion order. Candidate setup also must not hold the command queue.
+    // Vary JSON key order to match Rust and check that candidate setup leaves the queue free.
     send({command:'start_candidate',branch_id:'candidate',parent_branch_id:'authority',
         workspace:root,operation_id:'operation-1',tool_name:'runtime_tool',prediction:'guess',
         checkpoint:{adapter:pending.checkpoint.adapter,kind:pending.checkpoint.kind,opaqueId:pending.checkpoint.opaqueId},
@@ -250,15 +249,11 @@ export async function createAgentSession(options) {
         assert.deepEqual(tree.messages.map(m => m.role), ['assistant', 'toolResult', 'assistant', 'toolResult']);
         const resumedResult=tree.messages.find(m=>m.role==='toolResult');
         assert.match(resumedResult.content[0].text,/real-result/);
-        // Every reported record stays in the file, including the Authority's own
-        // records that are not on the promoted path.
         for (const transcript of transcripts) assert.ok(tree.entries.some(e => e.id === transcript.session_entry_id));
         const authorityRecords = transcripts.filter(m => m.branch_id === 'authority');
         assert.ok(authorityRecords.length >= 1);
         for (const record of authorityRecords) assert.ok(tree.entries.some(e => e.id === record.session_entry_id));
     }
-    // Closing the controller's write half must let the integration drain its
-    // output and exit without an unhandled rejected write.
     await finish(['candidate','authority']);
 });
 }
@@ -267,12 +262,11 @@ test('model usage survives completion before message_end and reports an unpaired
     const root = await mkdtemp(join(tmpdir(), 'ascout-pi-'));
     const socketPath = join(root, 'agent.sock');
     await mkdir(join(root, 'packages/coding-agent/src'), { recursive: true });
+    await symlink(join(REAL_PI, 'packages/pi-integration'), join(root, 'packages/pi-integration'), 'dir');
     await mkdir(join(root, 'node_modules/typebox'), { recursive: true });
     await writeFile(join(root, 'package.json'), '{"type":"module"}');
     await writeFile(join(root, 'node_modules/typebox/index.js'), 'exports.Type={Unsafe:x=>x};');
-    // Pi settles the model stream and invokes the beforeModelInference completion
-    // callback before the agent loop emits message_end. A second prompt reports a
-    // model message that never went through the hook at all.
+    // Pi completes the hook before message_end. The second prompt bypasses the hook.
      await writeFile(join(root, 'packages/coding-agent/src/index.ts'), `
  import { SessionManager } from '${REAL_PI}/packages/coding-agent/src/core/session-manager.ts';
  export { SessionManager };

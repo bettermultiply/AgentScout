@@ -1,4 +1,3 @@
-//! cgroup v2 目录探测与冻结等待。
 
 use std::fs;
 use std::io::{Read, Seek};

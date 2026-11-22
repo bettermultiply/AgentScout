@@ -16,8 +16,6 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    // The control plane serves the page; keep the diagnostic in the browser
-    // console rather than hiding a rendering bug behind a blank screen.
     console.error('AScout WebUI render error', error, info)
   }
 

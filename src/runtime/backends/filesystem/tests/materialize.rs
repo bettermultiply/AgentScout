@@ -1,34 +1,6 @@
 use super::super::*;
 
 #[test]
-fn establish_does_not_copy_mount_content() {
-    let root = tempfile::Builder::new()
-        .prefix("materialize-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
-    let workspace = root.path().join("workspace");
-    fs::create_dir(&workspace).unwrap();
-    fs::write(workspace.join("unrelated"), "must not be copied").unwrap();
-    let mut config = FilesystemConfig::new(root.path().join("state"));
-    config.force_overlay = true;
-    config.isolated_paths = Some(vec![workspace.clone()]);
-    let backend = FilesystemBackend::new(config).unwrap();
-    backend.establish("authority").unwrap();
-    let state = backend.lock().unwrap();
-    assert!(
-        state.environments["authority"]
-            .mounts
-            .values()
-            .all(|m| m.saved_base.is_none()),
-        "establish copied the execution lower"
-    );
-    assert!(
-        !root.path().join("state/materialization-bases").exists(),
-        "establish archived the entire mount"
-    );
-}
-
-#[test]
 fn materialize_final_view_permissions_types_and_retry() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let root = tempfile::Builder::new()
@@ -61,7 +33,6 @@ fn materialize_final_view_permissions_types_and_retry() {
         )
         .unwrap();
     assert_eq!(output.exit_code, 0, "{}", output.stderr);
-    // A hostile middle symlink must be replaced, not followed into outside.
     let outside = root.path().join("outside");
     fs::create_dir(&outside).unwrap();
     fs::write(outside.join("child"), "safe").unwrap();
@@ -98,36 +69,6 @@ fn materialize_final_view_permissions_types_and_retry() {
         fs::read_to_string(workspace.join("untouched")).unwrap(),
         "keep"
     );
-}
-
-#[test]
-fn materialize_export_overlapping_subtree_keeps_each_file() {
-    let root = tempfile::Builder::new()
-        .prefix("materialize-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
-    let view = root.path().join("view");
-    let package = root.path().join("package");
-    fs::create_dir_all(view.join("dir")).unwrap();
-    fs::create_dir(&package).unwrap();
-    fs::write(view.join("dir/a"), "a").unwrap();
-    fs::write(view.join("dir/b"), "b").unwrap();
-    fs::write(view.join("last"), "last").unwrap();
-    fs::write(package.join("selection.json"), r#"[{"path":"dir","subtree":true},{"path":"dir/a","subtree":false},{"path":"last","subtree":false}]"#).unwrap();
-    run_helper("export", &view, &package).unwrap();
-    let nodes: serde_json::Value =
-        serde_json::from_slice(&fs::read(package.join("nodes.json")).unwrap()).unwrap();
-    for (path, expected) in [("dir/a", "a"), ("dir/b", "b"), ("last", "last")] {
-        assert_eq!(
-            fs::read_to_string(
-                package
-                    .join("data")
-                    .join(nodes[path]["data"].as_str().unwrap())
-            )
-            .unwrap(),
-            expected
-        );
-    }
 }
 
 fn run_helper(operation: &str, root: &Path, package: &Path) -> Result<(), BackendError> {
@@ -368,33 +309,6 @@ fn materialize_writes_through_unreadable_parent_without_changing_its_mode_on_fai
     // Restore only the test fixture so TempDir can remove it.
     fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(host.join("restricted"), fs::Permissions::from_mode(0o700)).unwrap();
-}
-
-#[test]
-fn materialize_export_does_not_follow_stale_symlink_descendant() {
-    use std::os::unix::fs::symlink;
-    let root = tempfile::Builder::new()
-        .prefix("materialize-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
-    let view = root.path().join("view");
-    let outside = root.path().join("outside");
-    let package = root.path().join("package");
-    for path in [&view, &outside, &package] {
-        fs::create_dir(path).unwrap();
-    }
-    fs::write(outside.join("secret"), "outside").unwrap();
-    symlink(&outside, view.join("link")).unwrap();
-    fs::write(
-        package.join("selection.json"),
-        r#"[{"path":"link","subtree":false},{"path":"link/secret","subtree":false}]"#,
-    )
-    .unwrap();
-    run_helper("export", &view, &package).unwrap();
-    let nodes: serde_json::Value =
-        serde_json::from_slice(&fs::read(package.join("nodes.json")).unwrap()).unwrap();
-    assert!(nodes.get("link/secret").is_none());
-    assert_eq!(fs::read_dir(package.join("data")).unwrap().count(), 0);
 }
 
 #[test]

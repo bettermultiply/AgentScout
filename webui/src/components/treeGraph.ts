@@ -8,7 +8,6 @@ export interface TreeGraph {
   error: string | null
 }
 
-/** Turn the folded task state into React Flow nodes. */
 export function buildTree(task: TaskState | null, tuning: TreeTuning, layout = layoutTree, previous?: TreeGraph): TreeGraph {
   if (!task) return { nodes: [], latestNodeId: null, error: null }
   const path = authorityPath(task)
@@ -68,7 +67,6 @@ export function buildTree(task: TaskState | null, tuning: TreeTuning, layout = l
       draggable: false,
       selectable: false,
       focusable: false,
-      // Parent outlines protect the uninterrupted trunk silhouette.
       zIndex,
     })
     drawn.add(branchId)

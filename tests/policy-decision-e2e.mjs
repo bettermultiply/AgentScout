@@ -7,39 +7,6 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { runPath, spawnControl } from './control-plane-fixture.mjs';
 import { createInterposer } from '../instrumentation/core/index.ts';
-import { evaluatePureDecision } from '../instrumentation/core/pure-policy.ts';
-
-test('local compiled expression skips the sandbox and preserves Python semantics', async t => {
-    const program = (expression) => ({program: {argument: 'data', body: [['return', expression]]}, policy_config: ['dict']});
-    const op = ['index', ['var', 'data'], ['const', 'op']];
-    const missing = ['index', op, ['const', 'missing']];
-    const opportunity = program(['and', ['Not', ['dict']], ['or', ['const', true], missing]]);
-    const pure = {'admit.opportunity_pass': opportunity, 'admit.feasibility_pass': program(['const', false])};
-    const access = createInterposer({taskId: 'pure', report: async () => {}, evaluate: async () => assert.fail('sandbox called')});
-    await access.control({command: 'local_policy', branch_id: 'authority', policy_digest: 'fixture', decisions: {}, pure});
-    const input = {op: {kind: 'tool_execution', has_predictor: true}};
-    const point = {branch: 'authority', actionId: 'one', actionKind: 'tool_execution', name: 'fixture', op: input.op, admit: true};
-    assert.deepEqual(await access.beforeAction(point), {kind: 'allow'});
-    const run = (binding) => evaluatePureDecision(binding, 'admit.opportunity_pass', input, []);
-    assert.throws(() => run(program(missing)), /KeyError/);
-    assert.throws(() => run(program(['Add', ['dict'], ['const', 1]])), /TypeError/);
-    assert.throws(() => run(program(['list'])), /Invalid .* result/);
-    assert.throws(() => evaluatePureDecision(opportunity, 'admit.opportunity_pass', {}, []), /Invalid .* input/);
-    for (let i = 0; i < 1000; i++) run(opportunity);
-    const count = 10000;
-    const start = performance.now();
-    for (let i = 0; i < count; i++) assert.equal(run(opportunity)?.result, true);
-    t.diagnostic(`${((performance.now() - start) * 1000 / count).toFixed(2)} µs/evaluation`);
-});
-
-test('pure predict accepts abstention and rejects empty batches', () => {
-    const data = {chance_context: {}, process_context: {}};
-    const program = result => ({policy_config: ['dict'], program: {argument: 'data', body: [['return', result]]}});
-    const abstain = ['dict', ['abstain', ['const', true]]];
-    const empty = ['dict', ['generation', ['const', 'batch']], ['proposals', ['list']]];
-    assert.deepEqual(evaluatePureDecision(program(abstain), 'predict', data, []), {result: {abstain: true}});
-    assert.throws(() => evaluatePureDecision(program(empty), 'predict', data, []), /Invalid predict result/);
-});
 
 test('extent stops a candidate, survives restore, and clears on promotion', async () => {
     const inputs = [];

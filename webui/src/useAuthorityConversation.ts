@@ -20,7 +20,6 @@ function appendStable(
   return next.map((message, index) => previousById.get(messageIdentity(message, index)) ?? message)
 }
 
-/** Fetches each historical authority once and appends only newly available entries. */
 export function useAuthorityConversation(task: TaskState | null): ConversationEntry {
   const versions = useAppStore((state) => state.conversationVersions)
   const ids = authorityWindows(task).map((branch) => branch.branchId)
@@ -58,8 +57,7 @@ export function useAuthorityConversation(task: TaskState | null): ConversationEn
       if (!cancelled) { setStatus('error'); setError(failure instanceof Error ? failure.message : String(failure)) }
     })
     return () => { cancelled = true }
-    // Versions are the observation-side invalidation boundary; task object changes
-    // alone do not cause a full transcript rebuild.
+    // Only observation versions invalidate the transcript.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ids.join('|'), current?.branchId, ids.map((id) => versions[id] ?? 0).join('|')])
   return { branchId: current?.branchId ?? null, status, data, error }

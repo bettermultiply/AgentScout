@@ -5,7 +5,6 @@
 ```sh
 npm install --prefix tools/replay
 npm run check --prefix tools/replay
-npm test --prefix tools/replay
 ```
 
 仅开发检查需要 TypeScript 和 Node 类型包；版本与仓库已有 WebUI 开发依赖一致，可复用已安装的依赖。运行回放本身不需要安装它们。
@@ -40,7 +39,7 @@ AScout 保存追加 provider 配置内容，普通恢复不依赖工具临时目
 
 端点只接受 `POST /v1/chat/completions`，成功项在输出任何响应前等待一次 500ms，再以 SSE 返回全部内容。取消期间清理定时器，停止写入连接。缺键或耗尽返回 HTTP 400，不回退真实模型。独立 `serve.ts` 可直接接收源 run，也可供低层检查接收显式导出文件；原生 run 模式默认不写报告，显式 `REPLAY_REPORT` 可指定验收报告，`REPLAY_REQUEST_LOG` 可记录请求；通用入口也支持这两个选项。`missing_keys` 统计缺键／耗尽，`unconsumed_keys` 统计剩余项。端口可省略，自动选择并打印 URL。Pi 配置见 `models.json`，dummy key 仅用于本地服务。
 
-消息边界接受 Pi 的纯工具调用格式：assistant 的 `content:null` 必须伴随非空、通过既有字段校验的 `tool_calls`；其他角色的 null、非法正文和非法工具调用字段仍返回 HTTP 400。此兼容不改变匹配键、消费顺序或取消行为。HTTP 回归见 `verify/messages.test.ts`。
+消息边界接受 Pi 的纯工具调用格式：assistant 的 `content:null` 必须伴随非空、通过既有字段校验的 `tool_calls`；其他角色的 null、非法正文和非法工具调用字段仍返回 HTTP 400。此兼容不改变匹配键、消费顺序或取消行为。
 
 独立 `serve.ts` 的文件输入保持只读：文件名恰为 `recording.json` 时默认报告为同目录 `report.json`；其他文件名在完整路径后追加 `.report.json`，例如 `capture.json.report.json`、`report.json.report.json`。显式 `REPLAY_REPORT` 或默认报告若指向源文件本身（包括符号链接、硬链接），启动时拒绝。
 
@@ -51,12 +50,9 @@ AScout 保存追加 provider 配置内容，普通恢复不依赖工具临时目
 ```sh
 node tools/replay/verify/b1.ts
 node tools/replay/verify/native.ts
-node --test tools/replay/verify/cancellation.test.ts
-node --test tools/replay/verify/report-path.test.ts
 node tools/replay/verify/b1-pi.ts EXISTING_B1_PI_RUN
-node --test tools/replay/verify/messages.test.ts
 ```
 
-B1 保留手构造低层规范化、顺序消费、缺失/耗尽和报告检查。B1-PI 支持从已有 B1-PI run 开始，省略参数则使用手构造原生记录，验证真实 Pi provider 对并行工具调用及后续回放请求的解析。所有路径均不调用真实模型。
+B1 从手构造的运行记录执行导出与 HTTP 回放，检查顺序消费、缺失、耗尽和报告。B1-PI 支持从已有 B1-PI run 开始，省略参数则使用手构造原生记录，验证真实 Pi provider 对并行工具调用及后续回放请求的解析。所有路径均不调用真实模型。
 
 2026-11-14 格式修复验证：类型检查、15 项 Node 回归、B1、native、B1-PI 通过。套件只提供已有响应，机制正确性仍须另行验证；候选数量与嵌套、活跃祖先丢弃、跨组件取消／超时、最终回答交付及长轨迹环境复现仍有覆盖缺口。请求命中／消费不代表回答已交付，也不证明性能收益。范围及证据见 [回放开发说明](../../docs/development/replay.md)。

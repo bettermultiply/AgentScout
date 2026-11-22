@@ -1,4 +1,3 @@
-//! commands 测试。
 
 use super::super::*;
 use super::support::*;

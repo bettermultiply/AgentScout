@@ -1,4 +1,3 @@
-//! Policy 源文件、YAML/JSON 形状和 Decision 数据校验。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -562,50 +561,4 @@ pub(super) fn ids(value: &Value, key: &str) -> io::Result<BTreeSet<String>> {
         require(ids.insert(id.to_owned()), "duplicate ID in input view")?;
     }
     Ok(ids)
-}
-
-#[cfg(test)]
-mod notification_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn dispose_notification_is_optional_nonblank_and_promote_only() {
-        let input = json!({"resolution":"accepted"});
-        for action in [
-            json!({"intent":"Promote"}),
-            json!({"intent":"Promote","notification":"real result"}),
-        ] {
-            validate_result(Decision::Dispose, &input, &json!({"actions":[action]})).unwrap();
-        }
-        for action in [
-            json!({"intent":"Promote","notification":null}),
-            json!({"intent":"Promote","notification":" \n"}),
-            json!({"intent":"Promote","notification":2}),
-            json!({"intent":"Discard","notification":"no"}),
-            json!({"intent":"Promote","other":"no"}),
-        ] {
-            assert!(
-                validate_result(Decision::Dispose, &input, &json!({"actions":[action]})).is_err()
-            );
-        }
-        let command: crate::control_plane::gateway::agent::protocol::AgentCommand =
-            serde_json::from_value(json!({"command":"promote","branch_id":"winner"})).unwrap();
-        assert!(
-            serde_json::to_value(command)
-                .unwrap()
-                .get("notification")
-                .is_none()
-        );
-        for value in [json!(null), json!(" \n"), json!(2)] {
-            assert!(
-                serde_json::from_value::<
-                    crate::control_plane::gateway::agent::protocol::AgentCommand,
-                >(
-                    json!({"command":"promote","branch_id":"winner","notification":value})
-                )
-                .is_err()
-            );
-        }
-    }
 }

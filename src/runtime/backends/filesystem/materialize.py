@@ -38,8 +38,7 @@ if operation == 'export':
     def export(path, recursive=False):
         global data_index
         parts = components(path)
-        # Selection can contain a stale descendant from an older delta layer.
-        # Never follow its final-view ancestor symlink out of the mount.
+        # A stale delta descendant can now sit below a symlink in the merged view.
         ancestor = root
         for part in parts[:-1]:
             ancestor = os.path.join(ancestor, part)
@@ -84,8 +83,6 @@ if operation == 'export':
 
     for item in selection:
         export(item['path'], item['subtree'])
-    # Copy-up directories are selected individually, not recursively. Only
-    # opaque/redirect subtrees require enumerating their final descendants.
     save('nodes.json', nodes)
     save('root.json', {'mode': stat.S_IMODE(os.stat(root).st_mode)})
     save('ready', True)
@@ -103,9 +100,7 @@ with open(os.path.join(package, 'nodes.json')) as source:
 with open(os.path.join(package, 'root.json')) as source:
     root_mode = json.load(source)['mode']
 
-# Traversal and chmod do not require directory read permission. O_PATH pins the
-# inode without temporarily widening its permissions. Only enumeration opens a
-# readable descriptor (and still fails honestly when that is not permitted).
+# O_PATH pins directories for traversal and chmod without requiring read permission.
 root_fd = os.open(root, os.O_PATH | NOFOLLOW)
 directories = {}
 
@@ -229,8 +224,7 @@ try:
                     original = None
                     try:
                         if old is not None:
-                            # Pin the original inode before collecting attributes;
-                            # pathname-based cp could race a substituted symlink.
+                            # Pin the inode so attribute collection cannot race a replaced symlink.
                             original = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NOATIME, dir_fd=fd)
                             old = os.fstat(original)
                             attributes = {key: os.getxattr(original, key) for key in os.listxattr(original)}
@@ -263,15 +257,13 @@ try:
         finally:
             os.close(fd)
 finally:
-    # Child creation/deletion must not reset untouched parent timestamps.
     for fd, info in directories.values():
         try:
             os.utime('/proc/self/fd/' + str(fd), ns=(info.st_atime_ns, info.st_mtime_ns))
         finally:
             os.close(fd)
 
-# Directory permissions last, including the mount root itself. Directory
-# receipts are written only after this phase, so a failure remains retryable.
+# Write directory receipts only after chmod so permission failures remain retryable.
 for path, node in sorted(nodes.items(), key=lambda item: (-item[0].count('/'), item[0])):
     if node['kind'] == 'directory' and path not in receipts['modes']:
         if path:
@@ -280,8 +272,7 @@ for path, node in sorted(nodes.items(), key=lambda item: (-item[0].count('/'), i
         else:
             fd, target = -1, os.dup(root_fd)
         try:
-            # Linux fchmod rejects O_PATH descriptors. The proc fd link refers
-            # to this pinned inode, never a re-resolved user-controlled path.
+            # fchmod rejects O_PATH; the proc fd link still names the pinned inode.
             os.chmod('/proc/self/fd/' + str(target), node['mode'])
         finally:
             os.close(target)

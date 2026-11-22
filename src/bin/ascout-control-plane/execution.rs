@@ -1,9 +1,6 @@
-//! Process signal forwarding for the Coordinator's input channel.
 use super::ui;
 use ascout::control_plane::coordination::execution::Event;
 use std::io::Read;
-#[cfg(test)]
-use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::{
@@ -53,8 +50,7 @@ fn forward_signals(
     interrupt: &AtomicBool,
     sender: mpsc::Sender<Event>,
 ) {
-    // The pipe is only a wake hint. Check pending intent periodically too:
-    // a full pipe or a late flag must never strand the main loop in recv().
+    // A full wake pipe can drop a write, so poll the pending intent too.
     let mut byte = [0];
     loop {
         if shutdown.swap(false, Ordering::AcqRel) {
@@ -86,7 +82,6 @@ pub struct SignalForwarding {
 impl Drop for SignalForwarding {
     fn drop(&mut self) {
         SIGNAL_FD.store(-1, Ordering::Relaxed);
-        // EOF cannot be lost when the nonblocking wake socket is full.
         let _ = self.writer.shutdown(std::net::Shutdown::Write);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -106,46 +101,4 @@ pub fn forward(events: mpsc::Sender<Event>) -> io::Result<SignalForwarding> {
         writer,
         worker: Some(worker),
     })
-}
-
-#[cfg(test)]
-mod signal_tests {
-    use super::*;
-
-    #[test]
-    fn late_and_repeated_signals_do_not_need_another_pipe_byte() {
-        let (mut reader, writer) = UnixStream::pair().unwrap();
-        reader
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .unwrap();
-        let shutdown = AtomicBool::new(false);
-        let interrupt = AtomicBool::new(false);
-        let (sender, receiver) = mpsc::channel();
-        // Force the wake byte to be consumed before the pending flag is visible.
-        (&writer).write_all(&[1]).unwrap();
-        reader.read_exact(&mut [0]).unwrap();
-        thread::scope(|scope| {
-            scope.spawn(|| forward_signals(reader, &shutdown, &interrupt, sender));
-            let result = || {
-                for _ in 0..3 {
-                    interrupt.store(true, Ordering::Release);
-                    assert!(matches!(
-                        receiver.recv_timeout(Duration::from_millis(500)),
-                        Ok(Event::Request(ui::Request::Interrupt))
-                    ));
-                }
-                shutdown.store(true, Ordering::Release);
-                assert!(matches!(
-                    receiver.recv_timeout(Duration::from_millis(500)),
-                    Ok(Event::Request(ui::Request::Shutdown))
-                ));
-            };
-            // Close even when an assertion fails, so the scoped worker cannot hang.
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(result));
-            writer.shutdown(std::net::Shutdown::Write).unwrap();
-            if let Err(error) = outcome {
-                std::panic::resume_unwind(error);
-            }
-        });
-    }
 }

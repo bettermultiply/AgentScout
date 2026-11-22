@@ -1,15 +1,3 @@
-//! Linux file-system-only isolation for Runtime Agent processes.
-//!
-//! This backend deliberately does not own network, memory, resource, or Agent
-//! Session state.  It owns only the branch file view and starts the Agent entry
-//! point in a bubblewrap mount namespace.  The namespace is inherited by every
-//! descendant process.
-//!
-//! Two data planes are available.  The btrfs plane snapshots the branch
-//! subvolume and materializes a writable child snapshot; the overlay plane
-//! seals the parent upper into an immutable layer.  Both read and write
-//! OverlayFS whiteouts, opaque directories, redirects and metacopy markers
-//! through the same semantic view.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -58,40 +46,24 @@ use refs::{DeleteWorker, spawn_delete_worker};
 use replay::*;
 use util::*;
 
-/// Upper trees with fewer entries are cloned with reflink/copy; larger ones
-/// use a btrfs snapshot.  The bound makes the entry count O(min(N, limit)).
-/// See `docs/fs-backend/current-state.md` for the measured cross-over between
-/// per-entry reflink cost and the fixed btrfs transaction/snapshot cost.
 pub(crate) const SNAPSHOT_CLONE_ENTRY_LIMIT: usize = 256;
 
-/// Default upper-entry threshold for the per-fork layout choice: an upper
-/// smaller than this is copied into the child upper (Flatten), otherwise the
-/// snapshot layer joins the child lower chain (Chain).  Overridden through
-/// `FilesystemConfig::fork_flatten_entry_limit` by tests and benchmarks.
 pub(crate) const DEFAULT_FORK_FLATTEN_ENTRY_LIMIT: usize = 256;
 
-/// Maximum number of immutable lower layers a Chain-layout mount may carry.
-/// Measured on this machine with real `bwrap --overlay-src ... --ro-overlay`:
-/// 231 lower sources mount, 232 fail (`Invalid argument`; bwrap rewrites each
-/// source to `/proc/self/fd/N`, so the underlying path length is not the
-/// limit).  This keeps a margin below half of the measured maximum.  Exceeding
-/// it is an explicit error before any directory is created, never a silent
-/// Flatten fallback.
+/// Leave headroom below the measured bwrap limit of 231 lower sources.
+/// Reject excess depth before creating directories.
 pub(crate) const MAX_LOWER_DEPTH: usize = 96;
 use state::{
     BackendState, Environment, EnvironmentMetadata, MountUnit, OperationRecord, SnapshotMetadata,
     SnapshotRecord,
 };
 
-/// A Backend whose sole responsibility is the Agent-visible filesystem.
 pub struct FilesystemBackend {
     config: FilesystemConfig,
     process: Arc<crate::runtime::process::Processes>,
     holder_starts: Mutex<HashMap<String, Arc<execution::HolderStart>>>,
     launches: Mutex<HashMap<String, crate::protocol::contract::AgentLaunch>>,
     mechanism: FilesystemMechanism,
-    /// Strict `btrfs subvolume delete` ioctl succeeded during the probe.
-    /// False means discard falls back to an O(file count) background removal.
     fast_delete: bool,
     btrfs_incremental_diff: bool,
     fork_cost: ForkCost,
@@ -159,8 +131,6 @@ impl FilesystemBackend {
         } else {
             (false, false)
         };
-        // btrfs is selected only when the real send/receive --dump probe
-        // succeeds; otherwise the portable overlay plane is used.
         let kernel_incremental = btrfs_ok && probe.probe_btrfs_incremental();
         let btrfs_incremental_diff = kernel_incremental;
         let mechanism = if btrfs_ok && btrfs_incremental_diff {
@@ -242,7 +212,6 @@ impl FilesystemBackend {
             .map(|mut entries| entries.next().is_some())
             .unwrap_or(false);
         if trash_has_entries {
-            // Reclaim entries left behind by a crashed or killed runtime.
             backend.delete_worker.signal();
         }
         let overlaps = backend.state_overlap_mounts();
@@ -343,8 +312,7 @@ impl FilesystemBackend {
                             ))
                         })?;
                         for mount in environment.mounts.values() {
-                            // Check before any work reset or launch. Do not move an old
-                            // subvolume or rewrite durable paths behind a recovered process.
+                            // Preserve the live mount's on-disk paths during recovery.
                             if path_exists(&mount.upper) && path_exists(&mount.work) {
                                 ensure_overlay_work(&mount.upper, &mount.work)?;
                             }
@@ -552,8 +520,6 @@ impl FilesystemBackend {
         Ok(())
     }
 
-    /// Immutable lower chain recorded for a snapshot.  New metadata keys by
-    /// absolute mount point; old metadata used `workspace`/`tmp`.
     pub(super) fn snapshot_mount_layers(
         snapshot: &SnapshotRecord,
         environment: &Environment,
@@ -579,7 +545,6 @@ impl FilesystemBackend {
         format!("snapshot-{child}")
     }
 
-    /// Snapshot id that `diff`/`accept` use as the fork base for `child`.
     pub fn base_snapshot_id_for_child(child: &str) -> String {
         format!("snapshot-{child}-base")
     }
@@ -738,8 +703,6 @@ impl Drop for FilesystemBackend {
         }
         self.process.stop_all();
         starts.clear();
-        // Stop the worker, but do not wait: any unfinished trash entries are
-        // reclaimed by the next startup.
         self.delete_worker.shutdown();
     }
 }

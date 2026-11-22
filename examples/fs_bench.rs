@@ -1,4 +1,3 @@
-//! Real filesystem backend benchmark.  Not part of the test suite.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,8 +18,6 @@ struct Case {
     state: PathBuf,
     workspace: PathBuf,
     cleanup: Vec<PathBuf>,
-    /// Per-fork layout threshold override: `0` forces Chain and `usize::MAX`
-    /// forces Flatten.
     flatten_limit: usize,
     isolate_unmanaged: bool,
 }
@@ -81,9 +78,6 @@ fn run() -> Result<(), String> {
             isolate_unmanaged: true,
         },
         Case {
-            // Forced Chain in the same non-overlapping layout as the forced
-            // Flatten case below: state on a separate mount, only the
-            // workspace mount participates in launch isolation.
             name: "reflink-chain-nonoverlap",
             root: project.join(format!("target/fs-bench-{pid}-chain-nonoverlap")),
             state: PathBuf::from(format!("/var/tmp/ascout-fs-bench-chain-state-{pid}")),

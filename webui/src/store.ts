@@ -15,11 +15,6 @@ export type ConnectionState =
   | 'closed'
   | 'error'
 
-/**
- * Where to land inside the Branch detail after clicking a call node.
- * `sequences` are the event sequences of the clicked group; the detail uses
- * them to scroll and highlight, and `actionId` is the anchor when present.
- */
 export interface DetailAnchor {
   kind: 'tool' | 'model'
   actionId: string | null
@@ -79,7 +74,6 @@ function readPanelOpen(): boolean {
     const stored = window.localStorage.getItem('ascout.panel')
     if (stored !== null) return stored !== 'closed'
   } catch {
-    // Storage can be unavailable; fall through to the viewport default.
   }
   return !window.matchMedia('(max-width: 1020px)').matches
 }
@@ -281,7 +275,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       try {
         window.localStorage.setItem('ascout.panel', open ? 'open' : 'closed')
       } catch {
-        // Storage can be unavailable in private browsing; the panel still works.
       }
       set(
         open
@@ -299,7 +292,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       try {
         window.localStorage.setItem('ascout.panel', 'open')
       } catch {
-        // Ignore unavailable storage.
       }
       set({
         selectedBranchId: branchId,

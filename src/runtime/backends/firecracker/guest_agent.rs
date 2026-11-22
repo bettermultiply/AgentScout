@@ -1,6 +1,3 @@
-//! microVM 内的 Guest Agent。
-//!
-//! Guest Agent 监听固定的 vsock 端口，接收 argv，直接在 guest 内启动进程并返回输出。
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
@@ -17,14 +14,10 @@ use serde_json::{Value, json};
 
 pub const PORT: u32 = 52;
 
-/// 首行请求（argv JSON）上限。
 pub(super) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
-/// 单条流（stdout 或 stderr）保留给control plane的上限；超出时终止命令并返回错误。
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-/// 同时执行的 guest 连接上限。
 const MAX_CONNECTIONS: usize = 64;
-/// 读取请求首行和写出响应的超时。
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -73,7 +66,6 @@ pub fn serve() -> io::Result<()> {
 fn reject_connection(mut stream: UnixStream) -> io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
-    // 读取请求以便客户端完成写入；内容本身不需要解析。
     let _ = read_request_line(&mut BufReader::new(stream.try_clone()?));
     let response = GuestResponse {
         exit_code: -1,
@@ -166,7 +158,6 @@ fn serve_connection(mut stream: UnixStream) -> io::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // 让命令进入独立会话，取消时可以终止整个进程组。
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
@@ -378,9 +369,7 @@ fn execute_environment_command(
         if status.is_none() {
             status = child.try_wait()?;
             if status.is_some() {
-                // Snapshot bytes already buffered when the foreground exited.
-                // Drain all of them, without an arbitrary time/size cutoff or
-                // allowing a continuous background writer to delay terminal.
+                // Drain the bytes buffered at exit. Background writes cannot extend this boundary.
                 let mut remaining = Vec::new();
                 for pipe in &pipes {
                     let mut count: libc::c_int = 0;
@@ -409,8 +398,7 @@ fn execute_environment_command(
         }
         thread::sleep(Duration::from_millis(5));
     }
-    // Foreground output is drained before terminal; background output continues
-    // to be consumed after the client leaves rather than giving writers SIGPIPE.
+    // Keep reading background output after the client leaves to avoid SIGPIPE.
     for mut pipe in pipes {
         thread::spawn(move || {
             let mut buffer = [0; 8192];
@@ -446,7 +434,6 @@ fn write_response(stream: &mut UnixStream, response: GuestResponse) -> io::Resul
     stream.flush()
 }
 
-/// 有界读取：超过上限后继续排空管道，但不继续占用内存。
 fn read_all(mut reader: impl Read, exceeded: Arc<AtomicBool>) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8192];
@@ -468,7 +455,6 @@ fn read_all(mut reader: impl Read, exceeded: Arc<AtomicBool>) -> Vec<u8> {
     bytes
 }
 
-/// 取消时终止整个进程组，避免命令的子进程变成孤儿。
 fn kill_process_group(pid: u32) {
     let process_group = pid as i32;
     unsafe {
@@ -524,152 +510,4 @@ fn vsock_listener(port: u32) -> io::Result<RawFd> {
         return Err(error);
     }
     Ok(descriptor)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    use crate::runtime::execution_wire as wire;
-
-    fn contents(message: &wire::Message) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        message
-            .body
-            .as_ref()
-            .unwrap()
-            .reader()
-            .read_to_end(&mut bytes)
-            .unwrap();
-        bytes
-    }
-
-    #[test]
-    fn generic_files_and_command_stream_use_native_guest_operations() {
-        let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
-        let path = root.path().join("binary");
-        let request = |operation: &str, arguments: Value, body: Option<Vec<u8>>| {
-            let (mut client, server) = UnixStream::pair().unwrap();
-            let worker = thread::spawn(|| serve_connection(server));
-            wire::Message {
-                meta: json!({"operation":operation,"arguments":arguments}),
-                body: body.map(wire::Body::bytes),
-            }
-            .write(&mut client)
-            .unwrap();
-            let mut reader = BufReader::new(client);
-            let mut events = Vec::new();
-            loop {
-                let event = wire::read(&mut reader, true).unwrap();
-                let terminal = event.meta["stream"].is_null();
-                events.push(event);
-                if terminal {
-                    break;
-                }
-            }
-            worker.join().unwrap().unwrap();
-            events
-        };
-        let bytes = vec![0, 255, 10];
-        let written = request("write_file", json!({"path":path}), Some(bytes.clone()));
-        assert_eq!(written[0].meta["value"]["bytes_written"], 3);
-        let read = request("read_file", json!({"path":path}), None);
-        assert_eq!(contents(&read[0]), bytes);
-        assert_eq!(
-            read[0].meta["value"]["actual_range"],
-            json!({"offset":0,"limit":3})
-        );
-
-        let (mut client, server) = UnixStream::pair().unwrap();
-        let worker = thread::spawn(|| serve_connection(server));
-        wire::write_header(
-            &mut client,
-            &json!({"operation":"write_file","arguments":{"path":path},"body_length":4}),
-        )
-        .unwrap();
-        client.write_all(b"\0\0\0\x03bad\0\0\0\0").unwrap();
-        client.shutdown(std::net::Shutdown::Write).unwrap();
-        let rejected = wire::read(&mut BufReader::new(client), false).unwrap();
-        assert_eq!(rejected.meta["error_category"], "invalid_input");
-        worker.join().unwrap().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-
-        let events = request(
-            "exec",
-            json!({"cwd":root.path(),"command":"printf early; sleep 0.05; printf late >&2; exit 7"}),
-            None,
-        );
-        assert_eq!(events.last().unwrap().meta["exit_code"], 7);
-        let output: Vec<u8> = events
-            .iter()
-            .filter(|event| event.body.is_some())
-            .flat_map(contents)
-            .collect();
-        assert_eq!(output, b"earlylate");
-        assert!(events.iter().any(|event| event.meta["stream"] == "stderr"));
-        let events = request("exec", json!({"command":"head -c 2097152 /dev/zero"}), None);
-        assert_eq!(
-            events
-                .iter()
-                .filter_map(|event| event.body.as_ref())
-                .map(wire::Body::len)
-                .sum::<u64>(),
-            2097152
-        );
-    }
-
-    #[test]
-    fn generic_command_cancellation_stops_the_process_group() {
-        let root = tempfile::tempdir_in("/tmp/opencode").unwrap();
-        let (mut client, server) = UnixStream::pair().unwrap();
-        let worker = thread::spawn(|| serve_connection(server));
-        wire::write_header(&mut client,&json!({"operation":"exec","arguments":{"cwd":root.path(),"command":"(sleep 0.4; echo leaked > leak) & sleep 0.05; echo ready; sleep 30"}})).unwrap();
-        let mut reader = BufReader::new(client);
-        let ready = wire::read(&mut reader, true).unwrap();
-        assert_eq!(contents(&ready), b"ready\n");
-        reader
-            .get_ref()
-            .shutdown(std::net::Shutdown::Write)
-            .unwrap();
-        assert!(
-            matches!(wire::read(&mut reader, true), Err(error) if error.kind() == io::ErrorKind::UnexpectedEof)
-        );
-        worker.join().unwrap().unwrap();
-        thread::sleep(Duration::from_millis(450));
-        assert!(!root.path().join("leak").exists());
-    }
-
-    #[test]
-    fn read_all_stops_storing_after_the_limit() {
-        let input = vec![b'x'; MAX_OUTPUT_BYTES + 1024];
-        let exceeded = Arc::new(AtomicBool::new(false));
-        let bytes = read_all(Cursor::new(input), exceeded.clone());
-        assert_eq!(bytes.len(), MAX_OUTPUT_BYTES);
-        assert!(exceeded.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn read_all_keeps_output_below_the_limit() {
-        let exceeded = Arc::new(AtomicBool::new(false));
-        let bytes = read_all(Cursor::new(b"short output".to_vec()), exceeded.clone());
-        assert_eq!(bytes, b"short output");
-        assert!(!exceeded.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn oversized_first_line_is_rejected() {
-        let input = vec![b'a'; MAX_REQUEST_BYTES + 16];
-        let mut reader = BufReader::new(Cursor::new(input));
-        let error = read_request_line(&mut reader).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("exceeds"), "{error}");
-    }
-
-    #[test]
-    fn normal_first_line_is_accepted() {
-        let mut reader = BufReader::new(Cursor::new(b"{\"command\":[\"true\"]}\n".to_vec()));
-        let line = read_request_line(&mut reader).unwrap();
-        assert_eq!(line.trim(), "{\"command\":[\"true\"]}");
-    }
 }

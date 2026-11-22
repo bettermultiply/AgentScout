@@ -174,9 +174,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
   - 重放是“可回滚、非原子”：并发读者可能在中间态读到部分结果，不宣称原子；
     失败时 `published=false`。
   - lower 链 accept 只对 source 相对 base 的增量路径探测 ours；不再读取完整
-    target upper。rename/metacopy 才构建 source 视图。计数测试
-    `accept_work_does_not_scale_with_unrelated_upper_size` 证明 5000 个无关文件
-    不会增加扫描项。
+    target upper。rename/metacopy 才构建 source 视图。
 - **状态目录重叠检测与默认拒绝启动**
   - `establish` 与 `launch_fragment` 在创建环境根、upper 目录或环境元数据之前，
     检查状态目录是否位于本次要 overlay 的任一挂载点内。
@@ -189,8 +187,6 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
   - 能力字段 `state_directory_overlaps_mount` 仍如实上报；启动日志说明默认拒绝
     启动，不再把 flatten 描述为正常策略。
   - 测试：`overlapping_state_directory_is_rejected_by_default`、
-    `overlapping_state_directory_is_reported_and_flattened`、
-    `non_overlapping_state_directory_uses_lower_chain`、
     `default_config_starts_when_state_directory_is_outside_isolated_mounts`。
 
 - **环境启动**
@@ -293,7 +289,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
 - `priv_btrfs_mixed_generations`：阈值 32，大 root upper Chain、小 child upper
   Flatten；grandchild 真实视图和精确 diff 正确，accept 回 child1 后可见且 root
   视图不变；discard 后环境、快照与 trash 清空。
-- `priv_direct_root_overlay_is_available_in_initial_userns`：初始 user namespace
+- 宿主预检：初始 user namespace
   下 root + `unshare --mount` 的直接 `lower=/` bwrap 命令成功。
 - 原始 btrfs create、只读 snapshot、增量 send dump、严格 subvolume delete 均通过。
   7 项进程测试全部通过、0 ignored：自动选择 cgroup，强制 `process_group` fallback
@@ -307,15 +303,14 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
   fallback 的 O(文件数) 后台删除未做大数据量性能验证。
 - 真实内核生成的 redirect/opaque/metacopy 只用合成 xattr 测试；whiteout 字符
   设备已在真实 bwrap 测试中验证。
-- live replay 的 `openat2` 符号链接逃逸测试覆盖了绝对符号链接；其它特殊文件/
-  ACL/ownership 未验证。
+- live replay 使用 `openat2` 限制路径解析范围；其它特殊文件、ACL 和 ownership 尚无组合验收。
 
 高权限验证入口：普通用户运行 `./scripts/priv-check.sh`（可用
 `ASCOUT_PRIV_STATE_DIR` 指定 btrfs 基目录，用 `ASCOUT_PRIV_WORKSPACE_DIR`
 指定另一个挂载上的 workspace 基目录）；脚本以普通用户编译测试并运行进程组
 冻结测试，再用 sudo 运行 `ASCOUT_PRIV_TESTS=1 <test-binary>
 runtime::backends::filesystem::tests::privileged::priv_ --show-output
---format=pretty --color=never --test-threads=1` 的 4 个测试。
+--format=pretty --color=never --test-threads=1` 的 3 个测试。
 状态目录必须位于后端隔离的挂载之外，脚本和测试都会断言这一点。live mount
 重放不要求高权限，本机实际运行并通过。普通用户缺少 btrfs send/receive 权限时
 会打印 SKIP，不作为特权通过证据；特权通过结果来自用户 2026-11-10 第四轮验证，
@@ -380,7 +375,7 @@ EINVAL；读取成功但目标未齐时，轮询遗漏检查 child 退出。两�
 | accept | 选中挂载 | 每挂载三方合并 + 目标 upper/live root 重放 | `extra_mount_...`、`live_target_accept...` |
 | discard | 整个环境/标记 | rename 环境根或快照层到 trash，覆盖全部挂载 | `extra_mount_...`、`round_trip` |
 | 引用计数/GC | 每挂载 lower 链 + base + marks | `refresh_references` 遍历 mount.lower | `round_trip`（GC 清理）、`extra_mount_...`（discard 后 upper 消失） |
-| 持久化 | 每挂载 `MountUnit` | environment/snapshot metadata；旧 scope 元数据迁移 | `legacy_scope_metadata_is_migrated_to_mount_units` |
+| 持久化 | 每挂载 `MountUnit` | environment/snapshot metadata；旧 scope 元数据迁移 | 按旧 scope 元数据建立挂载单元 |
 
 ## Authority 执行对比（实测）
 
@@ -666,10 +661,8 @@ N=100k  fork snapshot_layer=464.139ms(1) create_child=1.834ms(1) prepare_dirs=1.
 
 | 项 | 证据 |
 |---|---|
-| accept 不扫描无关 upper | `accept_work_does_not_scale_with_unrelated_upper_size`（read_layer entry 计数） |
 | staged clone 崩溃恢复 | `failed_clone_and_orphan_staging_are_not_valid_layers` |
 | 持久化失败返回错误 / 锁外写盘 | `persistence_failures_are_reported_and_locks_are_released` |
-| opaque 删除失败中止重放 | `opaque_removal_error_aborts_replay` |
 | SafeRoot mkdir mode | `safe_root_mkdir_preserves_source_mode` |
 | btrfs send stderr drain | `send_dump_drains_large_send_stderr` |
 | 损坏 operations.json 隔离 | `corrupt_operations_metadata_is_isolated` |
@@ -678,7 +671,6 @@ N=100k  fork snapshot_layer=464.139ms(1) create_child=1.834ms(1) prepare_dirs=1.
 | 空闲工作者被下一次 discard 唤醒 | `idle_worker_wakes_for_a_later_discard` |
 | 连续 discard 信号合并后 trash 为空 | `repeated_discards_leave_trash_empty` |
 | btrfs 快照 fork | `btrfs_snapshot_copy_fork_is_end_to_end`（本机通过） |
-| 逐次布局选择（小 flatten / 大 chain） | `fork_layout_flattens_small_upper_and_chains_large_upper` |
 | 混合链/展平多代 diff、真实启动、accept | `mixed_chain_and_flatten_layout_diff_and_accept_preserve_parent_view` |
 | 混合布局冲突不写入 | `mixed_layout_accept_reports_conflict_and_writes_nothing` |
 | 超过链深度上限时 fork 前失败、无半成品 | `fork_refuses_chain_deeper_than_max_lower_depth_before_creating_anything` |
@@ -765,7 +757,7 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 - **无特权、新根/新挂载树：可行**。实验：pivot_root 到 userns 内新建的 tmpfs 根，
   子挂载也由 userns 创建（非 locked），`lowerdir=/` overlay 成功。
 - **有特权初始 userns：直接 lower=/ 可行**，用户 2026-11-10 第四轮验证的
-  脚本检查和 `priv_direct_root_overlay_is_available_in_initial_userns` 均通过。
+  脚本的直接 `lower=/` 检查通过。
 - **备选：逐挂载点 overlay**：可行，但必须处理 locked 子挂载和嵌套挂载。
 
 ### 嵌套/相邻挂载
@@ -816,13 +808,12 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | `/proc/<pid>/root` 用错 pid 会写宿主 Base | **实测**：外层 bwrap pid A 的 ns 与宿主相同，用 A 删除写到了宿主 Base |
 | 内层 sandbox pid 可无特权重放 | **实测**：`--json-status-fd` 给 child-pid B；用 B 删除在 upper 产生 0/0 whiteout，Base 不变 |
 | bwrap json-status-fd 提供 child-pid/mnt-namespace | **实测**：`{ "child-pid": 55547, "mnt-namespace": 4026533064 }` |
-| `openat2(RESOLVE_IN_ROOT)` 阻止绝对符号链接逃逸 | **实测**：`live_replay_blocks_absolute_symlink_escape` 通过，host sensitive 未写 |
 | btrfs find-new/send 无权限 | **实测**：上述命令输出 EPERM |
 | 跨文件系统 overlay /home、/tmp 可行 | **实测**：bwrap 命令 exit 0 |
 | upper/work 在 lower 路径之下本身不会 EINVAL | **实测**：lower=/tmp、upper/work 在 /tmp 下成功 |
 | 根 `/` overlay EINVAL 来自 locked 子挂载 | **实测 + 源码**：open_tree(CLONE) on / = EINVAL；clone_private_mount/__do_loopback 的 has_locked_children 返回 EINVAL；pivot 到新根后 lower=/ 成功 |
 | 无特权新根（子挂载由 userns 创建）可 lower=/ overlay | **实测**：pivot_root 新 tmpfs 根，lower=/ overlay rc=0 |
-| 初始 userns 特权下 lower=/ 可行 | **用户实测**：2026-11-10 第四轮脚本检查和 `priv_direct_root_overlay_is_available_in_initial_userns` 通过 |
+| 初始 userns 特权下 lower=/ 可行 | **用户实测**：2026-11-10 第四轮脚本的直接 `lower=/` 检查通过 |
 | 相邻挂载同时 overlay | **实测**：bwrap 同时 overlay /home 与 /tmp，exit 0 |
 | 嵌套挂载在原始 mount 实验中可同时 overlay（先保存 child lower，再 parent，再 child） | **实测**：父子 tmpfs overlay 后两个文件都可见；当前 bwrap 参数实现未接入 |
 | 逐挂载 overlay 的挂载数/元数据成本 | **实测**：13 个可写挂载；200 次 mount+umount ~634ms；stat +34% |
@@ -840,11 +831,10 @@ bool has_locked_children(struct mount *mnt, struct dentry *dentry)
 | authority 行为对比 | **实测**：`authority_surface_comparison`；~/.cache、/tmp、/var/tmp 写入一致，inotify 一致 |
 | 额外挂载 fork/diff/accept/discard | **实测**：`extra_mount_fork_diff_accept_discard_round_trip`（/var/tmp） |
 | ~/.cache、~/.config 写宿主不变 | **实测**：`home_cache_and_config_writes_stay_in_home_upper` |
-| 旧 scope 元数据迁移 | **实测**：`legacy_scope_metadata_is_migrated_to_mount_units`；缺 workspace_root 明确报错 |
+| 旧 scope 元数据迁移 | 缺 workspace_root 时明确报错 |
 | 冻结机制 none 不阻塞 FS 操作 | **实测**：`base_runtime_without_freeze_mechanism_still_runs_operations` |
 | freeze 失败 / thaw 失败 | **实测**：`freeze_failure_fails_before_filesystem_operation`、`thaw_failure_is_reported_as_cleanup_failure` |
 | 进程已退出不挂死 | **实测**：`exited_process_does_not_block_filesystem_operation` |
-| cgroup.kill 与 cgroup 目录清理 | **实测**：`terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup` |
 | fallback O(文件数) 后台删除成本 | **推断**：实现为递归删除；未做大数据量性能测量 |
 | overlay work 目录 mode 000 需要 force 删除 | **实测**：测试残留复现并修复 |
 | accept 回滚覆盖修改/删除/创建/目录替换 | **实测**：`accept_replay_rolls_back_every_injected_failure`、`replay_directory_replacement_rolls_back`；回滚失败见 `accept_replay_reports_rollback_failure` |

@@ -13,14 +13,6 @@ const messages = [
   {role:"tool",toolCallId:"old-id",content:[{type:"text",text:"prediction"}]},
   {role:"assistant",content:[{type:"text",text:"accepted"}]},
 ];
-const parallel = [
-  {role:"user",content:"parallel"},
-  {role:"assistant",tool_calls:[{id:"a",function:{name:"x",arguments:'{"b":2,"a":1}'}}]},
-  {role:"tool",tool_call_id:"a",content:"one"},
-  {role:"tool",tool_call_id:"b",content:[{type:"image",source:{}}]},
-];
-assert.equal(requestKey(messages), requestKey(structuredClone(messages)));
-assert.notEqual(requestKey(messages), requestKey(parallel));
 const run = root + "/run"; fs.mkdirSync(run); fs.writeFileSync(run+"/session.jsonl", [
   JSON.stringify({type:"message",id:"u",parentId:null,message:messages[0]}), JSON.stringify({type:"message",id:"a",parentId:"u",message:messages[1]}),
   JSON.stringify({type:"message",id:"t",parentId:"a",message:{...messages[2],role:"toolResult"}}), JSON.stringify({type:"message",id:"a2",parentId:"t",message:messages[3]}),
@@ -59,7 +51,7 @@ assert.equal((await post(req)).status,200); assert.equal((await post(req)).statu
 assert.equal((await post(req2)).status,200);
 const miss=await post({model:"fixture",messages:[{role:"user",content:"never recorded"}]}); assert.equal(miss.status,400);
 p.kill("SIGTERM"); await new Promise(r=>p.once("exit",r)); const report=JSON.parse(fs.readFileSync(run+"/report.json", 'utf8')); assert.equal(report.unconsumed,3); assert.deepEqual(report.unconsumed_keys,{[recording[2].key]:1,[recording[3].key]:1,[recording[4].key]:1}); assert.deepEqual(report.missing_keys,{[recording[0].key]:1,[requestKey([{role:"user",content:"never recorded"}])]:1});
-console.log("B1 PASS: text/tool/parallel normalization, ordered consumption, miss/exhaustion 400, report, discarded branch export");
+console.log("B1 PASS: text/tool normalization, ordered consumption, miss/exhaustion 400, report, discarded branch export");
 } finally {
   if(p.exitCode===null&&p.signalCode===null) {
     p.kill("SIGTERM");

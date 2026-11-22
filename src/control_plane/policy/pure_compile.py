@@ -1,5 +1,3 @@
-# Trusted compile-only AST lowering. The runtime runner remains byte-identical
-# so previously published executable digests remain valid.
 class Unsupported(Exception):
     pass
 
@@ -140,10 +138,8 @@ class PureCompiler:
                 raise Unsupported()
             seen.add(name)
         argument = self.signature(entry)
-        # A referenced capability has no representation in the evaluator.
         if any(isinstance(n, ast.Name) and n.id == 'capabilities' for n in ast.walk(entry)):
             raise Unsupported()
-        # A comprehension target is scoped to that expression in Python.
         names = {argument, 'policy_config'} | {
             n.targets[0].id for n in ast.walk(entry) if isinstance(n, ast.Assign)
             and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)

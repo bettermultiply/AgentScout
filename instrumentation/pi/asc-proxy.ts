@@ -1,4 +1,3 @@
-/** ASC-Proxy owns the separate control and backend-neutral execution channels. */
 import {connect} from 'node:net';
 import {executionMessages, operationBody, writeExecution} from './execution-wire.ts';
 type Access = {transport:string;address:string;environment_id:string};
@@ -61,8 +60,7 @@ export class AscProxy {
             parts = body.parts;
         }
         const socket = connect(access.address);
-        // The async iterator also receives socket errors. Keep a listener on
-        // during setup/teardown, when the iterator may have released its own.
+        // Keep socket errors handled even when the iterator is inactive.
         socket.on('error', () => {});
         try {
             await writeExecution(socket, request, parts);
@@ -141,8 +139,7 @@ export class AscProxy {
     }
     private async cancelEnvironment(access:Access){
         const environment=access.environment_id;
-        // Wait for admission before sending per-operation cancellation. The
-        // Environment drain also covers interrupted cancellation connections.
+        // Cancellation needs admission first. Environment drain covers interrupted cancels.
         await Promise.allSettled([...this.active].map(async([identity,active])=>{
             const [owner,operation]=JSON.parse(identity);
             if(owner===environment){

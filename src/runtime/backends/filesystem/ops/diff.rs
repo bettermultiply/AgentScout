@@ -1,11 +1,7 @@
-//! diff 数据面操作。
 
 use super::*;
 
 impl FilesystemBackend {
-    /// Compare the branch's own delta with the speculation snapshot it is
-    /// based on.  Only delta layers after `base` plus the branch upper are
-    /// scanned; no file content is read.
     pub fn diff(
         &self,
         base: &str,
@@ -22,19 +18,13 @@ impl FilesystemBackend {
         let mounts = source_environment.selected_mounts(&scopes)?;
         let mut changes = Vec::new();
         for mount in &mounts {
-            // Chain layout lists the base snapshot layer in the mount's lower
-            // chain; Flatten layout copies it into the upper instead, so the
-            // whole upper is compared with the base layer below.
             let in_lower = mount.lower.iter().any(|layer| layer == &base_record.path);
             let mount_changes = if in_lower {
                 let (delta, redirects) =
                     self.delta_since(&source_environment, mount, &base_record.path)?;
                 changes_from_delta(&delta, &redirects)
             } else if self.mechanism == FilesystemMechanism::Overlay {
-                // A mark is an independent copy of the upper, not a layer in
-                // the live lower chain.  Compare the branch's own upper with
-                // that copy; cost is O(upper entries), never the lineage.
-                // A missing base layer means the base upper was empty.
+                // A mark is a detached upper copy, so diff cost depends only on upper entries.
                 let current = read_layer(&mount.upper)?;
                 let mark = read_layer_if_exists(&mount.layer_upper(&base_record.path))?;
                 changes_from_upper_copy(&current, &mark)
@@ -43,8 +33,6 @@ impl FilesystemBackend {
                     self.btrfs_delta(&source_environment, mount, &base_record.path)?;
                 raw
             } else {
-                // The base upper was empty and therefore has no layer; every
-                // current entry is a change.
                 let current = read_layer(&mount.upper)?;
                 changes_from_upper_copy(&current, &View::new())
             };

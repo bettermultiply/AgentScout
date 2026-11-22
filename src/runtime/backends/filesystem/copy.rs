@@ -1,4 +1,3 @@
-//! reflink、文件/upper 复制与时间戳/xattr 保留。
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -24,8 +23,7 @@ pub(crate) fn set_clone_failure_after(entries: Option<usize>) {
     CLONE_ENTRIES.with(|value| value.set(0));
 }
 
-/// Tests inject clone failures through thread-local counters, so cloning must
-/// stay on the caller's thread while an injection is armed.
+/// Clone on the caller's thread while thread-local failure injection is armed.
 pub(crate) fn clone_failure_requires_serial_execution() -> bool {
     #[cfg(test)]
     {
@@ -48,9 +46,7 @@ pub(crate) fn staging_path(target: &Path) -> PathBuf {
         .join(format!(".tmp-{name}-{}", now_nanos()))
 }
 
-/// Atomically publish a fully-written staging tree.  A crash before this
-/// rename leaves only a `.tmp-*` directory, which is never referenced by
-/// metadata and is removed on the next backend start.
+/// A crash before rename leaves an unreferenced staging tree for startup cleanup.
 pub(crate) fn finalize_staging(staging: &Path, target: &Path) -> Result<(), BackendError> {
     if path_exists(target) {
         remove_directory_force(target)?;
@@ -87,9 +83,6 @@ pub(crate) fn reflink_file(source: &Path, target: &Path) -> std::io::Result<()> 
     }
 }
 
-/// True when an upper tree has no entries.  `read_dir` only fetches the first
-/// directory entry, so this is O(1) in the number of files.  The overlay
-/// `work` directory is a sibling of `upper`, never a child.
 pub(crate) fn upper_is_empty(path: &Path) -> bool {
     match fs::read_dir(path) {
         Ok(mut entries) => entries.next().is_none(),
@@ -98,9 +91,6 @@ pub(crate) fn upper_is_empty(path: &Path) -> bool {
     }
 }
 
-/// Count upper entries recursively, stopping at `limit`.  Cost is
-/// O(min(entries, limit)); directories count as entries.  Symlinks are not
-/// followed.
 pub(crate) fn upper_entry_count(path: &Path, limit: usize) -> usize {
     let mut count = 0;
     let mut pending = vec![path.to_path_buf()];
@@ -126,8 +116,7 @@ pub(crate) fn upper_entry_count(path: &Path, limit: usize) -> usize {
     count
 }
 
-/// Clone only one upper directory.  Preserves overlay markers, whiteouts,
-/// modes, symlinks and mtimes.  Never uses hard links.
+/// Preserve overlay markers, whiteouts, modes, symlinks and mtimes without hard links.
 pub(crate) fn clone_upper(
     source: &Path,
     target: &Path,
@@ -261,8 +250,7 @@ pub(crate) fn set_times(path: &Path, metadata: &fs::Metadata) -> Result<(), Back
     if result == 0 {
         Ok(())
     } else {
-        // Timestamp preservation is best-effort on filesystems that reject it;
-        // semantic content and modes are already copied.
+        // Some filesystems reject timestamp writes. Keep them best-effort.
         Ok(())
     }
 }
@@ -277,6 +265,5 @@ pub(crate) fn copy_file(source: &Path, target: &Path) -> Result<(), BackendError
         .open(target)
         .map_err(|value| BackendError::new(format!("open target {}: {value}", target.display())))?;
     std::io::copy(&mut input, &mut output).map_err(error)?;
-    // The save boundary synchronizes the published generation.
     Ok(())
 }

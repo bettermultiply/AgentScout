@@ -1,5 +1,3 @@
-// Interpreter for the compile probe's JSON instruction tree. No generated code
-// is executed. Unsupported value ranges are evaluated by the sandbox instead.
 export type PureDecision = {
     readonly program: { readonly argument: string; readonly body: readonly unknown[] };
     readonly policy_config: unknown;

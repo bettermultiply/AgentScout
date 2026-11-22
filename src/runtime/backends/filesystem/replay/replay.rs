@@ -1,4 +1,3 @@
-//! 将 delta 重放到目标 upper 或 live mount，并回滚已创建项。
 
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -23,8 +22,6 @@ struct JournalEntry {
     backup: Option<PathBuf>,
 }
 
-/// Operation journal for accept replay.  It records the target-upper state
-/// before each overwrite/delete and can reverse every recorded operation.
 pub(crate) struct ReplayJournal {
     root: PathBuf,
     entries: Vec<JournalEntry>,

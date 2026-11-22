@@ -1,4 +1,3 @@
-//! Session startup and sequential control coordination, independent of presentation and transport.
 use super::*;
 use super::{execution::runtime_call, recovery::Recovery, task::Task};
 use crate::control_plane::gateway::ui::Request;
@@ -12,7 +11,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Restore the saved execution or create its root control context before assembly.
 pub fn prepare(run_dir: &Path, resume: bool, workspace: Option<&Path>) -> io::Result<(SpeculativeTree, Option<Resume>)> {
     if resume {
         let (tree, saved) = crate::control_plane::recovery::load(run_dir)?;
@@ -28,14 +26,12 @@ pub fn prepare(run_dir: &Path, resume: bool, workspace: Option<&Path>) -> io::Re
     }
 }
 
-/// Product options after applying the saved launch configuration, if any.
 pub struct AgentSettings {
     pub model: Option<String>,
     pub models: Option<PathBuf>,
     pub thinking: Option<String>,
 }
 
-/// The single Tree and its bindings before admitting the Runtime and Agent.
 pub struct Prepared {
     pub(super) run_dir: PathBuf,
     pub(super) tree: SpeculativeTree,
@@ -74,7 +70,6 @@ impl Prepared {
         {
             return Err("Saved Policy exists; refusing to overwrite run data".into());
         }
-        // Establish task control state before starting its execution infrastructure.
         let (mut tree, saved) = prepare(&run_dir, resume, workspace.as_deref())?;
         let recovery_generation = match &saved {
             Some(recovery::Resume::Paused(path)) => Some(path.as_path()),
@@ -119,8 +114,7 @@ impl Prepared {
                 .ok_or("Saved Policy artifact missing; supply --policy <name> explicitly")?;
             engine.compile(path)?
         };
-        // Policy references a Runtime configuration, not a saved Runtime. Preserve
-        // the original cwd resolution even when the artifact lives inside the run.
+        // Preserve the configuration's cwd-relative paths when saving inside the run.
         let config_path = runtime_override
             .or_else(|| {
                 if resume {
@@ -146,8 +140,7 @@ impl Prepared {
             format!("{:x}", Sha256::digest(bytes))
         } else {
             policy.save(&artifact_path)?;
-            // Hash the exact deterministic bytes published by save, not a second
-            // read of a file another process could have changed in the meantime.
+            // Hash the bytes written by save so a concurrent replacement cannot change the digest.
             format!("{:x}", Sha256::digest(serde_json::to_vec_pretty(&policy)?))
         };
         Ok(Self {
@@ -247,8 +240,6 @@ impl Prepared {
     }
 }
 
-/// Establish/load Runtime state and ask Runtime to host the configured Agent.
-/// The returned command is completed by `connected` after Agent connection acceptance.
 pub fn start(
     tree: &mut SpeculativeTree,
     runtime: &dyn Runtime,
@@ -368,7 +359,6 @@ pub fn start(
     Ok(command)
 }
 
-/// Admit the connected Agent and deliver local Policy before root startup/load.
 pub fn connected(
     tree: &mut SpeculativeTree,
     policy: &CompiledPolicy,
@@ -417,7 +407,6 @@ pub fn connected(
     ])
 }
 
-/// Only coordination bookkeeping lives here; all speculative domain state remains in Tree.
 pub struct Session {
     recovery: Recovery,
     lifecycle: Task,
@@ -617,8 +606,7 @@ impl Session {
         actions.operations.extend(progress.operations);
         actions.records.extend(progress.records);
         actions.commands.extend(self.lifecycle.progress(tree)?);
-        // Never switch beneath in-flight work or a pending Promote. Descendants
-        // retain their own model; new sessions inherit their actual parent's.
+        // Existing descendants keep their models. New sessions inherit from their own parent.
         let idle = (!tree.recovering() || self.recovery.loaded)
             && !self.model_changing
             && tree.authority_ready()
@@ -655,8 +643,6 @@ impl Session {
         })
     }
 
-    /// Coordinate persistence/materialization after asynchronous work is dispatched.
-    /// The caller only sends commands, wakes its event loop and closes transport.
     pub fn settle(
         &mut self,
         tree: &mut SpeculativeTree,

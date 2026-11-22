@@ -49,7 +49,7 @@ speculative-first 在已有 Proposal、launch 已决定且没有在飞 launch �
 
 Branch cancellation 与 Execute 使用同一 admission 锁：开始取消时推进 execution generation，关闭新 admission，等待已有操作终态后 drain 写者；成功后开放新 generation，旧 generation 不能复活。drain 失败仍关闭执行，但允许重试 drain，不再永久卡死。确定性回归覆盖活跃操作取消、清理期间新增执行拒绝、drain 失败／重试、延迟旧请求拒绝及存活 authority 的新 task 执行；1299 次确认回归仍通过。
 
-补充检查：`cargo test --bins --test filesystem_backend_identity --test ledger_projection --test policy --test policy_provider -- --test-threads=1` 9/9 通过；ASC-Proxy 的独立 `tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --skipLibCheck ../pi/node_modules/@types/node/index.d.ts instrumentation/pi/asc-proxy.ts` 通过（使用 `../pi/node_modules/.bin/tsc`）。`git diff --check` 通过。全仓格式最终记录 `/tmp/opencode/instrumentation-fmt-final.log`，剩余 24 个文件均已出现在本轮格式化前记录中。ASC-Proxy 的个别取消失败不会跳过 branch-wide drain，新增 socket 回归核对该流程。
+补充检查：当时的 Rust 二进制和集成测试 9/9 通过；ASC-Proxy 的独立 `tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --skipLibCheck ../pi/node_modules/@types/node/index.d.ts instrumentation/pi/asc-proxy.ts` 通过（使用 `../pi/node_modules/.bin/tsc`）。`git diff --check` 通过。全仓格式最终记录 `/tmp/opencode/instrumentation-fmt-final.log`，剩余 24 个文件均已出现在本轮格式化前记录中。ASC-Proxy 的个别取消失败不会跳过 branch-wide drain，新增 socket 回归核对该流程。
 
 `cargo check --all-targets`、`cargo test --lib`（178 项）、`node --test tests/pi*.mjs`（32 项）、`tests/predictor-fact-e2e.mjs`（2 项，正常单步及 Promote 后五步）、相邻 Pi 原生边界与摘要验证（20 项）、Pi `npm run check` 通过。端到端仅使用 loopback fake SSE；证据目录为 `/tmp/opencode/predictor-fact-e2e-CAb2ux` 和 `/tmp/opencode/predictor-fact-e2e-FtNgKj`。本轮无真实模型请求。Firecracker 实机和不受本机支持的隔离 backend 未做端到端验收，不由库测试通过推定全部 backend 已验证。
 
@@ -116,7 +116,7 @@ Branch cancellation 与 Execute 使用同一 admission 锁：开始取消时推�
 
 `SpeculativeTree.ui_prompts` 按 Branch 保存提示，候选内容不进入观察事件。`change_authority` 在确认 Promote 后发布该 Branch 的挂起提示，同时取消换出权威的未答提示：提示已经展示过，但换出后任何回答都会被拒绝，继续显示只会留下无法操作的控件。`change_status` 进入丢弃／清理、interrupt、shutdown、失败及释放时关闭提示并排队取消命令。未知 Branch 或重复 `prompt_id` 也回一条取消命令，不把 Agent 的提示错误升级为连接失败。执行循环先发送这些取消，再发送原有生命周期命令。WebUI 仍通过原有 SSE 读取 `ui_prompt_requested/ui_prompt_resolved/ui_notification/commands_listed`，无第二条推送通道。
 
-本轮验证：先用 `tests/pi-interaction.mjs` 稳定复现回答后 Promise 不完成，再移除外层提前 `pending.delete`，由内部 finish 统一删除并 resolve；回答、明确取消、分支取消、AbortSignal 与无人回答保持等待均通过。实际 TUI 输入循环的手工字节回归覆盖 confirm/select/input/editor、中文退格、多行提交及 Esc 取消，不把答案当聊天。控制树 13 项相关测试通过，含候选提示挂起→换权威发布→回答、迟到／错类型拒绝、换权威取消与缓存查询。`tests/pi*.mjs` 全部 32 项通过；SDK double 的 session_start 先等待回答，再完成资源加载，断言清单读取一次、重复请求只回缓存。WebUI 手工事件核对换权威保留清单、关闭旧提示、重连折叠恢复缓存。`cargo check --all-targets`、WebUI typecheck/build、`git diff --check` 通过；构建保留现有大包体提示。未调用真实模型、未执行特权环境测试，也未完成真实终端／浏览器／真实扩展的人工全链路验收。
+本轮验证：先用手造交互事件稳定复现回答后 Promise 不完成，再移除外层提前 `pending.delete`，由内部 finish 统一删除并 resolve；回答、明确取消、分支取消、AbortSignal 与无人回答保持等待均通过。实际 TUI 输入循环的手工字节回归覆盖 confirm/select/input/editor、中文退格、多行提交及 Esc 取消，不把答案当聊天。控制树 13 项相关测试通过，含候选提示挂起→换权威发布→回答、迟到／错类型拒绝、换权威取消与缓存查询。`tests/pi*.mjs` 全部 32 项通过；SDK double 的 session_start 先等待回答，再完成资源加载，断言清单读取一次、重复请求只回缓存。WebUI 手工事件核对换权威保留清单、关闭旧提示、重连折叠恢复缓存。`cargo check --all-targets`、WebUI typecheck/build、`git diff --check` 通过；构建保留现有大包体提示。未调用真实模型、未执行特权环境测试，也未完成真实终端／浏览器／真实扩展的人工全链路验收。
 
 整轮中断中止权威执行、丢弃候选，并把仍在请求阶段的工具操作标记为失败。文件、shell 和 Runtime 工具通过同一执行协议转发取消，只有 backend 终态和遗留写者清理确认后才结束 Branch 取消；本地 Promise 结束不作为 backend 停止证据。
 

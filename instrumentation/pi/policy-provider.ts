@@ -1,4 +1,3 @@
-// Trusted, one-request host process owned by ModelProviderProcess.
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { loadModelRuntime } from './model-runtime.ts';

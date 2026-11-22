@@ -1,9 +1,3 @@
-//! Runtime 后端接口和一次后端调用的内部结果。
-//!
-//! `Backend` 是 Runtime Adapter 使用的最小执行接口。它不假设后端是
-//! NLE、虚拟机、容器还是本地进程；一个 Runtime 可以把多个实现按明确的
-//! 顺序组合起来。旧的单 Backend 实现仍然可以只实现原来的方法，新的
-//! Runtime 编排通过带上下文的方法调用它们。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -15,25 +9,17 @@ use crate::protocol::contract::{
 };
 use crate::runtime::launch_plan::LaunchFragment;
 
-/// 一次 Runtime 请求传给 Backend 的逻辑上下文。
-///
-/// Backend 只接收 Environment 和操作上下文，不接收或推导 control plane 的 Branch 身份。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackendContext {
-    /// Stable identity for an operation. Empty for legacy environment calls.
     pub operation_id: String,
     /// Original product tool call when one tool performs multiple operations.
     pub tool_call_id: Option<String>,
-    /// Fences delayed filesystem results. Zero is the legacy value.
     pub generation: u64,
     pub task_id: Option<String>,
     pub environment_id: String,
     pub parent_environment_id: Option<String>,
-    /// Filesystem-only optional access point to a target environment's merged
-    /// mount view, for example `/proc/<pid>/root`.  Other Backends ignore it.
     pub target_mount_pid: Option<u32>,
-    /// Mount namespace inode recorded by Processes for the target pid.
-    /// FilesystemBackend validates it before replaying into `/proc/<pid>/root`.
+    /// Match the recorded mount namespace before replay into `/proc/<pid>/root`.
     pub target_mount_namespace: Option<u64>,
 }
 
@@ -50,7 +36,6 @@ impl BackendContext {
 
 type OutputObserver = dyn Fn(super::execution_wire::Message) -> std::io::Result<()> + Send + Sync;
 
-/// Adapter 用它通知后端当前操作应当停止。
 #[derive(Default)]
 pub struct CancelHandle {
     cancelled: AtomicBool,
@@ -76,7 +61,6 @@ impl CancelHandle {
         }
         Ok(())
     }
-    /// 每个操作开始前重置。
     pub fn reset(&self) {
         self.cancelled.store(false, Ordering::SeqCst);
     }
@@ -97,13 +81,9 @@ pub struct BackendError {
     pub message: String,
     pub cancelled: bool,
     pub error_category: String,
-    /// 已经完成的有序 Backend 标识。
     pub completed: Vec<String>,
-    /// 因本次错误没有执行的 Backend 标识。
     pub remaining: Vec<String>,
-    /// 回滚或清理时仍未完成的 Backend 标识。
     pub cleanup_failures: Vec<String>,
-    /// 失败前已经产生、但不能丢弃的 Backend 输出。
     pub outputs: Vec<BackendOutput>,
 }
 
@@ -181,11 +161,9 @@ impl std::fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
-/// 一个 Backend 调用产生的所有可见输出。
 #[derive(Debug, Clone, Default)]
 pub struct BackendExecution {
     pub outputs: Vec<BackendOutput>,
-    /// 由 Backend Policy 明确选择的旧单值输出来源。
     pub primary_backend: Option<String>,
 }
 
@@ -214,15 +192,11 @@ impl BackendExecution {
     }
 }
 
-/// 机制侧的能力。Adapter 只通过这个接口触及环境。
 pub trait Backend: Send + Sync {
-    /// Stop residual tool writers, including descendants of completed calls.
     fn cancel_tool_writers(&self, _context: &BackendContext) -> Result<(), BackendError> {
         Ok(())
     }
 
-    /// Runtime creates the identity before composing its internal Backend resources.
-    /// The caller supplies operation metadata only; no Branch identity is accepted.
     fn create_environment(&self, context: &BackendContext) -> Result<String, BackendError> {
         let environment_id = super::identity::allocate(self);
         let context = BackendContext {
@@ -241,8 +215,6 @@ pub trait Backend: Send + Sync {
     fn create_child_environment(&self, context: &BackendContext) -> Result<String, BackendError> {
         let environment_id = super::identity::allocate(self);
         let parent = &context.environment_id;
-        // Existing Backend branching methods receive the parent as their context;
-        // their composition layer derives child-local contexts internally.
         if let Err(mut error) = self.branch_with_context(context, parent, &environment_id) {
             if self.state(&environment_id).is_some() {
                 error.created_environment_id = Some(environment_id);
@@ -251,8 +223,7 @@ pub trait Backend: Send + Sync {
         }
         Ok(environment_id)
     }
-    /// Called only after task writers and candidate work have drained. Non-FS
-    /// backends already own their authoritative state and need no host copy.
+    /// 等所有写者与候选工作结束后调用。非文件系统 Backend 无需复制到宿主。
     fn materialize(&self, _context: &BackendContext) -> Result<FilesystemResult, BackendError> {
         Ok(FilesystemResult::default())
     }
@@ -267,14 +238,10 @@ pub trait Backend: Send + Sync {
         result.conflicts.extend(publication.conflicts);
         Ok(result)
     }
-    /// 配置中用于 Policy 路由和结果关联的稳定标识。
     fn backend_id(&self) -> &str {
         "backend"
     }
 
-    /// 这个 Runtime 实际由哪些 Backend 组成。单 Backend 返回它自己；
-    /// 组合 Runtime 返回底层连接的有序标识。握手上报用它，control plane 据此
-    /// 知道身份，但 Registry 与能力验证不在这里展开。
     fn backend_ids(&self) -> Vec<String> {
         vec![self.backend_id().to_string()]
     }
@@ -306,7 +273,6 @@ pub trait Backend: Send + Sync {
             .map(|output| BackendExecution::single(self.backend_id(), output))
     }
 
-    /// Generic environment operations; product tool definitions stay in Integration.
     fn environment_operation(
         &self,
         _context: &BackendContext,
@@ -361,9 +327,6 @@ pub trait Backend: Send + Sync {
             .map(|output| BackendExecution::single(self.backend_id(), output))
     }
 
-    /// Filesystem version operations are deliberately a typed seam. The
-    /// default is explicit rejection so an unconfigured Backend cannot claim
-    /// that an Agent promotion also published files.
     fn filesystem_operation(
         &self,
         _context: &BackendContext,
@@ -387,19 +350,16 @@ pub trait Backend: Send + Sync {
         self.branch(parent, child)
     }
 
-    /// Shared state needs no copy. Backends must explicitly declare this.
     fn acceptance_state_is_shared(&self) -> bool {
         false
     }
 
-    /// Confirm completion of writers that can outlive an execution request.
     fn drain_acceptance(&self, _source: &str) -> Result<(), BackendError> {
         Err(BackendError::new(
             "backend cannot confirm acceptance writer drain",
         ))
     }
 
-    /// Transfer isolated state after the target is paused and source writers drain.
     fn accept_state(
         &self,
         _target: &BackendContext,
@@ -410,7 +370,6 @@ pub trait Backend: Send + Sync {
         Err(BackendError::new("backend does not support state transfer"))
     }
 
-    /// 把环境提升为权威环境。默认 no-op，供没有环境侧 promote 语义的 Runtime 继承。
     fn promote(&self, _environment_id: &str) -> Result<(), BackendError> {
         Ok(())
     }
@@ -461,8 +420,7 @@ pub trait Backend: Send + Sync {
         ))
     }
 
-    /// Save after earlier components. Backends may quiesce their execution
-    /// across the preceding saves as well as their own capture.
+    /// Runs after earlier saves. Quiescence may cover more than this backend's capture.
     fn save_runtime_after(
         &self,
         path: &std::path::Path,
@@ -478,11 +436,6 @@ pub trait Backend: Send + Sync {
         ))
     }
 
-    /// Adapter 退出时回收所有仍然存在的环境。
-    ///
-    /// 默认实现逐个 terminate + cleanup，并且单个失败不会跳过其余环境；
-    /// 失败汇总在返回错误中。具体 Backend 可以覆盖，但不应改变“尽力清理
-    /// 所有环境”的语义。
     fn shutdown(&self) -> Result<(), BackendError> {
         let mut failures = Vec::new();
         for environment_id in self.environments() {
@@ -503,8 +456,6 @@ pub trait Backend: Send + Sync {
         }
     }
 
-    /// Collect environment variables for the run host. Mounts remain owned by
-    /// the backend that starts environment execution.
     fn launch_fragment(
         &self,
         _context: &BackendContext,
@@ -513,9 +464,8 @@ pub trait Backend: Send + Sync {
         Ok(LaunchFragment::default())
     }
 
-    /// Start execution for an existing Environment, independently of the run host.
-    /// A new operation may retry after partial startup, so an already running
-    /// resource for this Environment must be reused.
+    /// Start the Environment's execution separately from the run host.
+    /// A retry must reuse any resource already started for this Environment.
     fn start_environment_execution(
         &self,
         _context: &BackendContext,
@@ -524,13 +474,10 @@ pub trait Backend: Send + Sync {
         Ok(())
     }
 
-    /// Release live execution resources while retaining saved environment state.
     fn stop_environment_execution(&self) -> Result<(), BackendError> {
         Ok(())
     }
 
-    // A backend can prepare its execution before a preceding lifecycle step,
-    // then publish its own transition once the preceding step succeeds.
     fn suspend_after(
         &self,
         context: &BackendContext,

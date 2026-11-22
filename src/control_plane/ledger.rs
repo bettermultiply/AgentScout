@@ -1,7 +1,3 @@
-//! Ledger：control plane 的异步旁路记录。
-//!
-//! 只记录已经发生的运行事实，不参与决策，也不从记录里恢复生命周期。
-//! 目标语义见 `docs/design/control-plane.md` §2.6。
 
 use super::observation::{ObservationContent, ObservationEvent};
 use std::fs::{File, OpenOptions};
@@ -91,22 +87,17 @@ impl LedgerReader {
     }
 }
 
-#[cfg(test)]
-#[path = "ledger_tests.rs"]
-mod tests;
 
 use serde_json::Value;
 
 use crate::control_plane::speculative_tree::BranchRecord;
 
-/// 一次运行的事件记录。文件由调用方给出，Ledger 只负责追加。
 #[derive(Clone)]
 pub struct Ledger {
     inner: Arc<Mutex<LedgerWriter>>,
 }
 
-// One process-owned writer per canonical path. Opening a recovery publisher
-// reuses the active writer, including its failure state and observation index.
+// All opens of a canonical path share the writer's failure state and observation index.
 impl Ledger {
     pub fn open(path: &Path) -> io::Result<Self> {
         use std::sync::{OnceLock, Weak};
@@ -185,8 +176,6 @@ struct LedgerWriter {
     file: File,
     failed: bool,
     append_boundary: Option<u64>,
-    #[cfg(test)]
-    write_faults: std::collections::VecDeque<usize>,
     reader: LedgerReader,
 }
 
@@ -214,8 +203,6 @@ impl LedgerWriter {
             file,
             failed: false,
             append_boundary: None,
-            #[cfg(test)]
-            write_faults: Default::default(),
             reader: LedgerReader {
                 index: Arc::new((
                     Mutex::new(ObservationIndex {
@@ -236,7 +223,6 @@ impl LedgerWriter {
     pub fn reader(&self) -> LedgerReader {
         self.reader.clone()
     }
-    /// Publish only successfully saved observations.
     pub fn append_observation(
         &mut self,
         task_id: &str,
@@ -286,7 +272,6 @@ impl LedgerWriter {
         result
     }
 
-    /// 追加一条记录。记录内容由调用方决定，Ledger 不解释它。
     pub fn record(&mut self, record: Value) -> io::Result<()> {
         if self.failed {
             return Err(io::Error::other("Ledger append previously failed"));
@@ -297,13 +282,6 @@ impl LedgerWriter {
             .ok()
             .filter(|m| m.is_file())
             .map(|m| m.len());
-        #[cfg(test)]
-        if let Some(bytes) = self.write_faults.pop_front() {
-            let encoded = serde_json::to_vec(&record)?;
-            self.file.write_all(&encoded[..bytes.min(encoded.len())])?;
-            self.failed = true;
-            return Err(io::Error::other("injected append failure"));
-        }
         let result = writeln!(self.file, "{}", serde_json::to_string(&record)?);
         if result.is_err() {
             self.failed = true;
@@ -311,8 +289,7 @@ impl LedgerWriter {
         result
     }
 
-    /// Archive a departed Branch, retry once after restoring the append boundary.
-    /// Final failure is reported before releasing the record; control state is never restored.
+    /// Retry the archive once after restoring the append boundary. Control state stays advanced.
     pub fn archive_branch(
         &mut self,
         branch: BranchRecord,

@@ -1,4 +1,3 @@
-//! Run ordering, Runtime result interpretation, and final environment cleanup.
 use super::session::{self, Prepared, Session};
 use super::{ControlActions, ControlResult, SpeculationCoordinator};
 use super::{Operation, Runtime, RuntimeCapabilities, RuntimeExecutionState, SpeculativeTree};
@@ -102,8 +101,6 @@ pub enum Event {
     Timer,
 }
 
-/// Display data forwarded in execution order. The receiver only updates its
-/// disposable cache; the Coordinator publishes the corresponding observation.
 pub enum PresentationUpdate<'a> {
     Fork {
         parent: &'a str,
@@ -152,8 +149,6 @@ pub fn ui_connection(projection: UiProjection, events: mpsc::Sender<Event>) -> u
     })
 }
 
-/// Start the Agent, run its session and finish even when connection or host setup fails.
-/// The host starts its presentation after admission and can scope resources to the event loop.
 pub fn execute<Guard>(
     prepared: Prepared,
     ledger: Ledger,
@@ -392,7 +387,6 @@ impl<'a> Execution<'a> {
             );
             return;
         }
-        // Only the matching ActionStarted establishes the tool name and start time.
         let content = match message {
             AgentMessage::ActionStarted {
                 branch_id,

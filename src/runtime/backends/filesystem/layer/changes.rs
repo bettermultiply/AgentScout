@@ -1,4 +1,3 @@
-//! Change 列表生成与挂载点路径前缀。
 
 use std::path::Path;
 

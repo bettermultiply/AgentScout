@@ -1,4 +1,3 @@
-//! `impl Backend for FilesystemBackend`。
 
 use super::*;
 
@@ -26,9 +25,7 @@ impl FilesystemBackend {
             candidate.state = to;
             (candidate, previous)
         };
-        // Persist before publishing the in-memory transition.  The Adapter
-        // serializes operations per environment; if a direct backend caller
-        // races, restore the old metadata and fail instead of lying.
+        // Persist first. If a direct caller races, restore the old metadata.
         self.persist_environment(&candidate)?;
         let mut state = self.environment()?;
         let current = state
@@ -437,7 +434,6 @@ impl Backend for FilesystemBackend {
     ) -> Result<(), BackendError> {
         let id = &context.environment_id;
         let mut launches = self.launches.lock().map_err(error)?;
-        // Failed starts have already attempted cleanup. Still stop any residual process.
         let _ = self.wait_for_holder(id);
         let stopped = self.process.stop(id);
         let preceding = previous();

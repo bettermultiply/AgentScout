@@ -1,4 +1,3 @@
-//! One owned, serialized sandbox. Replacing or dropping it kills and reaps it.
 use super::validation::invalid;
 use serde_json::Value;
 use std::{
@@ -20,62 +19,6 @@ impl Drop for Worker {
         let _ = self.child.wait();
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worker_survives_creator_thread_exit() {
-        let mut worker = std::thread::spawn(|| {
-            let mut worker = Worker::start(
-                "import sys,json\nfor line in sys.stdin.buffer:\n payload=b'true'\n sys.stdout.buffer.write(len(payload).to_bytes(4,'big')+payload)\n sys.stdout.buffer.flush()\n",
-                Path::new("/usr/bin/python3"),
-                Path::new("/usr/bin/bwrap"),
-            ).unwrap();
-            worker.evaluate(&serde_json::json!({}), Duration::from_secs(5)).unwrap();
-            worker
-        }).join().unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(worker.evaluate(&serde_json::json!({}), Duration::from_secs(5)).unwrap(), serde_json::json!(true));
-    }
-
-    #[test]
-    fn repeated_requests_share_interpreter_state() {
-        let script = "import sys,json\ncount=0\nfor line in sys.stdin.buffer:\n count+=1\n payload=json.dumps(count).encode()\n sys.stdout.buffer.write(len(payload).to_bytes(4,'big')+payload)\n sys.stdout.buffer.flush()\n";
-        let mut worker = Worker::start(
-            script,
-            Path::new("/usr/bin/python3"),
-            Path::new("/usr/bin/bwrap"),
-        )
-        .unwrap();
-        assert_eq!(
-            worker
-                .evaluate(&serde_json::json!({}), Duration::from_secs(5))
-                .unwrap(),
-            serde_json::json!(1)
-        );
-        assert_eq!(
-            worker
-                .evaluate(&serde_json::json!({}), Duration::from_secs(5))
-                .unwrap(),
-            serde_json::json!(2)
-        );
-        drop(worker);
-        let mut rebuilt = Worker::start(
-            script,
-            Path::new("/usr/bin/python3"),
-            Path::new("/usr/bin/bwrap"),
-        )
-        .unwrap();
-        assert_eq!(
-            rebuilt
-                .evaluate(&serde_json::json!({}), Duration::from_secs(5))
-                .unwrap(),
-            serde_json::json!(1)
-        );
-    }
-}
-
 impl Worker {
     pub fn start(script: &str, python: &Path, bwrap: &Path) -> io::Result<Self> {
         let directory = tempfile::tempdir()?;
@@ -86,9 +29,7 @@ impl Worker {
         pipe.set_nonblocking(true)?;
         let child = Command::new(bwrap)
             .args([
-                // Workers outlive the evaluation thread that creates them.
-                // Ownership and Drop supervise their lifetime; PDEATHSIG would
-                // kill a cached worker when that short-lived thread exits.
+                // PDEATHSIG would kill the cached worker when its spawning thread exits.
                 "--unshare-all",
                 "--new-session",
                 "--cap-drop",

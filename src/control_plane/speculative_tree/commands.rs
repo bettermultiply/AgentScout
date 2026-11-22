@@ -1,4 +1,3 @@
-//! SpeculativeTree 的命令队列与生命周期。
 
 use super::*;
 
@@ -118,7 +117,6 @@ impl SpeculativeTree {
         Ok(command)
     }
 
-    /// A prompt starts a turn on the confirmed authority, never on an intended winner.
     pub fn input_ready(&self) -> bool {
         !self.task_finishing
             && !self.recovering
@@ -219,8 +217,7 @@ impl SpeculativeTree {
                 Some(&command_id),
                 OperationStatus::Failed,
             )?;
-            // A timed-out authority switch is ambiguous. Never resume the old
-            // authority as if the Agent had confirmed rejection.
+            // A Promote timeout cannot tell us which Branch is now authoritative.
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
@@ -233,7 +230,6 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    /// Cancellation affects all pending candidates; their subtrees are discarded by resolve_candidate.
     pub fn interrupt(&mut self) -> io::Result<Vec<AgentCommand>> {
         self.cancel_ui_prompts(None, "Execution interrupted");
         self.queued_prompts.clear();
@@ -263,8 +259,7 @@ impl SpeculativeTree {
                 )?);
             }
         }
-        // A switch already in flight cannot be assumed rejected. Abort the
-        // intended winner too, while retaining Promote's receipt until known.
+        // An in-flight Promote may already have applied. Cancel both potential writers.
         let promoting: Vec<_> = self
             .branches
             .values()
@@ -393,7 +388,6 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    /// 保存 Runtime 实际返回的独占 Environment 身份；不据此宣告建立成功。
     pub fn bind_environment(&mut self, branch_id: &str, environment_id: String) -> io::Result<()> {
         self.branch(branch_id)?;
         if environment_id.is_empty()
@@ -415,8 +409,7 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    /// Runtime facts are independent of Agent session cleanup. In particular,
-    /// releasing a session does not clean its Runtime Environment.
+    /// Releasing an Agent session does not clean its Runtime Environment.
     pub fn record_runtime_state(
         &mut self,
         branch_id: &str,
@@ -463,8 +456,6 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    /// Orderly process exit also releases the current Authority's session.
-    /// Runtime environment cleanup remains a separate confirmed operation.
     pub fn begin_cleanup(&mut self, branch_id: &str) -> io::Result<AgentCommand> {
         self.branch(branch_id)?;
         let command = self.make_cleanup_command(branch_id)?;
@@ -508,7 +499,6 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    /// Set only when the authority Branch itself can no longer continue.
     pub fn authority_failure(&self) -> Option<&str> {
         self.authority_branch_id
             .as_ref()
@@ -516,7 +506,6 @@ impl SpeculativeTree {
             .and_then(|branch| branch.execution_state.failure.as_deref())
     }
 
-    /// 由 control plane 登记初始权威 Branch，并要求 Pi 启动它。
     pub fn create_authority(
         &mut self,
         branch_id: impl Into<String>,

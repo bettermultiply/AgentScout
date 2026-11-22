@@ -1,8 +1,6 @@
-//! Decision 枚举及其对外字段名。
 
 use serde::{Deserialize, Serialize};
 
-/// `admit` has two separately invoked entries, not a tenth Decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Decision {
     #[serde(rename = "admit.opportunity_pass")]

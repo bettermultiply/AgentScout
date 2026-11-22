@@ -1,4 +1,3 @@
-//! 编译后 Policy 的固定源码、绑定与摘要校验。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -56,13 +55,11 @@ pub struct PolicyModelGrant {
     pub timeout_ms: u64,
 }
 
-/// Fixed source, bindings, Python identity and author-side provenance.
-/// Deserialize only from an authenticated source; the digest is not authentication.
+/// The digest checks integrity. Only deserialize authenticated artifacts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompiledPolicy {
-    // Provenance is retained from the same reads used by compilation. It does
-    // not enter the executable digest, which remains the Decision identity.
+    // Provenance comes from the same compile-time reads and stays outside the Decision digest.
     pub(super) source: std::path::PathBuf,
     pub(super) definition: String,
     pub(super) runtime_config_path: Option<std::path::PathBuf>,
@@ -75,8 +72,6 @@ pub struct CompiledPolicy {
     pub(super) digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) policy_model_grant: Option<PolicyModelGrant>,
-    // Derived from the bound source by the compile probe. Artifact bytes are
-    // authenticated by the caller, and the executable identity stays stable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) pure: BTreeMap<Decision, Value>,
 }
@@ -95,7 +90,6 @@ impl CompiledPolicy {
         Self::from_bytes(&std::fs::read(path)?)
     }
 
-    /// Decode the very bytes whose artifact identity the caller checked.
     pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
         let policy: Self = serde_json::from_slice(bytes).map_err(invalid)?;
         policy.validate()?;
@@ -103,7 +97,6 @@ impl CompiledPolicy {
         Ok(policy)
     }
 
-    /// Publish only complete artifacts, and never replace an existing run's data.
     pub fn save(&self, path: &std::path::Path) -> io::Result<()> {
         use std::io::Write;
         self.validate()?;
@@ -138,18 +131,14 @@ impl CompiledPolicy {
             .map(|binding| binding.inputs.as_slice())
     }
 
-    /// Whether the compiled Policy contains this Decision.
     pub fn has_decision(&self, decision: Decision) -> bool {
         self.decisions.contains_key(&decision)
     }
 
-    /// Runtime configuration selected by this Policy, if any.
     pub fn runtime(&self) -> Option<&str> {
         self.runtime.as_deref()
     }
 
-    /// A serializable Python script with all declared source and bindings embedded.
-    /// Run through PolicyEngine, not as an unrestricted Python program.
     pub fn script(&self, decision: Decision) -> io::Result<String> {
         self.validate()?;
         let manifest = json!({
@@ -198,8 +187,6 @@ impl CompiledPolicy {
             &format!("\n{helper}\nif __name__ == \"__main__\":"),
             1,
         );
-        // Return metadata before anything imports the Policy module. The
-        // regular check still handles runtime signature checks for fallbacks.
         Ok(script.replacen(
             "    sys.meta_path.insert(0, Sources(sources))",
             "    if request.get('check') is True:\n        emit_pure_check(tree, functions[0], binding)\n        return\n    sys.meta_path.insert(0, Sources(sources))",

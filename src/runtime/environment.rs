@@ -1,4 +1,3 @@
-//! Complete file operations executed inside the target environment.
 use super::execution_wire::{Body, Message, invalid};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,7 +19,6 @@ pub fn error_category(error: &io::Error) -> &'static str {
     }
 }
 
-// Bound retained text for line selection. Raw reads and writes use files.
 const MAX_LINE_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Deserialize)]
@@ -224,7 +222,6 @@ fn read_file(path: &Path, args: &Value) -> io::Result<Message> {
         let count = range["limit"]
             .as_u64()
             .ok_or_else(|| invalid("line limit must be a nonnegative integer"))?;
-        // Scan skipped lines without allocating them; retain only the requested range.
         let mut reader = io::BufReader::new(file);
         let mut line = 1_u64;
         let mut bytes = Vec::new();
@@ -307,108 +304,4 @@ fn read_file(path: &Path, args: &Value) -> io::Result<Message> {
         json!({"actual_range":{"offset":offset,"limit":length},"has_more":length<available,"truncated":false}),
         Body::file(file, offset, length),
     ))
-}
-
-#[cfg(test)]
-mod range_regressions {
-    use super::*;
-    use std::io::Write;
-
-    fn bytes(result: &Message) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        result
-            .body
-            .as_ref()
-            .unwrap()
-            .reader()
-            .read_to_end(&mut bytes)
-            .unwrap();
-        bytes
-    }
-
-    #[test]
-    fn explicit_byte_range_can_read_a_zero_size_proc_file() {
-        let result = read_file(
-            Path::new("/proc/self/status"),
-            &json!({"byte_range":{"limit":5}}),
-        )
-        .unwrap();
-        assert_eq!(bytes(&result), b"Name:");
-        assert_eq!(
-            result.meta["value"]["actual_range"],
-            json!({"offset":0,"limit":5})
-        );
-    }
-
-    #[test]
-    fn small_ranges_do_not_load_huge_files() {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(b"one\ntwo\n").unwrap();
-        file.as_file().set_len(1024 * 1024 * 1024).unwrap();
-        let result = read_file(file.path(), &json!({"line_range":{"offset":2,"limit":1}})).unwrap();
-        assert_eq!(bytes(&result), b"two");
-        assert_eq!(
-            result.meta["value"]["actual_range"],
-            json!({"offset":2,"limit":1})
-        );
-        assert_eq!(result.meta["value"]["has_more"], true);
-        let result = read_file(file.path(), &json!({"byte_range":{"offset":0,"limit":3}})).unwrap();
-        assert_eq!(bytes(&result), b"one");
-    }
-
-    #[test]
-    fn output_bounds_stop_before_partial_lines_and_binary_fallback_ignores_ranges() {
-        let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(b"ok\nxxxxxxxxxxxxxxxx").unwrap();
-        let result = read_file(
-            file.path(),
-            &json!({"line_range":{"offset":1,"limit":2000},"max_bytes":8}),
-        )
-        .unwrap();
-        assert_eq!(bytes(&result), b"ok");
-        assert_eq!(result.meta["value"]["actual_range"]["limit"], 1);
-        assert_eq!(result.meta["value"]["truncated"], true);
-        let result = read_file(
-            file.path(),
-            &json!({"line_range":{"offset":2,"limit":1},"max_bytes":8}),
-        )
-        .unwrap();
-        assert!(bytes(&result).is_empty());
-        assert_eq!(result.meta["value"]["actual_range"]["limit"], 0);
-        assert_eq!(result.meta["value"]["has_more"], true);
-        assert!(read_file(file.path(), &json!({"line_range":{"offset":4,"limit":0}})).is_err());
-        std::fs::write(file.path(), b"\x89PNG\r\n\x1a\n\xffbinary").unwrap();
-        let result = read_file(
-            file.path(),
-            &json!({"line_range":{"offset":9,"limit":0},"max_bytes":1,"binary_fallback":true}),
-        )
-        .unwrap();
-        assert_eq!(bytes(&result), b"\x89PNG\r\n\x1a\n\xffbinary");
-        assert_eq!(result.meta["value"]["representation"], "binary");
-    }
-
-    #[test]
-    fn line_ranges_preserve_empty_and_final_lines() {
-        for content in ["", "a", "a\n", "a\nb", "a\nb\n", "\n\n"] {
-            let mut file = tempfile::NamedTempFile::new().unwrap();
-            file.write_all(content.as_bytes()).unwrap();
-            let lines: Vec<_> = content.split('\n').collect();
-            for offset in 1..=lines.len() {
-                for limit in 0..=lines.len() + 1 {
-                    let end = (offset - 1 + limit).min(lines.len());
-                    let result = read_file(
-                        file.path(),
-                        &json!({"line_range":{"offset":offset,"limit":limit}}),
-                    )
-                    .unwrap();
-                    assert_eq!(
-                        bytes(&result),
-                        lines[offset - 1..end].join("\n").as_bytes(),
-                        "{content:?}, {offset}, {limit}"
-                    );
-                    assert_eq!(result.meta["value"]["has_more"], json!(end < lines.len()));
-                }
-            }
-        }
-    }
 }

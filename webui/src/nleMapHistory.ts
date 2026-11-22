@@ -44,8 +44,6 @@ export function eventHistory(events: ObservationEvent[]): MapHistoryResult {
   const actions = events.filter((event): event is NleMapActionEvent => event.event === 'nle_map_action')
   if (!actions.length) return { history: [], branchId: null, branchSources: [], quality: 'invalid', qualityMessage: null }
 
-  // A map is one real world's executed history. The first action's task is the
-  // map scope; candidate branches with no invoke event never enter this list.
   const taskId = [...actions].sort((a, b) => a.sequence - b.sequence)[0].task_id
   const scopedActions = actions.filter((event) => event.task_id === taskId)
   const branchSources = [...new Set(scopedActions.map((event) => event.branch_id))]

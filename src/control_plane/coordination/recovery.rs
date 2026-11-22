@@ -1,4 +1,3 @@
-//! Save/restore coordination; transport and presentation stay with the caller.
 use super::execution::runtime_call;
 use super::{AgentCommand, AgentMessage, Operation, Runtime, SpeculativeTree};
 use crate::control_plane::recovery;

@@ -1,4 +1,3 @@
-//! Recovery components, association validation and atomic manifest publication.
 use crate::control_plane::speculative_tree::{BranchStatus, SpeculativeTree};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -6,8 +5,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
-/// Restore launch configuration before constructing an Agent session. An
-/// explicitly selected model is applied only through the normal idle path.
 pub fn models(
     run_dir: &Path,
     generation: Option<&Path>,
@@ -125,9 +122,6 @@ pub fn digest(path: &Path) -> io::Result<String> {
 }
 
 pub fn publish(run_dir: &Path, generation: &Path, tree: &SpeculativeTree) -> io::Result<()> {
-    // Component writes alone do not establish a recoverable generation.
-    // Apply the same association checks used by load before replacing the
-    // last known-good completion marker.
     validate(tree, generation)?;
     for name in ["agent.json", "runtime.json"] {
         fs::File::open(generation.join(name))?.sync_all()?;
@@ -144,8 +138,6 @@ pub fn publish(run_dir: &Path, generation: &Path, tree: &SpeculativeTree) -> io:
         })
         .collect::<io::Result<serde_json::Map<String, Value>>>()?;
     let manifest = json!({"version":1,"files":files});
-    // Opening reuses the process-owned writer, serializing append, sync and
-    // rollback with ordinary events without allocating an observation sequence.
     let mut ledger = super::ledger::Ledger::open(&run_dir.join("events.jsonl"))?;
     let temporary = run_dir.join("recovery.tmp");
     let bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -162,7 +154,6 @@ pub fn publish(run_dir: &Path, generation: &Path, tree: &SpeculativeTree) -> io:
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
-    // Compatibility index only. Ledger is the durable completion boundary.
     if let Err(error) = fs::rename(&temporary, run_dir.join("recovery.json")) {
         ledger.warning(&format!(
             "Recovery Ledger saved; compatibility index update failed: {error}"
@@ -216,7 +207,6 @@ fn open_ended(
     records: &[Value],
     completed: usize,
 ) -> io::Result<(SpeculativeTree, Resume)> {
-    // Release records after this completion identify the assembled authority.
     let reference = records[completed + 1..]
         .iter()
         .rev()
@@ -245,7 +235,6 @@ fn open_ended(
         .iter()
         .rev()
         .find(|record| record["message"] == "session_file" && record.get("bindings").is_some());
-    // Older runs wrote these bindings at shutdown. Never load their execution state.
     let legacy;
     let bindings = if let Some(record) = bindings {
         if record["run_id"] != run_id {
@@ -453,10 +442,7 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
             }
             return Err(fail("live Branch environment missing"));
         };
-        // An Environment can be associated with multiple Backend instances.
-        // The Runtime has already validated the concrete participant metadata;
-        // recovery only requires the environment to exist in at least one
-        // saved component, not in every component.
+        // Runtime validates the participants. Here one saved component must own the Environment.
         if sets.is_empty() || !sets.iter().any(|s| s.contains(env)) {
             return Err(fail("live Branch environment missing"));
         }

@@ -1,4 +1,3 @@
-//! Interpreter for the compile probe's JSON instruction tree.
 use std::{cmp::Ordering, collections::BTreeMap};
 
 use serde_json::{Value, json};

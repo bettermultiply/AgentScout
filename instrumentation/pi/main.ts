@@ -1,8 +1,3 @@
-/** Product Integration: Pi SDK hooks and session management; createInterposer
- * supplies the Interposer and AscProxy supplies ASC-Proxy communication. */
-// This is a protocol boundary: Pi's SDK types are intentionally loaded from
-// the selected checkout at runtime, so the Rust-side wire schema remains the
-// compile-time contract for this small launcher.
 // @ts-nocheck
 import type { ToolCall, ToolResultMessage } from '../../../pi/packages/ai/src/types.ts';
 import { createRequire } from 'node:module';
@@ -36,9 +31,7 @@ try {
 const { createAgentSession: createNativeAgentSession, DefaultResourceLoader, SettingsManager, getAgentDir, SessionManager, ModelRuntime, resolveCliModel } = require(resolve(root, 'packages/coding-agent/src/index.ts'));
 const nativeCommandSources = new WeakMap();
 async function createAgentSession(options) {
-    // Use a native inline extension to obtain the product's command catalogue.
-    // Keep Pi's normal resource loader, including user extensions and resources.
-    if (!DefaultResourceLoader) return createNativeAgentSession(options); // SDK test doubles
+    if (!DefaultResourceLoader) return createNativeAgentSession(options);
     const agentDir = options.agentDir ?? getAgentDir();
     const settingsManager = options.settingsManager ?? SettingsManager.create(options.cwd, agentDir);
     let extension;
@@ -221,8 +214,6 @@ function releasePause(){pauseRequested=false;for(const release of [...pauseRelea
 function captureHooks(){
     for(const branch of branchTasks.keys())interruptedBranches.add(branch);
     for(const [id,hook] of pendingHooks){
-        // Native non-Runtime tools have Pi's terminal cancellation result.
-        // A started external action cannot safely be replayed after restart.
         if(hook.started&&!runtimeTools.some(spec=>spec.name===hook.toolCall.name))continue;
         suspendedHooks.set(id,{...hook,admitted:checkpoints.has(id)});
     }
@@ -246,9 +237,6 @@ let commandCatalogStarted = false;
 function cacheCommands(session, branch) {
     if (branch !== authority || commandCatalogStarted) return;
     commandCatalogStarted = true;
-    // bindExtensions includes session_start followed by resources_discover.
-    // Publish prompts immediately; a session_start answer must not depend on
-    // this catalog becoming available.
     void extensionBindings.get(branch).then(async () => {
         commandCatalog = nativeCommandSources.has(session) ? await nativeCommandSources.get(session)() : typeof session.getCommands === 'function' ? await session.getCommands() : [
             ...(session.extensionRunner?.getRegisteredCommands() ?? []).map(item => ({name:item.invocationName,description:item.description,source:'extension',sourceInfo:item.sourceInfo})),
@@ -262,8 +250,7 @@ function bindInteraction(session,branch) {
     interaction.resume(branch);
     sessions.set(branch,session);
     install(session,branch);
-    // session_start extensions may ask the user. Never hold the command
-    // queue while their UI promise is outstanding (including on candidates).
+    // session_start can await a UI answer delivered through the command queue.
     const binding=session.bindExtensions({uiContext:interaction.context(branch)});
     extensionBindings.set(branch,binding);
     cacheCommands(session, branch);
@@ -278,8 +265,7 @@ async function stopSession(branch) {
     releaseToolResults(branch);
     await stopped;
     await Promise.allSettled([...(branchTasks.get(branch)??[])]);
-    // dispose() is synchronous and does not emit session_shutdown. Await the
-    // native extension lifecycle while its append context is still valid.
+    // Pi's dispose() does not emit session_shutdown. Emit it while appends are valid.
     if(session?.extensionRunner?.hasHandlers('session_shutdown'))
         await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});
     await session?.waitForIdle?.();
@@ -317,7 +303,6 @@ function syncTranscript(branch) {
     for(const payload of pending)void report(payload);
 }
 async function reportSessionHistory(branch, manager) {
-    // Display inherited entries without reporting them as new execution facts.
     for (const entry of manager.getBranch()) {
         if (entry.type !== 'message') continue;
         reportedEntries.add(entry.id);
@@ -426,9 +411,7 @@ function tools(branch) {
         return value.result?.content?value.result:{content:[{type:'text',text:text(value.result)}],details:undefined};
     }}))];
 }
-// FS execution must never fall back to host implementations selected through
-// user settings or extensions. Only the isolated built-ins and Runtime tools
-// have an execution plan in this integration.
+// Host tool fallbacks would bypass filesystem isolation.
 const filesystemToolSelection={tools:['read','bash','edit','write',...runtimeTools.map(tool=>tool.name)]};
 async function beforeModelInference(branch, modelValue, context, signal) {
     parkedModels.add(branch);
@@ -438,8 +421,6 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     await pauseBoundary(signal);
     await acceptanceBoundary(branch, signal);
     syncTranscript(branch);
-    // Model inference does not pass the tool effect gate; admission and extent
-    // remain owned by the generic access layer.
     if(saving||closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
     const actionId=modelForks.get(branch)?.operation_id??`model-${nextAction++}`;
     const op={kind:'model_inference',name:'model',produces_result:true,result_pending:true,arguments:{model:`${modelValue.provider}/${modelValue.id}`},branch_id:branch,predicting:modelForks.has(branch),authority:branch===authority};
@@ -487,14 +468,8 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',name:'model',arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length},timestamp_ms:startedAt});
     return async status=>{
         if(status==='succeeded')return;
-        // Pi settles the stream and runs this callback before the agent loop
-        // emits the assistant message_end. Keep the action while its message
-        // has started so message_end can still pair the usage. Only forget an
-        // action that produced no message at all (the request threw before the
-        // stream started), so it cannot be paired with a later message.
-        // A provider can fail before its first stream event. Pi then emits a
-        // synthetic assistant message after this callback; retain its identity
-        // until that message arrives (or the turn exits without a message).
+        // Stream completion precedes message_end, which still needs the action ID.
+        // Pi can emit a synthetic assistant message even if no stream event arrived.
         action.terminalStatus=status??(signal?.aborted?'cancelled':'failed');
     };
 }
@@ -633,8 +608,6 @@ function install(session,branch) {
     };
     session.subscribe(event=>{
         if(event.type==='message_start'&&event.message.role==='assistant'){
-            // The completion callback can run before message_end, so the
-            // message itself marks which queued action it belongs to.
             const action=modelActions.get(branch)?.find(action=>!action.seen_message);
             if(action)action.seen_message=true;
         }
@@ -653,8 +626,6 @@ function install(session,branch) {
                 if(fork){modelForks.delete(branch);const restoring=session.setModel(fork.model).then(()=>session.setThinkingLevel(fork.thinkingLevel));modelRestores.set(branch,restoring);void restoring.catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error)}));}
                 const started_at_ms=Number.isFinite(event.message.timestamp)?event.message.timestamp:(action?.started_at_ms??Date.now());
                 const duration_ms=Number.isFinite(event.message.durationMs)?event.message.durationMs:Math.max(0,Date.now()-started_at_ms);
-                // Usage is never dropped: a model call that cannot be paired
-                // with an action reports a null action_id instead of inventing one.
                 void report({message:'usage',branch_id:branch,action_id:action?.action_id??null,started_at_ms,finished_at_ms:started_at_ms+duration_ms,model:event.message.model,thinking_level:event.message.thinkingLevel,usage:event.message.usage??{}});
             }
         }
@@ -668,8 +639,7 @@ async function run(session,branch,operation) {
     await report({message:'turn_completed',branch_id:branch});
     if(branch===authority)tree.settle();
 }
-// A turn may wait for a later control command (runtime result, Promote or
-// Abort). Keep setup ordered, but never hold the command queue for the turn.
+// A turn can await a later command, so the queue only orders its setup.
 function executeTurn(session,branch,operation) {
     const task=run(session,branch,async()=>{await extensionBindings.get(branch);if(cancelled.has(branch)||closing) return;await operation()})
         .catch(error=>saving?undefined:report({message:'branch_failed',branch_id:branch,reason:String(error instanceof Error?error.message:error)}));
@@ -680,8 +650,6 @@ function executeTurn(session,branch,operation) {
 }
 async function handle(command) {
     const branch=command.branch_id;
-    // Hold bookkeeping (local Policy, effect/pause/extent gates) belongs to the
-    // generic access layer; each product only connects its own execution points.
     if(!['start_candidate','promote'].includes(command.command))await access.control(command);
     switch(command.command){
         case 'model': {
@@ -738,15 +706,13 @@ async function handle(command) {
         case 'load': {
             for(const [branch,environment] of Object.entries(command.environments))environments.set(branch,environment as string);
             for(const [branch,access] of Object.entries(command.execution_accesses??{}))ascProxy.bind(branch,access);
-            // A failed load must not settle/delete the saved native sources.
             saving=true;
             let error;
             try {
                 if(sessions.size)throw Error('Load requires an empty Agent adapter');
                 const record=loadRecovery(command.path);
                 for(const source of record.tree.sources){
-                    // open() creates a session for a missing path: check the
-                    // saved checksum first so missing references fail clearly.
+                    // Verify the file first: Pi's open() creates a missing session.
                     if(checksum(readFileSync(source.file))!==source.checksum)throw Error(`Recovery source changed: ${source.file}`);
                     source.entries=SessionManager.open(source.file).getEntries();
                 }
@@ -827,9 +793,6 @@ async function handle(command) {
         case 'start_branch': {
             environments.set(branch,command.environment_id);
             ascProxy.bind(branch,command.execution_access);
-            // The control plane explicitly starts this Branch as the authority;
-            // a leftover authority marker in a reused session file must not
-            // keep a previous run's winner in charge.
             if(command.role==='authority'){authority=branch;tree.adoptAuthority(branch)}
             const manager=tree.createBranch(branch,command.workspace,tree.manager,nativeReference ? nativeTail : tree.tail(branch)??tree.manager.getLeafId());
             const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
@@ -837,8 +800,7 @@ async function handle(command) {
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
             await report({message:'branch_created',branch_id:branch});
             if(nativeReference){
-                // The control plane opens input on branch_started. Publish the
-                // inherited conversation and restore the session link first.
+                // branch_started opens input, so restore history and its link first.
                 await reportSessionHistory(branch,manager);
                 linkSession();
             }
@@ -862,9 +824,7 @@ async function handle(command) {
                 for(const [id,hook] of suspendedHooks)if(live.has(hook.branch))suspendedHooks.delete(id);
                 for(const owner of live)interruptedBranches.delete(owner);
                 releasePause();
-                // Live turns resume their existing hooks. Loaded turns rebuild
-                // only saved hook positions from native messages and facts;
-                // completed Runtime actions are never replayed.
+                // Rebuild only saved hook positions to avoid replaying Runtime actions.
                 for(const [id,setup] of [...candidateSetups])startSetup(setup);
                 const grouped=new Map();
                 for(const [id,hook] of suspendedHooks){const hooks=grouped.get(hook.branch)??[];hooks.push([id,hook]);grouped.set(hook.branch,hooks)}
@@ -896,8 +856,7 @@ async function handle(command) {
                 }
                 for(const [owner,target] of sessions)if((owner!==authority||continuing)&&interruptedBranches.has(owner)&&!grouped.has(owner)&&!candidateSetups.has(owner)&&!cancelled.has(owner)){
                     const last=target.messages.at(-1);
-                    // Pi excludes aborted assistant output from model context;
-                    // keep its native record but continue from its prior input.
+                    // Pi excludes aborted assistant output from model context.
                     if(last?.role==='assistant'&&['aborted','error'].includes(last.stopReason))target.agent.state.messages=target.messages.slice(0,-1);
                     if(target.messages.at(-1)?.role!=='assistant')executeTurn(target,owner,()=>target.continue());
                 }
@@ -957,7 +916,6 @@ async function handle(command) {
             if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
             candidateSetups.delete(branch);
             await report({message:'branch_created',branch_id:branch});
-            // Injected result is new candidate content, not copied from the Parent.
             for(let i=0;i<paired.length;i++)await report({message:'transcript',branch_id:branch,entry:paired[i],session_entry_id:pairedEntryIds[i]});
             await report({message:'branch_started',branch_id:branch});
             await report({message:'branch_ready',branch_id:branch});
@@ -1006,9 +964,7 @@ async function handle(command) {
                 return;
             }
             if ([parent, branch].some(id => !acceptancePauses.has(id))) throw Error('Acceptance pause missing');
-            // The control plane has confirmed the target Environment is suspended.
-            // A parked candidate turn can contain independent descendants.
-            // Only an already-started inference owned by this session drains here.
+            // A parked turn can have independent descendants. Drain only this session's inference.
             while ([...activeActions.values()].some(action => action.branch_id === branch && action.action_kind === 'model_inference')) {
                 if (cancelled.has(branch) || cancelled.has(parent) || closing || !acceptancePauses.has(parent)) throw Error('Acceptance interrupted');
                 await new Promise(resolve => setTimeout(resolve, 5));
@@ -1075,9 +1031,7 @@ async function handle(command) {
                     await notifications.accept(sessions.get(branch),command);
                     syncTranscript(branch);
                 } catch(error) {
-                    // Promote is already applied. Do not turn a notification
-                    // persistence failure into a false Promote failure, and do
-                    // not emit a delivery record for a message not accepted by Pi.
+                    // Notification persistence cannot undo an applied Promote.
                     console.error(`Notification persistence failed for ${command.command_id}:`,error);
                     await report({message:'adapter_capability_gap',branch_id:branch,capability:'notification',status:'failed',reason:`${command.command_id}: ${error}`});
                 }
@@ -1136,8 +1090,6 @@ async function dispatch(command){
         await handle(command);
     }catch(error){reason=String(error instanceof Error?error.message:error)}
     if(operation&&command.command_id)return {message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status:reason?'failed':'applied',generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{}),...(reason?{reason}:{})};
-    // A failed command-list query is not a Branch failure; the UI simply gets
-    // no list for that request.
     if(reason&&command.command==='suspend_recovery'&&!pauseRequested)return;
     if(reason&&command.command!=='get_commands'&&!(saving&&command.command==='start_candidate'))return {message:'branch_failed',branch_id:command.branch_id,reason};
 }
@@ -1151,9 +1103,7 @@ const tasks=new Set();
 const deliveries=new IdentityWindow(positiveSequence);
 let commandQueue: Promise<unknown>=Promise.resolve();
 try{
-    // Do not let the async iterator's clean EOF destroy the socket with a
-    // synthetic AbortError while the writable half is still ending. Keep the
-    // explicit half-close below as the only shutdown path.
+    // An iterator AbortError on clean EOF would interrupt the socket's pending writes.
     for await(const wire of ascProxy.messages()){
             if(!['command','delivery'].includes(wire.kind))throw Error('Unexpected message direction');
             const command=wire.kind==='delivery'?wire.payload.command:wire.payload;
@@ -1164,8 +1114,7 @@ try{
                 await sendWire({kind:'received',payload:{id:wire.payload.id}});
                 if(previous!==undefined)continue;
             }
-            // Session-start extensions may themselves await a prompt while
-            // holding the command queue. Cancellation must release them first.
+            // Release extension prompts before queuing cleanup that may await binding.
             const id=command.command_id;
             const old=id?commands.get(id):undefined;
             if(old&&old.serialized!==JSON.stringify(command)){await report({message:'branch_failed',branch_id:command.branch_id,reason:'Command id reused with different payload'});continue}
@@ -1175,9 +1124,8 @@ try{
                 await report({message:'branch_failed',branch_id:command.branch_id,reason:'Command identity expired or window full; command was not executed'});continue;
             }
             if(!old&&['abort','discard','cleanup'].includes(command.command))interaction.cancel(command.branch_id);
-            // A candidate may wait for sibling tool results. It must not hold
-            // up resolve_pending / cleanup on the transport's command queue.
-            // Save must interrupt immediately even if setup is awaiting a tool.
+            // Candidate setup can await a tool result that only a later command delivers.
+            // Save must interrupt that wait immediately.
             const result=old?.result??(['save','suspend_recovery','ui_prompt_answer','prepare_acceptance'].includes(command.command)
                 ?dispatch(command):command.command==='start_candidate'
                 ?commandQueue.then(()=>dispatch(command))
@@ -1216,10 +1164,7 @@ try{
     tree.settle();
     if(!transportError)await report({message:'agent_released',agent_id:agentId,session:{file:tree.manager.getSessionFile(),id:tree.manager.getHeader().id,cwd:tree.manager.getHeader().cwd}});
     await ascProxy.close();
-    // An aborted local-policy evaluation can leave the evaluator child's stdio
-    // handles open after it rejects; those handles would otherwise keep this
-    // adapter alive even though every report is flushed and the socket is
-    // closed. Shutdown is complete here, so terminate explicitly.
+    // A cancelled local-policy evaluator can leave child stdio open after the socket closes.
     if(transportError)console.error('Agent control connection failed:',transportError);
     process.exit(transportError||ascProxy.error?1:0);
 }

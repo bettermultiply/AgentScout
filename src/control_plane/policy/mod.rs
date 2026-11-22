@@ -1,6 +1,3 @@
-//! YAML compilation and isolated Python Policy evaluation.
-//!
-//! This module returns decisions; it never applies them to Branch or Runtime state.
 
 mod compile;
 mod decision;

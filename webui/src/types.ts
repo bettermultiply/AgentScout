@@ -1,4 +1,3 @@
-/** Wire types for the control plane's read-only observation API. */
 
 export type BranchRole = 'authority' | 'candidate'
 
@@ -58,10 +57,6 @@ export type RuntimeExecutionState =
   | 'cleaned'
   | 'failed'
 
-/**
- * One settlement dimension. Measured and estimated values are separate
- * accumulators; the UI never merges them into one number.
- */
 export interface ObservationAmount {
   measured: number | null
   estimated: number | null
@@ -328,7 +323,6 @@ export interface RunStatus {
   connected: boolean
 }
 
-/** Pi transcript entries are product-shaped JSON; the UI renders known parts. */
 export type ConversationMessage = Record<string, unknown>
 
 export interface Conversation {

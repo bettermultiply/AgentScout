@@ -1,14 +1,3 @@
-//! Optional phase timing for filesystem data-plane operations.
-//!
-//! Disabled by default.  Set `ASCOUT_FS_PROFILE=1` to print one summary line
-//! per fork/mark, for example:
-//!
-//! ```text
-//! filesystem-profile: op=fork plan=0.120ms snapshot_layer=210.4ms(9) ...
-//! ```
-//!
-//! The check is a process-wide `OnceLock<bool>`; when disabled each phase is
-//! just one predictable branch and no clock reads.
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -33,7 +22,6 @@ impl Profile {
         }
     }
 
-    /// Run `action`, accumulating its duration under `phase` when profiling.
     pub(crate) fn run<T>(&mut self, phase: &'static str, action: impl FnOnce() -> T) -> T {
         if !self.enabled {
             return action();

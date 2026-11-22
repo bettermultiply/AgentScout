@@ -1,4 +1,3 @@
-//! 文件系统视图层：Node/View、扫描、解析与变更列表。
 
 pub(super) mod changeops;
 pub(super) mod changes;

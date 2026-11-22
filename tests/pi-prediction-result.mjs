@@ -63,7 +63,7 @@ def match_proposal(data, *, policy_config, capabilities):
     });
     await new Promise(r => fake.listen(0, '127.0.0.1', r));
     t.after(() => { fake.closeAllConnections(); fake.close(); });
-    fs.writeFileSync(`${root}/pi/models.json`, JSON.stringify({providers:{fixture:{
+    fs.writeFileSync(`${root}/models.json`, JSON.stringify({providers:{fixture:{
         baseUrl:`http://127.0.0.1:${fake.address().port}/v1`, api:'openai-completions', apiKey:'local-fake',
         models:[{id:'fixture', reasoning:false, input:['text','image'], contextWindow:32768, maxTokens:256}],
     }}}));
@@ -72,7 +72,7 @@ def match_proposal(data, *, policy_config, capabilities):
         adapter_instance:'pi-prediction', python:`${project}/../.venv-nle/bin/python`, bridge:`${project}/examples/nle-runtime-bridge.py`,
         guidebook:`${project}/examples/nle/Guidebook.txt`, seed:7, action_delay_seconds:3, env_id:'NetHackScore-v0'}));
     const control = spawnControl(`${project}/target/debug/ascout-control-plane`, [root, `${project}/../pi`,
-        `${root}/policy/policy.yaml`, '--web', `127.0.0.1:${port}`, '--model', 'fixture/fixture', '--thinking', 'off'],
+        `${root}/policy/policy.yaml`, '--web', `127.0.0.1:${port}`, '--model', 'fixture/fixture', '--models', `${root}/models.json`, '--thinking', 'off'],
     {env:{...process.env, ASCOUT_RUNTIME_CONFIG:`${root}/runtime.json`, PI_CODING_AGENT_DIR:`${root}/pi`}, stdio:['ignore','pipe','pipe']});
     for (const stream of [control.stdout, control.stderr]) stream.on('data', b => fs.appendFileSync(`${root}/control.log`, b));
     const base = `http://127.0.0.1:${port}`;

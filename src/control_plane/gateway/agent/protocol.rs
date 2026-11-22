@@ -1,11 +1,9 @@
-//! Agent Adapter 握手、命令、执行事实及 socket 消息封装。
 
 use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// 一个 Agent 内 Branch 的角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchRole {
@@ -13,7 +11,6 @@ pub enum BranchRole {
     Candidate,
 }
 
-/// Branch 暂时不能前进的原因，同一时刻只记最近挡住它的 Decision。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockedReason {
@@ -46,7 +43,6 @@ pub enum CommandStatus {
     Cancelled,
 }
 
-/// Agent action 类型不包含 Authority/Candidate；角色始终由 Tree 决定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
@@ -68,9 +64,6 @@ pub enum ActionStatus {
     TimedOut,
 }
 
-/// Capabilities declared by an Agent Adapter during the wire handshake.
-/// These are descriptive facts; the control plane does not currently use them
-/// to evaluate local Decisions or admit ordinary actions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterCapabilities {
     #[serde(rename = "preExecutionInterception")]
@@ -101,7 +94,6 @@ fn deserialize_notification<'de, D: serde::Deserializer<'de>>(
     Ok(Some(text))
 }
 
-/// control plane 向 Pi integration 发送的命令。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum AgentCommand {
@@ -140,8 +132,6 @@ pub enum AgentCommand {
         #[serde(default)]
         execution_accesses: BTreeMap<String, crate::protocol::contract::ExecutionAccess>,
     },
-    /// Delivers the compiled local Decision artifact. The adapter may reject
-    /// it when it has no real Hook/evaluation seam.
     LocalPolicy {
         branch_id: String,
         policy_digest: String,
@@ -163,12 +153,9 @@ pub enum AgentCommand {
         command_id: String,
         generation: u64,
     },
-    /// `rebalance` 的 `pause`：Agent Adapter 在下一个边界停住该 Branch，
-    /// 并以 `branch_suspended` 报告。
     Pause {
         branch_id: String,
     },
-    /// `rebalance` 的 `resume`：放行被停住的 Branch，并以 `branch_resumed` 报告。
     Resume {
         branch_id: String,
     },
@@ -272,7 +259,6 @@ pub struct UiPrompt {
     pub prefill: Option<String>,
 }
 
-/// Agent Adapter 向 control plane 报告的事实；不包含 Runtime 或 Tree 完成事实。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "message", rename_all = "snake_case")]
 pub enum AgentMessage {
@@ -336,8 +322,6 @@ pub enum AgentMessage {
         /// Instrumentation 测量的事件时刻（Unix 毫秒），不是 control plane 收到消息的时刻。
         timestamp_ms: u64,
     },
-    /// Explicit request from the adapter's local decision path. An ordinary
-    /// ActionStarted is only an execution fact and never admits speculation.
     SpeculativeAdmissionRequest {
         task_id: String,
         policy_digest: String,
@@ -394,8 +378,7 @@ pub enum AgentMessage {
     },
     Usage {
         branch_id: String,
-        /// 这次调用对应的模型 action。Instrumentation 确实无法配对时为 None：仍然上报
-        /// 用量，但不伪造 action 身份。
+        /// 无法配对时为 None，用量仍上报。
         #[serde(default)]
         action_id: Option<String>,
         model: String,
@@ -437,7 +420,6 @@ pub enum AgentMessage {
     BranchReady {
         branch_id: String,
     },
-    /// Internal Adapter request to bind a local Candidate before tool execution.
     EnvironmentRequested {
         branch_id: String,
     },
@@ -463,7 +445,6 @@ pub enum AgentMessage {
     },
 }
 
-/// Agent socket 上的双向消息。长度前缀由传输层负责，消息本身只描述方向。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum AgentWireMessage {

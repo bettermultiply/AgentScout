@@ -8,7 +8,6 @@ export interface StemCandidate {
   angles: number[]
 }
 
-/** Greedy same-side angular clearance, in branch arc-distance coordinates. */
 export function placeStems(stems: StemCandidate[], children: StemNeighbor[]): Map<string, { side: -1 | 1; tilt: number }> {
   const placed: StemNeighbor[] = []
   const result = new Map<string, { side: -1 | 1; tilt: number }>()

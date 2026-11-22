@@ -1,4 +1,3 @@
-//! control plane：投机树、分支协调、会话请求、策略与账本。
 
 pub mod speculative_tree;
 pub mod coordination;

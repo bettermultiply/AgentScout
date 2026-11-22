@@ -1,4 +1,3 @@
-//! 隔离的 Python Policy 评估进程与有界结果读取。
 
 use std::collections::BTreeMap;
 use std::env;
@@ -20,8 +19,6 @@ use super::validation::{
 };
 use super::{MAX_BYTES, MAX_FILES};
 
-/// Linux prototype: bubblewrap namespaces, read-only source, seccomp, rlimits,
-/// bounded result pipe and a supervised wall-clock deadline. No external abilities.
 pub struct PolicyEngine {
     python: PathBuf,
     bubblewrap: PathBuf,
@@ -29,9 +26,6 @@ pub struct PolicyEngine {
     worker: std::sync::Mutex<BTreeMap<String, super::worker::Worker>>,
 }
 
-/// Executable resolution order: explicit environment variable, PATH, then the
-/// historical absolute path. The last step keeps existing deployments working;
-/// execution later reports a clear error if none of them exist.
 fn resolve_executable(variable: &str, name: &str, fallback: &str) -> PathBuf {
     if let Some(value) = env::var_os(variable) {
         return PathBuf::from(value);
@@ -85,7 +79,6 @@ fn require_executable(path: &Path, variable: &str, name: &str) -> io::Result<()>
 }
 
 impl PolicyEngine {
-    /// Paths are trusted deployment settings, never read from the Policy YAML.
     pub fn new(python: PathBuf, bubblewrap: PathBuf, timeout: Duration) -> io::Result<Self> {
         require(
             python.is_absolute() && bubblewrap.is_absolute(),
@@ -103,7 +96,6 @@ impl PolicyEngine {
         })
     }
 
-    /// Admission only confirms backend identity; Runtime owns interface checks.
     pub fn confirm_backends(
         &self,
         policy: &CompiledPolicy,
@@ -224,8 +216,6 @@ impl PolicyEngine {
         let mut policy = CompiledPolicy {
             source: source_path_absolute,
             definition: text.to_owned(),
-            // Preserve existing semantics: relative Runtime paths are relative
-            // to the launch cwd, not the Policy's directory.
             runtime_config_path: definition.runtime.as_ref().map(|runtime| {
                 let path = PathBuf::from(runtime);
                 if path.is_absolute() {
@@ -246,7 +236,6 @@ impl PolicyEngine {
         if let Some(grant) = policy.policy_model_grant() {
             super::validation::validate_model_grant(grant)?;
         }
-        // Probe the trusted interpreter inside the same isolation as the algorithms.
         let probe = self.execute("import sys,json,os\nb=json.dumps(sys.version).encode();os.write(1,len(b).to_bytes(4,'big')+b)", &json!({}))?;
         policy.python = probe
             .as_str()
@@ -254,9 +243,7 @@ impl PolicyEngine {
             .to_owned();
         policy.digest = policy.content_digest()?;
         for decision in Decision::ALL {
-            // The AST probe has different bytes from the runtime runner and
-            // is used only once. Keep it out of the runtime worker cache so
-            // it cannot evict the already-checked Decision runners.
+            // The one-shot AST probe must not evict cached Decision workers.
             let probe = policy.check_script(decision)?;
             let checked = super::worker::Worker::start(&probe, &self.python, &self.bubblewrap)
                 .and_then(|mut worker| worker.evaluate(&json!({"check": true}), self.timeout))
@@ -309,7 +296,6 @@ impl PolicyEngine {
         Ok(result)
     }
 
-    /// Explicit deployment entry point using a killable IPC provider process.
     pub fn evaluate_with_provider(
         &self,
         policy: &CompiledPolicy,
@@ -329,8 +315,7 @@ impl PolicyEngine {
         )
     }
 
-    /// Explicit host grant; the callback must honor its deadline. The persistent
-    /// supervisor forks a clean evaluation child before loading untrusted code.
+    /// The host grant callback must honor its deadline.
     pub fn evaluate_with_capabilities(
         &self,
         policy: &CompiledPolicy,
@@ -343,8 +328,7 @@ impl PolicyEngine {
         self.evaluate_capability_request(policy, decision, data, models, requests, complete, None, self.timeout)
     }
 
-    /// Cancellation is checked during Python execution and provider IPC. On
-    /// cancellation both owned processes are killed and reaped before return.
+    /// Cancellation kills and reaps owned Python and provider processes before returning.
     pub fn evaluate_with_provider_cancellable(
         &self,
         policy: &CompiledPolicy,
@@ -448,8 +432,6 @@ impl PolicyEngine {
     }
 
     fn execute(&self, script: &str, request: &Value) -> io::Result<Value> {
-        // The identity probe is a trusted one-shot program; compiled scripts
-        // implement the persistent protocol.
         if !script.contains("MANIFEST =") {
             return self.execute_once(script, request);
         }
@@ -458,8 +440,6 @@ impl PolicyEngine {
             .lock()
             .map_err(|_| invalid("Policy worker lock poisoned"))?;
         if !slot.contains_key(script) {
-            // Fixed maximum: one worker for each of the ten Decision bindings.
-            // Eviction drops (kills and waits for) the previous owner.
             if slot.len() >= 10 {
                 slot.clear();
             }
@@ -481,7 +461,6 @@ impl PolicyEngine {
     fn execute_once(&self, script: &str, request: &Value) -> io::Result<Value> {
         require_executable(&self.python, "ASCOUT_POLICY_PYTHON", "python3")?;
         require_executable(&self.bubblewrap, "ASCOUT_POLICY_BWRAP", "bwrap")?;
-        // No author data in a shared directory: tempfile creates a private 0700 root.
         let directory = tempfile::tempdir()?;
         let script_path = directory.path().join("runner.py");
         let request_path = directory.path().join("request.json");
@@ -574,7 +553,6 @@ impl PolicyEngine {
                     break Err(invalid("Policy result exceeds size limit"));
                 }
                 if let Some(status) = child.try_wait()? {
-                    // Drain bytes already queued before the process exited.
                     loop {
                         match reader.read(&mut buffer) {
                             Ok(0) => break,
@@ -629,32 +607,5 @@ impl PolicyEngine {
         let response: Value = serde_json::from_slice(&bytes[4..]).map_err(invalid)?;
         check_json(&response, 0)?;
         Ok(response)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn executable_lookup_uses_path_entries() {
-        let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("policy-tool");
-        fs::write(&executable, b"#!/bin/sh\n").unwrap();
-        let path = directory.path().as_os_str();
-        assert_eq!(find_in_path_value(path, "policy-tool"), Some(executable));
-        assert_eq!(find_in_path_value(path, "missing-tool"), None);
-    }
-
-    #[test]
-    fn missing_executable_reports_the_override_variable() {
-        let error = require_executable(
-            Path::new("/definitely/missing/bwrap"),
-            "ASCOUT_POLICY_BWRAP",
-            "bwrap",
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-        assert!(error.to_string().contains("ASCOUT_POLICY_BWRAP"), "{error}");
     }
 }

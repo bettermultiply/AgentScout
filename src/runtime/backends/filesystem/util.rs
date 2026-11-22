@@ -1,4 +1,3 @@
-//! 路径、目录删除、z 作用域与错误等通用工具。
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -14,7 +13,6 @@ pub(super) fn error(value: impl std::fmt::Display) -> BackendError {
 }
 
 pub(super) fn normalize_scopes(scope: &[PathScope]) -> Result<Vec<PathScope>, BackendError> {
-    // Empty means "all mounts"; PathScope is only an optional filter now.
     let mut scopes = Vec::new();
     for value in scope {
         if !scopes.contains(value) {
@@ -50,9 +48,7 @@ pub(super) fn reset_dir(path: &Path) -> Result<(), BackendError> {
     fs::create_dir_all(path).map_err(error)
 }
 
-/// OverlayFS work directories can contain a mode-000 `work` child.  Plain
-/// `remove_dir_all` cannot descend into it, so make directories traversable
-/// before unlinking their contents.
+/// OverlayFS's mode-000 `work` child needs traversal permission before recursive deletion.
 pub(super) fn remove_directory_force(path: &Path) -> Result<(), BackendError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -91,10 +87,6 @@ pub(super) fn remove_directory_force(path: &Path) -> Result<(), BackendError> {
 }
 
 pub(super) fn ensure_overlay_disjoint(target: &Path, upper: &Path) -> Result<(), BackendError> {
-    // An upper directory below its lower mount is supported (the state
-    // directory is commonly below the workspace mount).  It is only unsafe
-    // when it *is* the mount target, so that is the one case rejected.  The
-    // state directory itself is masked with a tmpfs after the overlays.
     let target = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
     let upper = fs::canonicalize(upper).unwrap_or_else(|_| upper.to_path_buf());
     if target == upper {
@@ -110,9 +102,7 @@ pub(super) fn remove_path(btrfs: &Path, path: &Path, use_btrfs: bool) -> Result<
     remove_path_with_mode(btrfs, path, use_btrfs, use_btrfs)
 }
 
-/// Linux btrfs gives each subvolume its own st_dev, even on one filesystem.
-/// OverlayFS renames copy-up temporaries from work into upper, so both trees
-/// must have the same device (and hence the same btrfs subvolume).
+/// Copy-up renames need upper and work to share `st_dev`. Each btrfs subvolume has its own.
 pub(super) fn ensure_overlay_work(upper: &Path, work: &Path) -> Result<(), BackendError> {
     let upper_device = fs::metadata(upper).map_err(error)?.dev();
     let work_device = fs::metadata(work).map_err(error)?.dev();
@@ -183,9 +173,7 @@ pub(super) fn remove_path_with_mode(
     Ok(())
 }
 
-/// Recursively delete a tree that may contain btrfs subvolumes.  Plain
-/// `remove_dir_all` leaves nested subvolume roots behind, so every directory
-/// gets a best-effort `btrfs subvolume delete` before `rmdir`.
+/// Btrfs subvolume roots require subvolume deletion before falling back to rmdir.
 pub(super) fn remove_btrfs_tree(btrfs: &Path, path: &Path) -> Result<(), BackendError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -193,8 +181,6 @@ pub(super) fn remove_btrfs_tree(btrfs: &Path, path: &Path) -> Result<(), Backend
         Err(value) => return Err(error(value)),
     };
     if metadata.is_dir() {
-        // Clear read-only before descending; otherwise removing children of a
-        // read-only snapshot fails with EROFS.
         let _ = Command::new(btrfs)
             .args([
                 std::ffi::OsStr::new("property"),

@@ -1,4 +1,3 @@
-//! Command-line entry point for the foreground control plane.
 use ascout::control_plane::coordination::session;
 use std::{
     env, fs,

@@ -1,4 +1,3 @@
-//! fork/mark/diff/accept/discard 数据面操作。
 
 pub(super) mod accept;
 pub(super) mod diff;
@@ -11,9 +10,6 @@ use fork::{ForkProducer, ForkTask};
 use super::*;
 
 impl FilesystemBackend {
-    /// Scan only the delta layers after `base` plus the branch's own upper
-    /// for one mount unit.  No file content is read and the cost is
-    /// O(changed entries), not the size of the whole lineage.
     pub(super) fn delta_since(
         &self,
         environment: &Environment,
@@ -38,8 +34,6 @@ impl FilesystemBackend {
         Ok((view, redirects))
     }
 
-    /// Materialize the metadata maps for one mount's layer chain, bottom to
-    /// top.  This is O(entries in the chain), never O(file contents).
     pub(super) fn read_chain(
         &self,
         layers: &[PathBuf],
@@ -52,8 +46,6 @@ impl FilesystemBackend {
         Ok(maps)
     }
 
-    /// Compare the live upper with one base layer copy.  Used for marks and
-    /// for fork bases whose upper was empty (the layer does not exist).
     pub(super) fn upper_delta_from_base(
         &self,
         mount: &MountUnit,

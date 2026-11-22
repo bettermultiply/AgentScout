@@ -1,10 +1,8 @@
-//! FirecrackerBackend 的环境生命周期与 Backend 实现。
 
 use super::guest_ops::*;
 use super::network::*;
 use super::*;
 
-/// 环境 id 会直接拼进状态目录路径，因此必须是单个普通路径分量。
 pub(super) const MAX_ENVIRONMENT_ID_BYTES: usize = 128;
 
 pub(super) fn validate_environment_id(environment_id: &str) -> Result<(), BackendError> {
@@ -64,11 +62,8 @@ impl FirecrackerBackend {
         })
     }
 
-    /// Lock order: per-id operation locks (lexicographic for branch), then
-    /// environment. The operations map is released before taking an operation
-    /// lock, and environment map lookup is released before locking the entry.
-    /// Weak entries retain lock identity across cleanup/reuse while any caller
-    /// still holds or waits for the lock, without retaining every past id.
+    /// Lock order: per-ID operations (lexicographic for branch), then environment entry.
+    /// Release map locks before taking entry locks. Weak entries preserve identity across reuse.
     pub(super) fn operation_lock(&self, id: &str) -> Result<Arc<Mutex<()>>, BackendError> {
         validate_environment_id(id)?;
         let mut operations = self.operations.lock().unwrap();
@@ -110,7 +105,6 @@ impl FirecrackerBackend {
         directory: &Path,
         network: &EnvironmentNetwork,
     ) -> Result<(), BackendError> {
-        // 网络建立后立即记录，进程异常退出时外部清理仍能定位 netns/veth/子网。
         fs::write(
             directory.join("network"),
             format!(
@@ -130,8 +124,7 @@ impl FirecrackerBackend {
         Self::write_network_metadata(directory, network)
     }
 
-    /// 状态目录里记录的进程是否仍然存活。pid 可能被系统复用，因此同时检查
-    /// 命令行仍是本环境的 Firecracker。
+    /// 同时检查命令行，避免把复用的 PID 当成本环境的 Firecracker。
     fn recorded_environment_process(directory: &Path, environment_id: &str) -> Option<u32> {
         let pid = fs::read_to_string(directory.join("pid"))
             .ok()?
@@ -162,8 +155,6 @@ impl FirecrackerBackend {
         .then_some(pid)
     }
 
-    /// establish/branch 前处理残留目录。没有存活进程的残留直接删除；仍被
-    /// 存活 Firecracker 占用时返回清晰错误，避免误删。
     pub(super) fn remove_stale_directory(
         &self,
         directory: &Path,
@@ -260,7 +251,6 @@ impl FirecrackerBackend {
         }
     }
 
-    /// Shared rollback for a started-but-not-fully-configured Environment.
     pub(super) fn rollback_environment_start(
         &self,
         id: &str,
@@ -462,7 +452,6 @@ impl Backend for FirecrackerBackend {
             )));
         }
         let directory = self.config.state_directory.join(environment_id);
-        // Socket 路径长度必须在复制 rootfs 和建立网络之前检查。
         check_socket_paths(&directory.join("api.sock"), &directory.join("vsock.sock"))?;
         self.remove_stale_directory(&directory, environment_id)?;
         fs::create_dir_all(&directory).map_err(error)?;
@@ -521,7 +510,6 @@ impl Backend for FirecrackerBackend {
         };
         let mut arguments = arguments.clone();
         if arguments.meta["bound_cwd"].is_null() {
-            // The stock guest environment's existing workspace is /root.
             arguments.meta["bound_cwd"] = Value::String("/root".into());
         }
         guest_operation(&socket, operation, &arguments, cancel)
@@ -541,8 +529,7 @@ impl Backend for FirecrackerBackend {
             }
             environment.vsock_socket.clone()
         };
-        // No lifecycle/environment lock across guest I/O: terminate must be
-        // able to kill the VM even while a guest command is still running.
+        // Terminate must be able to kill the VM while guest I/O is blocked.
         guest_command(&socket, command, cancel)
     }
 
@@ -577,8 +564,7 @@ impl Backend for FirecrackerBackend {
             let child_rootfs = child_directory.join("rootfs.ext4");
             let snapshot = child_directory.join("snapshot.state");
             let memory = child_directory.join("snapshot.memory");
-            // Prevent new operate calls and state polling during the snapshot
-            // window. Already-running commands do not retain this mutex.
+            // The snapshot lock blocks new operations and polling, not commands already running.
             let mut environment = parent_environment.lock().unwrap();
             let api_socket = environment.api_socket.clone();
             let parent_directory = environment.directory.clone();
@@ -622,7 +608,6 @@ impl Backend for FirecrackerBackend {
                         Ok(value)
                     }
                     (Ok(_), Err(resume)) => {
-                        // 父 VM 已暂停但未能恢复；不能把它报告为 Available。
                         environment.state = EnvironmentState::Suspended;
                         Err(BackendError::new(format!(
                             "parent resume after snapshot failed: {resume}"

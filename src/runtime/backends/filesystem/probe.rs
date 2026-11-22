@@ -1,4 +1,3 @@
-//! probe 相关实现。
 
 use super::*;
 
@@ -62,9 +61,6 @@ impl FilesystemBackend {
         result
     }
 
-    /// Probe btrfs snapshot creation.  `fast_delete` reports whether the
-    /// strict subvolume-delete ioctl works; without it discard still retires
-    /// data by rename and removes it in the background with a fallback.
     pub(super) fn probe_btrfs(&self) -> (bool, bool) {
         let root = self.config.state_directory.join(".probe-btrfs");
         if path_exists(&root) {

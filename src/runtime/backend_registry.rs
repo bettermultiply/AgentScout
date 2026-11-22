@@ -1,4 +1,3 @@
-//! Declarations for backend implementations available on this node.
 
 use std::sync::Arc;
 
@@ -7,7 +6,6 @@ use serde::Deserialize;
 use super::backend::{Backend, BackendError};
 use crate::protocol::contract::RuntimeCapabilities;
 
-/// Host-side interface requirements. These are independent of any external ABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendInterface {

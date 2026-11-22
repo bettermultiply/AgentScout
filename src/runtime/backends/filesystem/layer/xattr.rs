@@ -1,4 +1,3 @@
-//! overlay xattr 与 whiteout 字符设备。
 
 use std::ffi::CString;
 use std::fs::{self, File};

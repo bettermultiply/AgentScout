@@ -1,4 +1,3 @@
-//! control plane 协调：组织 Policy 求值和 Runtime 操作。
 
 mod controller;
 pub mod execution;

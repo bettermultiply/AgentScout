@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { DEFAULT_TUNING, TUNE_FIELDS, normalizeTuning, type TreeTuning } from '../tree'
 
 
-/** Temporary drawing-parameter panel; not part of the product surface. */
 export function TreeTuningPanel({ tuning, onChange, onClose }: { tuning: TreeTuning; onChange: (next: TreeTuning) => void; onClose: () => void }) {
   const [width, setWidth] = useState(360)
 

@@ -116,8 +116,7 @@ fn unified_filesystem_endpoint_binds_relative_operations_to_target_workspace() {
     );
     assert_eq!(bytes(call(&read(2), None)), original);
 
-    // Each case reuses an identity from a malformed request. Only a complete
-    // body may be admitted and no partially transmitted write may replace it.
+    // Failures must leave the request identity available for a complete upload.
     let mut socket = UnixStream::connect(&access.address).unwrap();
     let mut damaged = request(3, "write_file", path.clone());
     damaged["body_length"] = 5.into();
@@ -129,8 +128,7 @@ fn unified_filesystem_endpoint_binds_relative_operations_to_target_workspace() {
     assert_eq!(terminal(socket).meta["event"], "rejected");
     assert_eq!(bytes(call(&read(4), None)), original);
 
-    // Exercise short reads of frame headers and body, while verifying a
-    // retry is recognized by content rather than by frame boundaries.
+    // Change frame boundaries to verify that retry identity follows content.
     let mut socket = UnixStream::connect(&access.address).unwrap();
     damaged["body_length"] = 2.into();
     let mut encoded = Vec::new();
@@ -214,7 +212,6 @@ fn unified_filesystem_endpoint_binds_relative_operations_to_target_workspace() {
         wire::read(&mut execution, false).unwrap().meta["status"],
         "cancelled"
     );
-    // A reconnect receives the same output before the cached terminal.
     let mut socket = UnixStream::connect(&access.address).unwrap();
     wire::write_header(&mut socket, &exec).unwrap();
     let mut retry = BufReader::new(socket);

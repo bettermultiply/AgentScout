@@ -31,6 +31,6 @@
 
 - `cargo test --lib control_plane::`：22 项通过。
 - `cargo test --lib runtime::tests::`：13 项通过。
-- `/usr/bin/node --test tests/pi-access.mjs tests/nle-map-history.mjs tests/tree-layout.mjs`：14 项通过。
+- 当时的 Pi、地图和布局检查共 14 项通过。
 
 共 49 项通过。未新增测试、未调用真实模型、未执行特权环境验收；源码核查到的能力不自动视为端到端通过。其他待定选型与发布范围仍需用户决定，不能仅凭存在局部代码关闭。

@@ -19,10 +19,7 @@ const idle: ConversationEntry = {
   error: null,
 }
 
-/**
- * Fetch a Branch conversation only while it is actually visible. Updates are
- * debounced because conversation_updated can arrive once per streamed chunk.
- */
+/** Debounce updates: a streamed chunk can trigger its own conversation_updated event. */
 export function useConversation(
   branchId: string | null,
   enabled: boolean,
@@ -68,7 +65,6 @@ export function useConversation(
   return entry
 }
 
-/** A one-second clock used for "how long has this speculation lived". */
 export function useNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {

@@ -1,9 +1,7 @@
-//! discard 数据面操作。
 
 use super::*;
 
 impl FilesystemBackend {
-    /// Release a branch or mark and schedule its data for removal.
     pub fn discard(
         &self,
         snapshot: &str,

@@ -1,4 +1,3 @@
-//! Assemble one foreground run and own its process and presentation lifetimes.
 use super::{execution, tui, ui};
 use ascout::control_plane::{
     coordination::{execution as coordinator, session::Prepared},
@@ -66,8 +65,6 @@ fn resolve_agent_entry() -> Result<std::path::PathBuf, Box<dyn std::error::Error
     Ok(path)
 }
 
-/// 启动 Runtime Adapter 并完成握手。control plane 只持有连接和进程句柄，
-/// 不保存任何环境状态。
 fn start_adapter(
     config_path: &std::path::Path,
     run_dir: &std::path::Path,
@@ -118,8 +115,7 @@ fn start_adapter(
     let log_path = run_dir.join("adapter.log");
     let log = fs::File::create(&log_path)?;
     let mut adapter = Command::new(binary)
-        // Terminal Ctrl-C belongs to the tree. Its children are stopped
-        // through the shutdown protocol, not killed by the foreground group.
+        // A separate process group lets Ctrl-C use the tree's shutdown protocol.
         .process_group(0)
         .arg("--config")
         .arg(config_path)
@@ -171,7 +167,6 @@ fn start_adapter(
     let hello = match session.wait_for_hello(Duration::from_secs(10)) {
         Some(hello) => hello,
         None => {
-            // Failed admission must not leave the process started by assembly behind.
             let _ = session.shutdown();
             let _ = adapter.kill();
             let _ = adapter.wait();
@@ -185,7 +180,6 @@ pub fn lock_run(run_id: &str, run_dir: &Path) -> Result<fs::File, Box<dyn std::e
     if run_dir.file_name().and_then(|name| name.to_str()) != Some(&run_id) {
         return Err("Run directory identity mismatch".into());
     }
-    // Hold ownership before reading history, replacing sockets or launching the Agent.
     let run_lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -212,7 +206,6 @@ pub fn run(
         prepared.run_dir(),
         adapter_override,
     )?;
-    // Every fallible assembly step after process launch shares this teardown.
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         prepared.bind_runtime(&capabilities)?;
         let agent_entry = resolve_agent_entry()?;
@@ -341,7 +334,6 @@ pub fn run(
         adapter.wait()?;
         errors.push("Runtime Adapter shutdown timed out; forced termination required".into());
     }
-    // 运行目录留给调用方检查；不声称异常退出已完成环境清理。
     if errors.is_empty() {
         Ok(())
     } else {

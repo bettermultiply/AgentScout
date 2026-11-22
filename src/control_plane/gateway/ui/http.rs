@@ -1,4 +1,3 @@
-//! Loopback-only HTTP/SSE ingress and delivery. Ledger remains the fact owner.
 use super::{Assets, Connection, Presentation, Request};
 use crate::control_plane::ui_projection::UiProjection;
 use std::io::{self, Read, Write};
@@ -8,7 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-/// Control-plane-owned listener and connection workers.
 pub struct Server {
     stopped: Arc<AtomicBool>,
     reader: UiProjection,
@@ -108,9 +106,7 @@ pub fn start<P: Presentation + Clone + 'static>(
             worker_stopped.store(true, Ordering::Release);
             reader.wake_readers();
             for (socket, _) in &workers {
-                // Interrupt idle/partial HTTP reads. Keep writes available so
-                // disconnected observation streams can drain their final events.
-                // A blocked write retains the existing two-second timeout.
+                // Stop idle reads while allowing streams to drain final events.
                 let _ = socket.shutdown(std::net::Shutdown::Read);
             }
             for (_, worker) in workers {
@@ -209,7 +205,7 @@ fn serve<P: Presentation>(
                     b"Expected after sequence",
                 );
             }
-            // EventSource sends Last-Event-ID on automatic reconnect; it supersedes the initial query.
+            // On reconnect, EventSource's Last-Event-ID is newer than the initial query.
             let sequence = get("last-event-id").or(after).unwrap_or("0").parse::<u64>();
             let Ok(mut sequence) = sequence else {
                 return reply(stream, "400 Bad Request", "text/plain", b"Invalid sequence");

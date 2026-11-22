@@ -1,4 +1,3 @@
-//! nested Chance 测试。
 
 use super::super::*;
 use super::support::*;
@@ -100,8 +99,6 @@ fn nested_chance_waits_on_a_live_candidate_and_is_invalidated_with_it() {
         "an unconfirmed ancestor Proposal blocks commit eligibility"
     );
 
-    // A matching nested Proposal is not discarded while the ancestor is still
-    // unconfirmed; it waits for commit eligibility.
     tree.record_authority_outcome(nested, json!("nested guess"), Some(json!({})))
         .unwrap();
     let actions = tree.progress(&RuntimeCapabilities::default()).unwrap();

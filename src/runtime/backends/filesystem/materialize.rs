@@ -1,6 +1,3 @@
-//! Authority publication reads only paths selected by its overlay delta.
-//! A persistent package freezes the affected final view before any host write;
-//! failed publication retains the package and its per-path receipts for retry.
 use super::*;
 use std::os::fd::AsRawFd;
 
@@ -38,9 +35,7 @@ impl FilesystemBackend {
                     .chain(std::iter::once(mount.upper.clone()))
                 {
                     for (path, node) in read_layer_if_exists(&layer)? {
-                        // Selection is a union, not a semantic merge: a later
-                        // copy-up must not hide an earlier opaque/redirect's
-                        // complete affected subtree. The kernel resolves values.
+                        // Later copy-ups cannot narrow an earlier opaque/redirect subtree.
                         *selected.entry(path).or_default() |=
                             node.opaque || node.redirect.is_some();
                     }
@@ -65,10 +60,6 @@ impl FilesystemBackend {
                     "/dev",
                 ]);
                 command.env("PYTHONHASHSEED", "0");
-                // The merged view only needs a mount point that exists on the
-                // host.  A mapped mount target (a workload path such as /app)
-                // does not, so the view is assembled at a private directory
-                // under the environment root instead.
                 let view = if mount.target.is_dir() {
                     mount.target.clone()
                 } else {
@@ -95,9 +86,8 @@ impl FilesystemBackend {
                 checked(command, "read Authority delta final view")?;
             }
         }
-        // Freeze every affected mount before touching host lowers. Keep all
-        // packages until the complete publication succeeds, including receipts
-        // for mounts already completed before a later mount failed.
+        // Export all affected mounts before changing any host lower.
+        // Keep receipts so a partial publication can retry.
         for mount in environment.mounts.values() {
             let package = environment.root.join(format!(
                 "publication-{}",
@@ -112,12 +102,8 @@ impl FilesystemBackend {
                 .arg(&package);
             checked(command, "publish Authority delta")?;
             sync_filesystem(destination)?;
-            // Execution reset requires coordinated live-mount replacement;
-            // never approximate it by copying the host mount.
         }
-        // No tool mount is live at this boundary. Replace the execution plan
-        // with fresh uppers, never clear or mutate an existing mounted upper.
-        // Keep the old root/package until metadata and the new plan are durable.
+        // Keep the old uppers and package until both metadata and the new plan are durable.
         let mut next = environment.clone();
         next.root =
             self.environments_root()
@@ -137,18 +123,15 @@ impl FilesystemBackend {
             mount.work = volume.join("work");
         }
         Self::prepare_mount_dirs(&next.mounts.values().cloned().collect::<Vec<_>>())?;
-        // Until both files are installed keep memory on the old generation and
-        // retain its publication receipts. Retry must not export the host again.
-        // Retaining the old generation can fail (for example metadata storage
-        // is unwritable). Do it before publishing a new execution plan.
+        // Retain the old generation before installing the new plan. Its receipts
+        // let a retry skip exporting the already-modified host.
         let mut state = self.lock()?;
         self.retain_retired_root(&mut state, &environment.root)?;
         if let Err(failure) = self
             .persist_environment(&next)
             .and_then(|()| sync_filesystem(&self.config.state_directory))
         {
-            // persist_environment may have installed metadata before its plan
-            // write failed. Restore the previous durable description as well.
+            // A plan write can fail after metadata is installed.
             self.write_json(
                 &self.environment_metadata_path(id),
                 &EnvironmentMetadata::from_environment(&environment),
@@ -158,9 +141,7 @@ impl FilesystemBackend {
             return Err(failure);
         }
         state.environments.insert(next.id.clone(), next);
-        // Publication and execution-plan replacement are now committed. GC is
-        // maintenance: failure must not turn this into a retry with a new delta.
-        // Retain storage rather than delete anything if metadata persistence fails.
+        // GC failure after commit must not trigger publication of a new delta.
         let garbage = self.refresh_references(&mut state)?;
         let referenced = Self::root_referenced(&state, &environment.root);
         drop(state);

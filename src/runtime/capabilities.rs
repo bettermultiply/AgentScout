@@ -1,4 +1,3 @@
-//! 多 Backend 能力合并（冲突时回退到 None/保守值）。
 
 use std::collections::{BTreeMap, BTreeSet};
 

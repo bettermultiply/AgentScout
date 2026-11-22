@@ -25,14 +25,12 @@ export class SessionTree {
         this.tails.set(this.authority,this.manager.getLeafId());
     }
 
-    // Copy native records, never reconstruct them from model-visible messages.
-    // Keep the full source index: custom/summary entries can refer off-path.
+    // Keep the full native index: custom and summary entries can refer off-path.
     createBranch(branchId,workspace,source=this.manager,leaf=source.getLeafId(),persist=true) {
         const identity=source.constructor.create(workspace);
         const header={...identity.getHeader(),parentSession:source.getSessionFile()};
         const manager=source.constructor.inMemory(workspace,undefined,[header,...source.getEntries()]);
-        // Pi accepts preloaded entries but doesn't assign a path in memory mode.
-        // Reserve the native path without writing until a persistence boundary.
+        // Pi's preloaded memory sessions need a path before they can persist.
         manager.sessionFile=identity.getSessionFile();
         if(leaf)manager.branch(leaf);else manager.resetLeaf();
         manager.appendCustomEntry('authority',{branch_id:branchId,parentId:leaf??null});
@@ -46,7 +44,6 @@ export class SessionTree {
     static persist(manager) {
         if(manager.isPersisted()&&existsSync(manager.getSessionFile()))return;
         SessionTree.write(manager.getSessionFile(),manager.getHeader(),manager.getEntries());
-        // Keep the existing manager and its leaf. Pi appends subsequent entries.
         manager.persist=true;
         manager.flushed=true;
     }
@@ -88,7 +85,6 @@ export class SessionTree {
         else this.acceptanceParents.set(branchId, parent);
     }
 
-    /** Explicit control-plane authority takes precedence over a previous run. */
     adoptAuthority(branchId) { this.authority=branchId; }
 
     context(branchId) {
@@ -105,7 +101,6 @@ export class SessionTree {
 
     stop(branchId) { const branch=this.branches.get(branchId);if(branch)branch.stopped=true; }
 
-    /** Original native indexes are separate from the assembled final history. */
     snapshot(directory, checkpointManagers=[]) {
         const managers=new Map([[this.manager.getSessionFile(),this.manager]]);
         for(const {manager} of this.branches.values())managers.set(manager.getSessionFile(),manager);
@@ -135,7 +130,6 @@ export class SessionTree {
 
     static restore(record, SessionManager, sessionFile) {
         const managers=new Map();
-        // Validate the entire set before opening any manager or selecting paths.
         for(const source of record.sources){
             if(checksum(readFileSync(source.file))!==source.checksum)throw Error(`Recovery source changed: ${source.file}`);
             const records=readFileSync(source.file,'utf8').trim().split('\n').map(JSON.parse);
@@ -188,14 +182,12 @@ export class SessionTree {
         tree.tails=new Map(record.tails);
         tree.originalEntries=new Map(record.originalEntries);tree.accepted=new Set(record.accepted);
         tree.acceptanceParents=new Map(record.acceptanceParents ?? []);
-        // Keep the saved-file identity map for checkpoints whose source is no
-        // longer a live branch but is still needed by a valid continuation.
+        // Checkpoints can outlive their source Branch.
         tree.recoveryManagers=managers;
         return tree;
     }
 
-    // Read native indexes at a synchronous boundary. Active managers are never
-    // rewritten, reloaded, disposed or deleted by history assembly.
+    // Assembly may read live managers synchronously but must leave their context intact.
     settle() {
         if(this.readOnlyUntilPrompt)return;
         if(this.branches.size===0){
@@ -232,8 +224,7 @@ export class SessionTree {
                 }
                 return result;
             };
-            // A copied index contains predictions and unrelated paths. Only
-            // the source continuation of this exact checkpoint supplies facts.
+            // The copied index may also contain predictions and unrelated paths.
             let checkpoint=input.checkpoint;
             if(!checkpoint){
                 let entry=this.originalEntries.get(input.pairedTail);
@@ -272,14 +263,9 @@ export class SessionTree {
         }
         const tail=this.tail(this.authority),marker={type:'custom',customType:'authority',id:randomUUID(),parentId:tail,timestamp:new Date().toISOString(),data:{branch_id:this.authority,parentId:tail}};
         SessionTree.write(this.manager.getSessionFile(),this.manager.getHeader(),[...entries.values(),marker]);
-        // Re-open only the assembly manager. Runtime managers keep their own
-        // original predicted contexts, including any inference already in flight.
         this.manager=this.manager.constructor.open(this.manager.getSessionFile());
         for(const [branchId,branch] of this.branches)if(branch.stopped){
-            // Entries remain in the manager until assembly succeeds. A failed
-            // write/validation never removes its native source file.
-            // Checkpoint managers can still reference this native session after
-            // the Branch is released. Pi owns its persisted history lifetime.
+            // Preserve native history files: checkpoints can reference a released Branch.
             this.branches.delete(branchId);
         }
     }

@@ -1,16 +1,3 @@
-/**
- * Interposer: product-independent Agent access, exposed by createInterposer.
- *
- * This module owns the parts of the Agent access side that do not depend on a
- * concrete Agent product: local Policy evaluation, per-Branch hook counting and
- * `extent`, the `effect` gate, control-plane reports, and waiting for the
- * control plane's disposition. Product-specific pre-execution holds and session
- * continuation belong to Product Integration (instrumentation/pi/main.ts);
- * ASC-Proxy (instrumentation/pi/asc-proxy.ts) owns communication.
- * A Product Integration only turns its own
- * execution points into `ExecutionPoint` values and executes the disposition;
- * it does not evaluate `extent` or `effect` itself.
- */
 import { evaluatePureDecision, type PureDecision } from './pure-policy.ts';
 
 export type PolicyArtifact = {
@@ -38,17 +25,12 @@ export type ExecutionPoint = {
     branch: string;
     /** Product action identity, used to pair repeated hooks of one action. */
     actionId: string;
-    /** Generic action kind such as `tool_execution` or `model_inference`. */
     actionKind: string;
     name: string;
     arguments?: unknown;
-    /** Policy `op` description presented to `admit`. */
     op: Record<string, unknown>;
-    /** Product-supplied `contract_context` for `admit.feasibility_pass`. */
     contractContext?: unknown;
-    /** Whether this point may be admitted speculatively. */
     admit: boolean | (() => boolean);
-    /** Extra product facts copied into `speculative_admission_request`. */
     admissionFacts?: Record<string, unknown> | (() => Record<string, unknown>);
     fastStart?: { chanceId: string; start: (prediction: unknown) => void };
     signal?: AbortSignal;
@@ -95,14 +77,12 @@ type BranchProgress = {
 
 export type Interposer = {
     setPolicy(branch: string, artifact: PolicyArtifact): void;
-    /** Apply the hold bookkeeping for a control-plane command. */
     control(command: ControlCommand): Promise<void>;
     beforeAction(point: ExecutionPoint): Promise<Disposition>;
     afterAction(action: ActionCompletion): void;
     releaseAll(): void;
     snapshot(): unknown;
     restore(record: any): void;
-    /** Predictor availability reported by the control plane, before `admit` runs. */
     hasPredictor(branch: string): Promise<boolean>;
 };
 
@@ -153,8 +133,6 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
     const progress = new Map<string, BranchProgress>();
     const countedHooks = new Set<string>();
 
-    // Reject whole-object or dynamic lookups of inputs whose values only the
-    // control plane knows. Inspect every arm, including unexecuted branches.
     function localInputs(binding: PureDecision, roots: string[]) {
         const argument = binding.program.argument;
         function allowed(node: unknown): boolean {
@@ -189,7 +167,6 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             if (proposals?.abstain === true) return {abstain: true} as const;
             if (proposals?.proposals?.length === 1) return proposals.proposals[0];
         } catch {
-            // A program that cannot be evaluated with local facts uses normal admission.
         }
     }
 
@@ -251,9 +228,6 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
         await waitFor(hold, point.signal, 'Extent stop cancelled');
     }
 
-    // A Branch that has not been accepted yet may not produce effects. The
-    // `effect` Decision is evaluated at the boundary; while the gate holds, the
-    // Branch is reported as blocked by the effect gate.
     async function effectGate(point: ExecutionPoint) {
         const hold = effectHolds.get(point.branch);
         if (!hold) return;
@@ -290,7 +264,6 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
         await report({ message: 'branch_resumed', branch_id: point.branch });
     }
 
-    // `rebalance` pause: hold the Branch at its next boundary until resumed.
     async function pauseGate(branch: string, signal: AbortSignal | undefined) {
         const hold = pauseHolds.get(branch);
         if (!hold) return;
@@ -329,7 +302,6 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
     return {
         setPolicy,
         async hasPredictor(branch) {
-            // Availability is a control-plane fact, never a Decision evaluation.
             return policies.get(branch)?.has_predictor === true;
         },
 
@@ -342,8 +314,7 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             for(const [branch,artifact] of record.policies)setPolicy(branch,artifact);
             for(const branch of record.effectHolds)effectHolds.set(branch,makeHold());
             for(const branch of record.pauseHolds)pauseHolds.set(branch,makeHold());
-            // Older snapshots only recorded hook counts. The effect hold also
-            // identifies the candidates in those snapshots.
+            // Older snapshots identify held candidates without recording their hook identities.
             for (const branch of record.effectHolds) progress.set(branch, newProgress(undefined, true));
             for (const [branch, count] of record.hookCounts ?? []) branchProgress(branch).hookCount = count;
             for (const [branch, value] of record.progress ?? []) {
@@ -390,8 +361,6 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
                     if (!hold) return;
                     extentHolds.delete(branch);
                     hold.release();
-                    // A disposal without an outcome only releases the extent
-                    // hold; the Branch becomes runnable again.
                     if (command.outcome === undefined) {
                         await report({ message: 'branch_resumed', branch_id: branch });
                     }

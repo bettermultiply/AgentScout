@@ -1,11 +1,7 @@
-//! SpeculativeTree 的候选、晋升与回收。
 
 use super::*;
 
 impl SpeculativeTree {
-    /// Create one candidate Branch for a new Proposal on `chance_id`: the
-    /// Proposal, the Branch, its position and the start intent are one Tree
-    /// operation.
     pub fn start_candidate(
         &mut self,
         chance_id: &str,
@@ -56,8 +52,6 @@ impl SpeculativeTree {
         let transcript_index = self.branch(parent)?.execution_position.transcript_index;
         let parent_assumptions = self.branch(parent)?.assumption_set.clone();
         let parent_status = self.branch(parent)?.status;
-        // The Chance's authority value is produced by its parent Branch.
-        // Inherited assumptions constrain where a result may be transferred.
         if !parent_status.is_live_authority() && !parent_status.is_live_candidate() {
             return Err(invalid_input("parent branch cannot create a candidate"));
         }
@@ -70,9 +64,6 @@ impl SpeculativeTree {
             Some(chance_id.to_string()),
             (chance.speculation_kind, chance.speculation_started_at_ms),
         )?;
-        // The logical transcript belongs to the control plane. A Branch
-        // inherits its parent's transcript and appends only its own entries;
-        // native Pi session files remain the persistence/assembly form.
         if let Some(history) = self.transcripts.get(parent).cloned() {
             self.transcripts.insert(branch_id.clone(), history);
         }
@@ -160,7 +151,6 @@ impl SpeculativeTree {
             .collect()
     }
 
-    /// The authority's real result for the Chance this candidate belongs to.
     pub fn candidate_outcome(&self, candidate: &str) -> Option<&Value> {
         let chance = self
             .chances
@@ -168,9 +158,7 @@ impl SpeculativeTree {
         chance.authority_outcome.as_ref()
     }
 
-    /// Runtime evidence gathered for the Chance's real action. This is the
-    /// verifier input (`before`/`after` observations), not the model-facing
-    /// tool result.
+    /// Verifier input (`before`/`after` observations) is separate from the tool result.
     pub fn candidate_evidence(&self, candidate: &str) -> Option<&Value> {
         let chance = self
             .chances
@@ -200,9 +188,6 @@ impl SpeculativeTree {
             .chance_id
             .as_ref()
             .and_then(|id| self.chances.get(id));
-        // With the authority held, Policy may judge a real Proposal using its
-        // own acceptance rule. Never fabricate a Proposal for an unfinished
-        // alternate-model inference. An in-flight launch must settle first.
         let held_proposal = chance.is_some_and(|chance| {
             chance.authority == AuthorityState::NotRequested
                 && chance.launch_epoch.is_some()
@@ -217,10 +202,7 @@ impl SpeculativeTree {
             && branch.status.is_decidable()
     }
 
-    /// A candidate may only win while the authority is still at the waiting
-    /// point the candidate forked from. Once the authority has started another
-    /// tool operation, promoting the candidate would roll the authority back
-    /// past work that has already been executed.
+    /// Promote only at the original wait point to avoid rolling back executed authority work.
     pub(crate) fn authority_advanced_past(&self, candidate: &BranchRecord) -> bool {
         let Some(chance) = candidate
             .chance_id
@@ -305,8 +287,6 @@ impl SpeculativeTree {
                 .then_some(&parent.branch_id);
         }
 
-        // The speculative target must carry the same outer assumptions.
-        // Its own Proposal must exist so a full acceptance can carry it on.
         if parent.role != BranchRole::Candidate
             || !parent.status.is_decidable()
             || self.branch_proposal(&parent.branch_id).is_none()
@@ -357,7 +337,6 @@ impl SpeculativeTree {
                 .any(|branch| branch.status == BranchStatus::Promoting)
     }
 
-    /// Return terminal Branches that may be handed to the Ledger.
     pub fn evictable_branches(&self) -> Vec<String> {
         self.branches
             .values()
@@ -384,10 +363,7 @@ impl SpeculativeTree {
             .collect()
     }
 
-    /// 从活动 Tree 中取出终止 Branch，并把它的所有权交给调用方的 Ledger。
-    ///
-    /// 从这一步开始，核心数据结构已经不再拥有该 Branch；Ledger 决定
-    /// 记录对象何时释放。调用方应立即把返回值传给 Ledger。
+    /// 取出终止 Branch 后，调用方须立即将其移交 Ledger。
     pub fn take_archivable_branch(&mut self, branch_id: &str) -> io::Result<BranchRecord> {
         if !self.evictable_branches().iter().any(|id| id == branch_id) {
             return Err(invalid_input("branch is not safe to archive"));
@@ -405,9 +381,6 @@ impl SpeculativeTree {
             .ok_or_else(|| invalid_input("branch does not exist"))
     }
 
-    /// Discard a candidate and every Branch descended from it. When this was
-    /// the last live Branch of its Chance, the Chance is recorded as discarded
-    /// with `why`.
     pub fn discard_candidate(
         &mut self,
         branch_id: &str,

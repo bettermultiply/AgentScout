@@ -1,4 +1,3 @@
-//! Task termination and authority materialization coordination.
 use super::{AgentCommand, SpeculativeTree};
 use crate::protocol::contract::OperationResult;
 use serde_json::{Value, json};
@@ -102,7 +101,6 @@ impl Task {
             .and_then(|id| tree.branches.get(id))
             .and_then(|branch| branch.environment_id.clone());
         let Some(environment) = environment else {
-            // Report through the normal visible, retryable materialization failure path.
             self.materializing = true;
             self.materialized = Some(Err("authority Branch or Environment missing".into()));
             return Ok(None);

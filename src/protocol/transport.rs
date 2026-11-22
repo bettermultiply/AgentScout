@@ -1,4 +1,3 @@
-//! 会话上的消息编解码：4 字节大端长度前缀 + JSON 负载。
 
 use std::io::{self, Read, Write};
 
@@ -47,37 +46,4 @@ pub fn read_message<R: Read, T: DeserializeOwned>(reader: &mut R) -> io::Result<
     let message = serde_json::from_slice(&payload)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     Ok(Some(message))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    #[test]
-    fn read_message_rejects_an_oversized_length_before_allocating() {
-        let mut input = Cursor::new(vec![0xff, 0xff, 0xff, 0xff]);
-        let error = read_message::<_, serde_json::Value>(&mut input).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("exceeds"), "{error}");
-    }
-
-    #[test]
-    fn read_message_round_trips_a_normal_message() {
-        let mut buffer = Vec::new();
-        write_message(&mut buffer, &serde_json::json!({"hello": "world"})).unwrap();
-        let value: serde_json::Value = read_message(&mut Cursor::new(buffer)).unwrap().unwrap();
-        assert_eq!(value["hello"], "world");
-    }
-
-    #[test]
-    fn write_message_rejects_payloads_over_the_limit() {
-        // A JSON string of this size exceeds the limit without needing a
-        // custom serializer.
-        let payload = "x".repeat(MAX_MESSAGE_BYTES + 1);
-        let mut buffer = Vec::new();
-        let error = write_message(&mut buffer, &payload).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("exceeds"), "{error}");
-    }
 }

@@ -1,4 +1,3 @@
-//! Requests to independent backend executables. Tool messages can carry framed bytes.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -142,8 +141,7 @@ fn retry(error: &io::Error) -> bool {
     )
 }
 
-// A tool exchange owns the channel until its terminal. Socket timeouts give
-// us a chance to send control messages without unwinding the frame decoder.
+// Read timeouts allow cancellation without discarding the partial frame.
 struct ToolIo<'a> {
     channel: &'a mut BufReader<UnixStream>,
     cancel: &'a CancelHandle,
@@ -179,8 +177,7 @@ impl BufRead for ToolIo<'_> {
             if self.cancel.is_cancelled()
                 && let Some(request) = self.cancel_request.take()
             {
-                // Only the read phase may send cancellation. A partially sent
-                // request must reach its final frame before the next header.
+                // Finish the request frame before sending a cancellation header.
                 wire::write_header(self, &request)?;
             }
             if self.channel.buffer().is_empty() {
@@ -303,8 +300,7 @@ impl Instance {
                 {
                     return Err(interrupted.clone());
                 }
-                // Once we have sent any bytes, only a complete terminal makes
-                // this exchange reusable. Transport failures are not cancellation.
+                // Once a request is on the wire, only its complete terminal makes the channel reusable.
                 if io.upload_started
                     || !matches!(
                         error.kind(),
@@ -393,7 +389,6 @@ impl Instance {
 
     fn abort(&mut self) {
         if !self.closed {
-            // The program is the leader of a dedicated process group.
             // SAFETY: the negative child PID addresses its dedicated process group.
             unsafe {
                 libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);

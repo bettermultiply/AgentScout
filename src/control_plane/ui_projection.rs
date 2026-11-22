@@ -1,4 +1,3 @@
-//! UI Projection: disposable UI cache over saved Ledger observations.
 use super::{
     ledger::LedgerReader,
     observation::{ObservationEvent, StateEventSet},

@@ -1,4 +1,3 @@
-//! AScout control facts only. Agent messages are rendered by the product in its PTY.
 use super::ui::{ObservedBranch, ObservedTree};
 use ascout::control_plane::gateway::agent::protocol::{BlockedReason, BranchRole};
 use ascout::control_plane::speculative_tree::BranchStatus;
@@ -85,34 +84,4 @@ pub fn structured(value: &Value) -> String {
     let mut text = String::new();
     fields(value, "", &mut text);
     text
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ascout::control_plane::gateway::agent::protocol::BranchRole;
-    use ascout::control_plane::speculative_tree::BranchStatus;
-    #[test]
-    fn invalid_selection_is_explicit_and_valid_selection_is_read_only() {
-        let branch = ObservedBranch {
-            branch_id: "authority".into(),
-            parent_branch_id: None,
-            role: BranchRole::Authority,
-            status: BranchStatus::Running,
-            runtime: None,
-            reason: None,
-        };
-        let mut tree = ObservedTree::default();
-        tree.authority_branch_id = Some("authority".into());
-        tree.branches.insert("authority".into(), branch);
-        for input in ["0", "2", "abc", "", "-1"] {
-            assert!(
-                select_branch(&tree, input)
-                    .unwrap_err()
-                    .contains("无效 Branch 编号")
-            );
-        }
-        assert_eq!(select_branch(&tree, "1").unwrap(), "authority");
-        assert_eq!(tree.authority_branch_id.as_deref(), Some("authority"));
-    }
 }

@@ -83,10 +83,9 @@
 - `node --experimental-strip-types --test tests/predictor-fact.mjs`：原版 0/3（`red.log`），首次修复后 3/3（`green.log`）；最终另加异常传播覆盖。
 - `node --experimental-strip-types --test tests/pi-access.mjs tests/predictor-fact.mjs`：最终 10/10，`focused.log`。
 - `node --test tests/predictor-fact-e2e.mjs`：两次通过均为 1/1，`e2e-green.log`、构建后再次运行的 `e2e-after-build.log`；首轮脚本断言失败见 `e2e.log`。
-- `cargo test --test policy`：1/1，`policy-integration.log`；`cargo test --lib control_plane::policy`：3/3，`policy-unit.log`；`cargo test --lib control_plane`：26/26，`control-plane.log`。
+- 当时的 Policy 集成检查：1/1，`policy-integration.log`；`cargo test --lib control_plane::policy`：3/3，`policy-unit.log`；`cargo test --lib control_plane`：26/26，`control-plane.log`。
 - `cargo check --all-targets`、`cargo build --bins --example policy`：通过，`check.log`、`build.log`。
 - `git diff --check`：通过，`diff-check.log`。退出后进程检查未发现本次三个 E2E run 的残留进程。
-- `python3 tests/policy-proposal-order.py`：1/1，`proposal-order.log`。
 - `node --experimental-strip-types --test tests/pi-*.mjs tests/predictor-fact.mjs`：当时 33/34（新增异常测试前），`pi-core.log`。唯一失败为 `tests/pi-filesystem-tools.mjs:100` 的后代进程等待断言 `1 !== 0`；`node --test tests/pi-filesystem-tools.mjs` 独立重跑仍 4/5（`pi-filesystem-rerun.log`）。该文件工具实现和测试本轮未修改，入口也未调用本次修改的 access core 或 main；保留给主审检查已有工作，不宣称 Pi 全部通过。
 
 ## 当前可运行范围
@@ -510,6 +509,6 @@ Gateway 的 Agent socket、UI HTTP/SSE 和 Runtime ControlSession 通信代码�
 
 验证结果和支持边界见本轮验收记录；脚本 Agent／Runtime 替身验证控制路径，不代表真实模型或 NLE 的端到端效果。完整 Policy 调度、嵌套与 Registry 能力验证仍属既有后续范围。
 
-本轮验收（2026-11-05）：`cargo test --lib --bins`、`cargo test --test policy`、`/usr/bin/node --test tests/pi-access.mjs`、`cargo check --all-targets`、`cargo clippy --lib --bin ascout-control-plane -- -D warnings` 通过。新增 3 项回归前已复现取消后的迟到预测、环境建立期间提前归档、工具超时重复立即唤醒问题，修复后通过。
+本轮验收（2026-11-05）：`cargo test --lib --bins`、当时的 Policy 集成检查、`/usr/bin/node --test tests/pi-access.mjs`、`cargo check --all-targets`、`cargo clippy --lib --bin ascout-control-plane -- -D warnings` 通过。新增 3 项回归前已复现取消后的迟到预测、环境建立期间提前归档、工具超时重复立即唤醒问题，修复后通过。
 
 脚本 Agent／Runtime 替身经正式 Unix 协议和现有 Policy 求值路径完成：命中接受、不命中丢弃、接受后输入、慢 Runtime 期间中断，以及有序退出。共享环境验证目录 `/tmp/ascout-event-probe-f6mwzji2`，真实 SIGINT 验证 `/tmp/ascout-event-probe-bdwx8p3u`，独立环境协议路径验证 `/tmp/ascout-event-probe-vdx7fvxl`。替身只证明控制流程，不证明真实隔离或真实 Agent 任务收益。未调用真实模型、未运行真实 NLE／Firecracker。

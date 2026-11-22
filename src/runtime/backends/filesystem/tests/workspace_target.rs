@@ -1,10 +1,6 @@
 use super::super::*;
 use super::support::{mount_for, run_in_environment};
 
-/// A workload that names its workspace `/app` must see the isolated workspace
-/// there: the sandbox path is not a host path, the host directory stays the
-/// overlay lower, and publication writes back to the host workspace.  Writes
-/// must never reach the host before materialization.
 #[test]
 fn workspace_is_mounted_at_its_sandbox_target_and_publishes_back() {
     let root = tempfile::Builder::new()

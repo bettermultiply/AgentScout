@@ -1,4 +1,3 @@
-//! Host-selected subprocess bridge. No provider code runs on an uncancellable thread.
 use super::validation::invalid;
 use serde_json::Value;
 use std::{
@@ -8,10 +7,8 @@ use std::{
     time::Instant,
 };
 
-/// Executable and arguments are deployment configuration, never Policy input.
-/// The service reads one JSON line and writes one JSON line, then exits.
-/// Killing the service revokes its provider connection; the service must not
-/// launch detached descendants.
+/// Deployment config selects the executable. The service exchanges one JSON line each way.
+/// It must exit without leaving detached descendants that retain provider access.
 pub struct ModelProviderProcess {
     pub executable: std::path::PathBuf,
     pub arguments: Vec<String>,

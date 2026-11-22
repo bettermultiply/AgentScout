@@ -1,20 +1,18 @@
 import {writeExecution} from '../instrumentation/pi/execution-wire.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, symlink } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 
 const pi=resolve('../pi');
-// The real protocol launcher and native SessionManager run unchanged. This SDK
-// double models only Pi's triggerTurn:false queue/abort/idle boundary, not an LLM.
-// tests/pi-notification.mjs separately checks that boundary against native Pi.
 for(const mode of ['cleanup','eof','abort','turn_end','default','write_cleanup','write_eof','idle_write_cleanup','idle_write_eof']) {
 test(`notification through main.ts: ${mode}`,{timeout:15000},async t=>{
     const failed=mode.includes('write'),idle=mode==='default'||mode.startsWith('idle_');
     const root=await mkdtemp('/tmp/opencode/notification-adapter-');
     await mkdir(join(root,'packages/coding-agent/src'),{recursive:true});
+    await symlink(join(pi,'packages/pi-integration'),join(root,'packages/pi-integration'),'dir');
     await mkdir(join(root,'node_modules/typebox'),{recursive:true});
     await writeFile(join(root,'package.json'),' {"type":"module"}');
     await writeFile(join(root,'node_modules/typebox/index.js'),'exports.Type={Unsafe:x=>x};');
@@ -78,14 +76,19 @@ export async function createAgentSession(options){
     if(!idle)await wait(m=>m.message==='action_started'&&m.action_kind==='tool_execution');
     const command={command:'promote',branch_id:'authority',command_id:'promote-notice',generation:1,...(mode==='default'?{}:{notification:'real authoritative result'})};
     if(failed)await writeFile(join(root,'fail'),'fail');
-    send(command);send(command);await result(command.command_id,'applied');
-    // A barrier proves the retransmission has completed, not just its first ACK.
-    send({command:'resolve_pending',branch_id:'authority',command_id:'barrier',generation:1});await result('barrier','applied');
-    assert.equal(messages.filter(m=>m.message==='command_result'&&m.command_id===command.command_id&&m.status==='applied').length,2);
-    let audit=(await readFile(join(root,'audit.jsonl'),'utf8').catch(()=>'' )).trim().split('\n').filter(Boolean).map(JSON.parse);
-    assert.equal(audit.filter(e=>e==='abort').length,0,'normal Promote must not abort inference');
-    assert.equal(audit.filter(e=>e==='model').length,idle?0:1);
-    assert.equal(audit.filter(e=>e.send).length,mode==='default'?0:1,'full command retransmission sends once');
+    const retransmit=failed||mode==='turn_end';
+    send(command);
+    if(retransmit)send(command);
+    await result(command.command_id,'applied');
+    if(retransmit){
+        // Wait for both ACKs before checking the effect of retransmission.
+        send({command:'resolve_pending',branch_id:'authority',command_id:'barrier',generation:1});await result('barrier','applied');
+        assert.equal(messages.filter(m=>m.message==='command_result'&&m.command_id===command.command_id&&m.status==='applied').length,2);
+    }
+    const auditRows=async()=>(await readFile(join(root,'audit.jsonl'),'utf8').catch(()=>'' )).trim().split('\n').filter(Boolean).map(JSON.parse);
+    const beforeStop=await auditRows();
+    assert.ok(!beforeStop.includes('abort'),'Promote must not abort inference');
+    if(failed)assert.equal(beforeStop.filter(e=>e.send).length,1,'retransmission does not retry a failed write');
     if(mode!=='default')assert.equal(messages.filter(m=>m.message==='transcript'&&m.entry.role==='custom').length,0,'queued is not delivered');
     if(mode==='turn_end'){
         const stdout=Buffer.from(JSON.stringify({result:'real'}));
@@ -93,6 +96,7 @@ export async function createAgentSession(options){
         toolSocket.end();toolSocket=undefined;
         send({command:'resolve_pending',branch_id:'authority',command_id:'finish-tool',operation_id:'op',generation:1,outcome:'real'});await wait(m=>m.message==='turn_completed');
         send(command);send({command:'resolve_pending',branch_id:'authority',command_id:'after-delivery',generation:1});await result('after-delivery','applied');
+        assert.equal(messages.filter(m=>m.message==='command_result'&&m.command_id===command.command_id&&m.status==='applied').length,3);
         send({...command,notification:'changed payload'});send({command:'resolve_pending',branch_id:'authority',command_id:'after-conflict',generation:1});await result('after-conflict','applied');
         assert.ok(messages.some(m=>m.message==='branch_failed'&&m.reason==='Command id reused with different payload'));
     }
@@ -117,8 +121,10 @@ export async function createAgentSession(options){
         assert.ok(!messages.some(m=>m.message==='agent_released'));
         if(mode.startsWith('idle_'))assert.ok(messages.some(m=>m.message==='adapter_capability_gap'&&m.capability==='notification'&&m.status==='failed'));
     }
-    audit=(await readFile(join(root,'audit.jsonl'),'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse);
+    const audit=await auditRows();
     assert.equal(audit.filter(e=>e==='model').length,idle?0:1,'delivery and shutdown do not request another model turn');
-    for(const event of audit.filter(e=>e.send))assert.deepEqual(event.options,{triggerTurn:false});
+    const sends=audit.filter(e=>e.send);
+    if(!failed)assert.equal(sends.length,mode==='default'?0:1,'Promote sends once across delivery and retransmission');
+    for(const event of sends)assert.deepEqual(event.options,{triggerTurn:false});
 });
 }

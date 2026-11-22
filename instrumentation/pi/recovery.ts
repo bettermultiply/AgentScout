@@ -5,7 +5,6 @@ import {randomUUID, createHash} from 'node:crypto';
 
 export const checksum = value => createHash('sha256').update(value).digest('hex');
 
-/** Publish only a complete, readable generation; failure never removes the old save. */
 export function save(file, value) {
     const bytes=JSON.stringify(value),temporary=`${file}.${randomUUID()}.tmp`;
     let descriptor;

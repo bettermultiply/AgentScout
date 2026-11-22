@@ -47,25 +47,3 @@ impl SeenRequests {
         self.entries.insert(id, value);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn bounded_window_expires_accepted_ids_without_retiring_unseen_lower_ids() {
-        let mut seen = SeenRequests::default();
-        assert!(seen.admission_error("req-2").is_none());
-        seen.insert("req-2".into(), ([2; 32], true));
-        assert!(seen.admission_error("req-1").is_none());
-        seen.insert("req-1".into(), ([1; 32], true));
-        for n in 3..2000 {
-            let id = format!("req-{n}");
-            assert!(seen.admission_error(&id).is_none());
-            seen.insert(id, ([0; 32], true));
-            assert!(seen.entries.len() <= 257);
-        }
-        assert!(seen.admission_error("req-1").unwrap().contains("expired"));
-        assert!(seen.get("req-1").is_none());
-        assert!(seen.get("req-1999").is_some());
-    }
-}

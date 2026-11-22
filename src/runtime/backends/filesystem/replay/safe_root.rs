@@ -1,4 +1,3 @@
-//! openat2 根目录 fd 操作（防绝对符号链接逃逸）。
 
 use std::ffi::CString;
 use std::fs::File;

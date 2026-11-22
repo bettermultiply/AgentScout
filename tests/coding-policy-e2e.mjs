@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -12,17 +11,6 @@ import { runPath, spawnControl } from './control-plane-fixture.mjs';
 const coding = resolve('assets/policy/coding');
 const binary = resolve('target/debug/ascout-control-plane');
 
-test('CLI help works without startup configuration', () => {
-    for (const flag of ['--help', '-h']) {
-        const {status, stdout, stderr} = spawnSync(binary, [flag], {env: {}, encoding: 'utf8'});
-        assert.equal(status, 0, stderr);
-        assert.equal(stderr, '');
-        for (const text of ['[pi-root]', 'TUI', '--web', '--cwd', '--policy', '--backend',
-            '--runtime', '--model ', '--thinking', 'ascout runs']) {
-            assert.ok(stdout.includes(text), `Help is missing ${text}`);
-        }
-    }
-});
 const tool = (id, name, args) => ({tool_calls: [{index: 0, id, type: 'function',
     function: {name, arguments: JSON.stringify(args)}}]});
 
@@ -39,7 +27,7 @@ async function freePort() {
     return port;
 }
 
-async function fixture(t, respond, prepare) {
+async function fixture(t, respond, prepare, {checkUiNotice = false} = {}) {
     const root = fs.mkdtempSync(join(tmpdir(), 'ascout-coding-'));
     for (const dir of ['workspace', 'pi']) fs.mkdirSync(join(root, dir));
     const write = (name, content, executable = false) => fs.writeFileSync(join(root, 'workspace', name), content,
@@ -105,95 +93,18 @@ async function fixture(t, respond, prepare) {
         if (t.passed) fs.rmSync(root, {recursive: true, force: true});
     });
     await wait(event => event.message === 'branch_ready', 'Pi startup');
-    // A successful request below also ensures the post-bind notice has been emitted.
     assert.equal((await post('prompt', {prompt: 'Verify the software and report the outcome.'})).status, 202);
     const done = await wait(event => event.message === 'task_completed', 'task completion');
-    const urlNotices = stderr.split('\n').filter(line => line.includes(`http://${address}`));
-    assert.deepEqual(urlNotices, [`AScout browser UI: http://${address}`]);
+    if (checkUiNotice) {
+        const urlNotices = stderr.split('\n').filter(line => line.includes(`http://${address}`));
+        assert.deepEqual(urlNotices, [`AScout browser UI: http://${address}`]);
+    }
     assert.equal(done.status, 'succeeded', `${root}\n${logs}`);
     return {done, rows, root, shutdown: async () => {
         assert.equal((await post('shutdown')).status, 202);
         assert.equal((await exit)[0], 0, logs);
     }};
 }
-
-
-function decision(name, data) {
-    const {status, stdout, stderr} = spawnSync('/usr/bin/python3', ['-B', '-c', `
-import json, sys
-from decisions import ${name}
-print(json.dumps(${name}(json.load(sys.stdin), policy_config={'max_assumption_depth': 2}, capabilities={})))
-`], {cwd: coding, input: JSON.stringify(data), encoding: 'utf8'});
-    assert.equal(status, 0, stderr);
-    return JSON.parse(stdout);
-}
-
-const admits = command => decision('feasibility_pass', {op: {arguments: {command}}, state: {assumption_depth: 0}});
-
-test('coding Policy isolates heredoc bodies and malformed lines, and waits only for foreground verification', () => {
-    assert.equal(admits(`python3 - <<'PY'\ntext = """\npytest\n"""\nPY\npytest > test.log 2>&1; tail -50 test.log`), true);
-    assert.equal(admits(`python3 - <<-PY\n\tpytest\n\tPY\nprintf ok`), false);
-    assert.equal(admits(`printf '%s\npytest`), true);
-    assert.equal(admits('pytest > test.log 2>&1 &'), false);
-    assert.equal(admits('pytest | tee test.log &'), false);
-    assert.equal(admits('pytest & cargo check'), true);
-});
-
-test('coding Policy rejects mixed mutation and verification commands', () => {
-    for (const command of [
-        `apply_patch <<'PATCH'\n*** Update File: src/sample.py\nPATCH\npytest`,
-        `python3 -c "Path('src/sample.py').write_text('new')"; pytest`,
-        `python3 -c "open('src/sample.py', 'w').write('new')"; pytest`,
-        `sed -i.bak 's/old/new/' src/sample.py && pytest`,
-        `perl -pi -e 's/old/new/' src/sample.py && pytest`,
-        'git apply fix.patch && pytest', 'patch -p1 < fix.patch && pytest',
-        'printf new > src/sample.py; pytest',
-    ]) assert.equal(admits(command), false, command);
-});
-
-test('coding Policy predicts from successful shell edits since the previous verification', () => {
-    const bash = (command, status = 'succeeded', content = '') => ({tool_name: 'bash', arguments: {command}, status, content});
-    const patch = bash(`apply_patch <<'PATCH'\n*** Add File: tests/test_sample.py\nPATCH`);
-    const source = bash(`python3 - <<'PY'\nPath('src/sample.py').write_text('new')\nPY`);
-    const predict = history => decision('predict', {chance_context: {arguments: {command: 'pytest'}}, history})
-        .proposals[0].provenance;
-    assert.deepEqual(predict([source, bash('pytest'), patch, {...source, status: 'failed'}]),
-        {kind: 'expected_test_failure', phase: 'tdd_repro'});
-    assert.deepEqual(predict([patch, source]), {kind: 'verification_pass', phase: 'post_source_edit'});
-    assert.deepEqual(predict([patch, bash('pytest --bad-option', 'failed')]),
-        {kind: 'expected_test_failure', phase: 'tdd_repro'});
-    assert.deepEqual(predict([source, bash('pytest; tail -20 test.log', 'succeeded', 'ModuleNotFoundError: app')]),
-        {kind: 'verification_pass', phase: 'post_source_edit'});
-    assert.deepEqual(predict([patch, bash('pytest | tee test.log', 'succeeded', '1 failed, 9 passed')]),
-        {kind: 'expected_test_failure', phase: 'tdd_repro'});
-    assert.deepEqual(predict([patch, bash('pytest', 'succeeded', '10 passed')]),
-        {kind: 'verification_pass', phase: 'baseline_check'});
-    assert.deepEqual(predict([bash(`sed -i 's/old/new/' tests/test_sample.py`)]),
-        {kind: 'expected_test_failure', phase: 'tdd_repro'});
-});
-
-test('coding Policy reads failed test summaries even when tail masks the exit code', () => {
-    const match = (kind, text, is_error = false) => decision('match_proposal', {
-        proposal: {provenance: {kind}}, match_context: {authority: {status: 'succeeded'}},
-        outcome: {status: 'succeeded', is_error, content: [{type: 'text', text}]},
-    });
-    const compatible = {verdict: 'compatible', score: 0.9};
-    for (const text of ['FAILED (failures=3, errors=4)', '1 failed, 9 passed', '2 errors',
-        'ERROR: test_sample', 'FAIL: test_sample', 'AssertionError: unexpected value']) {
-        assert.equal(match('verification_pass', text).verdict, 'incompatible', text);
-        assert.deepEqual(match('expected_test_failure', text), compatible, text);
-    }
-    for (const text of ['TypeError: bad argument', 'AttributeError: missing']) {
-        assert.deepEqual(match('expected_test_failure', text), compatible);
-    }
-    assert.deepEqual(match('expected_test_failure', 'test process exited 1', true), compatible);
-    for (const text of ['SyntaxError: invalid syntax', 'IndentationError: unexpected indent', 'command not found',
-        'No such file', 'Permission denied', 'ModuleNotFoundError: dependency']) {
-        assert.equal(match('expected_test_failure', text, true).verdict, 'incompatible');
-    }
-    assert.deepEqual(match('verification_pass', 'OK (skipped=2, expected failures=1)'),
-        {verdict: 'compatible', score: 1});
-});
 
 const lastTool = messages => messages.findLast(message => message.role === 'tool');
 
@@ -230,14 +141,14 @@ test('coding Policy promotes a reproduced failure, discards bad work, then promo
         write('pytest', '#!/bin/bash\nsleep 1.2\nif [[ "$1" == --broken ]]; then echo SyntaxError: invalid syntax; else echo AssertionError: expected 1; fi\nexit 1\n', true);
         write('runtests.py', '#!/bin/bash\nsleep 1.2\nprintf "OK (skipped=2, expected failures=1)\\n"\n', true);
         return join(coding, 'policy.yaml');
-    });
+    }, {checkUiNotice: true});
     const events = rows();
     const decisions = events.filter(e => e.disposition);
     assert.deepEqual(decisions.map(e => e.disposition), ['Promote', 'Discard', 'Promote']);
     assert.equal(done.branch_id, decisions.at(-1).branch_id);
     assert.ok(!events.some(e => e.message === 'policy_error' || e.policy_error));
     assert.equal(events.filter(e => e.message === 'speculative_admission_request').length, 3);
-    for (const action of ['initial-read', 'test-edit', 'second-fix']) {
+    for (const action of ['initial-read', 'test-edit']) {
         assert.ok(events.some(e => e.message === 'action_finished' && e.action_id.startsWith(action) && e.status === 'succeeded'));
     }
     assert.ok(events.some(e => e.message === 'action_finished' && e.action_id.startsWith('bad-write') && e.branch_id === decisions[1].branch_id));

@@ -1,4 +1,3 @@
-//! refs 相关实现。
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar};
@@ -6,19 +5,12 @@ use std::time::Duration;
 
 use super::*;
 
-/// Only one background reclamation runs at a time.  Concurrent recursive
-/// deletes of many btrfs snapshots contend for filesystem transactions and
-/// slow the next fork; serializing them keeps the foreground latency bounded.
+/// Concurrent btrfs reclamation contends with foreground forks.
 static BACKGROUND_DELETE_LOCK: Mutex<()> = Mutex::new(());
 
-/// How long the worker waits before retrying entries that are still present.
-/// A new signal wakes it earlier; shutdown wakes it immediately.
 const DELETE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
-/// Shared state for the background deletion worker.  The worker owns no
-/// strong reference to `FilesystemBackend`; it only holds the configuration
-/// values it needs.  `FilesystemBackend::drop` sets `shutdown` so the worker
-/// leaves unfinished entries in trash for the next startup to reclaim.
+/// The worker must allow backend Drop to run and leave unfinished trash for startup.
 pub(super) struct DeleteWorker {
     signaled: Mutex<bool>,
     condvar: Condvar,
@@ -47,7 +39,6 @@ impl DeleteWorker {
             .signaled
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Repeated signals collapse into the one pending sweep.
         *signaled = true;
         self.condvar.notify_one();
     }
@@ -61,8 +52,6 @@ impl DeleteWorker {
         self.shutdown.load(Ordering::SeqCst)
     }
 
-    /// Block until a sweep is requested or the backend shuts down.  Returns
-    /// false when the worker must exit.
     fn wait_for_signal(&self) -> bool {
         let mut signaled = self
             .signaled
@@ -79,8 +68,6 @@ impl DeleteWorker {
         run
     }
 
-    /// Wait for a new signal or the bounded retry deadline.  A signal wakes
-    /// the worker immediately; shutdown also ends the wait.
     fn wait_for_retry(&self) {
         let signaled = self
             .signaled
@@ -101,9 +88,6 @@ impl DeleteWorker {
         *signaled = false;
     }
 
-    /// Delete every settled entry in trash.  Returns true when trash is empty.
-    /// Transient entries that may still be renamed into place are left alone;
-    /// a failed entry is logged and retried later instead of being dropped.
     fn sweep(&self) -> bool {
         let entries = match fs::read_dir(&self.trash_root) {
             Ok(entries) => entries,
@@ -134,8 +118,7 @@ impl DeleteWorker {
             };
             let name = entry.file_name();
             if is_transient_name(&name.to_string_lossy()) {
-                // A staging item may not be fully renamed into place yet.
-                // Do not delete it; retry on the next pass or startup.
+                // Staging may still be in use. Retry on the next pass or startup.
                 remaining = true;
                 continue;
             }
@@ -176,8 +159,6 @@ pub(super) fn spawn_delete_worker(worker: Arc<DeleteWorker>) {
                 if worker.sweep() {
                     break;
                 }
-                // Failed or transient entries remain.  Wait for the next
-                // signal or a bounded retry deadline; never busy-spin.
                 worker.wait_for_retry();
             }
         }
@@ -223,8 +204,6 @@ impl FilesystemBackend {
                     .any(|layer| layer.starts_with(root))
         })
     }
-    /// Rebuild snapshot reference tokens from the current environment graph.
-    /// Unreferenced snapshots are removed from memory and scheduled for GC.
     pub(super) fn refresh_references(
         &self,
         state: &mut BackendState,
@@ -256,8 +235,7 @@ impl FilesystemBackend {
                 ));
             }
         }
-        // Only snapshots reachable from environments retain their lower chains;
-        // recording all snapshots would let unreachable chains retain each other.
+        // Count lower references only from reachable snapshots so dead chains can be reclaimed.
         let mut pending: Vec<String> = tokens.iter().map(|(id, _)| id.clone()).collect();
         let mut visited = BTreeSet::new();
         while let Some(id) = pending.pop() {
@@ -299,8 +277,7 @@ impl FilesystemBackend {
         Ok(garbage)
     }
 
-    /// Persist the current snapshot set after the global state lock has been
-    /// released.  Callers must invoke this after `refresh_references`.
+    /// Call after `refresh_references` and after releasing the global state lock.
     pub(super) fn persist_all_snapshots(&self) -> Result<(), BackendError> {
         let snapshots: Vec<SnapshotRecord> = {
             let state = self.lock()?;
@@ -319,10 +296,6 @@ impl FilesystemBackend {
         Ok(())
     }
 
-    /// Move a path out of the reachable namespace in one rename.  Actual
-    /// reclamation happens in a background thread.  This is the hot path of
-    /// discard; without the btrfs delete ioctl the background pass is
-    /// O(file count), but the caller does not wait for it.
     pub(super) fn retire_path(&self, path: &Path) -> Result<(), BackendError> {
         self.retire_path_in(path, &self.trash_root())
     }
@@ -352,7 +325,6 @@ impl FilesystemBackend {
             .unwrap_or_else(|| "retired".to_string());
         let destination = trash.join(format!("{token}-{name}"));
         fs::rename(path, &destination).map_err(error)?;
-        // Signal the worker; concurrent discards coalesce into one sweep.
         self.delete_worker.signal();
         Ok(())
     }

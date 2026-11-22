@@ -1,4 +1,3 @@
-//! Report observed Environment state changes.
 
 use super::*;
 use crate::protocol::contract::*;

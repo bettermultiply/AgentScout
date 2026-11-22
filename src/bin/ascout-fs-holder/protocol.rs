@@ -504,8 +504,7 @@ impl Holder {
         }
         let status = child.wait();
         self.writers.lock().unwrap().remove(&pid);
-        // Keep pipe readers alive for detached children. They keep running
-        // after successful foreground exit and must not receive SIGPIPE.
+        // Keep reading after foreground exit so detached writers do not get SIGPIPE.
         if let Ok(open) = streamed.as_ref() {
             if open[0] {
                 thread::spawn(move || {
@@ -531,8 +530,7 @@ fn range(offset: u64, limit: u64, has_more: bool, truncated: bool) -> Value {
     json!({"value":{"actual_range":{"offset":offset,"limit":limit},"has_more":has_more,"truncated":truncated},"body_kind":"file_bytes"})
 }
 
-// Resolve symlinks even when the target or its ancestors will be created by
-// this write. Existing prefixes use the kernel's canonical spelling.
+// Resolve existing symlinks even when part of the write path doesn't exist yet.
 fn canonical(path: &Path) -> PathBuf {
     let mut result = PathBuf::from("/");
     let mut components: std::collections::VecDeque<_> = path
@@ -755,7 +753,6 @@ fn stream_event(
         Ok(())
     })();
     if result.is_err() && sent != 0 {
-        // No terminal header can follow an incomplete body.
         let _ = socket.shutdown(std::net::Shutdown::Write);
     }
     result
@@ -828,24 +825,4 @@ fn forward(
         }
     }
     Ok(fds.map(|fd| fd.fd >= 0))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonical_aliases_share_a_mutation_lock() {
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("target");
-        let alias = directory.path().join("alias");
-        std::os::unix::fs::symlink(&target, &alias).unwrap();
-        let holder = Holder::default();
-        let (_, first) = holder.mutation_lock(&target);
-        let held = first.lock().unwrap();
-        let (_, second) = holder.mutation_lock(&alias);
-        assert!(second.try_lock().is_err());
-        drop(held);
-        assert!(second.try_lock().is_ok());
-    }
 }

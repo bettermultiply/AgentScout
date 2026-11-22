@@ -1,4 +1,3 @@
-//! cgroup / 进程组冻结、终止与清理。
 
 use std::fs;
 use std::path::PathBuf;
@@ -27,16 +26,10 @@ impl FreezeMechanism {
 pub struct ProcessHandle {
     pub inner_pid: u32,
     pub mount_namespace: u64,
-    #[cfg(test)]
-    pub cgroup_path: Option<PathBuf>,
 }
 
 impl Processes {
     pub fn freeze(&self, environment_id: &str) -> Result<(), BackendError> {
-        #[cfg(test)]
-        if self.fail_freeze.load(Ordering::SeqCst) {
-            return Err(BackendError::new("injected freeze failure"));
-        }
         let process = self.process(environment_id)?;
         match self.freeze {
             FreezeMechanism::Cgroup => {
@@ -61,10 +54,6 @@ impl Processes {
     }
 
     pub fn thaw(&self, environment_id: &str) -> Result<(), BackendError> {
-        #[cfg(test)]
-        if self.fail_thaw.load(Ordering::SeqCst) {
-            return Err(BackendError::new("injected thaw failure"));
-        }
         let process = self.process(environment_id)?;
         match self.freeze {
             FreezeMechanism::Cgroup => {
@@ -141,16 +130,12 @@ impl Processes {
         }
         if !killed && unsafe { libc::kill(-process.process_group, libc::SIGKILL) } != 0 {
             let failure = std::io::Error::last_os_error();
-            // 进程组已经不存在不是失败。
             if failure.raw_os_error() != Some(libc::ESRCH) {
                 failures.push(format!("failed to kill process group: {failure}"));
             }
         }
-        // The environment owns every process in this mount namespace, not only
-        // the processes that stayed in the holder's group or cgroup. A
-        // descendant that changed session must end with the Branch too. The
-        // open namespace fd pins the inode for the whole sweep; without it a
-        // freed inode could already belong to a new Branch.
+        // Sweep the mount namespace to include descendants outside the group and cgroup.
+        // Keep the namespace fd open throughout so its inode cannot be reused.
         let swept = process
             .namespace_fd
             .as_ref()
@@ -164,8 +149,7 @@ impl Processes {
         if failures.is_empty() {
             Ok(())
         } else {
-            // Keep ownership after failure so cleanup can retry the same
-            // process/cgroup instead of losing a still-live resource.
+            // Retain failed resources so cleanup can retry.
             self.processes
                 .lock()
                 .map_err(|_| BackendError::new("Processes lock poisoned"))?
@@ -207,8 +191,6 @@ impl Processes {
                 owned.push(process);
             }
         }
-        // Sweep while every namespace fd is still open, so an inode freed by
-        // one Branch cannot have been reused by another before the scan.
         let mut swept = std::collections::BTreeSet::new();
         for process in &owned {
             if process.namespace_fd.is_some() && swept.insert(process.mount_namespace) {
@@ -221,8 +203,6 @@ impl Processes {
     }
 
     fn process(&self, environment_id: &str) -> Result<AgentProcessRef, BackendError> {
-        // The caller only needs pid/pgid/cgroup; clone them out so the map lock
-        // is not held while filesystem operations run.
         let processes = self
             .processes
             .lock()
@@ -250,7 +230,6 @@ struct AgentProcessRef {
     cgroup_path: Option<PathBuf>,
     #[cfg(test)]
     mount_namespace: u64,
-    /// Keeps the branch namespace inode alive while terminate sweeps it.
     #[cfg(test)]
     namespace_fd: Option<OwnedFd>,
 }

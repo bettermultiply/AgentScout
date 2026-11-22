@@ -1,4 +1,3 @@
-//! Private filesystem command metadata used only inside Runtime.
 use super::*;
 use serde_json::json;
 
@@ -49,16 +48,9 @@ impl FilesystemBackend {
             .join("holder-sockets")
             .join(&environment.id)
             .join("cmd.sock");
-        // Tools run inside the branch namespace, where an isolated workspace
-        // may be mounted at a different path than its host directory. Pi
-        // resolves relative tool paths against this sandbox path; the host
-        // directory remains only the overlay lower and publication target.
         let (host_workspace, workspace) = match environment.workspace_root.as_deref() {
             Some(workspace) => {
-                // The workspace may be a subdirectory of the isolated mount.
-                // Pi resolves tool paths against the workspace, so the host
-                // side of the mapping is the host path at the same depth, not
-                // the mount's bottom directory.
+                // The host mapping must include the workspace's offset within the isolated mount.
                 let host = environment.mount_for_path(workspace).and_then(|mount| {
                     mount.base.as_ref().map(|base| {
                         let relative = workspace

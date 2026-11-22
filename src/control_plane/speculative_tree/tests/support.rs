@@ -1,4 +1,3 @@
-//! Agent 控制树测试共享辅助。
 
 use super::super::*;
 

@@ -1,4 +1,3 @@
-//! 进程冻结/解冻测试。
 
 use super::super::*;
 use super::support::*;

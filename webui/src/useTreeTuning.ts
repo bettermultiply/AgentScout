@@ -7,9 +7,6 @@ import {
 
 const STORAGE_KEY = 'ascout-tree-tuning'
 
-/**
- * Drawing parameters for the tree are restored from this browser's local storage.
- */
 export function useTreeTuning(): [TreeTuning, (next: TreeTuning) => void] {
   const tuning = useAppStore(store => store.treeTuning)
   const setTuning = useAppStore(store => store.setTreeTuning)
@@ -25,7 +22,6 @@ export function useTreeTuning(): [TreeTuning, (next: TreeTuning) => void] {
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tuning))
     } catch {
-      // Storage may be unavailable.
     }
   }, [tuning])
 

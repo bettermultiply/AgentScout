@@ -56,7 +56,6 @@ fn mount(
 
 fn readonly(target: &Path) -> io::Result<()> {
     let name = cstr(target.as_os_str())?;
-    // Linux mount_setattr applies read-only to every nested bind in one call.
     let attributes = [1_u64, 0, 0, 0]; // MOUNT_ATTR_RDONLY, remaining fields zero
     let result = unsafe {
         libc::syscall(
@@ -141,8 +140,7 @@ fn setup(plan: &Plan) -> io::Result<()> {
         libc::MS_REC | libc::MS_PRIVATE,
         None,
     )?;
-    // /proc and /dev are replaced by the plan. Their child mount points may
-    // therefore be absent on the host, particularly the holder socket bind.
+    // `/proc` and `/dev` are replaced, so their bind targets may not exist on the host.
     let root_entries: Vec<_> = plan
         .entries
         .iter()
@@ -206,8 +204,7 @@ fn setup(plan: &Plan) -> io::Result<()> {
             } => {
                 let target = path(target)?;
                 fs::create_dir_all(&target)?;
-                // Pin paths by fd, so delimiters in paths and overlays over
-                // existing source mount points cannot alter layer resolution.
+                // Fds protect layer paths from delimiters and overlays on the original mount points.
                 let files: Vec<File> = lowers
                     .iter()
                     .rev()
@@ -251,8 +248,7 @@ fn setup(plan: &Plan) -> io::Result<()> {
         }
     }
     if assemble {
-        // The assembly root itself is read-only, like the root bind. Do not
-        // recursively set this flag on the explicitly writable mounts.
+        // Mark only the root read-only. Child mounts may be writable.
         mount(
             None,
             &plan.stage,
@@ -262,14 +258,12 @@ fn setup(plan: &Plan) -> io::Result<()> {
         )?;
     }
     std::env::set_current_dir(&plan.stage)?;
-    // Stack the old root on the new root, then immediately detach it.
     check(
         unsafe { libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), c".".as_ptr()) } as libc::c_int,
     )?;
     check(unsafe { libc::umount2(c".".as_ptr(), libc::MNT_DETACH) })?;
     std::env::set_current_dir(&plan.chdir)?;
-    // An unprivileged command must not regain mount capabilities via exec,
-    // including when the adapter runs with UID 0 inside a user namespace.
+    // Even UID 0 in a user namespace must not regain mount capabilities on exec.
     check(unsafe { libc::prctl(libc::PR_SET_SECUREBITS, 3, 0, 0, 0) })?; // NOROOT | NOROOT_LOCKED
     check(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) })?;
     Ok(())
@@ -284,8 +278,7 @@ pub fn run() -> io::Result<()> {
     let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
     let namespaces = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
     let cgroup = plan.cgroup.as_ref().map(File::open).transpose()?;
-    // The launcher is still single-threaded. The child is born as PID 1
-    // in its own namespace and, when available, directly in its cgroup.
+    // Clone while single-threaded. The child starts as PID 1 in its own namespace.
     let mut args: libc::clone_args = unsafe { std::mem::zeroed() };
     args.flags = namespaces as u64;
     args.exit_signal = libc::SIGCHLD as u64;
@@ -355,7 +348,6 @@ pub fn run() -> io::Result<()> {
     unsafe {
         libc::close(libc::STDOUT_FILENO);
     }
-    // Keep stdout reserved and harmless after closing the status pipe.
     let null = File::open("/dev/null")?;
     if null.as_raw_fd() == libc::STDOUT_FILENO {
         std::mem::forget(null);

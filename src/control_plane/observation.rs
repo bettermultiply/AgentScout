@@ -1,4 +1,3 @@
-//! Public observation facts, independent of transport and file storage.
 use super::gateway::agent::protocol::{ActionKind, ActionStatus, BranchRole};
 use super::speculative_tree::{AuthorityState, BranchStatus, ChanceStage, RuntimeExecutionState};
 use serde::{Deserialize, Serialize};
@@ -43,13 +42,10 @@ pub enum ObservationContent {
         branch_id: String,
         parent_branch_id: Option<String>,
         role: BranchRole,
-        /// 这个 Branch 所属的 Chance；初始权威为 null。
         chance_id: Option<String>,
         speculation_kind: Option<ActionKind>,
-        /// 被准入投机的起点（准入请求的 Instrumentation 时刻）；非投机候选为 null。
         speculation_started_at_ms: Option<u64>,
     },
-    /// `admit` 通过：Chance 获得 id，处于 `pending`。
     ChanceCreated {
         chance_id: String,
         parent_branch_id: String,
@@ -79,7 +75,6 @@ pub enum ObservationContent {
         chance_id: String,
         state: AuthorityState,
     },
-    /// Chance 上新增一个不可变 Proposal。
     ProposalAdded {
         chance_id: String,
         proposal_id: String,
@@ -111,8 +106,7 @@ pub enum ObservationContent {
     },
     ModelUsage {
         branch_id: String,
-        /// 这次调用对应的模型 action；Instrumentation 无法配对时为 null，不伪造身份，
-        /// 也不会因此丢弃这次用量。
+        /// 无法配对时为 null，用量仍上报。
         action_id: Option<String>,
         model: String,
         input_tokens: Option<u64>,
@@ -142,8 +136,7 @@ pub enum ObservationContent {
     ToolFinished {
         branch_id: String,
         action_id: String,
-        /// 工具名来自同一 action 的 `ActionStarted.name`；没有 ActionStarted
-        /// （例如只有准入请求）时为 null，不推测。
+        /// 来自同一 action 的 `ActionStarted.name`，缺失时为 null。
         tool_name: Option<String>,
         status: ActionStatus,
         /// 工具真正开始时刻来自 ActionStarted；只有准入请求时为 null。
@@ -152,9 +145,6 @@ pub enum ObservationContent {
         finished_at_ms: Option<u64>,
         duration_ms: Option<u64>,
     },
-    /// NLE workload's public observation before and after one real action.
-    /// The Runtime bridge is the authority for these values; the control plane
-    /// only forwards the already-public chars/blstats payload.
     NleMapAction {
         branch_id: String,
         action_id: String,
@@ -169,7 +159,6 @@ pub enum ObservationContent {
         disposition: Option<String>,
         time_ms: ObservationAmount,
         money: ObservationAmount,
-        /// 金钱维度的币种；该维度没有数据时为 null，不猜测。
         currency: Option<String>,
     },
     RunStatus {
@@ -180,17 +169,13 @@ pub enum ObservationContent {
     },
 }
 
-/// 结算的一个维度。实测与估计是两个独立部分：没有可靠测量时 `measured`
-/// 为 null，没有估计依据时 `estimated` 为 null；两者都不与对方相加或互相填充。
+/// 实测与估计分别报告，缺失时为 null。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObservationAmount {
-    /// 实测部分，带符号；没有可靠测量时为 null，不补零。
     pub measured: Option<f64>,
-    /// 估计部分，带符号；没有估计依据时为 null，不补零。
     pub estimated: Option<f64>,
 }
 
-/// 状态事件集中一个 Chance 的当前视图，由 Chance 与 Branch 事件折叠得到。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObservedChance {
     pub chance_id: String,

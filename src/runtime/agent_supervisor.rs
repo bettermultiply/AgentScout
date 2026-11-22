@@ -1,4 +1,3 @@
-//! The Agent and Instrumentation share one host process for the entire run.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -44,9 +43,7 @@ impl AgentSupervisor {
             .append(true)
             .open(&launch.log)
             .map_err(error)?;
-        // Pi runs on the host, so its own temporary files must stay on the
-        // host. Tool commands receive their own namespace through the holder
-        // and are not given this Pi-owned temp directory.
+        // Pi's temp path stays on the host. Tools use the holder's namespace.
         let temporary = launch
             .log
             .parent()

@@ -1,39 +1,24 @@
-//! fork 数据面操作。
 
 use std::time::Instant;
 
 use super::*;
 
-/// Maximum number of concurrent per-mount producers.  btrfs snapshot and
-/// subvolume creation serialize inside the kernel/filesystem, so more workers
-/// only add contention.
+/// The filesystem serializes btrfs snapshot and subvolume creation.
 const MAX_FORK_WORKERS: usize = 4;
 
-/// Per-mount copy producer used by fork/mark.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ForkProducer {
-    /// `btrfs subvolume snapshot`; fixed cost independent of entry count.
     Snapshot,
-    /// reflink/copy of the upper tree; cheaper for small uppers.
     Clone,
 }
 
-/// How a fork places the parent's current upper for one mount.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ForkLayout {
-    /// Add the new read-only snapshot layer S to the child lower chain and
-    /// leave the child upper empty.  Cost is O(changed entries) for later
-    /// diff/accept, but each such fork deepens the chain.
     Chain,
-    /// Copy the parent upper into the child upper and keep the parent lower
-    /// chain.  The chain does not grow, but diff/accept compare the whole
-    /// upper against the snapshot layer.
     Flatten,
 }
 
-/// One step of a per-mount production chain.  Steps of one mount stay
-/// sequential (a writable child snapshot needs its layer snapshot first);
-/// different mounts may run concurrently.
+/// A writable child snapshot depends on its mount's layer snapshot.
 pub(super) enum ForkTask {
     SnapshotLayer {
         source: PathBuf,
@@ -78,8 +63,6 @@ struct ForkPlan {
     selected: Vec<MountUnit>,
     produced: BTreeMap<String, ForkProducer>,
     layouts: BTreeMap<String, ForkLayout>,
-    /// View chain recorded on the snapshot: parent lower + S for every
-    /// produced mount, regardless of whether the child mount itself flattens.
     snapshot_lower: BTreeMap<String, Vec<PathBuf>>,
     child_environment: Environment,
 }
@@ -239,10 +222,6 @@ impl FilesystemBackend {
         profile: &mut Profile,
     ) -> Result<ForkPlan, BackendError> {
         let selected = profile.run("scan", || parent_environment.selected_mounts(scopes))?;
-        // Empty uppers are not copied at all: the child mount inherits the
-        // parent lower chain and starts with an empty upper.  This is the
-        // dominant case for speculative branches (only the workspace mount
-        // is written).
         let produced = profile.run("plan", || self.fork_producers(&selected));
         let layouts = profile.run("plan", || self.fork_layouts(&selected, &produced))?;
         let child_mounts = profile.run("plan", || {
@@ -271,9 +250,7 @@ impl FilesystemBackend {
             }
             child_mounts
         });
-        // The merge base must see the parent state that was frozen into S even
-        // when the child mount itself uses Flatten and does not list S as an
-        // overlay lower.
+        // The merge base includes S even when Flatten omits it from overlay lowers.
         let snapshot_lower: BTreeMap<String, Vec<PathBuf>> = parent_environment
             .mounts
             .iter()
@@ -306,9 +283,6 @@ impl FilesystemBackend {
         })
     }
 
-    /// Choose the per-fork layout for every mount whose upper is non-empty.
-    /// The entry count stops at the configured threshold, so the decision is
-    /// O(min(entries, threshold)).
     fn fork_layouts(
         &self,
         selected: &[MountUnit],
@@ -321,8 +295,6 @@ impl FilesystemBackend {
                 continue;
             }
             let layout = if self.config.state_directory.starts_with(&mount.target) {
-                // The state directory lives below this mount; a snapshot layer
-                // there cannot be a lowerdir of the same mount.
                 ForkLayout::Flatten
             } else if self.config.fork_flatten_entry_limit == 0 {
                 ForkLayout::Chain
@@ -355,8 +327,7 @@ impl FilesystemBackend {
         layer_path: &Path,
         profile: &mut Profile,
     ) -> Result<(), BackendError> {
-        // Snapshot each volume containing upper/work. Copy-up temporaries
-        // must stay in the same subvolume as upper, including empty children.
+        // OverlayFS copy-up needs upper and work in the same subvolume, even when empty.
         fs::create_dir_all(layer_path).map_err(error)?;
         let mut chains = Vec::new();
         let mut chain_targets = BTreeSet::new();
@@ -377,9 +348,6 @@ impl FilesystemBackend {
                 target: layer_volume.clone(),
             }];
             if plan.layouts.get(&key) == Some(&ForkLayout::Flatten) {
-                // Writable snapshot carries the parent state, so the layer is
-                // metadata/lower only and the mount is launched with the host
-                // mount as sole lower.
                 chain.push(ForkTask::SnapshotChild {
                     source: layer_volume,
                     target: child_mount.volume()?.to_path_buf(),
@@ -507,8 +475,6 @@ impl FilesystemBackend {
         }];
         chain_targets.insert(key.to_string());
         if layout == ForkLayout::Flatten {
-            // Writable snapshot carries the parent state; the read-only layer
-            // remains diff metadata.
             chain.push(ForkTask::SnapshotChild {
                 source: layer_volume,
                 target: child_volume.to_path_buf(),
@@ -537,9 +503,6 @@ impl FilesystemBackend {
             reflink,
         }];
         if layout == ForkLayout::Flatten {
-            // Flatten the parent upper into the child upper.  The layer copy
-            // is metadata for diff/accept only and never joins the child
-            // lower chain.
             let _ = child_mount.upper.parent().ok_or_else(|| {
                 BackendError::new("snapshot-copy child upper has no volume parent")
             })?;
@@ -589,8 +552,7 @@ impl FilesystemBackend {
         profile.run("gc", || self.schedule_gc(garbage))?;
 
         let durable = profile.run("persist", || {
-            // Only the new snapshot changed in this operation; persisting the
-            // whole snapshot set would make fork O(historical snapshots).
+            // Persist only the changed snapshot to keep fork cost independent of history.
             self.persist_snapshot(&snapshot)?;
             self.persist_environment(&plan.child_environment)?;
             Ok::<_, BackendError>(())
@@ -611,9 +573,6 @@ impl FilesystemBackend {
         Ok(())
     }
 
-    /// Decide per selected mount whether its upper is empty, and if not which
-    /// producer to use.  Counting stops at the threshold so cost is
-    /// O(min(entries, threshold)).
     pub(crate) fn fork_producers(&self, selected: &[MountUnit]) -> BTreeMap<String, ForkProducer> {
         let mut produced = BTreeMap::new();
         for mount in selected {
@@ -697,9 +656,7 @@ impl FilesystemBackend {
         (Ok(()), timings)
     }
 
-    /// Run independent per-mount chains with a bounded worker count and
-    /// deterministic error selection (lowest mount index wins, matching the
-    /// previous serial loop).
+    /// Report the lowest mount index on error to preserve serial-loop error order.
     pub(super) fn run_fork_chains(
         &self,
         profile: &mut Profile,
@@ -750,8 +707,6 @@ impl FilesystemBackend {
                         }
                     }
                     Err(_) => {
-                        // The outcome slots for this worker stay empty and
-                        // are reported as an error below.
                     }
                 }
             }

@@ -1,4 +1,3 @@
-//! Runtime proxy 会话：连接 control plane、收发消息。
 
 use super::*;
 use crate::protocol::contract::*;

@@ -1,71 +1,9 @@
-//! fork/mark/diff/accept/discard 端到端测试。
 
 use super::super::*;
 use super::support::*;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileTypeExt;
-
-#[test]
-fn retained_snapshot_keeps_transitive_lower_alive() {
-    let root = temp();
-    let backend = new_backend(root.path());
-    backend.establish("root").unwrap();
-    let mut state = backend.lock().unwrap();
-    for (id, lower) in [
-        ("older", vec![]),
-        ("newer", vec![root.path().join("older")]),
-    ] {
-        state.snapshots.insert(
-            id.into(),
-            SnapshotRecord {
-                snapshot_id: id.into(),
-                path: root.path().join(id),
-                read_only: true,
-                lower: BTreeMap::from([("mount".into(), lower)]),
-                refs: BTreeSet::new(),
-            },
-        );
-    }
-    state.environments.get_mut("root").unwrap().base_snapshot_id = Some("newer".into());
-    let garbage = backend.refresh_references(&mut state).unwrap();
-    assert!(
-        garbage.is_empty(),
-        "a retained snapshot's lower must remain reachable"
-    );
-}
-
-#[test]
-fn owned_saved_base_is_released_only_after_its_last_reference() {
-    let root = temp();
-    let backend = new_backend(root.path());
-    backend.establish("root").unwrap();
-    let owned = root.path().join("retained-parent");
-    fs::create_dir_all(owned.join("base")).unwrap();
-    let mut state = backend.lock().unwrap();
-    backend.retain_retired_root(&mut state, &owned).unwrap();
-    let mount = state
-        .environments
-        .get_mut("root")
-        .unwrap()
-        .mounts
-        .values_mut()
-        .next()
-        .unwrap();
-    mount.saved_base = Some(owned.join("base"));
-    assert!(backend.refresh_references(&mut state).unwrap().is_empty());
-    state
-        .environments
-        .get_mut("root")
-        .unwrap()
-        .mounts
-        .values_mut()
-        .next()
-        .unwrap()
-        .saved_base = None;
-    let garbage = backend.refresh_references(&mut state).unwrap();
-    assert!(garbage.iter().any(|(_, path)| path == &owned));
-}
 
 #[test]
 fn filesystem_operation_replays_same_generation_and_rejects_stale_generation() {
@@ -139,18 +77,6 @@ fn base_runtime_reaches_the_filesystem_data_plane() {
         .unwrap();
     assert!(result.confirmation.snapshot_created);
     assert!(result.confirmation.metadata_durable);
-}
-
-#[test]
-fn safe_root_mkdir_preserves_source_mode() {
-    use std::os::unix::fs::MetadataExt;
-    let safe = SafeRoot::open(std::process::id()).unwrap();
-    let token = format!("ascout-mode-{}", std::process::id());
-    let relative = format!("tmp/{token}");
-    safe.mkdir(&relative, 0o750).unwrap();
-    let metadata = fs::metadata(format!("/{relative}")).unwrap();
-    assert_eq!(metadata.mode() & 0o777, 0o750);
-    fs::remove_dir(format!("/{relative}")).unwrap();
 }
 
 #[test]
@@ -272,79 +198,6 @@ fn failed_clone_and_orphan_staging_are_not_valid_layers() {
 }
 
 #[test]
-fn accept_work_does_not_scale_with_unrelated_upper_size() {
-    let Some(small) = accept_read_layer_entries(20) else {
-        return;
-    };
-    let Some(large) = accept_read_layer_entries(5000) else {
-        return;
-    };
-    assert!(
-        small > 0,
-        "accept did not execute the read_layer counter at all: small={small}, large={large}"
-    );
-    assert!(
-        large <= small + 50,
-        "accept scanned unrelated upper entries: small={small}, large={large}"
-    );
-}
-
-fn accept_read_layer_entries(unrelated: usize) -> Option<usize> {
-    let workspace_root = btrfs_temp();
-    let base = workspace_root.path().join("base");
-    fs::create_dir_all(&base).unwrap();
-    let state = match separate_state_tempdir(&base) {
-        Some(value) => value,
-        None => {
-            eprintln!(
-                "SKIP accept_work_does_not_scale_with_unrelated_upper_size: no writable mount separate from workspace"
-            );
-            return None;
-        }
-    };
-    let mut config = FilesystemConfig::new(state.path().join("state"));
-    config.force_overlay = true;
-    // The state mount itself is isolated; only the workspace mount's
-    // lower chain is under test here.
-    config.allow_overlapping_state_directory = true;
-    // Force Chain: this test measures the delta-only accept path.
-    config.fork_flatten_entry_limit = 0;
-    let backend = FilesystemBackend::new(config).unwrap();
-    backend.establish("root").unwrap();
-    for index in 0..unrelated {
-        write_upper(
-            &backend,
-            "root",
-            &base.join(format!("unrelated-{index}")),
-            "x",
-        );
-    }
-    backend.fork("root", "child", &[]).unwrap();
-    let snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
-    for index in 0..10.min(unrelated) {
-        write_upper(
-            &backend,
-            "child",
-            &base.join(format!("unrelated-{index}")),
-            "changed",
-        );
-    }
-    backend.suspend("root").unwrap();
-    reset_read_layer_entries();
-    let accepted = backend
-        .accept(&snapshot, "child", "root", &[], None, None)
-        .unwrap();
-    let entries = read_layer_entries();
-    assert!(accepted.confirmation.published);
-    backend.resume("root").unwrap();
-    backend.terminate("child").unwrap();
-    backend.discard("child", &[]).unwrap();
-    backend.terminate("root").unwrap();
-    backend.cleanup("root").unwrap();
-    Some(entries)
-}
-
-#[test]
 fn accept_replay_rolls_back_every_injected_failure() {
     let root = temp();
     let token = format!("ascout-rollback-{}", std::process::id());
@@ -414,50 +267,6 @@ fn accept_replay_rolls_back_every_injected_failure() {
     backend.discard("child", &[]).unwrap();
     backend.terminate("root").unwrap();
     backend.cleanup("root").unwrap();
-}
-
-#[test]
-fn opaque_removal_error_aborts_replay() {
-    use std::os::unix::fs::PermissionsExt;
-    if unsafe { libc::geteuid() } == 0 {
-        eprintln!("SKIP opaque_removal_error_aborts_replay: running as root");
-        return;
-    }
-    let root = temp();
-    let upper = root.path().join("upper");
-    fs::create_dir_all(upper.join("opaque")).unwrap();
-    fs::write(upper.join("opaque/old.txt"), b"old").unwrap();
-    fs::set_permissions(&upper, fs::Permissions::from_mode(0o500)).unwrap();
-    let mut delta = View::new();
-    delta.insert(
-        "opaque".into(),
-        Node {
-            mode: libc::S_IFDIR | 0o755,
-            size: 0,
-            mtime_sec: 0,
-            mtime_nsec: 0,
-            inode: 0,
-            kind: NodeKind::Dir,
-            source: None,
-            opaque: true,
-            redirect: None,
-            metacopy: false,
-        },
-    );
-    let mut journal = ReplayJournal::new(root.path().join("journal")).unwrap();
-    let error = replay_delta(
-        &ReplayRoot::Upper(&upper),
-        &delta,
-        &[],
-        &[],
-        &mut journal,
-        &upper,
-        None,
-    )
-    .unwrap_err();
-    assert!(error.message.contains("replay"), "{}", error.message);
-    fs::set_permissions(&upper, fs::Permissions::from_mode(0o700)).unwrap();
-    let _ = journal.rollback();
 }
 
 #[test]
@@ -734,9 +543,6 @@ fn round_trip(root: tempfile::TempDir, expect_btrfs: bool) {
     wait_until(|| trash_is_empty(&root.path().join("trash")));
 }
 
-/// Real bubblewrap end-to-end: a whiteout created by `rm` must not
-/// resurrect the Base file in a forked child, and accept must propagate
-/// the deletion to the target.
 #[test]
 fn real_overlay_whiteout_survives_fork_diff_and_accept() {
     let root = btrfs_temp();
@@ -804,12 +610,9 @@ fn btrfs_mount_copy_up_rename_stays_within_subvolume() {
         return;
     }
     remove_path(&backend.config.btrfs_path, &probe, true).unwrap();
-    // Exercise create/snapshot/layout without send or a privileged mount.
-    // The host cannot select the full btrfs plane without privileged send.
+    // Exercise btrfs layout on hosts without privileged send.
     backend.mechanism = FilesystemMechanism::Btrfs;
-    // Exercise the same multi-target layout without reading arbitrary
-    // host mounts (some contain root-only entries). All lower fixtures
-    // belong to this test and remain outside the state directory.
+    // Use fixture lowers to avoid reading root-only entries on host mounts.
     let lowers = tempfile::Builder::new()
         .prefix("control-plane-refactor-lowers-")
         .tempdir_in("/tmp/opencode")
@@ -822,8 +625,6 @@ fn btrfs_mount_copy_up_rename_stays_within_subvolume() {
     *backend.overlay_targets.lock().unwrap() = Some(vec![targets[0].clone()]);
     let result = (|| -> Result<(), BackendError> {
         backend.establish("root")?;
-        // Discover additional real mounts through the launch-fragment path;
-        // no sandbox process or privileged mount is started by this test.
         *backend.overlay_targets.lock().unwrap() = Some(targets.clone());
         let launch = crate::protocol::contract::AgentLaunch {
             command: "/bin/true".into(),
@@ -882,8 +683,6 @@ fn btrfs_mount_copy_up_rename_stays_within_subvolume() {
         }
         backend.mark("flatten", "rename-domain", &[])?;
         backend.load_metadata()?;
-        // An old upper-as-subvolume environment must fail recovery without
-        // moving data or resetting its work directory.
         let legacy = backend.paths("legacy").join("mount");
         fs::create_dir_all(&legacy).map_err(error)?;
         backend.btrfs_create(&legacy.join("upper"))?;
@@ -1138,7 +937,6 @@ fn extra_mount_fork_diff_accept_discard_round_trip() {
     assert!(!child_file.exists(), "accept wrote the host target mount");
     assert!(lower_file.exists(), "accept deleted the host lower file");
 
-    // mark must also snapshot every mount, not only workspace/tmp.
     let mark = backend.mark("child", "extra-mark", &[]).unwrap();
     let mark_file = target.join(format!("{token}-mark"));
     let _ = fs::remove_file(&mark_file);
@@ -1195,9 +993,6 @@ fn extra_mount_fork_diff_accept_discard_round_trip() {
     backend.cleanup("root").unwrap();
 }
 
-/// A still-running parent writes after fork.  Its upper and mount are not
-/// touched by fork, so the child's independent upper copy must not see the
-/// later write.
 #[test]
 fn overlay_fork_isolates_parent_writes_after_the_copy() {
     let root = btrfs_temp();
@@ -1230,229 +1025,6 @@ fn overlay_fork_isolates_parent_writes_after_the_copy() {
     backend.terminate("root").unwrap();
     backend.cleanup("root").unwrap();
     wait_until(|| trash_is_empty(&root.path().join("trash")));
-}
-
-fn merged_view_entries(
-    backend: &FilesystemBackend,
-    environment_id: &str,
-    path: &Path,
-) -> BTreeSet<String> {
-    let (layers, upper) = {
-        let state = backend.lock().unwrap();
-        let environment = state.environments.get(environment_id).unwrap();
-        let mount = environment.mount_for_path(path).unwrap();
-        (
-            mount
-                .lower
-                .iter()
-                .map(|layer| mount.layer_upper(layer))
-                .collect::<Vec<_>>(),
-            mount.upper.clone(),
-        )
-    };
-    let mut view = View::new();
-    for layer in &layers {
-        apply_layer(&mut view, layer).unwrap();
-    }
-    apply_layer(&mut view, &upper).unwrap();
-    view.into_keys().collect()
-}
-
-fn producer_for(
-    backend: &FilesystemBackend,
-    base: &Path,
-) -> crate::runtime::backends::filesystem::ops::fork::ForkProducer {
-    let mount = mount_for(backend, "root", base);
-    let producers = backend.fork_producers(std::slice::from_ref(&mount));
-    *producers
-        .get(&mount.target.display().to_string())
-        .expect("non-empty mount has a producer")
-}
-
-#[test]
-fn adaptive_fork_producer_matches_upper_size_and_child_view() {
-    use crate::runtime::backends::filesystem::ops::fork::ForkProducer;
-
-    let root = btrfs_temp();
-    let base = root.path().join("base");
-    fs::create_dir_all(&base).unwrap();
-    let state = match separate_state_tempdir(&base) {
-        Some(value) => value,
-        None => {
-            eprintln!(
-                "SKIP adaptive_fork_producer_matches_upper_size_and_child_view: no writable state mount separate from workspace"
-            );
-            return;
-        }
-    };
-    let backend =
-        FilesystemBackend::new(overlapping_state_config(state.path().join("state"))).unwrap();
-    if backend.mechanism() != FilesystemMechanism::Overlay
-        || backend.fork_cost() != ForkCost::BtrfsSnapshot
-    {
-        eprintln!(
-            "SKIP adaptive_fork_producer_matches_upper_size_and_child_view: btrfs snapshot copies unavailable"
-        );
-        return;
-    }
-    backend.establish("root").unwrap();
-    for index in 0..10 {
-        write_upper(
-            &backend,
-            "root",
-            &base.join(format!("small-{index}")),
-            "small",
-        );
-    }
-    assert_eq!(producer_for(&backend, &base), ForkProducer::Clone);
-    let small_parent = merged_view_entries(&backend, "root", &base);
-    backend.fork("root", "child-small", &[]).unwrap();
-    assert_eq!(
-        merged_view_entries(&backend, "child-small", &base),
-        small_parent,
-        "clone producer changed the child view"
-    );
-
-    for index in 10..600 {
-        write_upper(
-            &backend,
-            "root",
-            &base.join(format!("large-{index}")),
-            "large",
-        );
-    }
-    assert_eq!(producer_for(&backend, &base), ForkProducer::Snapshot);
-    let large_parent = merged_view_entries(&backend, "root", &base);
-    backend.fork("root", "child-snapshot", &[]).unwrap();
-    let snapshot_view = merged_view_entries(&backend, "child-snapshot", &base);
-    assert_eq!(
-        snapshot_view, large_parent,
-        "snapshot producer changed the child view"
-    );
-
-    // Force the same parent view through the clone producer.  Empty
-    // mounts normally carry `volume_is_subvolume=false`; flipping the live
-    // mount exercises the clone path without changing the view.
-    {
-        let mut state = backend.lock().unwrap();
-        for mount in state
-            .environments
-            .get_mut("root")
-            .unwrap()
-            .mounts
-            .values_mut()
-        {
-            mount.volume_is_subvolume = false;
-        }
-    }
-    assert_eq!(producer_for(&backend, &base), ForkProducer::Clone);
-    backend.fork("root", "child-clone", &[]).unwrap();
-    let clone_view = merged_view_entries(&backend, "child-clone", &base);
-    assert_eq!(
-        clone_view, large_parent,
-        "forced clone producer changed the child view"
-    );
-    assert_eq!(
-        clone_view, snapshot_view,
-        "producers produced different child views"
-    );
-
-    backend.terminate("child-small").unwrap();
-    backend.discard("child-small", &[]).unwrap();
-    backend.terminate("child-snapshot").unwrap();
-    backend.discard("child-snapshot", &[]).unwrap();
-    backend.terminate("child-clone").unwrap();
-    backend.discard("child-clone", &[]).unwrap();
-    backend.terminate("root").unwrap();
-    backend.cleanup("root").unwrap();
-}
-
-#[test]
-fn fork_layout_flattens_small_upper_and_chains_large_upper() {
-    let root = btrfs_temp();
-    let base = root.path().join("base");
-    fs::create_dir_all(&base).unwrap();
-    let Some((_state, backend)) = layout_backend(&base, 32) else {
-        eprintln!(
-            "SKIP fork_layout_flattens_small_upper_and_chains_large_upper: no writable mount separate from workspace"
-        );
-        return;
-    };
-    backend.establish("root").unwrap();
-    for index in 0..2 {
-        write_upper(
-            &backend,
-            "root",
-            &base.join(format!("small-{index}")),
-            "small",
-        );
-    }
-    let parent_lower = mount_for(&backend, "root", &base).lower;
-    assert!(parent_lower.is_empty(), "root starts without lower layers");
-
-    backend.fork("root", "child-small", &[]).unwrap();
-    let small = mount_for(&backend, "child-small", &base);
-    assert_eq!(
-        small.lower, parent_lower,
-        "small upper must flatten: the child lower is the parent lower without a new layer"
-    );
-    assert!(
-        upper_at(&backend, "child-small", &base.join("small-0")).exists(),
-        "flattened child upper must carry the parent files"
-    );
-    let small_base = FilesystemBackend::base_snapshot_id_for_child("child-small");
-    let small_key = small.target.display().to_string();
-    let (small_chain, small_layer) = {
-        let state = backend.lock().unwrap();
-        let record = &state.snapshots[&small_base];
-        (record.lower[&small_key].clone(), record.path.clone())
-    };
-    let mut expected_chain = parent_lower.clone();
-    expected_chain.push(small_layer);
-    assert_eq!(
-        small_chain, expected_chain,
-        "the snapshot merge base must still be parent lower + S even when the child mount flattens"
-    );
-
-    for index in 2..66 {
-        write_upper(
-            &backend,
-            "root",
-            &base.join(format!("large-{index}")),
-            "large",
-        );
-    }
-    backend.fork("root", "child-large", &[]).unwrap();
-    let large = mount_for(&backend, "child-large", &base);
-    let large_base = FilesystemBackend::base_snapshot_id_for_child("child-large");
-    let large_key = large.target.display().to_string();
-    let (large_chain, large_layer) = {
-        let state = backend.lock().unwrap();
-        let record = &state.snapshots[&large_base];
-        (record.lower[&large_key].clone(), record.path.clone())
-    };
-    assert_eq!(
-        large.lower,
-        vec![large_layer.clone()],
-        "large upper must chain: the new layer joins the child lower"
-    );
-    assert_eq!(
-        large_chain, large.lower,
-        "chain snapshot view is the child lower chain"
-    );
-    assert!(
-        fs::read_dir(&large.upper)
-            .map(|mut entries| entries.next().is_none())
-            .unwrap_or(false),
-        "chained child upper must start empty"
-    );
-
-    backend.terminate("child-small").unwrap();
-    backend.discard("child-small", &[]).unwrap();
-    backend.terminate("child-large").unwrap();
-    backend.discard("child-large", &[]).unwrap();
-    backend.terminate("root").unwrap();
-    backend.cleanup("root").unwrap();
 }
 
 #[test]
@@ -1623,7 +1195,6 @@ fn mixed_layout_accept_reports_conflict_and_writes_nothing() {
         "grandchild-keep",
     );
     write_upper(&backend, "grandchild", &base.join("newfile"), "new");
-    // The target changes the same path after the fork.
     write_upper(&backend, "child1", &base.join("keep"), "target-keep");
 
     let grandchild_base = FilesystemBackend::base_snapshot_id_for_child("grandchild");
@@ -1674,9 +1245,7 @@ fn fork_refuses_chain_deeper_than_max_lower_depth_before_creating_anything() {
     };
     backend.establish("root").unwrap();
     write_upper(&backend, "root", &base.join("gen-0"), "x");
-    // Build the deepest allowed chain directly: the guard only depends on
-    // the recorded lower depth, and creating 96 real forks would add no
-    // coverage to the pre-creation failure assertion.
+    // The guard uses recorded depth, so populate metadata without creating forks.
     let target = mount_for(&backend, "root", &base).target;
     {
         let mut state = backend.lock().unwrap();

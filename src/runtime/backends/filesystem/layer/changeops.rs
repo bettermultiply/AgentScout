@@ -1,4 +1,3 @@
-//! 从 delta / upper 副本生成 FilesystemChange。
 
 use super::*;
 
@@ -16,9 +15,6 @@ pub(crate) fn changes_from_delta(
             });
             continue;
         }
-        // Phase 2 will add a structured changeset with create/modify
-        // classification.  Phase 1 only records that this upper entry changed;
-        // it deliberately does not touch base content to stay O(upper delta).
         changes.push(FilesystemChange {
             path: path.clone(),
             kind: "change".to_string(),

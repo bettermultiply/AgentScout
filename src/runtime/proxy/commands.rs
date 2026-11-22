@@ -1,4 +1,3 @@
-//! Instrumentation command connection, separate from control-plane operations.
 use super::*;
 use crate::protocol::contract::{EnvironmentState, ExecutionAccess};
 use crate::runtime::backend::{BackendContext, BackendError, CancelHandle};
@@ -299,8 +298,7 @@ struct Entry {
     terminal: Mutex<Option<Message>>,
     ready: Condvar,
 }
-// One anonymous file per operation with output. Readers snapshot the committed
-// range and send it outside the lock, so a slow client cannot hold up cancel.
+// Send snapshots of committed output outside the lock so slow readers cannot block cancel.
 struct Replay {
     file: Arc<std::fs::File>,
     length: u64,
@@ -792,13 +790,11 @@ fn serve(
                 );
             };
             entry.cancel.cancel();
-            // Receipt is not completion: only the backend's terminal return is.
             let terminal = entry
                 .ready
                 .wait_while(entry.terminal.lock().unwrap(), |value| value.is_none())
                 .unwrap();
-            // Cancellation only acknowledges the terminal status. The execute
-            // connection carries the result and all preceding output.
+            // The execute connection carries the output and result. Cancel only acknowledges terminal status.
             let mut receipt = terminal.as_ref().unwrap().meta.clone();
             for field in ["value", "exit_code", "body_kind", "stdout_length"] {
                 receipt.as_object_mut().unwrap().remove(field);

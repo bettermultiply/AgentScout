@@ -1,9 +1,7 @@
-//! 应用 Agent 消息，检查并推进 SpeculativeTree 的状态转换。
 
 use super::*;
 
 impl SpeculativeTree {
-    /// 检查并应用 Agent 报告的事实，返回后续命令。
     pub fn handle_message(&mut self, message: AgentMessage) -> io::Result<Vec<AgentCommand>> {
         match message {
             AgentMessage::SessionHistory { .. } => Ok(Vec::new()),
@@ -12,9 +10,6 @@ impl SpeculativeTree {
                 prompt_id,
                 prompt,
             } => {
-                // A prompt that cannot be shown is answered with a cancel
-                // command so the Agent stops waiting. Only messages that
-                // threaten control-plane state fail the connection.
                 let cancel = |reason: &str| {
                     Ok(vec![AgentCommand::UiPromptAnswer {
                         branch_id: branch_id.clone(),
@@ -282,12 +277,7 @@ impl SpeculativeTree {
                             ChanceStage::Resolving,
                             "Model authority arrived",
                         )?;
-                        // The authority fact closes the only window in which
-                        // an uncommitted Candidate may produce a Proposal.
-                        // Cancel those model continuations before processing
-                        // any later Candidate completion.  The returned
-                        // commands are sent through the normal connection
-                        // queue; this is deliberately not a direct Pi call.
+                        // Authority arrival closes the model Proposal window before later completions.
                         let unfinished: Vec<_> = self
                             .chance(&id)?
                             .branch_ids
@@ -320,8 +310,6 @@ impl SpeculativeTree {
                                 "Authority value arrived before Candidate Proposal was ready",
                             )?);
                         }
-                        // `handle_message` returns one command vector below;
-                        // keep these receipts alongside the authority fact.
                         pending_commands.extend(cancellation_commands);
                     }
                     let candidate_chance = self.branch(&branch_id)?.chance_id.clone();
@@ -359,9 +347,6 @@ impl SpeculativeTree {
                     status,
                     timestamp_ms,
                 )?);
-                // The model-fact path above may have queued cancellation
-                // commands.  Keep the command transport serialized by
-                // returning them to the control-plane execution loop.
                 Ok(pending_commands)
             }
             AgentMessage::TurnCompleted { branch_id } => {
@@ -477,8 +462,6 @@ impl SpeculativeTree {
         Ok(())
     }
 
-    /// The Agent Adapter reports that it actually holds this Branch at a
-    /// boundary. Only the latest blocking Decision is recorded.
     fn handle_branch_suspended(
         &mut self,
         branch_id: &str,
@@ -523,9 +506,7 @@ impl SpeculativeTree {
 
     fn handle_branch_started(&mut self, branch_id: &str) -> io::Result<Vec<AgentCommand>> {
         let branch = self.branch_mut(branch_id)?;
-        // A start fact already in transit may arrive after cancellation
-        // or after a duplicate start report. It must not resurrect a
-        // discarded Branch or abort Parent fallback.
+        // Late or duplicate start facts must not revive a discarded Branch or abort fallback.
         if branch.status == BranchStatus::Created {
             branch.execution_state.agent = AgentExecutionState::Running;
             for operation in &mut branch.pending_operations {
@@ -563,7 +544,7 @@ impl SpeculativeTree {
             .get(branch_id)
             .and_then(|actions| actions.get(operation_id))
         else {
-            return Ok(vec![]); // Duplicate/late completion cannot advance the Tree.
+            return Ok(vec![]);
         };
         if action.action_kind != action_kind {
             return Err(invalid_input("action kind does not match start"));
@@ -588,8 +569,6 @@ impl SpeculativeTree {
             }
             return Ok(vec![]);
         }
-        // 命中结算需要权威侧工具结果真实的 Instrumentation 到达时刻。这里只保留
-        // 已完成 action 的时刻，不改变 action 的生命周期。
         self.tool_finished_at_ms
             .entry(branch_id.to_string())
             .or_default()
@@ -632,10 +611,7 @@ impl SpeculativeTree {
             && self.branch(branch_id)?.role == BranchRole::Candidate
             && self.branch(branch_id)?.status.is_live_candidate()
         {
-            // The Candidate's model call started only after the authority
-            // value had already arrived. It can no longer produce a winning
-            // Proposal; cancel the request now that it has a real start fact
-            // and a truthful cancellation/usage can be observed.
+            // The real start fact lets cancellation and usage be observed even for a late call.
             self.pending_records.push(serde_json::json!({
                 "branch_id": branch_id,
                 "hypothesis": Value::Null,
@@ -652,9 +628,6 @@ impl SpeculativeTree {
         Ok(commands)
     }
 
-    /// Pair an admitted action with its later ActionFinished. This registers
-    /// the action's identity only; it records no start time. Tool start time
-    /// comes exclusively from the adapter's ActionStarted fact.
     pub(crate) fn register_action(
         &mut self,
         branch_id: &str,
@@ -769,8 +742,6 @@ impl SpeculativeTree {
         self.branch_mut(branch_id)?.execution_state.agent = AgentExecutionState::Failed;
         self.branch_mut(branch_id)?.execution_state.turn_active = false;
         self.branch_mut(branch_id)?.execution_state.failure = Some(reason.clone());
-        // A failure of the current authority is not a candidate
-        // discard: there is no older authority to fall back to.
         if self.authority_branch_id.as_deref() == Some(branch_id) {
             return Ok(vec![]);
         }
@@ -841,8 +812,6 @@ impl SpeculativeTree {
         self.apply_command_result(branch_id, pending.operation, status, reason)
     }
 
-    /// Keep the command/status dispatch visible; each transition body is a
-    /// named method.
     pub(in crate::control_plane) fn has_live_environment_dependents(&self, branch: &str) -> bool {
         // A full acceptance retains the source Environment on the retired
         // parent record while the winning session or its descendants use it.
@@ -1059,9 +1028,7 @@ impl SpeculativeTree {
         self.record_accepted_chance(winner, "Full acceptance applied within speculative parent")?;
         self.queue_settlement(winner, true)?;
 
-        // Preserve the historical fork links: the parent record now owns the
-        // retained source Environment. The winner takes over the parent's
-        // unresolved Chance, while its descendants keep their current owners.
+        // The retired parent still owns the source Environment and historical fork links.
         self.chance_mut(&inner_chance)?.branch_ids.retain(|id| id != winner);
         self.chance_mut(&outer_chance)?.branch_ids.push(winner.to_owned());
         let branch = self.branch_mut(winner)?;
@@ -1161,8 +1128,7 @@ impl SpeculativeTree {
             BranchStatus::Cleaned,
             "Agent session cleanup applied",
         )?;
-        // Cleanup is the terminal receipt for this session; no earlier
-        // in-flight command may keep it live or revive it.
+        // Cleanup is terminal even with earlier commands in flight.
         self.pending_commands
             .retain(|_, command| command.branch_id != branch_id);
         for operation in &mut self.branch_mut(branch_id)?.pending_operations {
@@ -1176,7 +1142,6 @@ impl SpeculativeTree {
         Ok(vec![])
     }
 
-    /// 只有 control plane 可以接受 Candidate；接受后旧权威失去权威身份。
     pub(crate) fn finish_runtime_promotion(
         &mut self,
         candidate: &str,

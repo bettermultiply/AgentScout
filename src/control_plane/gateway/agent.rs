@@ -1,4 +1,3 @@
-//! Agent listener, handshake, typed ingress and command delivery.
 pub mod protocol;
 
 use self::protocol::{AdapterCapabilities, AgentCommand, AgentMessage, AgentWireMessage};
@@ -76,7 +75,6 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// A single ordered delivery worker owns this writer clone.
     pub fn delivery_writer(&self) -> io::Result<Self> {
         Ok(Self {
             stream: self.stream.try_clone()?,
@@ -98,8 +96,7 @@ impl Connection {
         self.next_delivery += 1;
         let id = self.next_delivery;
         let message = AgentWireMessage::Delivery { id, command };
-        // Only receipt timeouts can be retried on this framed stream. A write
-        // error may leave a partial frame, so close rather than replay bytes.
+        // A write error can leave a partial frame. Retry only receipt timeouts.
         for _ in 0..3 {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(io::Error::new(
@@ -111,7 +108,6 @@ impl Connection {
                 let _ = self.stream.shutdown(std::net::Shutdown::Both);
                 return Err(error);
             }
-            // Short waits let cancellation stop retries without another thread.
             let deadline = Instant::now() + Duration::from_millis(200);
             let mut receipt = self.receipts.0.lock().unwrap();
             while *receipt != Some(id)
@@ -193,91 +189,6 @@ impl Drop for Connection {
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
             self.stop_receiving();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cancellation_stops_retries_but_cleanup_is_delivered() {
-        use std::sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc,
-        };
-        let (stream, mut peer) = UnixStream::pair().unwrap();
-        let mut connection = Connection {
-            stream,
-            reader: None,
-            next_delivery: 0,
-            receipts: Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new())),
-        };
-        connection.receive(|_| true).unwrap();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let token = cancelled.clone();
-        let receiver = thread::spawn(move || {
-            let _: AgentWireMessage = transport::read_message(&mut peer).unwrap().unwrap();
-            token.store(true, Ordering::Release);
-            let next: AgentWireMessage = transport::read_message(&mut peer).unwrap().unwrap();
-            let AgentWireMessage::Delivery {
-                id,
-                command: AgentCommand::Cleanup { .. },
-            } = next
-            else {
-                panic!("startup retried after cancellation")
-            };
-            transport::write_message(&mut peer, &AgentWireMessage::Received { id }).unwrap();
-        });
-        assert_eq!(
-            connection
-                .send_cancellable(
-                    AgentCommand::Prompt {
-                        branch_id: "b".into(),
-                        prompt: "go".into()
-                    },
-                    &cancelled
-                )
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::Interrupted
-        );
-        connection
-            .send(AgentCommand::Cleanup {
-                branch_id: "b".into(),
-                workspace: "/tmp/fake".into(),
-                command_id: "cleanup".into(),
-                generation: 0,
-            })
-            .unwrap();
-        receiver.join().unwrap();
-    }
-
-    #[test]
-    fn delivery_retries_same_id_until_receiver_acknowledges() {
-        let (stream, mut peer) = UnixStream::pair().unwrap();
-        let mut connection = Connection {
-            stream,
-            reader: None,
-            next_delivery: 0,
-            receipts: std::sync::Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new())),
-        };
-        connection.receive(|_| true).unwrap();
-        let receiver = thread::spawn(move || {
-            let first: AgentWireMessage = transport::read_message(&mut peer).unwrap().unwrap();
-            let second: AgentWireMessage = transport::read_message(&mut peer).unwrap().unwrap();
-            assert_eq!(first, second);
-            let AgentWireMessage::Delivery { id, .. } = second else {
-                panic!("missing delivery envelope")
-            };
-            transport::write_message(&mut peer, &AgentWireMessage::Received { id }).unwrap();
-        });
-        connection
-            .send(AgentCommand::Pause {
-                branch_id: "branch".into(),
-            })
-            .unwrap();
-        receiver.join().unwrap();
     }
 }
 

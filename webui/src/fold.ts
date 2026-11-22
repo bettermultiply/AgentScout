@@ -74,7 +74,6 @@ export interface BranchState {
   lastTimestampMs: number
   conversationUpdatedSequence: number | null
   authorityChangedAtMs: number | null
-  /** First timestamp at which the Branch reached a terminal lifecycle status. */
   terminalAtMs: number | null
 }
 
@@ -189,10 +188,6 @@ function appendUnique(values: string[], value: string): string[] {
   return values.includes(value) ? values : [...values, value]
 }
 
-/**
- * Pure fold over observation events. `upToSequence` makes the same function
- * usable for replay: every state is exactly the result of events 1..N.
- */
 export function foldEvents(
   events: readonly ObservationEvent[],
   upToSequence = Number.POSITIVE_INFINITY,
@@ -205,7 +200,6 @@ export function foldEvents(
   return state
 }
 
-/** Incremental, immutable application of one already-ordered event. */
 export function applyEvent(state: RunState, event: ObservationEvent): RunState {
   if (event.event === 'ui_prompt_requested' || event.event === 'ui_prompt_resolved' || event.event === 'commands_listed' || event.event === 'ui_notification') {
     return { ...state, sequence: Math.max(state.sequence, event.sequence) }
@@ -352,7 +346,6 @@ export function applyEvent(state: RunState, event: ObservationEvent): RunState {
         branch.tools = [...branch.tools, event]
         break
       case 'nle_map_action':
-        // Map replay consumes this public workload event independently.
         break
       case 'settlement':
         branch.settlements = [...branch.settlements, event]

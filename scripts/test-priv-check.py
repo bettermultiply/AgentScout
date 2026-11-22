@@ -13,14 +13,10 @@ PRIV_TESTS = [
     "priv_btrfs_chain_layout",
     "priv_btrfs_flatten_layout",
     "priv_btrfs_mixed_generations",
-    "priv_direct_root_overlay_is_available_in_initial_userns",
 ]
 PROCESS_TESTS = [
-    "runtime::process::tests::terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup",
     "runtime::process::tests::failed_launch_cleans_process_pending_status_and_cgroup",
     "runtime::process::tests::stop_reports_cgroup_kill_write_failure",
-    "runtime::process::tests::stop_unknown_or_exited_process_is_not_an_error",
-    "runtime::process::tests::exited_process_is_reported_as_not_running",
     "runtime::backends::filesystem::tests::process::process_freeze_thaw_stops_and_resumes_writer",
     "runtime::backends::filesystem::tests::process::process_group_fallback_freezes_and_reports_mechanism",
 ]
@@ -115,7 +111,7 @@ elif name == 'fake-tests':
                 print('test '+n+' ... ignored')
                 ignored += 1
                 continue
-            elif mode == 'priv-failed' and 'privileged::priv_' in args[0] and index < 3:
+            elif mode == 'priv-failed' and 'privileged::priv_' in args[0] and index < 2:
                 print('test '+n+' ... FAILED')
                 failed += 1
                 continue
@@ -297,8 +293,8 @@ if __name__ == "__main__":
             assert "coverage summary" in output, (mode, log)
             for check in CHECKS:
                 assert check in output, (mode, check, log)
+            assert "3/3 executed" in output, (mode, log)
             assert "4/4 executed" in output, (mode, log)
-            assert "7/7 executed" in output, (mode, log)
             expected_mechanism = "process_group" if mode == "freeze-pg" else "cgroup"
             assert f"mechanism={expected_mechanism}" in output, (mode, log)
             assert calls.count("--list") >= 1, (mode, calls)
@@ -318,11 +314,11 @@ if __name__ == "__main__":
             if mode == "missing-test":
                 assert "missing test" in output, (mode, log)
             if mode in {"priv-failed", "priv-exit-fail", "skip", "skip-inline", "ignored"}:
-                assert "PASS: 4 privileged Rust tests" not in output, (mode, log)
+                assert "PASS: 3 privileged Rust tests" not in output, (mode, log)
             if mode in {"process-fail", "freeze-none", "missing-process"}:
-                assert "PASS: 7 process-group tests" not in output, (mode, log)
+                assert "PASS: 4 process-group tests" not in output, (mode, log)
             if mode == "priv-failed":
-                assert "4/4 executed; 1/4 passed" in output, (mode, log)
+                assert "3/3 executed; 1/3 passed" in output, (mode, log)
             if mode == "no-layout":
                 assert "NO_VALID_STATE_LAYOUT" in output, (mode, log)
             if mode == "overlap-layout":

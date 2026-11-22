@@ -143,8 +143,6 @@ Python 和仓库 bridge。实际路径为 NleBackend::new 启动
 
 初始化修复的小回归证据为 `/tmp/opencode/nle-initialization-before.log`、`/tmp/opencode/nle-initialization-after.log`；`/tmp/opencode/current-disp-probe.json` 记录 disp=11/22/99 对动作 [1] 和 [1,2,3,4] 共六次短轨迹的全部 before/after 一致。这不构成任意长轨迹或全游戏保证。
 
-Policy 随机子集仍按配置顺序输出的回归见 `tests/policy-proposal-order.py`。该局部回归不代表完整机制验收。
-
 实际路径：`src/runtime/backends/nle.rs:69-108` 启动配置的 Python 与 `examples/nle-runtime-bridge.py`，通过 stdin/stdout JSONL 逐请求调用，Mutex 串行化请求（114-138）。`invoke_tool` 只把 bridge 的 result/evidence 包装回传（270-299）。Runtime 配置可由 `ASCOUT_RUNTIME_CONFIG` 覆盖，或由启动时加载的 Policy 的 runtime 路径选择（`src/bin/ascout-control-plane.rs:292-296`）；不是每个 Prompt 的参数。此为已有实现路径记录；当前首版同一 session 的 Policy 固定，不实现修改或切换，保存／恢复须保持一致，范围见 [Policy 开发说明](policy-engine.md)。
 
 `NleConfig.seed` 默认 None，establish 才下发；当前 bridge 显式保存 core、随机 disp、reseed=False、lgen=None，并固定日期效果。NLE `nle/env/base.py:480-513` 说明 None 的 disp 随机选取，lgen=None 不启用独立地图生成 RNG。未配置 seed 时 core 也随机。当前配置不能单独指定 disp、reseed、lgen 或日期策略；固定一个 core seed 不代表整个游戏的完整复现保证。

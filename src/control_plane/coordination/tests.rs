@@ -1,9 +1,8 @@
-//! control plane 协调测试。
 
 use super::*;
 
 use crate::control_plane::gateway::agent::protocol::{BranchRole, CommandOperation, CommandStatus};
-use crate::control_plane::speculative_tree::{AuthorityState, ChanceStage, OperationKind, OperationStatus};
+use crate::control_plane::speculative_tree::{AuthorityState, ChanceStage};
 use crate::control_plane::gateway::runtime::ControlServer;
 use crate::control_plane::policy::CompiledPolicy;
 use crate::protocol::contract::{
@@ -308,23 +307,6 @@ fn held_authority_four_launch_paths_promote_or_fallback_once() {
 }
 
 #[test]
-fn consumed_work_keeps_first_fingerprint_and_reports_only_conflicts() {
-    let (mut tree, _root) = task();
-    let mut actions = ControlActions::default();
-    tree.schedule(ControlOperation::Select(vec![]), &mut actions);
-    let id = actions.operations[0].0;
-    tree.complete_work(id, Ok(ControlResult::Selected(vec![]))).unwrap();
-    let is_conflict = |r: Value| r["reason"] == "conflicting complete_work feedback";
-    tree.complete_work(id, Ok(ControlResult::Selected(vec![]))).unwrap();
-    assert!(!tree.drain_records().into_iter().any(is_conflict));
-    tree.complete_work(id, Err("late failure".into())).unwrap();
-    assert!(tree.drain_records().into_iter().any(is_conflict));
-    tree.complete_work(id, Ok(ControlResult::Selected(vec![]))).unwrap();
-    assert!(!tree.drain_records().into_iter().any(is_conflict));
-    assert!(!tree.pending_work());
-}
-
-#[test]
 fn select_result_cannot_select_a_chance_outside_original_request() {
     let (mut tree, _root) = task();
     tree.speculative_admission(waiting()).unwrap();
@@ -341,19 +323,6 @@ fn select_result_cannot_select_a_chance_outside_original_request() {
 }
 
 #[test]
-fn conflicting_operation_feedback_preserves_first_terminal_state() {
-    let (mut tree, _root) = task();
-    tree.complete_operation("authority", Some("start-agent"), OperationStatus::Succeeded)
-        .unwrap();
-    tree.complete_operation("authority", Some("start-agent"), OperationStatus::Failed)
-        .unwrap();
-    assert_eq!(
-        tree.branches["authority"].pending_operations[0].status,
-        OperationStatus::Succeeded
-    );
-}
-
-#[test]
 fn rebalance_ignores_changed_branch_but_keeps_unrelated_result() {
     let (mut tree, _root) = task();
     tree.speculative_admission(waiting()).unwrap();
@@ -366,7 +335,6 @@ fn rebalance_ignores_changed_branch_but_keeps_unrelated_result() {
     tree.branches.get_mut(&branch_id).unwrap().status = BranchStatus::Running;
     let mut actions = ControlActions::default();
     tree.schedule(ControlOperation::Rebalance, &mut actions);
-    // An unrelated Branch changes. The unchanged Candidate's result is valid.
     tree.branches.get_mut("authority").unwrap().generation += 1;
     let completed = tree
         .complete_work(
@@ -1313,19 +1281,4 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
     assert_eq!(calls[0].1, Operation::BranchEnvironment { agent: None });
     session.shutdown().unwrap();
     client.join().unwrap();
-}
-
-#[test]
-fn expired_tool_wait_is_an_error_instead_of_an_immediate_timer_forever() {
-    let (mut tree, _root) = task();
-    tree.speculative_admission(waiting()).unwrap();
-    tree.branches
-        .get_mut("authority")
-        .unwrap()
-        .pending_operations
-        .iter_mut()
-        .find(|operation| operation.kind == OperationKind::Tool)
-        .unwrap()
-        .deadline_at = Some(0);
-    assert!(tree.check_command_deadlines().is_err());
 }

@@ -1,4 +1,3 @@
-//! 请求结果构造与文件系统确认校验。
 
 use crate::protocol::contract::{
     EnvironmentState, FilesystemResult, Operation, OperationRequest, OperationResult, ResultStatus,

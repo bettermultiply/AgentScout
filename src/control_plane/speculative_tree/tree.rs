@@ -1,4 +1,3 @@
-//! SpeculativeTree 的基础访问与内部索引。
 
 use super::*;
 use std::path::Path;
@@ -99,7 +98,6 @@ impl SpeculativeTree {
         &self.workspace_root
     }
 
-    /// Set the recording identity before execution starts; it cannot change under live work.
     pub fn set_execution_id(&mut self, execution_id: String) -> io::Result<()> {
         if self.authority_branch_id.is_some() && !self.recovering {
             return Err(invalid_input(
@@ -243,9 +241,6 @@ impl SpeculativeTree {
         if let Some(old) = &previous {
             self.touch_policy_branch(old);
             self.branch_mut(old)?.role = BranchRole::Candidate;
-            // Only the current authority's prompts can be answered. A prompt
-            // already shown for the outgoing authority would otherwise stay
-            // visible while every answer is rejected.
             self.cancel_ui_prompts(Some(old), "Branch is no longer the authority");
         }
         self.touch_policy_branch(id);
@@ -291,7 +286,6 @@ impl SpeculativeTree {
         Ok(tree)
     }
 
-    /// Start a fresh task with only the saved bindings of the ended run.
     pub(crate) fn reopen_ended(
         run_dir: &Path,
         run_id: &str,
@@ -310,7 +304,6 @@ impl SpeculativeTree {
         fs::create_dir_all(tree.workspace())?;
         tree.run_id = Some(run_id.into());
         tree.set_execution_id(format!("{run_id}:{sequence}"))?;
-        // Restore the saved values exactly, including omitted bindings and JSON nulls.
         tree.policy_binding = bindings.get("policy_binding").cloned();
         tree.runtime_binding = bindings.get("runtime_binding").cloned();
         tree.capability_view = bindings.get("capability_view").cloned();
@@ -328,8 +321,6 @@ impl SpeculativeTree {
         self.workspace_path.as_deref()
     }
 
-    /// Runtime tools may only execute for the live authority recorded by the Tree.
-    /// Candidate and late messages must never be routed into another Branch's world.
     pub fn can_invoke_tool(&self, branch_id: &str) -> bool {
         self.authority_branch_id.as_deref() == Some(branch_id)
             && self.branches.get(branch_id).is_some_and(|branch| {
@@ -401,8 +392,6 @@ impl SpeculativeTree {
             branch_id.to_string(),
             BranchRecord {
                 branch_id: branch_id.to_string(),
-                // Runtime assigns this identity after the establish request.
-                // An unbound Branch must not carry a control-plane placeholder.
                 environment_id: None,
                 parent_branch_id,
                 role,

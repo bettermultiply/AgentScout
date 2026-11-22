@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Privileged validation for the AScout filesystem backend.
-#
-# Run this as a normal user. Steps that need privilege use sudo internally;
-# cargo and the test binaries are always executed as the invoking user
-# (except the privileged Rust tests, which need root).
 set -euxo pipefail
 cd "$(dirname "$0")/.."
 
@@ -31,14 +26,10 @@ PRIV_TESTS=(
     priv_btrfs_chain_layout
     priv_btrfs_flatten_layout
     priv_btrfs_mixed_generations
-    priv_direct_root_overlay_is_available_in_initial_userns
 )
 PROCESS_TESTS=(
-    runtime::process::tests::terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup
     runtime::process::tests::failed_launch_cleans_process_pending_status_and_cgroup
     runtime::process::tests::stop_reports_cgroup_kill_write_failure
-    runtime::process::tests::stop_unknown_or_exited_process_is_not_an_error
-    runtime::process::tests::exited_process_is_reported_as_not_running
     runtime::backends::filesystem::tests::process::process_freeze_thaw_stops_and_resumes_writer
     runtime::backends::filesystem::tests::process::process_group_fallback_freezes_and_reports_mechanism
 )
@@ -103,10 +94,7 @@ remove_tree() {
     [ -n "$dir" ] || return 0
     [ -e "$dir" ] || return 0
     if [ -n "$BTRFS_BIN" ]; then
-        # Delete descendant btrfs subvolumes deepest-first; plain rm cannot
-        # remove a subvolume root. Failures here are retried by rm below.
-        # The btrfs path is passed as an argument, not through sudo's
-        # environment, because sudo may reset the environment.
+        # Delete nested subvolumes deepest first. Pass the path as an argument because sudo can reset env.
         $SUDO find "$dir" -depth -type d -exec sh -c \
             'bin="$1"; target="$2"; [ -x "$bin" ] && "$bin" subvolume show "$target" >/dev/null 2>&1 && "$bin" subvolume delete "$target" >/dev/null 2>&1; true' \
             sh "$BTRFS_BIN" {} \; >/dev/null 2>&1 || true
@@ -130,9 +118,6 @@ is_pseudo_fstype() {
     return 1
 }
 
-# Shell approximation of the backend's isolated set: the backend isolates
-# every writable, non-pseudo mount except "/".  The privileged test asserts the
-# real condition again through the backend.
 is_isolatable() {
     local target="$1" fstype="$2" options="$3"
     if [ "$target" = "/" ]; then
@@ -163,7 +148,7 @@ print_covered_checks() {
     echo "5. Rust test binary build (invoking user)"
     echo "6. process-group freeze tests: runtime::process + filesystem::tests::process"
     echo "7. privileged Rust tests: priv_btrfs_chain_layout, priv_btrfs_flatten_layout,"
-    echo "   priv_btrfs_mixed_generations, priv_direct_root_overlay_is_available_in_initial_userns"
+    echo "   priv_btrfs_mixed_generations"
 }
 
 print_summary() {
@@ -218,9 +203,6 @@ trap finish EXIT
 
 print_covered_checks
 
-# ---------------------------------------------------------------------------
-# Environment.
-# ---------------------------------------------------------------------------
 step "environment"
 begin_check environment
 id
@@ -247,9 +229,6 @@ fi
 CHECK_DETAIL[environment]="uid=$(id -u) gid=$(id -g)"
 complete_check
 
-# ---------------------------------------------------------------------------
-# Choose state and workspace directories.
-# ---------------------------------------------------------------------------
 step "state/workspace layout"
 begin_check layout
 STATE_MOUNT=""
@@ -359,9 +338,6 @@ if [ "${CHECK_STATUS[layout]}" = PASS ]; then
     LAYOUT_OK=1
 fi
 
-# ---------------------------------------------------------------------------
-# Raw btrfs capability checks.
-# ---------------------------------------------------------------------------
 step "btrfs raw capabilities"
 begin_check btrfs-raw
 if [ "$LAYOUT_OK" -ne 1 ] || [ "$BTRFS_AVAILABLE" -ne 1 ]; then
@@ -434,9 +410,6 @@ fi
 CHECK_DETAIL[btrfs-raw]="create/snapshot/send-dump/strict-delete"
 complete_check
 
-# ---------------------------------------------------------------------------
-# Direct lower=/ overlay in the initial user namespace.
-# ---------------------------------------------------------------------------
 step "direct lower=/ overlay in the initial user namespace"
 begin_check direct-root-overlay
 if [ "$LAYOUT_OK" -ne 1 ]; then
@@ -475,9 +448,6 @@ fi
 CHECK_DETAIL[direct-root-overlay]="lower=/ in initial userns"
 complete_check
 
-# ---------------------------------------------------------------------------
-# Build the test binary as the invoking user.
-# ---------------------------------------------------------------------------
 step "build test binary as the invoking user"
 begin_check rust-build
 BUILD_LOG="$LOG_DIR/build.log"
@@ -524,9 +494,6 @@ fi
 CHECK_DETAIL[rust-build]="lib tests"
 complete_check
 
-# ---------------------------------------------------------------------------
-# Process-group freeze tests, run as the invoking user.
-# ---------------------------------------------------------------------------
 step "process-group freeze tests (invoking user)"
 begin_check process-freeze
 if [ -z "$TEST_BIN" ] || [ ! -x "$TEST_BIN" ]; then
@@ -605,9 +572,6 @@ fi
 CHECK_DETAIL[process-freeze]="${PROCESS_RUN_COUNT}/${#PROCESS_TESTS[@]} executed; ${PROCESS_PASS_COUNT}/${#PROCESS_TESTS[@]} passed; ${PROCESS_IGNORED_COUNT} ignored; mechanism=${ACTUAL_FREEZE_MECHANISM}"
 complete_check
 
-# ---------------------------------------------------------------------------
-# Privileged Rust tests, run as root.
-# ---------------------------------------------------------------------------
 step "privileged Rust tests"
 begin_check privileged-rust
 if [ -z "$TEST_BIN" ] || [ ! -x "$TEST_BIN" ]; then

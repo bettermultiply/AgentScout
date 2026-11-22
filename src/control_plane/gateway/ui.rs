@@ -1,11 +1,9 @@
-//! Typed UI request delivery. Presentation and observation storage live outside Gateway.
 use serde::Deserialize;
 use std::sync::Arc;
 
 mod http;
 pub use http::{Server, start};
 
-/// Read-only presentation supplied by the UI; Gateway does not fold Tree facts.
 pub trait Presentation: Send + Sync {
     fn input_status(&self) -> serde_json::Value;
     fn conversation(&self, branch: &str) -> Option<serde_json::Value>;

@@ -1,18 +1,15 @@
 import {spawnControl, runPath} from './control-plane-fixture.mjs';
-// Real local FS/Pi/control plane, deterministic local SSE; never a paid model.
 import fs from 'node:fs';
 import http from 'node:http';
-import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
-for (const exitStatus of [true,false]) {
-test(exitStatus?'Pi reports a delivered nonzero bash exit as a failed action once':'Authority publishes after background writers, resets across tasks, cancels and retries failure',{timeout:120000},async t=>{
+test('Authority reports tool exits, publishes across tasks, retries failures and cancels writers',{timeout:120000},async t=>{
  const project=process.cwd(),root=fs.mkdtempSync('/tmp/opencode/authority-filesystem-');console.log('evidence',root);
  for(const name of ['workspace','pi','policy','tmp'])fs.mkdirSync(root+'/'+name);
  let requests=0;
- const commands=exitStatus?['printf x >> runs; printf failure-output; exit 7','printf y >> runs; printf success-output',null]:[
+ const commands=[
    `printf first > a; (echo $BASHPID > '${root}/background-pid'; while :; do printf x >> '${root}/background-heartbeat'; sleep 0.05; done) >/dev/null 2>&1 &`,null,
    {name:'write',args:{path:'b',content:'before'}},{name:'edit',args:{path:'b',oldText:'before',newText:'second'}},{name:'read',args:{path:'b'}},null,
    `printf cancelled > c; printf ready > '${root}/cancel-ready'; sleep 30`,null,`printf partial > partial; ln -sf new z`,null];
@@ -25,11 +22,11 @@ test(exitStatus?'Pi reports a delivered nonzero bash exit as a failed action onc
  })});await new Promise(r=>fake.listen(0,'127.0.0.1',r));
  const freePort=()=>new Promise(r=>{const s=http.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p))})});
  const [port,runtimePort]=await Promise.all([freePort(),freePort()]);
- fs.writeFileSync(root+'/pi/models.json',JSON.stringify({providers:{fixture:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
+ fs.writeFileSync(root+'/models.json',JSON.stringify({providers:{fixture:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
   for(const name of ['policy.yaml','decisions.py'])fs.copyFileSync(project+'/assets/policy/policy/'+name,root+'/policy/'+name);
   fs.writeFileSync(root+'/policy/policy.yaml',fs.readFileSync(root+'/policy/policy.yaml','utf8').replace('max_steps: 5','max_steps: 100'));
  fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_address:`127.0.0.1:${runtimePort}`,adapter_instance:'fs',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,filesystem:{state_directory:root+'/fs-state',isolated_paths:[runPath(root, 'workspace')],passthrough_rw:[root]}}));
- const p=spawnControl(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','fixture/fixture'],{env:{...process.env,TMPDIR:root+'/tmp',ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','ignore','pipe']});
+ const p=spawnControl(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','fixture/fixture','--models',root+'/models.json'],{env:{...process.env,TMPDIR:root+'/tmp',ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','ignore','pipe']});
  p.stderr.on('data',b=>fs.appendFileSync(root+'/stderr.log',b));
  t.after(()=>{if(p.exitCode===null)p.kill('SIGKILL');fake.closeAllConnections();fake.close()});
  const events=()=>fs.existsSync(runPath(root, 'events.jsonl'))?fs.readFileSync(runPath(root, 'events.jsonl'),'utf8').split('\n').filter(Boolean).map(s=>JSON.parse(s)):[];
@@ -37,24 +34,6 @@ test(exitStatus?'Pi reports a delivered nonzero bash exit as a failed action onc
  const post=body=>fetch(`http://127.0.0.1:${port}/api/request`,{method:'POST',headers:{origin:`http://127.0.0.1:${port}`,'content-type':'application/json'},body:JSON.stringify(body)});
  const completed=()=>events().filter(e=>e.message==='task_completed');
  await wait(()=>events().some(e=>e.message==='branch_ready'),'ready');
- if(exitStatus){
-   assert.equal((await post({action:'prompt',prompt:'Run the two fixture commands.'})).status,202);
-   await wait(()=>completed().length===1,'fixture commands complete');
-   const rows=events();
-   const toolEvents=message=>rows.filter(e=>e.message===message&&e.action_kind==='tool_execution');
-   assert.deepEqual(toolEvents('action_started').map(e=>e.action_id),['shell0','shell1']);
-   const finished=toolEvents('action_finished');
-   assert.deepEqual(finished.map(e=>[e.action_id,e.status,e.result.is_error]),[
-     ['shell0','failed',true],['shell1','succeeded',false],
-   ]);
-   assert.match(finished[0].result.payload,/failure-output[\s\S]*Command exited with code 7/);
-   assert.equal(finished[1].result.payload,'success-output');
-   assert.equal(fs.readFileSync(runPath(root,'workspace/runs'),'utf8'),'xy');
-   assert.equal(requests,3);
-   const done=once(p,'exit');assert.equal((await post({action:'shutdown'})).status,202);await done;
-   assert.equal(p.exitCode,0);
-   return;
- }
  await post({action:'prompt',prompt:'first'});
  await wait(()=>events().some(e=>e.message==='action_started'&&e.name==='bash'),'writer started');
  await new Promise(r=>setTimeout(r,200));
@@ -83,13 +62,16 @@ test(exitStatus?'Pi reports a delivered nonzero bash exit as a failed action onc
   await post({action:'prompt',prompt:'cancel'});await wait(()=>requests===7,'cancellation tool');
   await wait(()=>fs.existsSync(root+'/cancel-ready'),'cancellation write actually finished');await post({action:'interrupt'});await wait(()=>completed().length===3,'cancel materialized');
  assert.equal(completed()[2].status,'cancelled');assert.equal(fs.readFileSync(runPath(root, 'workspace/c'),'utf8'),'cancelled');
- // Cancellation skips the final inference from this turn.
   requests=8;
  fs.symlinkSync('old',runPath(root, 'workspace/z'));
  await post({action:'prompt',prompt:'failure'});await wait(()=>events().some(e=>e.message==='materialization_failed'),'publication fails');
   assert.equal(completed().length,3,'failure cannot announce success');
-  const failureState=await(await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`)).json();
-  assert.match(JSON.stringify(failureState),/Materialization failed/,'publication failure is visible to the user');
+  // Report the public API check separately so a failure still exercises retry and shutdown.
+  await t.test('publication failure is visible in the public state',async()=>{
+    const response=await fetch(`http://127.0.0.1:${port}/api/observation/state-event-set`);
+    assert.equal(response.status,200);
+    assert.match(JSON.stringify(await response.json()),/Materialization failed/);
+  });
   assert.equal(fs.readlinkSync(runPath(root, 'workspace/z')),'old');
   assert.equal(fs.readFileSync(runPath(root, 'workspace/partial'),'utf8'),'partial');
   fs.writeFileSync(runPath(root, 'workspace/partial'),'host after receipt');
@@ -126,7 +108,25 @@ test(exitStatus?'Pi reports a delivered nonzero bash exit as a failed action onc
     fs.writeFileSync(root+'/release-natural','release');
     await wait(()=>completed().length===naturalCount+2,'natural writer and deferred input finish');
     assert.equal(fs.readFileSync(runPath(root, 'workspace/natural-late'),'utf8'),'finished');
-    // Shutdown must also stop a resident writer while publication is waiting.
+
+    const exitRequest = requests;
+    const exitEventOffset = events().length;
+    commands[exitRequest] = 'printf x >> runs; printf failure-output; exit 7';
+    commands[exitRequest + 1] = 'printf y >> runs; printf success-output';
+    assert.equal((await post({action:'prompt',prompt:'Run the two fixture commands.'})).status,202);
+    await wait(()=>completed().length===naturalCount+3,'fixture commands complete');
+    const exitEvents = events().slice(exitEventOffset).filter(e=>e.action_kind==='tool_execution');
+    const failedId = `shell${exitRequest}`, succeededId = `shell${exitRequest+1}`;
+    assert.deepEqual(exitEvents.filter(e=>e.message==='action_started').map(e=>e.action_id),[failedId,succeededId]);
+    const finished = exitEvents.filter(e=>e.message==='action_finished');
+    assert.deepEqual(finished.map(e=>[e.action_id,e.status,e.result.is_error]),[
+      [failedId,'failed',true],[succeededId,'succeeded',false],
+    ]);
+    assert.match(finished[0].result.payload,/failure-output[\s\S]*Command exited with code 7/);
+    assert.equal(finished[1].result.payload,'success-output');
+    assert.equal(requests,exitRequest+3);
+    assert.equal(fs.readFileSync(runPath(root,'workspace/runs'),'utf8'),'xy');
+
     commands[requests]=`printf shutdown > shutdown-file; (while [ ! -e '${root}/release-shutdown' ]; do sleep 0.05; done; printf wrong > shutdown-late) >/dev/null 2>&1 &`;
     const shutdownStarted=events().filter(e=>e.message==='materialization_started').length;
     await post({action:'prompt',prompt:'shutdown while waiting'});
@@ -134,6 +134,6 @@ test(exitStatus?'Pi reports a delivered nonzero bash exit as a failed action onc
     const done=once(p,'exit');p.kill('SIGTERM');await done;assert.equal(p.exitCode,0);
     assert.equal(completed().at(-1).status,'cancelled');assert.equal(fs.readFileSync(runPath(root, 'workspace/shutdown-file'),'utf8'),'shutdown');
     assert.equal(fs.existsSync(runPath(root, 'workspace/shutdown-late')),false);
- console.log('PASS Authority lifecycle',root);
+    assert.equal(fs.readFileSync(runPath(root,'workspace/runs'),'utf8'),'xy','later publication does not replay either tool write');
+ t.diagnostic(`Reached clean shutdown and checked final workspace state: ${root}`);
 });
-}

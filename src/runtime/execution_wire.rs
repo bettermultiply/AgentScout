@@ -1,4 +1,3 @@
-//! Wire format for the execution sockets. Control Gateway framing is separate.
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -112,7 +111,6 @@ impl Message {
 
 pub fn write_header(writer: &mut impl Write, meta: &Value) -> io::Result<()> {
     let mut header = Vec::new();
-    // Bound serialization too, including business metadata supplied by callers.
     struct HeaderWriter<'a>(&'a mut Vec<u8>);
     impl Write for HeaderWriter<'_> {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {

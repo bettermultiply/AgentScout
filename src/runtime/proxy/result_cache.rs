@@ -1,4 +1,3 @@
-//! 已完成请求的有界结果窗口。
 
 use std::collections::{HashMap, VecDeque};
 
@@ -6,8 +5,6 @@ use crate::protocol::contract::OperationResult;
 
 pub(crate) const RESULT_CACHE_LIMIT: usize = 256;
 
-/// 已完成请求的有界结果窗口。超出窗口的请求按普通新请求重新执行；窗口
-/// 本身只用于重试去重，不保存环境状态。
 #[derive(Default)]
 pub(crate) struct ResultCache {
     pub(crate) entries: HashMap<String, OperationResult>,

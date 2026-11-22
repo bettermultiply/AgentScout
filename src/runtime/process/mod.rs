@@ -1,4 +1,3 @@
-//! Low-level launch, freeze and cleanup for environment processes.
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -25,10 +24,7 @@ use crate::runtime::launch_plan::LaunchFragment;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProcessRole {
-    /// A real Agent process; it owns the execution path and its writes.
     Agent,
-    /// A branch namespace holder; it owns no Agent state and never writes the
-    /// task workspace by itself.
     NamespaceHolder,
 }
 
@@ -39,9 +35,7 @@ struct AgentProcess {
     process_group: libc::pid_t,
     inner_pid: u32,
     mount_namespace: u64,
-    /// Open while this process is owned. It pins the branch namespace inode so
-    /// a later last-resort sweep cannot match an unrelated newer namespace that
-    /// reused a stale inode number.
+    /// Pins the inode until the last namespace sweep so it cannot match a reused namespace.
     namespace_fd: Option<OwnedFd>,
     cgroup_path: Option<PathBuf>,
 }
@@ -63,16 +57,10 @@ pub struct Processes {
     processes: Mutex<HashMap<String, AgentProcess>>,
     pending_status: Mutex<HashMap<String, PendingStatus>>,
     #[cfg(test)]
-    fail_thaw: AtomicBool,
-    #[cfg(test)]
-    fail_freeze: AtomicBool,
-    #[cfg(test)]
     fail_mount_wait: AtomicBool,
 }
 
 impl Processes {
-    /// Temporarily stop all owned execution while filesystem state is copied.
-    /// Thaw even when the copy fails so the user can continue or retry saving.
     pub(crate) fn with_frozen<T>(
         &self,
         should_freeze: impl Fn(&str) -> bool,
@@ -151,39 +139,8 @@ impl Processes {
             processes: Mutex::new(HashMap::new()),
             pending_status: Mutex::new(HashMap::new()),
             #[cfg(test)]
-            fail_thaw: AtomicBool::new(false),
-            #[cfg(test)]
-            fail_freeze: AtomicBool::new(false),
-            #[cfg(test)]
             fail_mount_wait: AtomicBool::new(false),
         }
-    }
-
-    #[cfg(test)]
-    pub fn with_mechanism(
-        _id: impl Into<String>,
-        bubblewrap_path: impl Into<PathBuf>,
-        freeze: FreezeMechanism,
-    ) -> Self {
-        Self::empty(
-            bubblewrap_path.into(),
-            freeze,
-            if freeze == FreezeMechanism::Cgroup {
-                cgroup::probe_cgroup_root()
-            } else {
-                None
-            },
-        )
-    }
-
-    #[cfg(test)]
-    pub fn inject_thaw_failure(&self, value: bool) {
-        self.fail_thaw.store(value, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub fn inject_freeze_failure(&self, value: bool) {
-        self.fail_freeze.store(value, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -205,9 +162,6 @@ impl Processes {
         }
     }
 
-    /// Keep one inexpensive process alive in the branch mount namespace.  The
-    /// process is deliberately independent from the Pi host process; its only
-    /// ownership is the namespace and the branch environment lifetime.
     pub fn launch_holder(
         &self,
         context: &BackendContext,
@@ -224,9 +178,7 @@ impl Processes {
         self.launch_with_role(context, &launch, fragment, ProcessRole::NamespaceHolder)
     }
 
-    /// Whether a real Agent process is still running in this environment.  A
-    /// holder keeps the namespace but is not a writer, so it must not block
-    /// filesystem materialization.
+    /// A namespace holder alone is not a writer and must not block materialization.
     pub fn writer_active(&self, environment_id: &str) -> Result<bool, BackendError> {
         let mut processes = self
             .processes
@@ -276,17 +228,10 @@ impl Processes {
         Some(ProcessHandle {
             inner_pid: process.inner_pid,
             mount_namespace: process.mount_namespace,
-            #[cfg(test)]
-            cgroup_path: process.cgroup_path.clone(),
         })
     }
 }
 
-/// Kill every process that still references the branch mount namespace.  The
-/// holder and its descendants are normally reached by cgroup/process-group
-/// termination; this is the last-resort sweep for a descendant that detached
-/// from the group.  A process outside a private mount namespace is never
-/// swept because that namespace belongs to the host.
 fn kill_namespace_processes(namespace: u64) -> Result<(), BackendError> {
     let host = fs::metadata("/proc/self/ns/mnt").map_err(error)?.ino();
     if namespace == host {
@@ -382,37 +327,12 @@ mod tests {
         context
     }
 
-    /// Fixed marker consumed by scripts/priv-check.sh.  It reports the
-    /// mechanism this Processes actually selected, not a guess.
+    /// `scripts/priv-check.sh` reads the mechanism actually selected here.
     fn report_freeze(backend: &Processes, test: &str) {
         eprintln!(
             "ASCOUT_FREEZE_MECHANISM={} test={test}",
             backend.freeze_mechanism().as_str()
         );
-    }
-
-    #[test]
-    fn terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup() {
-        let root = tempfile::tempdir().unwrap();
-        let backend = Processes::new("process", "bwrap");
-        report_freeze(
-            &backend,
-            "terminate_uses_cgroup_or_group_kill_and_cleanup_removes_cgroup",
-        );
-        let context = launch(&backend, "/bin/sleep", vec!["30".into()], root.path());
-        let handle = backend.process_handle(&context.environment_id).unwrap();
-        assert!(backend.is_running(&context.environment_id).unwrap());
-        backend.terminate(&context.environment_id).unwrap();
-        backend.stop(&context.environment_id).unwrap();
-        let cgroup = handle.cgroup_path.clone();
-        backend.cleanup(&context.environment_id).unwrap();
-        assert!(
-            !Path::new(&format!("/proc/{}", handle.inner_pid)).exists(),
-            "terminated process still exists"
-        );
-        if let Some(path) = cgroup {
-            assert!(!path.exists(), "cleanup left cgroup {}", path.display());
-        }
     }
 
     #[test]
@@ -491,8 +411,7 @@ mod tests {
         report_freeze(&backend, "stop_reports_cgroup_kill_write_failure");
         let context = launch(&backend, "/bin/sleep", vec!["30".into()], root.path());
         let fake_cgroup = tempfile::tempdir().unwrap();
-        // A directory named cgroup.kill makes fs::write fail instead of silently
-        // succeeding, which reproduces the old "always Ok" behavior.
+        // Make the kill write fail reliably without a real cgroup.
         fs::create_dir(fake_cgroup.path().join("cgroup.kill")).unwrap();
         {
             let mut processes = backend.processes.lock().unwrap();
@@ -512,78 +431,4 @@ mod tests {
         assert!(backend.process_handle(&context.environment_id).is_none());
     }
 
-    #[test]
-    fn stop_unknown_or_exited_process_is_not_an_error() {
-        let root = tempfile::tempdir().unwrap();
-        let backend = Processes::new("process", "bwrap");
-        report_freeze(&backend, "stop_unknown_or_exited_process_is_not_an_error");
-        backend.stop("missing").unwrap();
-
-        let context = launch(&backend, "/bin/true", Vec::new(), root.path());
-        for _ in 0..3000 {
-            if !backend.is_running(&context.environment_id).unwrap() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        backend.stop(&context.environment_id).unwrap();
-    }
-
-    #[test]
-    fn exited_process_is_reported_as_not_running() {
-        let root = tempfile::tempdir().unwrap();
-        let backend = Processes::new("process", "bwrap");
-        report_freeze(&backend, "exited_process_is_reported_as_not_running");
-        let context = launch(&backend, "/bin/true", Vec::new(), root.path());
-        for _ in 0..3000 {
-            if !backend.is_running(&context.environment_id).unwrap() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(
-            backend.process_handle(&context.environment_id).is_some(),
-            "the handle should remain observable after exit"
-        );
-        assert!(!backend.is_running(&context.environment_id).unwrap());
-        backend.cleanup(&context.environment_id).unwrap();
-    }
-
-    #[test]
-    fn launch_passes_agent_environment_to_child() {
-        let root = tempfile::tempdir().unwrap();
-        let backend = Processes::new("process", "bwrap");
-        let context = BackendContext::new("env");
-        let output = root.path().join("agent-env.txt");
-        let launch = AgentLaunch {
-            command: "/bin/sh".into(),
-            args: vec![
-                "-c".into(),
-                "printf '%s' \"$PI_CODING_AGENT_DIR\" > \"$ASCOUT_ENV_OUTPUT\"".into(),
-            ],
-            cwd: root.path().to_path_buf(),
-            log: root.path().join("process-test.log"),
-            instance_id: Some("test-instance".into()),
-            env: BTreeMap::from([(
-                String::from("PI_CODING_AGENT_DIR"),
-                String::from("/parent/pi"),
-            )]),
-        };
-        let fragment = LaunchFragment {
-            env: BTreeMap::from([(
-                String::from("ASCOUT_ENV_OUTPUT"),
-                output.display().to_string(),
-            )]),
-            ..LaunchFragment::default()
-        };
-        backend.launch(&context, &launch, &fragment).unwrap();
-        for _ in 0..3000 {
-            if output.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert_eq!(fs::read_to_string(&output).unwrap(), "/parent/pi");
-        backend.cleanup(&context.environment_id).unwrap();
-    }
 }

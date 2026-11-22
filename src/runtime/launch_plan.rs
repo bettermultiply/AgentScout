@@ -1,4 +1,3 @@
-//! Launch environment and mount descriptions shared by the environment backends.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -11,8 +10,6 @@ pub struct LaunchFragment {
     pub mounts: Vec<MountEntry>,
     pub chdir: Option<PathBuf>,
     pub env: BTreeMap<String, String>,
-    /// Optional host directory bind-mounted into the branch namespace for the
-    /// namespace-holder command socket.
     pub holder_bind: Option<(PathBuf, PathBuf)>,
 }
 
@@ -72,12 +69,7 @@ impl MountEntry {
     }
 }
 
-/// The sandbox root is a read-only bind of the host root, so mount targets that
-/// do not exist on the host (a workload-owned path such as `/app`) cannot be
-/// created below it.  When that happens the sandbox root is rebuilt as a tmpfs
-/// holding read-only binds of every top-level host entry that is not itself
-/// replaced by a mount entry.  The visible top level is unchanged for existing
-/// paths; only the absent targets become creatable.
+/// A tmpfs root with read-only host binds allows mount targets absent from the host root.
 pub fn sandbox_root_needs_assembly(entries: &[MountEntry]) -> bool {
     entries
         .iter()
@@ -184,7 +176,6 @@ impl MountSpec {
         }
     }
 }
-/// Standard base mounts used by isolation/probe code.
 pub fn base_mount_entries() -> Vec<MountEntry> {
     vec![
         MountEntry::RoBind {

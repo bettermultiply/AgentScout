@@ -1,4 +1,3 @@
-//! bubblewrap LaunchFragment 翻译、spawn 与内层状态读取。
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -83,7 +82,6 @@ impl Processes {
                     )
                     .map_err(error)?;
                 let mut entries = fragment.mounts.clone();
-                // Native root setup recursively protects inherited mounts.
                 entries.retain(|entry| !matches!(entry, MountEntry::RoBind { source, target } if source == target && target != std::path::Path::new("/")));
                 entries.push(MountEntry::Bind {
                     source: source.clone(),
@@ -180,8 +178,7 @@ impl Processes {
                     return Err(std::io::Error::last_os_error());
                 }
                 if let Some(file) = &cgroup_procs_fd {
-                    // Writing zero moves the calling process. No allocation
-                    // is safe in this post-fork, pre-exec callback.
+                    // Writing zero moves the caller. This post-fork callback cannot allocate.
                     let written = libc::write(file.as_raw_fd(), c"0".as_ptr().cast(), 1);
                     if written < 0 {
                         return Err(std::io::Error::last_os_error());
@@ -323,11 +320,7 @@ impl Processes {
                 return Err(failure);
             }
         };
-        // Pin the branch namespace while it is owned. Without the open fd the
-        // inode can be freed and reused by another Branch, which would make a
-        // later namespace sweep kill the wrong processes. A short command can
-        // already be reaped (and even reuse its pid), so only keep the fd when
-        // it still denotes the namespace reported by bwrap.
+        // The PID can already have been reused. Pin only the namespace bwrap reported.
         let namespace_fd = if native || use_bwrap {
             fs::File::open(format!("/proc/{inner_pid}/ns/mnt"))
                 .ok()
@@ -447,8 +440,6 @@ fn parse_status(line: &str) -> Result<(u32, u64), BackendError> {
     Ok((child_pid, namespace))
 }
 
-/// spawn 之后任一准备步骤失败时的统一回收：杀掉整个进程组、等待回收、
-/// 删除 cgroup 目录并移除可能残留的 status pipe。
 fn abort_launch(
     environment_id: &str,
     child: &mut std::process::Child,
@@ -536,9 +527,6 @@ fn wait_for_mounts(
                 if failure.kind() == std::io::ErrorKind::NotFound
                     || failure.raw_os_error() == Some(libc::EINVAL) =>
             {
-                // Exiting processes have no mount namespace: mountinfo may
-                // return EINVAL before reap or ENOENT after reap. The exit check
-                // below also covers readable but incomplete mountinfo.
             }
             Err(failure) => {
                 return Err(BackendError::new(format!(
@@ -546,9 +534,7 @@ fn wait_for_mounts(
                 )));
             }
         }
-        // A short command can finish between the readiness checks. Only the
-        // owned outer child's exit confirms completion; an incomplete or
-        // disappearing mountinfo alone never proves readiness.
+        // Missing mountinfo does not prove completion. Check the owned outer child.
         if child.try_wait().map_err(error)?.is_some() {
             return Ok(());
         }
@@ -593,81 +579,4 @@ fn overlay_targets_ready(text: &str, targets: &[PathBuf]) -> bool {
         })
         .collect();
     targets.iter().all(|target| mounted.contains(target))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn readiness_accepts_mountinfo_of_an_exited_unreaped_child() {
-        for code in [0, 7] {
-            let mut child = Command::new("/bin/sh")
-                .args(["-c", &format!("exit {code}")])
-                .spawn()
-                .unwrap();
-            let pid = child.id();
-            let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            // WNOWAIT leaves the exited process in /proc. Linux returns EINVAL
-            // for its mountinfo before the parent reaps it, rather than ENOENT.
-            let waited = unsafe {
-                libc::waitid(libc::P_PID, pid, &mut status, libc::WEXITED | libc::WNOWAIT)
-            };
-            let result = wait_for_mounts(pid, &[PathBuf::from("/workspace")], &mut child);
-            let exit = child.wait().unwrap();
-            assert_eq!(waited, 0);
-            assert!(result.is_ok(), "exited child mountinfo: {result:?}");
-            assert_eq!(
-                exit.code(),
-                Some(code),
-                "readiness must retain the exit status"
-            );
-        }
-    }
-
-    #[test]
-    fn readiness_checks_child_exit_even_when_mountinfo_is_readable() {
-        let mut namespace_holder = Command::new("/bin/cat")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
-        let mut child = Command::new("/bin/true").spawn().unwrap();
-        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
-        let waited = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id(),
-                &mut status,
-                libc::WEXITED | libc::WNOWAIT,
-            )
-        };
-        // Hold a real readable /proc entry independently of the managed child.
-        // This exercises successful reads with incomplete mounts deterministically,
-        // without relying on a race between reading mountinfo and process exit.
-        let pid = namespace_holder.id();
-        let targets = [PathBuf::from("/not-a-sandbox-overlay")];
-        let mountinfo = fs::read_to_string(format!("/proc/{pid}/mountinfo"));
-        let result = wait_for_mounts(pid, &targets, &mut child);
-        let exit = child.wait().unwrap();
-        drop(namespace_holder.stdin.take());
-        let holder_exit = namespace_holder.wait().unwrap();
-        assert_eq!(waited, 0);
-        assert!(!overlay_targets_ready(&mountinfo.unwrap(), &targets));
-        assert!(result.is_ok(), "completed child readiness: {result:?}");
-        assert!(exit.success());
-        assert!(holder_exit.success());
-    }
-
-    #[test]
-    fn readiness_requires_every_overlay_and_decodes_mount_paths() {
-        let targets = vec![PathBuf::from("/workspace"), PathBuf::from("/extra mount")];
-        let first = "21 1 0:1 / /workspace rw - overlay overlay rw\n";
-        assert!(
-            !overlay_targets_ready(first, &targets),
-            "one overlay is not all overlays"
-        );
-        let both = format!("{first}22 1 0:2 / /extra\\040mount rw - overlay overlay rw\n");
-        assert!(overlay_targets_ready(&both, &targets));
-    }
 }

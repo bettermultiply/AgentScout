@@ -166,7 +166,7 @@ test('executable tool cancellation preserves the shared instance, frames, and cl
     const shutdownHold = assert.rejects(proxy.execute('a', 'shutdown-hold', 'fixture_tool', {hold:true}, {}),
         /fixture writer stopped|socket closed|connection closed/i);
     await wait('started', a, 'shutdown-hold');
-    close(); // Normal adapter shutdown must cancel and drain invoke_tool too.
+    close();
     await shutdownHold;
     await wait('cancel', a, 'shutdown-hold');
     assert.doesNotMatch(await done(), /shutdown incomplete/);

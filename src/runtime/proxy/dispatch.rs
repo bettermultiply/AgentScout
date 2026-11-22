@@ -1,4 +1,3 @@
-//! 请求分发、执行与结果构造。
 
 use super::*;
 
@@ -108,7 +107,6 @@ impl Shared {
         request: &OperationRequest,
         cancel: &CancelHandle,
     ) -> OperationResult {
-        // Recovery owns its admission in BaseRuntime, including exclusive restore.
         let _operation = if matches!(
             request.operation,
             Operation::SaveRuntime { .. } | Operation::LoadRuntime { .. }
@@ -409,8 +407,7 @@ impl Shared {
         if state != Some(EnvironmentState::Available) {
             return self.not_applicable(request, state, "environment cannot be suspended");
         }
-        // Gate execution requests while their foreground writers finish and
-        // while the backend freezes managed processes, including background writers.
+        // Close admission before draining foreground writers and freezing background processes.
         let _admission = self.commands.as_ref().map(|commands| commands.pause_admission(&[environment_id])).transpose();
         let _admission = match _admission {
             Ok(admission) => admission,
@@ -504,9 +501,7 @@ impl Shared {
             );
         }
         match self.runtime.cleanup_with_context(context) {
-            // Successful cleanup is the backend's resource-release receipt.
-            // Backends may remove the record, so a subsequent state lookup
-            // cannot be used to reconstruct this completed transition.
+            // Cleanup may remove the backend record. Its receipt suffices to confirm release.
             Ok(()) => self.success(request, Some(EnvironmentState::Cleaned), false),
             Err(error) => self.backend_error(request, environment_id, error),
         }
@@ -579,15 +574,11 @@ impl Shared {
         state: Option<EnvironmentState>,
         can_accept_operations: bool,
     ) -> OperationResult {
-        // 环境实际停留在 PartiallyAvailable 时不能报告 Completed：部分
-        // Backend 尚未就绪，control plane 据此得到 PartiallyCompleted 与原因。
         let status = if state == Some(EnvironmentState::PartiallyAvailable) {
             ResultStatus::PartiallyCompleted
         } else {
             ResultStatus::Completed
         };
-        // 收口：只要环境停留在 PartiallyAvailable，就不能接受后续普通
-        // 操作，无论调用方传入 true 还是 false。
         let can_accept_operations =
             can_accept_operations && state != Some(EnvironmentState::PartiallyAvailable);
         let mut result = make_result(request, status, state, can_accept_operations);

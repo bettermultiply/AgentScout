@@ -1,4 +1,3 @@
-//! BaseRuntime operation admission, shutdown and recovery state.
 
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -22,7 +21,6 @@ impl Lifecycle {
         if state.closed {
             return Err("Runtime is shutting down");
         }
-        // Restore may replace or roll back the entire backend state.
         if state.loading || (loading && state.active != 0) {
             return Err("Runtime restore requires an idle session");
         }

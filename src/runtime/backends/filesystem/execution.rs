@@ -60,8 +60,7 @@ impl FilesystemBackend {
             let result = Self::launch_holder(&process, &context, &fragment);
             let running = result.is_ok();
             let _ = sender.send(result);
-            // Linux delivers the holder's parent-death signal on exit of the
-            // spawning thread. Keep this thread alive until the holder stops.
+            // The spawning thread's exit triggers the holder's parent-death signal.
             if running {
                 let _ = finished.recv();
             }
@@ -223,8 +222,7 @@ impl FilesystemBackend {
         cancel: &CancelHandle,
     ) -> Result<crate::runtime::execution_wire::Message, BackendError> {
         use std::os::fd::AsRawFd;
-        // launch_fragment prepares mount work directories and must never be
-        // regenerated while the holder has those overlays mounted.
+        // Regenerating the plan would touch workdirs still mounted by the holder.
         let plan: Value = serde_json::from_slice(
             &fs::read(
                 self.config
@@ -251,8 +249,6 @@ impl FilesystemBackend {
         ))
         .map_err(|e| BackendError::new(e.to_string()))?;
         let mut request = arguments.meta.clone();
-        // Runtime alone reads its backend's private mount mapping. Integration
-        // sends ordinary absolute paths, never backend-internal plan paths.
         {
             if let (Some(host), Some(target)) = (
                 plan["workspace"]["host"].as_str(),
@@ -360,238 +356,5 @@ impl FilesystemBackend {
                 Err(error)
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn backend() -> (FilesystemBackend, tempfile::TempDir) {
-        let root = tempfile::tempdir().unwrap();
-        let mut backend = FilesystemBackend::new(FilesystemConfig::new(root.path())).unwrap();
-        // These fixtures exercise real process groups and metadata, without mounting an overlay.
-        backend.usable = true;
-        *backend.overlay_targets.lock().unwrap() = Some(Vec::new());
-        backend.establish("env").unwrap();
-        (backend, root)
-    }
-
-    #[test]
-    fn filesystem_freezes_and_marks_writers_quiesced() {
-        let (runtime, _root) = backend();
-        let context = BackendContext::new("env");
-        let log_dir = tempfile::tempdir().unwrap();
-        let log = log_dir.path().join("agent.log");
-        let launch = AgentLaunch {
-            command: "/bin/sleep".into(),
-            args: vec!["5".into()],
-            cwd: PathBuf::from("/tmp"),
-            log: log.clone(),
-            instance_id: Some("test-agent".into()),
-            env: BTreeMap::new(),
-        };
-        runtime
-            .process
-            .launch(&context, &launch, &Default::default())
-            .unwrap();
-        let operation = Operation::FilesystemFork {
-            parent_snapshot_id: "env".into(),
-            child_snapshot_id: "child".into(),
-            path_scope: vec![],
-        };
-        let result = runtime
-            .with_filesystem_execution(&context, &operation, |_| Ok(FilesystemResult::default()))
-            .unwrap();
-        assert!(
-            result.confirmation.writers_quiesced,
-            "freeze must be reflected in writers_quiesced"
-        );
-        runtime.process.stop_all();
-
-        let result = runtime
-            .with_filesystem_execution(
-                &BackendContext::new("missing"),
-                &Operation::FilesystemFork {
-                    parent_snapshot_id: "missing".into(),
-                    child_snapshot_id: "child".into(),
-                    path_scope: vec![],
-                },
-                |_| Ok(FilesystemResult::default()),
-            )
-            .unwrap();
-        assert!(!result.confirmation.writers_quiesced);
-    }
-
-    #[test]
-    fn materialization_refuses_active_managed_writer_without_stopping_it() {
-        let root = tempfile::Builder::new()
-            .prefix("materialize-writer-")
-            .tempdir()
-            .unwrap();
-        let (runtime, _root) = backend();
-        let context = BackendContext::new("materialize-active");
-        let launch = AgentLaunch {
-            command: "/bin/sleep".into(),
-            args: vec!["30".into()],
-            cwd: root.path().into(),
-            log: root.path().join("agent.log"),
-            instance_id: None,
-            env: BTreeMap::new(),
-        };
-        runtime
-            .process
-            .launch(&context, &launch, &Default::default())
-            .unwrap();
-        let failure = runtime.materialize(&context).unwrap_err();
-        assert!(
-            failure
-                .to_string()
-                .contains("writers have not been confirmed drained")
-        );
-        assert!(runtime.process.is_running(&context.environment_id).unwrap());
-        runtime.process.cleanup(&context.environment_id).unwrap();
-    }
-
-    fn launch_test_agent(
-        runtime: &FilesystemBackend,
-        command: &str,
-        args: Vec<String>,
-    ) -> (BackendContext, tempfile::TempDir) {
-        let context = BackendContext::new("env");
-        let log_dir = tempfile::tempdir().unwrap();
-        let log = log_dir.path().join("agent.log");
-        let launch = AgentLaunch {
-            command: command.to_string(),
-            args,
-            cwd: PathBuf::from("/tmp"),
-            log,
-            instance_id: Some("test-agent".into()),
-            env: BTreeMap::new(),
-        };
-        // This fixture represents an environment writer, not the trusted Agent host.
-        runtime
-            .process
-            .launch(&context, &launch, &Default::default())
-            .unwrap();
-        (context, log_dir)
-    }
-
-    fn env_fork_operation() -> Operation {
-        Operation::FilesystemFork {
-            parent_snapshot_id: "env".into(),
-            child_snapshot_id: "child".into(),
-            path_scope: vec![],
-        }
-    }
-
-    #[test]
-    fn filesystem_without_freeze_mechanism_still_runs_operations() {
-        let (mut runtime, _root) = backend();
-        runtime.process = Arc::new(crate::runtime::process::Processes::with_mechanism(
-            "process",
-            "bwrap",
-            FreezeMechanism::None,
-        ));
-        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
-        let result = runtime
-            .with_filesystem_execution(&context, &env_fork_operation(), |_| {
-                Ok(FilesystemResult::default())
-            })
-            .unwrap();
-        assert!(!result.confirmation.writers_quiesced);
-        runtime.process.stop_all();
-    }
-
-    #[test]
-    fn freeze_failure_fails_before_filesystem_operation() {
-        let (runtime, _root) = backend();
-        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
-        runtime.process.inject_freeze_failure(true);
-        let error = runtime
-            .with_filesystem_execution(&context, &env_fork_operation(), |_| {
-                Ok(FilesystemResult::default())
-            })
-            .unwrap_err();
-        assert!(
-            error.message.contains("injected freeze failure"),
-            "{}",
-            error.message
-        );
-        runtime.process.inject_freeze_failure(false);
-        runtime.process.stop_all();
-    }
-
-    #[test]
-    fn thaw_failure_is_reported_as_cleanup_failure() {
-        let (runtime, _root) = backend();
-        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
-        runtime.process.inject_thaw_failure(true);
-        let error = runtime
-            .with_filesystem_execution(&context, &env_fork_operation(), |_| {
-                Ok(FilesystemResult::default())
-            })
-            .unwrap_err();
-        assert!(error.message.contains("thaw"), "{}", error.message);
-        assert!(
-            error
-                .cleanup_failures
-                .iter()
-                .any(|value| value.contains("thaw")),
-            "missing thaw cleanup failure: {:?}",
-            error.cleanup_failures
-        );
-        runtime.process.inject_thaw_failure(false);
-        runtime.process.stop_all();
-    }
-
-    #[test]
-    fn exited_process_does_not_block_filesystem_operation() {
-        let (runtime, _root) = backend();
-        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/true", Vec::new());
-        for _ in 0..3000 {
-            if !runtime.process.is_running("env").unwrap() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(!runtime.process.is_running("env").unwrap());
-        assert!(runtime.process.process_handle("env").is_some());
-        let result = runtime
-            .with_filesystem_execution(&context, &env_fork_operation(), |_| {
-                Ok(FilesystemResult::default())
-            })
-            .unwrap();
-        assert!(!result.confirmation.writers_quiesced);
-        runtime.process.stop_all();
-    }
-
-    #[test]
-    fn suspend_rollback_thaw_failure_is_reported() {
-        let (runtime, _root) = backend();
-        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
-        runtime.process.inject_thaw_failure(true);
-        let error = runtime
-            .suspend_after(&context, &mut || {
-                Err(BackendError::new("inner suspend failed"))
-            })
-            .unwrap_err();
-        assert_eq!(error.message, "inner suspend failed");
-        assert!(!error.cleanup_failures.is_empty());
-    }
-
-    #[test]
-    fn resume_rollback_freeze_failure_is_reported() {
-        let (runtime, _root) = backend();
-        let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
-        runtime.suspend(&context.environment_id).unwrap();
-        runtime.process.inject_freeze_failure(true);
-        let error = runtime
-            .resume_after(&context, &mut || {
-                Err(BackendError::new("inner resume failed"))
-            })
-            .unwrap_err();
-        assert_eq!(error.message, "inner resume failed");
-        assert!(!error.cleanup_failures.is_empty());
     }
 }

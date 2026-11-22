@@ -1,4 +1,3 @@
-//! Filesystem 测试共享辅助。
 
 use super::super::*;
 use crate::protocol::contract::AgentLaunch;
@@ -17,9 +16,6 @@ pub(super) fn btrfs_temp() -> tempfile::TempDir {
         .expect("tempdir under target/tmp")
 }
 
-/// Choose a state-directory tempdir on a different writable mount than
-/// the workspace.  This keeps the lower-chain tests independent of where
-/// the repository itself is located.
 pub(super) fn separate_state_tempdir(workspace: &Path) -> Option<tempfile::TempDir> {
     for target in real_writable_mounts() {
         if workspace.starts_with(&target) {
@@ -35,18 +31,12 @@ pub(super) fn separate_state_tempdir(workspace: &Path) -> Option<tempfile::TempD
     None
 }
 
-/// Config for tests whose state directory deliberately sits inside an
-/// isolated mount.  They exercise the retained flatten fallback; production
-/// layouts must keep the state directory outside every isolated mount.
 pub(super) fn overlapping_state_config(state: impl Into<PathBuf>) -> FilesystemConfig {
     let mut config = FilesystemConfig::new(state);
     config.allow_overlapping_state_directory = true;
     config
 }
 
-/// State-directory tempdir on a writable mount that is not in `isolated`
-/// and does not contain the workspace.  Used by tests that need the default
-/// (non-overlapping) layout.
 pub(super) fn tempdir_outside_mounts(
     workspace: &Path,
     isolated: &[PathBuf],
@@ -98,11 +88,6 @@ pub(super) fn new_overlay_backend(root: &Path) -> FilesystemBackend {
     backend
 }
 
-/// Overlay backend whose state directory is on a different mount than
-/// `workspace`, so the workspace mount is not forced to flatten by the
-/// overlap rule and the per-fork layout threshold decides.  The state
-/// mount itself still overlaps (it holds the state directory), so the
-/// internal switch stays enabled.
 pub(super) fn layout_backend(
     workspace: &Path,
     flatten_entry_limit: usize,
@@ -160,9 +145,7 @@ pub(super) fn dir_is_empty(path: &Path) -> bool {
     }
 }
 
-/// Parent directories reported by a Chain upper scan or btrfs send's
-/// directory metadata updates. Account for exactly these paths; unrelated
-/// directories and file changes must still fail the assertion.
+/// Ignore only expected parent directory entries from the upper scan or btrfs send.
 fn ancestor_directories(mount: &Path, file: &Path) -> Vec<PathBuf> {
     let mut directories = Vec::new();
     let mut current = file.parent();
@@ -176,15 +159,6 @@ fn ancestor_directories(mount: &Path, file: &Path) -> Vec<PathBuf> {
     directories
 }
 
-/// One fork generation on the mount that holds `base`: write base files,
-/// fork, assert the layout selected by `flatten_entry_limit`, let a real
-/// process modify/delete/create, assert the exact diff, accept back into
-/// `root`, verify the real view, then discard and wait for reclamation.
-///
-/// `flatten_entry_limit == 0` always selects Chain; `usize::MAX` always
-/// selects Flatten.  The helper is deliberately data-plane agnostic: the
-/// privileged tests run it on btrfs and an unprivileged test runs it on
-/// overlay, so the shared code itself is executed locally.
 pub(super) fn layout_diff_accept_scenario(
     backend: &FilesystemBackend,
     base: &Path,
@@ -200,8 +174,6 @@ pub(super) fn layout_diff_accept_scenario(
     let remove = base.join("remove");
     let newfile = base.join("newfile");
 
-    // Both files exist only in the parent view at fork time; the child
-    // must later change one and delete the other.
     write_upper(backend, "root", &keep, "base-keep");
     write_upper(backend, "root", &remove, "base-remove");
     let parent = mount_for(backend, "root", base);
@@ -283,7 +255,6 @@ pub(super) fn layout_diff_accept_scenario(
     .collect();
     let mut expected = expected;
     if expect_chain || backend.mechanism() == FilesystemMechanism::Btrfs {
-        // Btrfs Flatten also reports parent directory metadata updates.
         for file in [&keep, &remove, &newfile] {
             expected.extend(
                 ancestor_directories(&child.target, file)
@@ -378,10 +349,6 @@ pub(super) fn layout_diff_accept_scenario(
     );
 }
 
-/// Two fork generations on one mount: a large root upper selects Chain,
-/// then a small child upper selects Flatten.  This mirrors
-/// `mixed_chain_and_flatten_layout_diff_and_accept_preserve_parent_view`
-/// on the btrfs data plane.
 pub(super) fn mixed_generations_scenario(backend: &FilesystemBackend, base: &Path) {
     let keep = base.join("keep");
     let remove = base.join("remove");
@@ -633,9 +600,7 @@ pub(super) fn priv_state_root() -> PathBuf {
     root
 }
 
-/// Privileged tests need a workspace on a *different* mount than the
-/// state directory so the workspace mount is not forced to Flatten by the
-/// overlap rule.  Unlike the state directory there is no safe default.
+/// A separate workspace mount keeps privileged tests on Chain. Require an explicit path.
 pub(super) fn priv_workspace_root() -> PathBuf {
     let root = std::env::var_os("ASCOUT_PRIV_WORKSPACE_DIR")
         .map(PathBuf::from)

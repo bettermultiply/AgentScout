@@ -1,4 +1,3 @@
-//! 按环境串行执行的请求队列。
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -37,7 +36,6 @@ impl Queue {
         queue
     }
 
-    /// suspend/terminate 插到队首并打断在飞操作；其他操作按到达顺序排队。
     pub(super) fn enqueue(&self, request: OperationRequest, preempt: bool) {
         {
             let mut pending = self.pending.lock().unwrap();

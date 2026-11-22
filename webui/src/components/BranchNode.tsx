@@ -23,7 +23,6 @@ export type BranchFlowNode = Node<BranchData, 'branch'>
 function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
   const { branch, geometry:g, isAuthorityPath, isCurrentAuthority, childForks } = data
   const openBranch = useAppStore(store=>store.openBranch)
-  // All ink is in one tree coordinate system.
   const tone=branchTone(branch, isAuthorityPath, isCurrentAuthority)
   const open=(group?:CallGroup)=>openBranch(branch.branchId,group?{kind:group.kind,actionId:group.events[0]?.action_id??null,sequences:group.events.map(e=>e.sequence)}:undefined)
   const callTarget = (group: CallGroup) => ({
@@ -88,7 +87,6 @@ function BranchNodeView({ data }: NodeProps<BranchFlowNode>) {
           <title>父枝止于此；Proposal 验证完成于 {new Date(g.validationEnd.validatedAtMs).toLocaleString()}</title>
         </line> : null}
       </g>
-      {/* Chances retain their own colour and share their owning Branch's layer. */}
       <g transform={`translate(${g.offsetX} ${g.offsetY})`}>
         {childForks.map(f => {
           if (f.radius <= 0) return null

@@ -22,7 +22,7 @@ async function freePort() {
 test('normal CLI opens finished Pi history and can save and resume its next task', {timeout: 90000}, async t => {
     const root = fs.mkdtempSync('/tmp/as-resume-');
     console.log('evidence', root);
-    for (const dir of ['home/.config/ascout', 'pi', 'policy/policy', 'tmp']) fs.mkdirSync(`${root}/${dir}`, {recursive:true});
+    for (const dir of ['home/.config/ascout', 'pi', 'policy/policy', 'tmp', 'workspace']) fs.mkdirSync(`${root}/${dir}`, {recursive:true});
     fs.writeFileSync(`${root}/home/.config/ascout/config.toml`, `runs_dir = "${root}/runs"\npolicy_dir = "${root}/policy"\nlog_path = "${root}/system.log"\n`);
     for (const name of ['policy.yaml', 'decisions.py']) fs.copyFileSync(`assets/policy/policy/${name}`, `${root}/policy/policy/${name}`);
     const requests = [];
@@ -51,13 +51,11 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     t.after(() => {fake.closeAllConnections(); fake.close();});
     const modelFile = `${root}/additional.json`;
     fs.writeFileSync(modelFile, JSON.stringify({providers:{local:{baseUrl:`http://127.0.0.1:${fakePort}/v1`,api:'openai-completions',apiKey:'fake',models:[{id:'fake',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
-    fs.writeFileSync(`${root}/runtime.json`, JSON.stringify({backend:'nle',control_address:`127.0.0.1:${await freePort()}`,adapter_instance:'fixture',python:resolve('../.venv-nle/bin/python'),bridge:resolve('examples/nle-runtime-bridge.py'),guidebook:resolve('examples/nle/Guidebook.txt'),seed:7,filesystem:{state_directory:`${root}/fs`,isolated_paths:[`${root}/runs`],passthrough_rw:[root]}}));
+    fs.writeFileSync(`${root}/runtime.json`, JSON.stringify({backend:'nle',control_address:`127.0.0.1:${await freePort()}`,adapter_instance:'fixture',python:resolve('../.venv-nle/bin/python'),bridge:resolve('examples/nle-runtime-bridge.py'),guidebook:resolve('examples/nle/Guidebook.txt'),seed:7,filesystem:{state_directory:`${root}/fs`,isolated_paths:[`${root}/runs`, `${root}/workspace`],passthrough_rw:[root]}}));
     const web = `http://127.0.0.1:${await freePort()}`;
     const children = [];
     t.after(() => {for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');});
-    // Hold the first history frame at the real Pi transport. The commands_listed
-    // reply has no matching request, but its Ledger record proves the control
-    // plane has already processed all preceding frames and published their status.
+    // The commands_listed Ledger record proves the controller handled earlier Pi frames.
     const gatedEntry = `${root}/hold-history.mjs`;
     const releaseHistory = `${root}/release-history`;
     const historyBarrier = 'fixture-hold-history';
@@ -80,7 +78,7 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     `);
     function start(runId, holdHistory = false) {
         const entry = holdHistory ? {ASCOUT_AGENT_ENTRY:gatedEntry} : {};
-        const child = spawn('target/debug/ascout-control-plane', [resolve('../pi'), '--web', web.slice(7), ...(runId ? ['--resume', runId] : ['--model', 'local/fake', '--models', modelFile])], {
+        const child = spawn('target/debug/ascout-control-plane', [resolve('../pi'), '--web', web.slice(7), ...(runId ? ['--resume', runId] : ['--cwd', `${root}/workspace`, '--policy', 'policy', '--model', 'local/fake', '--models', modelFile])], {
             env:{...process.env, ...entry, HOME:`${root}/home`, TMPDIR:`${root}/tmp`, PI_CODING_AGENT_DIR:`${root}/pi`, ASCOUT_RUNTIME_CONFIG:`${root}/runtime.json`}, stdio:['ignore','ignore','pipe'],
         });
         child.log = '';
@@ -131,8 +129,7 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     const original = history();
     const originalFile = fs.realpathSync(`${run}/session.jsonl`);
     assert.match(original, /old-tool-output/);
-    // Exercise older Ledger records which have neither bindings nor a release
-    // reference. Their final-tree bindings and native session link still work.
+    // Simulate legacy records with only final-tree bindings and a native session link.
     const ledgerPath = `${run}/events.jsonl`;
     const historicalLedger = fs.readFileSync(ledgerPath);
     fs.writeFileSync(ledgerPath, events().filter(event => event.message !== 'agent_released').map(event => {
@@ -161,8 +158,6 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     await shutdown(child);
     assert.equal(history(), original);
     assert.equal(fs.realpathSync(`${run}/session.jsonl`), originalFile);
-    // Restore the recorded release to test primary reference resolution, even
-    // with a broken compatibility link. Only the fixture rewrites the Ledger.
     fs.writeFileSync(ledgerPath, historicalLedger);
     fs.unlinkSync(`${run}/session.jsonl`);
     fs.symlinkSync(`${root}/missing-compatibility-link`, `${run}/session.jsonl`);
