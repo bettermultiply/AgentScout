@@ -145,8 +145,20 @@ impl SpeculativeTree {
                 self.branch(&branch_id)?;
                 Ok(vec![])
             }
-            AgentMessage::BranchSuspended { branch_id, reason } => {
-                self.handle_branch_suspended(&branch_id, reason)
+            AgentMessage::EnvironmentRequested { branch_id } => {
+                let branch = self.branch(&branch_id)?;
+                if branch_id.starts_with("candidate-chance-local-")
+                    && branch.role == BranchRole::Candidate
+                    && branch.status.is_live_candidate()
+                    && branch.environment_id.is_none()
+                    && branch.execution_state.runtime == RuntimeExecutionState::Unknown
+                {
+                    self.record_runtime_state(&branch_id, RuntimeExecutionState::EnvironmentRequested)?;
+                }
+                Ok(vec![])
+            }
+            AgentMessage::BranchSuspended { branch_id, reason, detail } => {
+                self.handle_branch_suspended(&branch_id, reason, detail.as_deref())
             }
             AgentMessage::BranchResumed { branch_id } => self.handle_branch_resumed(&branch_id),
             AgentMessage::BranchStarted { branch_id } => self.handle_branch_started(&branch_id),
@@ -207,7 +219,9 @@ impl SpeculativeTree {
                     .get(&branch_id)
                     .is_some_and(|a| a.contains_key(&action_id));
                 let mut pending_commands = Vec::new();
-                if live && action_kind == ActionKind::ToolExecution {
+                if live && action_kind == ActionKind::ToolExecution
+                    && !(self.recovering && status == ActionStatus::Cancelled)
+                {
                     let ids: Vec<_> = self
                         .chances
                         .values()
@@ -221,7 +235,9 @@ impl SpeculativeTree {
                     for id in ids {
                         let chance = self.chance(&id)?.clone();
                         let mut actions = ControlActions::default();
-                        let outcome = if status == ActionStatus::Succeeded {
+                        let outcome = if status == ActionStatus::Succeeded
+                            || (status == ActionStatus::Failed && !result.is_null())
+                        {
                             Ok(ControlResult::Outcome(
                                 result.clone(),
                                 evidence.clone().unwrap_or(Value::Null),
@@ -321,6 +337,7 @@ impl SpeculativeTree {
                         {
                             let proposal_id = format!("proposal-{branch_id}");
                             self.chance_mut(&id)?.proposals.push(ProposalRecord {
+                                provenance: None,
                                 proposal_id: proposal_id.clone(),
                                 payload: result.clone(),
                             });
@@ -348,8 +365,15 @@ impl SpeculativeTree {
                 Ok(pending_commands)
             }
             AgentMessage::TurnCompleted { branch_id } => {
-                let active = self.branch(&branch_id)?.execution_state.turn_active;
-                self.branch_mut(&branch_id)?.execution_state.turn_active = false;
+                let branch = self.branch_mut(&branch_id)?;
+                let active = branch.execution_state.turn_active;
+                branch.execution_state.turn_active = false;
+                if branch_id.starts_with("candidate-chance-local-")
+                    && branch.role == BranchRole::Candidate
+                    && branch.status == BranchStatus::Running
+                {
+                    self.change_status(&branch_id, BranchStatus::Finished, "Candidate turn completed")?;
+                }
                 if active
                     && !self.recovering
                     && !self.stopping
@@ -395,6 +419,7 @@ impl SpeculativeTree {
                         started_at_ms,
                         finished_at_ms,
                         duration_ms: finished_at_ms.checked_sub(started_at_ms),
+                        tokens_used: usage["totalTokens"].as_u64().unwrap_or_default(),
                         cost: usage["cost"]["total"].as_f64(),
                     });
                 Ok(vec![])
@@ -458,6 +483,7 @@ impl SpeculativeTree {
         &mut self,
         branch_id: &str,
         reason: BlockedReason,
+        detail: Option<&str>,
     ) -> io::Result<Vec<AgentCommand>> {
         let branch = self.branch_mut(branch_id)?;
         if matches!(
@@ -471,13 +497,14 @@ impl SpeculativeTree {
             self.change_status(
                 branch_id,
                 BranchStatus::Blocked(reason),
-                &format!("Blocked: {reason:?}"),
+                &detail.map_or_else(|| format!("Blocked: {reason:?}"), |detail| format!("Blocked: {reason:?}: {detail}")),
             )?;
         }
         Ok(vec![])
     }
 
     fn handle_branch_resumed(&mut self, branch_id: &str) -> io::Result<Vec<AgentCommand>> {
+        self.extent_disposals.remove(branch_id);
         let branch = self.branch_mut(branch_id)?;
         if matches!(
             branch.status,
@@ -551,6 +578,7 @@ impl SpeculativeTree {
                 && status == ActionStatus::Succeeded
                 && branch.role == BranchRole::Candidate
                 && branch.status == BranchStatus::Running
+                && !branch_id.starts_with("candidate-chance-local-")
             {
                 self.change_status(
                     branch_id,
@@ -921,14 +949,17 @@ impl SpeculativeTree {
                 let (_, record) = self.pending_acceptance.take().unwrap();
                 let old = self.chance_parent(self.branch(branch_id)?)
                     .ok_or_else(|| invalid_input("missing acceptance parent"))?.to_owned();
-                let part = record["disposition"] == "Part";
+                let salvage = record["disposition"] == "Salvage";
+                let part = salvage || record["disposition"] == "Reuse";
                 let invalidated = self.authority_branch_id.as_deref() != Some(&old)
                     && self.acceptance_target(self.branch(branch_id)?).is_none();
                 if !part {
                     let target = self.branch_mut(&old)?.environment_id.take();
                     let source = std::mem::replace(&mut self.branch_mut(branch_id)?.environment_id, target);
+                    if source.is_some() {
+                        self.retained_source_environments.insert(old.clone());
+                    }
                     self.branch_mut(&old)?.environment_id = source;
-                    self.retained_source_environments.insert(old.clone());
                 }
                 if invalidated {
                     return self.discard_candidate_subtree(
@@ -939,12 +970,15 @@ impl SpeculativeTree {
                     );
                 }
                 if part {
-                    self.record_accepted_chance(branch_id, "Part acceptance applied")?;
-                    self.queue_settlement(branch_id, true)?;
+                    let disposition = if salvage { "Salvage" } else { "Reuse" };
+                    if !salvage {
+                        self.record_accepted_chance(branch_id, "Reuse applied")?;
+                    }
+                    self.queue_disposition_settlement(branch_id, !salvage, disposition)?;
                     let mut commands = self.discard_candidate_subtree(
                         branch_id,
-                        DiscardedReason::NotSelected,
-                        "Part acceptance applied",
+                        if salvage { DiscardedReason::MatchRejected } else { DiscardedReason::NotSelected },
+                        disposition,
                         true,
                     )?;
                     let siblings: Vec<_> = self

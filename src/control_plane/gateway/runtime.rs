@@ -200,6 +200,9 @@ impl ControlSession {
         }
     }
     fn start(stream: TcpStream) -> io::Result<Self> {
+        // The frame header and body are separate writes. Send both without
+        // waiting for the peer to acknowledge a short segment.
+        stream.set_nodelay(true)?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut reader = stream.try_clone()?;
         let session = Self {

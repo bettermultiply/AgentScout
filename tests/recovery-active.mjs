@@ -41,13 +41,13 @@ for(const failureMode of ['none','retry','continue','multiple','filesystem','int
   fs.writeFileSync(root+'/runtime.json',JSON.stringify({control_address:config.control_address,adapter_instance:'multiple',backends:[{id:'first',type:'nle',config},{id:'second',type:'nle',config:{...config,seed:8}}],policy:{default:['first','second'],routes:[{operation:'invoke_tool',backends:['first'],output_backend:'first'}]}}));
  }
   let policy=fs.readFileSync(project+'/assets/policy/policy/policy.yaml','utf8').replace('max_chances: 0','max_chances: 1').replace('      scenarios: []\n    feasibility_pass:', '      scenarios: [{}]\n    feasibility_pass:').replace('  predict:\n    file: decisions.py\n    function: predict\n    policy_config:\n      scenarios: []','  predict:\n    file: decisions.py\n    function: predict\n    policy_config:\n      candidates: ["moved", "blocked"]');
-  // This regression predicts tool outcomes, not model output. Select the
-  // first tool Chance even when model admissions precede it.
+  // Full acceptance uses the last action in the batch, so the earlier sibling
+  // can complete without advancing the authority past the selected action.
   policy=policy.replace('scenarios: [{}]', 'scenarios: [{when: {kind: nle_action}}]');
   fs.writeFileSync(root+'/policy/policy.yaml',policy);
  const nleVerifier=fs.readFileSync(project+'/assets/policy/nle/decisions.py','utf8').split('def _actual_outcome(')[1].split('def dispose(')[0];
  const algorithms=fs.readFileSync(project+'/assets/policy/policy/decisions.py','utf8').replace(/def match_proposal\([\s\S]*?(?=def dispose\()/,'def _actual_outcome('+nleVerifier);
-  fs.writeFileSync(root+'/policy/decisions.py',algorithms.replace('return [chance["chance_id"] for chance in data["frontier_view"][:policy_config["max_chances"]]]','return [chance["chance_id"] for chance in data["frontier_view"] if chance["chance_id"] == "chance-1"]').replace('if policy_config["value_type"] == "boolean"','if policy_config.get("value_type") == "boolean"').replace('elif policy_config["value_type"] == "enum"','elif policy_config.get("value_type") == "enum"').replace('{"intent": "Promote"}',failureMode==='continue'?'{"intent": "Promote", "notification": "recovery authoritative notification"}':'{"intent": "Promote"}'));
+  fs.writeFileSync(root+'/policy/decisions.py',algorithms.replace('return [chance["chance_id"] for chance in data["frontier_view"][:policy_config["max_chances"]]]','return [chance["chance_id"] for chance in data["frontier_view"] if chance["arguments"].get("action") == 1]').replace('if policy_config["value_type"] == "boolean"','if policy_config.get("value_type") == "boolean"').replace('elif policy_config["value_type"] == "enum"','elif policy_config.get("value_type") == "enum"').replace('{"intent": "Promote"}',failureMode==='continue'?'{"intent": "Promote", "notification": "recovery authoritative notification"}':'{"intent": "Promote"}'));
  const children=[];
  t.after(()=>{for(const p of children)if(p.exitCode===null)p.kill('SIGKILL');fake.closeAllConnections();fake.close()});
  const wait=async(fn,label)=>{const end=Date.now()+30000;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,20))}throw Error('Timeout '+label+' '+root)};

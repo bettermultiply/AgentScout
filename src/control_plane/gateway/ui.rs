@@ -33,6 +33,8 @@ pub enum Request {
     },
     Model {
         model: String,
+        #[serde(default)]
+        thinking: Option<String>,
     },
     Prompt {
         prompt: String,

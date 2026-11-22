@@ -2,10 +2,24 @@
 //! A persistent package freezes the affected final view before any host write;
 //! failed publication retains the package and its per-path receipts for retry.
 use super::*;
+use std::os::fd::AsRawFd;
+
+fn sync_filesystem(path: &Path) -> Result<(), BackendError> {
+    let file = fs::File::open(path).map_err(error)?;
+    if unsafe { libc::syncfs(file.as_raw_fd()) } != 0 {
+        return Err(error(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
 
 impl FilesystemBackend {
     pub(super) fn materialize_authority(&self, id: &str) -> Result<FilesystemResult, BackendError> {
         let environment = Self::resolve_environment(&*self.lock()?, id)?;
+        let python = if Path::new("/usr/bin/python3").is_file() {
+            "/usr/bin/python3"
+        } else {
+            "python3"
+        };
         for mount in environment.mounts.values() {
             let package = environment.root.join(format!(
                 "publication-{}",
@@ -41,7 +55,16 @@ impl FilesystemBackend {
                 )
                 .map_err(error)?;
                 let mut command = Command::new(&self.config.bubblewrap_path);
-                command.args(["--die-with-parent", "--unshare-user", "--ro-bind", "/", "/"]);
+                command.args([
+                    "--die-with-parent",
+                    "--unshare-user",
+                    "--ro-bind",
+                    "/",
+                    "/",
+                    "--dev",
+                    "/dev",
+                ]);
+                command.env("PYTHONHASHSEED", "0");
                 // The merged view only needs a mount point that exists on the
                 // host.  A mapped mount target (a workload path such as /app)
                 // does not, so the view is assembled at a private directory
@@ -66,13 +89,7 @@ impl FilesystemBackend {
                     .arg(&view);
                 command.arg("--bind").arg(&package).arg(&package);
                 command
-                    .args([
-                        "--",
-                        "python3",
-                        "-c",
-                        include_str!("materialize.py"),
-                        "export",
-                    ])
+                    .args(["--", python, "-c", include_str!("materialize.py"), "export"])
                     .arg(&view)
                     .arg(&package);
                 checked(command, "read Authority delta final view")?;
@@ -87,12 +104,14 @@ impl FilesystemBackend {
                 short_hash(&mount.target.display().to_string())
             ));
             let destination = mount.base.as_deref().unwrap_or(&mount.target);
-            let mut command = Command::new("python3");
+            let mut command = Command::new(python);
             command
+                .env("PYTHONHASHSEED", "0")
                 .args(["-c", include_str!("materialize.py"), "publish"])
                 .arg(destination)
                 .arg(&package);
             checked(command, "publish Authority delta")?;
+            sync_filesystem(destination)?;
             // Execution reset requires coordinated live-mount replacement;
             // never approximate it by copying the host mount.
         }
@@ -124,13 +143,18 @@ impl FilesystemBackend {
         // is unwritable). Do it before publishing a new execution plan.
         let mut state = self.lock()?;
         self.retain_retired_root(&mut state, &environment.root)?;
-        if let Err(failure) = self.persist_environment(&next) {
+        if let Err(failure) = self
+            .persist_environment(&next)
+            .and_then(|()| sync_filesystem(&self.config.state_directory))
+        {
             // persist_environment may have installed metadata before its plan
             // write failed. Restore the previous durable description as well.
             self.write_json(
                 &self.environment_metadata_path(id),
                 &EnvironmentMetadata::from_environment(&environment),
             )?;
+            self.persist_tool_plan(&environment)?;
+            sync_filesystem(&self.config.state_directory)?;
             return Err(failure);
         }
         state.environments.insert(next.id.clone(), next);
@@ -165,4 +189,71 @@ fn checked(mut command: Command, operation: &str) -> Result<(), BackendError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Re-execute only this test so the poisoned PATH cannot race other tests.
+    #[test]
+    fn materialization_ignores_workspace_python() {
+        const CHILD: &str = "ASCOUT_TEST_MATERIALIZE_POISONED_PATH";
+        let directory = tempfile::tempdir().unwrap();
+        if std::env::var_os(CHILD).is_none() {
+            let python = directory.path().join("python3");
+            fs::write(
+                &python,
+                "#!/bin/sh\necho 'unexpected workspace python' >&2\nexit 91\n",
+            )
+            .unwrap();
+            fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::join_paths(
+                std::iter::once(directory.path().to_path_buf())
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            let name = module_path!().split_once("::").unwrap().1;
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    &format!("{name}::materialization_ignores_workspace_python"),
+                ])
+                .env(CHILD, "1")
+                .env("PATH", path)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("sample.txt"), "before").unwrap();
+        let mut config = FilesystemConfig::new(directory.path().join("state"));
+        config.force_overlay = true;
+        config.isolated_paths = Some(vec![workspace.clone()]);
+        let backend = FilesystemBackend::new(config).unwrap();
+        backend.establish("authority").unwrap();
+        let env =
+            FilesystemBackend::resolve_environment(&*backend.lock().unwrap(), "authority").unwrap();
+        let mount = env.mounts.values().next().unwrap();
+        fs::write(mount.upper.join("sample.txt"), "after").unwrap();
+        assert!(
+            backend
+                .materialize_authority("authority")
+                .unwrap()
+                .confirmation
+                .published
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("sample.txt")).unwrap(),
+            "after"
+        );
+    }
 }

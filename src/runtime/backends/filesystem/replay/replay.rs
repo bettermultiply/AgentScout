@@ -105,16 +105,6 @@ impl ReplayJournal {
         (failures, self.copy_warnings)
     }
 
-    pub(crate) fn sync(&self) -> Result<(), BackendError> {
-        if let Ok(directory) = fs::File::open(self.root.join("backups")) {
-            directory.sync_all().map_err(error)?;
-        }
-        if let Ok(directory) = fs::File::open(&self.root) {
-            directory.sync_all().map_err(error)?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn cleanup(self) {
         let _ = remove_directory_force(&self.root);
     }

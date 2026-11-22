@@ -4,4 +4,5 @@ mod authority;
 mod commands;
 mod nested;
 mod promotion;
+mod reopen;
 mod support;

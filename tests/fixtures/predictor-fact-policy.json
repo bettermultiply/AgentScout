@@ -1,24 +1,91 @@
 {
   "source": "tests/fixtures/predictor-fact-policy.json",
   "runtime_config_path": null,
-  "definition": "version: 1\nlanguage: python\nfiles:\n  - decisions.py\nfidelity: Best-effort\nruntime: nle-runtime.json\ndecisions:\n  admit:\n    opportunity_pass:\n      file: decisions.py\n      function: opportunity_pass\n    feasibility_pass:\n      file: decisions.py\n      function: feasibility_pass\n  select:\n    file: decisions.py\n    function: select\n    policy_config:\n       max_chances: 4\n  rebalance:\n    file: decisions.py\n    function: rebalance\n  extent:\n    file: decisions.py\n    function: extent\n    policy_config:\n      max_steps: 20\n  predict:\n    file: decisions.py\n    function: predict\n    policy_config:\n      value_type: enum\n      enum_values: [\"moved\", \"blocked\"]\n  launch:\n    file: decisions.py\n    function: launch\n  effect:\n    file: decisions.py\n    function: effect\n  match:\n    file: decisions.py\n    function: match_proposal\n    policy_config:\n      value_type: enum\n      enum_values: [\"moved\", \"blocked\"]\n  dispose:\n    file: decisions.py\n    function: dispose\n",
+  "definition": "version: 1\nlanguage: python\nfiles:\n  - opportunity.py\n  - decisions.py\nfidelity: Best-effort\nruntime: nle-runtime.json\ndecisions:\n  admit:\n    opportunity_pass:\n      file: opportunity.py\n      function: opportunity_pass\n    feasibility_pass:\n      file: decisions.py\n      function: feasibility_pass\n  select:\n    file: decisions.py\n    function: select\n    policy_config:\n       max_chances: 4\n  rebalance:\n    file: decisions.py\n    function: rebalance\n  extent:\n    file: decisions.py\n    function: extent\n    policy_config:\n      max_steps: 20\n  predict:\n    file: decisions.py\n    function: predict\n    policy_config:\n      value_type: enum\n      enum_values: [\"moved\", \"blocked\"]\n  launch:\n    file: decisions.py\n    function: launch\n  effect:\n    file: decisions.py\n    function: effect\n  match:\n    file: decisions.py\n    function: match_proposal\n    policy_config:\n      value_type: enum\n      enum_values: [\"moved\", \"blocked\"]\n  dispose:\n    file: decisions.py\n    function: dispose\n",
   "version": 1,
   "python": "3.14.9 (main, Oct 25 2026, 14:52:47) [GCC 16.2.1 20260810]",
   "files": {
-    "decisions.py": "\"\"\"NLE policy algorithms using public observations.\"\"\"\n\n\ndef opportunity_pass(data, *, policy_config, capabilities):\n    op = data[\"op\"]\n    return op[\"has_predictor\"]\n\n\ndef feasibility_pass(data, *, policy_config, capabilities):\n    return True\n\n\ndef select(data, *, policy_config, capabilities):\n    return [chance[\"chance_id\"] for chance in data[\"frontier_view\"][:policy_config[\"max_chances\"]]]\n\n\ndef rebalance(data, *, policy_config, capabilities):\n    return []\n\n\ndef extent(data, *, policy_config, capabilities):\n    return \"stop\" if data[\"process_state\"][\"steps_completed\"] >= policy_config[\"max_steps\"] else \"continue\"\n\n\n# NLE's movement keys, as (dx, dy) offsets on the public character grid.\n_MOVES = {\n    1: (0, -1),  # k north\n    2: (1, 0),  # l east\n    3: (0, 1),  # j south\n    4: (-1, 0),  # h west\n    5: (1, -1),  # u northeast\n    6: (1, 1),  # n southeast\n    7: (-1, 1),  # b southwest\n    8: (-1, -1),  # y northwest\n}\n_WALLS = set(\"|-\")\n_FLOOR = set(\".#<>\")\n\n\ndef predict(data, *, policy_config, capabilities):\n    \"\"\"Return movement proposals for the pending boundary.\n\n    Workload-specific interpretation belongs in this sample Policy. The\n    control plane passes a generic process context and never extracts an NLE\n    action field itself.\n    \"\"\"\n    values = policy_config[\"enum_values\"]\n    context = data.get(\"process_context\") or {}\n    if \"observation\" not in context:\n        return {\"proposals\": [], \"generation\": \"batch\"}\n    observation = context.get(\"observation\") or {}\n    try:\n        action = int((context.get(\"arguments\") or {}).get(\"action\"))\n    except (TypeError, ValueError):\n        return {\"proposals\": [], \"generation\": \"batch\"}\n    move = _MOVES.get(action)\n    if move is None:\n        return {\"proposals\": [], \"generation\": \"batch\"}\n    chars = observation.get(\"chars\")\n    stats = observation.get(\"blstats\")\n    if not chars or not stats:\n        return {\"proposals\": [], \"generation\": \"batch\"}\n    x, y = int(stats[0]), int(stats[1])\n    tx, ty = x + move[0], y + move[1]\n    if not (0 <= ty < len(chars) and 0 <= tx < len(chars[ty])):\n        return {\"proposals\": [], \"generation\": \"batch\"}\n    tile = chars[ty][tx]\n    if tile in _WALLS:\n        outcomes = [\"blocked\"]\n    elif tile in _FLOOR:\n        outcomes = [\"moved\"]\n    else:\n        outcomes = list(values)\n    return {\"proposals\": [{\"payload\": value} for value in outcomes], \"generation\": \"batch\"}\n\n\ndef launch(data, *, policy_config, capabilities):\n    return True\n\n\ndef effect(data, *, policy_config, capabilities):\n    return {\"mode\": \"block\"}\n\n\ndef _actual_outcome(evidence):\n    \"\"\"Read one real action's outcome from the observations around it.\"\"\"\n    start = (evidence.get(\"before\") or {}).get(\"blstats\")\n    end = (evidence.get(\"after\") or {}).get(\"blstats\")\n    if not isinstance(start, list) or not isinstance(end, list):\n        return None\n    if len(start) < 2 or len(end) < 2:\n        return None\n    return \"moved\" if (start[0], start[1]) != (end[0], end[1]) else \"blocked\"\n\n\ndef match_proposal(data, *, policy_config, capabilities):\n    evidence = data[\"evidence\"]\n    if evidence is None:\n        return {\"verdict\": \"indeterminate\"}\n    if evidence.get(\"is_error\", False):\n        return {\"verdict\": \"incompatible\"}\n    if \"before\" in evidence and \"after\" in evidence:\n        # The real outcome is the verifier's job: AScout only ships the\n        # observations, the Policy decides what counts as moved or blocked.\n        actual = _actual_outcome(evidence)\n    else:\n        actual = evidence.get(\"payload\")\n    if actual is None:\n        return {\"verdict\": \"indeterminate\"}\n    if policy_config[\"value_type\"] == \"boolean\" and actual in (\"true\", \"false\"):\n        actual = actual == \"true\"\n    elif policy_config[\"value_type\"] == \"enum\":\n        if actual not in policy_config[\"enum_values\"]:\n            return {\"verdict\": \"incompatible\"}\n    compatible = data[\"proposal\"][\"payload\"] == actual\n    return {\"verdict\": \"compatible\" if compatible else \"incompatible\"}\n\n\ndef dispose(data, *, policy_config, capabilities):\n    if data[\"resolution\"] in (\"indeterminate\", \"error\", \"extent_reached\"):\n        return {\"actions\": []}\n    if data[\"resolution\"] == \"accepted\":\n        return {\"actions\": [{\"intent\": \"Promote\"}]}\n    return {\"actions\": [{\"intent\": \"Discard\"}]}\n"
+    "decisions.py": "\"\"\"NLE policy algorithms using public observations.\"\"\"\n\n\n\n\ndef feasibility_pass(data, *, policy_config, capabilities):\n    return True\n\n\ndef select(data, *, policy_config, capabilities):\n    return [chance[\"chance_id\"] for chance in data[\"frontier_view\"][:policy_config[\"max_chances\"]]]\n\n\ndef rebalance(data, *, policy_config, capabilities):\n    return []\n\n\ndef extent(data, *, policy_config, capabilities):\n    return \"stop\" if data[\"process_state\"][\"steps_completed\"] >= policy_config[\"max_steps\"] else \"continue\"\n\n\n# NLE's movement keys, as (dx, dy) offsets on the public character grid.\n_MOVES = {\n    1: (0, -1),  # k north\n    2: (1, 0),  # l east\n    3: (0, 1),  # j south\n    4: (-1, 0),  # h west\n    5: (1, -1),  # u northeast\n    6: (1, 1),  # n southeast\n    7: (-1, 1),  # b southwest\n    8: (-1, -1),  # y northwest\n}\n_WALLS = set(\"|-\")\n_FLOOR = set(\".#<>\")\n\n\ndef predict(data, *, policy_config, capabilities):\n    \"\"\"Return movement proposals for the pending boundary.\n\n    Workload-specific interpretation belongs in this sample Policy. The\n    control plane passes a generic process context and never extracts an NLE\n    action field itself.\n    \"\"\"\n    values = policy_config[\"enum_values\"]\n    context = data.get(\"process_context\") or {}\n    if \"observation\" not in context:\n        return {\"abstain\": True}\n    observation = context.get(\"observation\") or {}\n    try:\n        action = int((data[\"chance_context\"][\"arguments\"]).get(\"action\"))\n    except (TypeError, ValueError):\n        return {\"abstain\": True}\n    move = _MOVES.get(action)\n    if move is None:\n        return {\"abstain\": True}\n    chars = observation.get(\"chars\")\n    stats = observation.get(\"blstats\")\n    if not chars or not stats:\n        return {\"abstain\": True}\n    x, y = int(stats[0]), int(stats[1])\n    tx, ty = x + move[0], y + move[1]\n    if not (0 <= ty < len(chars) and 0 <= tx < len(chars[ty])):\n        return {\"abstain\": True}\n    tile = chars[ty][tx]\n    if tile in _WALLS:\n        outcomes = [\"blocked\"]\n    elif tile in _FLOOR:\n        outcomes = [\"moved\"]\n    else:\n        outcomes = list(values)\n    return {\"proposals\": [{\"payload\": value} for value in outcomes], \"generation\": \"batch\"}\n\n\ndef launch(data, *, policy_config, capabilities):\n    return True\n\n\ndef effect(data, *, policy_config, capabilities):\n    return {\"mode\": \"block\"}\n\n\ndef _actual_outcome(evidence):\n    \"\"\"Read one real action's outcome from the observations around it.\"\"\"\n    start = (evidence.get(\"before\") or {}).get(\"blstats\")\n    end = (evidence.get(\"after\") or {}).get(\"blstats\")\n    if not isinstance(start, list) or not isinstance(end, list):\n        return None\n    if len(start) < 2 or len(end) < 2:\n        return None\n    return \"moved\" if (start[0], start[1]) != (end[0], end[1]) else \"blocked\"\n\n\ndef match_proposal(data, *, policy_config, capabilities):\n    evidence = data[\"evidence\"]\n    if evidence is None:\n        return {\"verdict\": \"indeterminate\"}\n    if evidence.get(\"is_error\", False):\n        return {\"verdict\": \"incompatible\"}\n    if \"before\" in evidence and \"after\" in evidence:\n        # The real outcome is the verifier's job: AScout only ships the\n        # observations, the Policy decides what counts as moved or blocked.\n        actual = _actual_outcome(evidence)\n    else:\n        actual = evidence.get(\"payload\")\n    if actual is None:\n        return {\"verdict\": \"indeterminate\"}\n    if policy_config[\"value_type\"] == \"boolean\" and actual in (\"true\", \"false\"):\n        actual = actual == \"true\"\n    elif policy_config[\"value_type\"] == \"enum\":\n        if actual not in policy_config[\"enum_values\"]:\n            return {\"verdict\": \"incompatible\"}\n    compatible = data[\"proposal\"][\"payload\"] == actual\n    return {\"verdict\": \"compatible\" if compatible else \"incompatible\"}\n\n\ndef dispose(data, *, policy_config, capabilities):\n    if data[\"resolution\"] in (\"indeterminate\", \"error\", \"extent_reached\"):\n        return {\"actions\": []}\n    if data[\"resolution\"] == \"accepted\":\n        return {\"actions\": [{\"intent\": \"Promote\"}]}\n    return {\"actions\": [{\"intent\": \"Discard\"}]}\n",
+    "opportunity.py": "def opportunity_pass(data, *, policy_config, capabilities):\n    op = data[\"op\"]\n    return op[\"has_predictor\"]\n"
   },
   "runtime": "nle-runtime.json",
   "decisions": {
-    "admit.opportunity_pass": {"file":"decisions.py","function":"opportunity_pass","policy_config":{},"inputs":[]},
-    "admit.feasibility_pass": {"file":"decisions.py","function":"feasibility_pass","policy_config":{},"inputs":[]},
-    "select": {"file":"decisions.py","function":"select","policy_config":{"max_chances":4},"inputs":[]},
-    "rebalance": {"file":"decisions.py","function":"rebalance","policy_config":{},"inputs":[]},
-    "extent": {"file":"decisions.py","function":"extent","policy_config":{"max_steps":20},"inputs":[]},
-    "predict": {"file":"decisions.py","function":"predict","policy_config":{"enum_values":["moved","blocked"],"value_type":"enum"},"inputs":[]},
-    "launch": {"file":"decisions.py","function":"launch","policy_config":{},"inputs":[]},
-    "effect": {"file":"decisions.py","function":"effect","policy_config":{},"inputs":[]},
-    "match": {"file":"decisions.py","function":"match_proposal","policy_config":{"enum_values":["moved","blocked"],"value_type":"enum"},"inputs":[]},
-    "dispose": {"file":"decisions.py","function":"dispose","policy_config":{},"inputs":[]}
+    "admit.opportunity_pass": {
+      "file": "opportunity.py",
+      "function": "opportunity_pass",
+      "policy_config": {},
+      "inputs": []
+    },
+    "admit.feasibility_pass": {
+      "file": "decisions.py",
+      "function": "feasibility_pass",
+      "policy_config": {},
+      "inputs": []
+    },
+    "select": {
+      "file": "decisions.py",
+      "function": "select",
+      "policy_config": {
+        "max_chances": 4
+      },
+      "inputs": []
+    },
+    "rebalance": {
+      "file": "decisions.py",
+      "function": "rebalance",
+      "policy_config": {},
+      "inputs": []
+    },
+    "extent": {
+      "file": "decisions.py",
+      "function": "extent",
+      "policy_config": {
+        "max_steps": 20
+      },
+      "inputs": []
+    },
+    "predict": {
+      "file": "decisions.py",
+      "function": "predict",
+      "policy_config": {
+        "enum_values": [
+          "moved",
+          "blocked"
+        ],
+        "value_type": "enum"
+      },
+      "inputs": []
+    },
+    "launch": {
+      "file": "decisions.py",
+      "function": "launch",
+      "policy_config": {},
+      "inputs": []
+    },
+    "effect": {
+      "file": "decisions.py",
+      "function": "effect",
+      "policy_config": {},
+      "inputs": []
+    },
+    "match": {
+      "file": "decisions.py",
+      "function": "match_proposal",
+      "policy_config": {
+        "enum_values": [
+          "moved",
+          "blocked"
+        ],
+        "value_type": "enum"
+      },
+      "inputs": []
+    },
+    "dispose": {
+      "file": "decisions.py",
+      "function": "dispose",
+      "policy_config": {},
+      "inputs": []
+    }
   },
-  "digest": "142ae502f7f6091da9dac6ddd2bac2287f821af3b8a046f83e92445edaa84e2f"
+  "digest": "d732f49b0946cb0d110723a1b8f27cf56a7b119f78abdbf517721c050f8d512f"
 }

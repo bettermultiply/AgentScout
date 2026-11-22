@@ -147,6 +147,12 @@ pub enum AgentCommand {
         policy_digest: String,
         has_predictor: bool,
         decisions: Value,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        pure: BTreeMap<String, Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_inputs: Option<BTreeMap<String, Vec<String>>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy_model_grant: Option<crate::control_plane::policy::PolicyModelGrant>,
     },
     Prompt {
         branch_id: String,
@@ -220,6 +226,8 @@ pub enum AgentCommand {
     },
     Promote {
         branch_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reuse_parent_environment: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_branch_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -342,6 +350,8 @@ pub enum AgentMessage {
         arguments: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fast_start: Option<Value>,
         /// 投机开始的 Instrumentation 测量时刻（Unix 毫秒）。
         timestamp_ms: u64,
     },
@@ -427,9 +437,15 @@ pub enum AgentMessage {
     BranchReady {
         branch_id: String,
     },
+    /// Internal Adapter request to bind a local Candidate before tool execution.
+    EnvironmentRequested {
+        branch_id: String,
+    },
     BranchSuspended {
         branch_id: String,
         reason: BlockedReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     BranchResumed {
         branch_id: String,

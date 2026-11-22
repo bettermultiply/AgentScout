@@ -125,10 +125,12 @@ predict(predict_input) -> ProposalSet
 
 ```text
 ProposalSet = {
-    proposals: [Proposal, ...],
-    generation: batch | incremental # 表示 Proposal 的生成是一次性的还是递增的
-}
+    generation: batch,
+    proposals: [Proposal, ...]  # 至少一项
+} | { abstain: true, reason?: string }
 ```
+
+显式 `abstain` 将 Chance 收尾为 `Discarded(NotSelected)`，随后真实操作照常执行。批量预测缺少 Proposal 属于 `policy_error`。
 
 每个 `Proposal` 至少包含一个当前 Chance 边界的候选输入：
 
@@ -190,7 +192,7 @@ effect(effect_descriptor, context) -> EffectPlan
 | `allow` | 在声明范围内直接执行真实请求 |
 | `deny` | 直接拒绝该效果或拒绝相关投机环节 |
 
-`simulate` 建立在 `stage` 暂存之上，不是与暂存互斥的替代路径。Branch 被接受后才处理暂存的真实请求，丢弃或前提失效则取消；模拟结果不会自动变成真实调用。Instrumentation 本地求值并落实 `effect`，将模拟操作交给 Runtime 内的 External Effect Coordinator，由它判断能否模拟。不能模拟时，真实请求继续暂存在本机，不离开本机；当前 Branch 不获得模拟结果，在效果边界阻塞并保留已完成进展，不因此直接拒绝整个投机。该 Branch 成为权威后才发出真实请求并继续，丢弃或前提失效则取消请求。可模拟时才返回明确标记来源的临时结果。模拟响应不是真实 Authority，必须明确标记为模拟结果、记录生成来源并作为未验证假设处理；后续仍需通过 Authority、validator 或其他明确规则验证。这即正式语义所称的**伪装执行**，其约束与保证见 [效果管理设计](effect-management.md)。`EffectClass` 描述效果可采用的处理纪律，`StateDomain` 描述效果作用的状态域，二者保持正交；Policy 选择的模式必须经过 Effect Management、Contract 和 Runtime capability 校验。
+`simulate` 建立在 `stage` 暂存之上，不是与暂存互斥的替代路径。Branch 被接受后才处理暂存的真实请求，丢弃或前提失效则取消；模拟结果不会自动变成真实调用。Runtime 未提供外部效果协调器时，`stage` 和 `simulate` 在 `EffectGate` 阻塞分支并记录原因。Instrumentation 本地求值并落实 `effect`，将模拟操作交给 Runtime 内的 External Effect Coordinator，由它判断能否模拟。不能模拟时，真实请求继续暂存在本机，不离开本机；当前 Branch 不获得模拟结果，在效果边界阻塞并保留已完成进展，不因此直接拒绝整个投机。该 Branch 成为权威后才发出真实请求并继续，丢弃或前提失效则取消请求。可模拟时才返回明确标记来源的临时结果。模拟响应不是真实 Authority，必须明确标记为模拟结果、记录生成来源并作为未验证假设处理；后续仍需通过 Authority、validator 或其他明确规则验证。这即正式语义所称的**伪装执行**，其约束与保证见 [效果管理设计](effect-management.md)。`EffectClass` 描述效果可采用的处理纪律，`StateDomain` 描述效果作用的状态域，二者保持正交；Policy 选择的模式必须经过 Effect Management、Contract 和 Runtime capability 校验。
 
 Policy 可以选择暂存、代理、延迟释放、阻塞、补偿或其他合法处理方式，但不能把效果排除在 AScout 的最低纳管范围之外。Effect Management 必须检查 Runtime 声明的后端能力是否足以落实所选纪律。
 
@@ -211,7 +213,8 @@ match(proposal, evidence, match_context) -> MatchResult
 ```text
 MatchResult = {
     verdict: compatible | incompatible | indeterminate | error,
-    score?: MatchScore
+    score?: MatchScore,
+    details?: object
 }
 ```
 
@@ -234,16 +237,18 @@ MatchResult = {
 dispose(branch, resolution, context) -> DispositionPlan
 ```
 
-`context.match` 提供比较结果，`context.authority_outcome` 提供对应 Chance／operation 的真实返回值。Part 可从 Candidate 的受控可见执行记录发现结果，也可使用只列明确结果的输入。Policy 可以同时使用两种输入，二者都须判断结果依据、依赖状态及 AuB 进展是否相容，然后在 Runtime 移交前接受。Full 的可选通知由 Policy 构造。Part 的反馈以实际提交的结果和状态为准。
+`context.match` 原样提供比较结果（包括 `details`），`context.authority_outcome` 提供对应 Chance／operation 的真实返回值。`match.proposal`、`branch.proposal` 与 `context.candidate_proposal` 提供同一份 `{id, payload, provenance}`。
+
+`Promote` 仅接受可选 `notification`。`Reuse` 和 `Salvage` 选择 `results: [{id, notification}, ...]` 或 `scopes: [path, ...]`，后者可附 `notification`。控制面验证结果身份及其已知文件依赖，Runtime 以父环境和候选环境的共同祖先为基准检查冲突。反馈只覆盖实际移交的成果。
 
 `resolution` 表示为什么进入处置，而不是具体怎么处置：
 `resolution =[accepted, rejected, indeterminate, error, cancelled, preempted, extent_reached, failed]`
 
 `DispositionPlan` 可以包含一个或多个处置意图：
 
-- **Reuse**：采用候选已验证结果的处置意图。接入的 part 接受保留 AuB 的执行延续。
-- **Promote**：full 接受后使用 SpB 的执行延续和 AuB 合入后的环境。
-- **Salvage**：提取安全的部分进展，交给权威路径或后续过程；
+- **Reuse**：仅适用于 `accepted`。采用部分已验证结果，保留原父分支会话并回收候选。可附 `Discard`。
+- **Promote**：仅适用于 `accepted`。全量合入环境并采用候选分支的会话延续。
+- **Salvage**：适用于整体未接受的处置。祖先假设须已确认，且须与 `Discard` 组合。独立成果移交后原父分支继续执行。
 - **Re-execute**：使用权威结果重新执行必要工作；
 - **Discard**：丢弃候选工作及其未确认产物；
 - **Compensate**：对已发生且可补偿的效果执行反向处理；

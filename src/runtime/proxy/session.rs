@@ -25,6 +25,7 @@ impl RuntimeProxy {
 
     fn serve(&self, address: &str) -> io::Result<()> {
         let stream = TcpStream::connect(address)?;
+        stream.set_nodelay(true)?;
         let mut reader = stream.try_clone()?;
         let (out, out_rx) = mpsc::channel::<AdapterMessage>();
 

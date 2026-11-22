@@ -23,11 +23,12 @@ test(exitStatus?'Pi reports a delivered nonzero bash exit as a failed action onc
   const chunk=(delta,finish_reason=null)=>({id:'fixture',object:'chat.completion.chunk',created:0,model:'fixture',choices:[{index:0,delta,finish_reason}]});
   res.write('data: '+JSON.stringify(chunk(delta))+'\n\n');res.end('data: '+JSON.stringify(chunk({},command?'tool_calls':'stop'))+'\n\ndata: [DONE]\n\n');
  })});await new Promise(r=>fake.listen(0,'127.0.0.1',r));
- const port=await new Promise(r=>{const s=http.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p))})});
+ const freePort=()=>new Promise(r=>{const s=http.createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p))})});
+ const [port,runtimePort]=await Promise.all([freePort(),freePort()]);
  fs.writeFileSync(root+'/pi/models.json',JSON.stringify({providers:{fixture:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
   for(const name of ['policy.yaml','decisions.py'])fs.copyFileSync(project+'/assets/policy/policy/'+name,root+'/policy/'+name);
   fs.writeFileSync(root+'/policy/policy.yaml',fs.readFileSync(root+'/policy/policy.yaml','utf8').replace('max_steps: 5','max_steps: 100'));
- fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_address:'127.0.0.1:18180',adapter_instance:'fs',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,filesystem:{state_directory:root+'/fs-state',isolated_paths:[runPath(root, 'workspace')],passthrough_rw:[root]}}));
+ fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_address:`127.0.0.1:${runtimePort}`,adapter_instance:'fs',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,filesystem:{state_directory:root+'/fs-state',isolated_paths:[runPath(root, 'workspace')],passthrough_rw:[root]}}));
  const p=spawnControl(project+'/target/debug/ascout-control-plane',[root,project+'/../pi',root+'/policy/policy.yaml','--web',`127.0.0.1:${port}`,'--model','fixture/fixture'],{env:{...process.env,TMPDIR:root+'/tmp',ASCOUT_RUNTIME_CONFIG:root+'/runtime.json',PI_CODING_AGENT_DIR:root+'/pi'},stdio:['ignore','ignore','pipe']});
  p.stderr.on('data',b=>fs.appendFileSync(root+'/stderr.log',b));
  t.after(()=>{if(p.exitCode===null)p.kill('SIGKILL');fake.closeAllConnections();fake.close()});

@@ -161,8 +161,8 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
   - `target_mount_pid=None`：调用方确认无 live mount，直接写目标 upper，删除写
     whiteout。
   - `target_mount_pid=Some(inner_pid)`（由 FilesystemBackend 的进程句柄提供）：
-    - 校验 `/proc/<pid>/ns/mnt` 等于该环境启动时由 bwrap `--json-status-fd`
-      记录的 mount namespace，且不等于宿主 mount namespace；
+    - 校验 `/proc/<pid>/ns/mnt` 等于原生 holder 就绪消息记录的 mount namespace，
+      且不等于宿主 mount namespace。PID 是宿主侧可见的常驻 holder PID。
     - 以 `/proc/<pid>/root` 的 dirfd 为根，用
       `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)` + 最终组件 `O_NOFOLLOW`
       执行 mkdir/unlink/write/symlink；
@@ -194,11 +194,19 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
     `default_config_starts_when_state_directory_is_outside_isolated_mounts`。
 
 - **环境启动**
-  - FilesystemBackend 生成 holder 挂载计划，使用 `src/runtime/process/` 的底层实现启动 holder，并记录内层 PID 和 mount namespace。
-  - 挂载就绪要求 mountinfo 中全部预期 overlay 目标存在，并解码路径的八进制转义；
-    保持原有 400 × 5ms 轮询期限。目标未齐时每轮检查持有的 child；只有确认它已
-    退出才接受短命令完成，包括 mountinfo 仍可读但不完整，或读取返回 ENOENT/EINVAL
-    的情况。其他读取错误返回诊断，活进程仍须满足全部目标。
+  - FilesystemBackend 把挂载计划交给 Runtime Adapter 同目录的 `ascout-fs-holder`。
+    原生进程建立 user、mount 和 PID namespace，在完成挂载并监听 `cmd.sock` 后通过
+    管道发送宿主侧可见的 PID 与 mount namespace。Adapter 校验并持有 namespace 句柄。
+  - 派生环境在同步完成 fork 和 holder 目录准备后返回。父环境此后的写入不会改变
+    这次 fork 的文件系统基准。后台任务完成实际 holder 启动。首次工具操作、冻结、
+    排空写入、live-mount accept 和保存等待就绪并保留启动错误。终止及清理等待
+    启动收敛后再回收进程和目录。
+  - `examples/fs_holder_bench.rs` 分别计时数据层准备、分支返回、首次读取完成。
+    本机 release 构建在 `/var/tmp` 上跑 30 轮，派生返回 p50 为 0.694 ms、p95 为 6.992 ms，
+    首次读取完成 p50 为 4.306 ms、p95 为 10.896 ms。该基准直接调用 FilesystemBackend，
+    不含控制面传输、Pi 会话初始化和模型请求。
+  - 支持时使用 `clone3(CLONE_INTO_CGROUP)` 直接把 holder 建在目标 cgroup 中。
+    Linux 需提供 `mount_setattr`，用于递归设定宿主 bind mount 为只读。
 - **删除**
   - discard 热路径 rename 到 trash，O(1)；后台删除。
   - 后台删除由常驻工作者执行：首次需要物理删除时发信号；工作者持续扫描 trash
@@ -220,11 +228,11 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
     原状态。全局 state 锁外执行持久化写盘。
   - 损坏的 `operations.json` 改名为 `.corrupt-<pid>` 并大声告警，随后以空记录
     继续；若改名隔离失败，加载返回明确错误并保留坏文件，不以空记录继续，也不
-    覆盖坏文件。元数据写入是 temp + `sync_all` + rename 原子写，写到一半崩溃
-    不会留下损坏的 `operations.json`；损坏来源是磁盘错误、人为编辑或版本不一致。
-    环境/快照元数据读不出来仍跳过并记录日志。
-  - 副本层使用 staging 目录 + 原子 rename + 目录 sync；没有完成 rename 的
-    `.tmp-*` 在下次启动清理，不视为有效层。
+    覆盖坏文件。运行期元数据和副本层通过同一文件系统中的临时文件或 staging 目录
+    加 `rename` 发布，使用内核页缓存。环境和快照元数据无法读取时跳过并记录日志。
+    未完成 rename 的 `.tmp-*` 在下次启动清理。
+  - `/pause` 同步独立保存代的文件、目录及其元数据。最终物化同步宿主目标文件系统
+    和新的环境元数据。
   - `btrfs send | receive --dump` 并发 drain send stderr，避免大输出死锁。
 
 ## 未实现 / Phase 2
@@ -233,7 +241,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
 - accept 重放已支持修改/删除/创建/目录替换的逆序回滚，但仍非原子；并发读者
   可能观察到中间状态。
 - 有特权时直接 `lower=/`：只做了探测/高权限测试，未作为默认路径。
-- **环境进程实现**：`src/runtime/process/` 提供 bwrap、进程组、cgroup 和 namespace 句柄。FilesystemBackend 拥有每个已启动环境的 holder。
+- **环境进程实现**。`src/runtime/process/` 管理进程组、cgroup 和 namespace 句柄。FilesystemBackend 持有各环境的 `ascout-fs-holder`。临时探测与物化仍使用 bubblewrap。
 - **真实 freeze 已实现**：cgroup v2 `cgroup.freeze`；不可用时 fallback 进程组
   SIGSTOP/SIGCONT；能力字段 `freeze_mechanism`。`BaseRuntime::suspend/resume`
   已改为真实 freeze/thaw，`terminate` 优先 `cgroup.kill`。

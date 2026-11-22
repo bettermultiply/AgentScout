@@ -55,13 +55,7 @@ pub(crate) fn finalize_staging(staging: &Path, target: &Path) -> Result<(), Back
     if path_exists(target) {
         remove_directory_force(target)?;
     }
-    fs::rename(staging, target).map_err(error)?;
-    if let Some(parent) = target.parent()
-        && let Ok(directory) = File::open(parent)
-    {
-        directory.sync_all().map_err(error)?;
-    }
-    Ok(())
+    fs::rename(staging, target).map_err(error)
 }
 
 pub(crate) fn cleanup_staging(root: &Path) -> Result<(), BackendError> {
@@ -283,7 +277,6 @@ pub(crate) fn copy_file(source: &Path, target: &Path) -> Result<(), BackendError
         .open(target)
         .map_err(|value| BackendError::new(format!("open target {}: {value}", target.display())))?;
     std::io::copy(&mut input, &mut output).map_err(error)?;
-    // Persistence is finalized by the caller with one directory sync after
-    // the complete copy layer is atomically renamed into place.
+    // The save boundary synchronizes the published generation.
     Ok(())
 }

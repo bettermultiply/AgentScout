@@ -97,7 +97,7 @@ Pi 握手中的能力字段是接入原语声明，不是模型推理或 sub-age
 
 Rust 协议、控制循环与 Pi 接入使用 `ActionStarted` / `ActionFinished`。action 包含 task/Branch/action identity、类型、可选父 action、结果终态和 evidence，并携带 Instrumentation 测量的 `timestamp_ms`；`SpeculativeAdmissionRequest` 登记执行前的等待身份和准入时刻，不伪造实际开始。`Usage` 关联模型 `action_id` 并提供 Instrumentation 起止时间。Tree 保存活动 action，完成事实进入 Ledger。Pi 从真实请求前 Hook 报告模型开始，从工具 Hook 报告工具 action，输出与使用量可关联模型 action。Candidate 推理不使用角色专用完成事件。Agent session 与 Branch 执行释放分开报告；命令接收/开始回执不提前完成 Tree 操作。runtime proxy 独立报告操作开始/结果及环境事件，环境建立失败不伪装成 Agent 失败。
 
-能力边界：通用协议可表达 sub-agent 等 action，但 Pi 当前只采集模型推理与工具执行；二者的真实执行前 Hook 均执行下发的本地 Decision，Policy 允许时产生 `speculative_admission_request`，通过既有 launch 控制 eager／speculative-first。sub-agent 启动前 Hook 仍为 false；不要把 `message_start` 当作模型推理前 Hook，也不宣称任意 action 均可投机。空预测或预测失败放行原权威调用一次，不保留挂起的 Proposal。模型开始时间来自真实请求前 Hook，而非首次 assistant message。extent stop 支持工具与模型边界；discard、cleanup、取消和合法恢复释放等待，断线不伪造完成。Agent 自身超时须实际观察后报告。分阶段回执覆盖已有身份管理的 Promote、ResolvePending、Discard、Cleanup；其他命令依其 Branch／回合事实。Runtime 资源清单随 OperationResult 返回，独立资源／效果事件尚未接通。
+能力边界：通用协议可表达 sub-agent 等 action，但 Pi 当前只采集模型推理与工具执行；二者的真实执行前 Hook 均执行下发的本地 Decision，Policy 允许时产生 `speculative_admission_request`，通过既有 launch 控制 eager／speculative-first。sub-agent 启动前 Hook 仍为 false；不要把 `message_start` 当作模型推理前 Hook，也不宣称任意 action 均可投机。显式放弃预测或预测失败均放行原权威调用一次。失败记录 `policy_error`。模型开始时间来自真实请求前 Hook，而非首次 assistant message。extent stop 支持工具与模型边界；discard、cleanup、取消和合法恢复释放等待，断线不伪造完成。Agent 自身超时须实际观察后报告。分阶段回执覆盖已有身份管理的 Promote、ResolvePending、Discard、Cleanup；其他命令依其 Branch／回合事实。Runtime 资源清单随 OperationResult 返回，独立资源／效果事件尚未接通。
 
 ### 模型投机 `branch_model`（当前已接通的语义）
 

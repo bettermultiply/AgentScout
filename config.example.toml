@@ -1,8 +1,20 @@
-# Policy 所在目录；每份 Policy 使用一个子目录。
+# AScout 内置 Policy 所在目录。
 policy_dir = "~/.local/share/ascout/policies"
-# AScout 运行记录目录的根目录；新运行的子目录名以 run- 开头。
+# 运行记录目录，历史记录会保留在这里。
 runs_dir = "~/.local/share/ascout/runs"
-# 默认选择的 Policy 名称；配置不会自动安装 Policy。
-default_policy = "policy"
-# control plane 的系统运行日志路径。
+# 未指定 --policy 时使用的 Policy。
+default_policy = "coding"
+# control plane 系统日志。
 log_path = "~/.local/share/ascout/ascout.log"
+# 可选。Pi 源码或安装根目录。make install 会在开发目录存在时填入。
+# pi_root = "/path/to/pi"
+# 可选。未设置时自动查找已安装或构建的 Adapter。
+# runtime_adapter = "~/.local/bin/ascout-runtime-adapter"
+# 可选。高级 Runtime JSON 路径。filesystem 后端默认自动生成 run 内配置。
+# runtime_config = "/path/to/runtime.json"
+default_backend = "filesystem"
+web_address = "127.0.0.1:8080"
+# default_model = "openai/gpt-6.2-sol"
+# default_thinking = "medium"
+# 可选。Pi 模型配置文件。未设置时依次使用 PI_CODING_AGENT_DIR/models.json 和 ~/.pi/agent/models.json。
+# models = "~/.pi/agent/models.json"

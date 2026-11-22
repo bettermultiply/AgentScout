@@ -56,7 +56,13 @@ fn find_in_path_value(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
 impl Default for PolicyEngine {
     fn default() -> Self {
         Self {
-            python: resolve_executable("ASCOUT_POLICY_PYTHON", "python3", "/usr/bin/python3"),
+            python: if let Some(path) = env::var_os("ASCOUT_POLICY_PYTHON") {
+                PathBuf::from(path)
+            } else if Path::new("/usr/bin/python3").is_file() {
+                PathBuf::from("/usr/bin/python3")
+            } else {
+                find_in_path("python3").unwrap_or_else(|| PathBuf::from("python3"))
+            },
             bubblewrap: resolve_executable("ASCOUT_POLICY_BWRAP", "bwrap", "/usr/bin/bwrap"),
             timeout: Duration::from_secs(5),
             worker: std::sync::Mutex::new(BTreeMap::new()),
@@ -195,7 +201,16 @@ impl PolicyEngine {
                     .remove(decision.as_str())
                     .ok_or_else(|| invalid(format!("missing {}", decision.as_str())))?,
             };
-            let binding: Binding = serde_json::from_value(value).map_err(invalid)?;
+            let mut binding: Binding = serde_json::from_value(value).map_err(invalid)?;
+            if let Some(history) = &binding.history {
+                require(decision == Decision::Predict && history.mode == "transcript_tail"
+                    && (1..=64).contains(&history.max_entries), "invalid history projection")?;
+                binding.inputs.push("history".into());
+            }
+            if let Some(outcome) = &binding.outcome {
+                require(decision == Decision::Match && outcome == "tool_output", "invalid outcome projection")?;
+                binding.inputs.push("outcome".into());
+            }
             validate_binding(decision, &binding, &files)?;
             decisions.insert(decision, binding);
         }
@@ -225,7 +240,12 @@ impl PolicyEngine {
             runtime: definition.runtime,
             decisions,
             digest: String::new(),
+            policy_model_grant: definition.policy_model_grant,
+            pure: BTreeMap::new(),
         };
+        if let Some(grant) = policy.policy_model_grant() {
+            super::validation::validate_model_grant(grant)?;
+        }
         // Probe the trusted interpreter inside the same isolation as the algorithms.
         let probe = self.execute("import sys,json,os\nb=json.dumps(sys.version).encode();os.write(1,len(b).to_bytes(4,'big')+b)", &json!({}))?;
         policy.python = probe
@@ -234,10 +254,30 @@ impl PolicyEngine {
             .to_owned();
         policy.digest = policy.content_digest()?;
         for decision in Decision::ALL {
-            self.execute(&policy.script(decision)?, &json!({"check": true}))
-                .map_err(|e| {
-                    io::Error::new(e.kind(), format!("{} binding: {e}", decision.as_str()))
-                })?;
+            // The AST probe has different bytes from the runtime runner and
+            // is used only once. Keep it out of the runtime worker cache so
+            // it cannot evict the already-checked Decision runners.
+            let probe = policy.check_script(decision)?;
+            let checked = super::worker::Worker::start(&probe, &self.python, &self.bubblewrap)
+                .and_then(|mut worker| worker.evaluate(&json!({"check": true}), self.timeout))
+                .map_err(|e| io::Error::new(e.kind(), format!("{} binding: {e}", decision.as_str())))?;
+            if let Some(error) = checked.get("error").and_then(Value::as_str) {
+                if decision == Decision::OpportunityPass {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+                }
+                return Err(invalid(error));
+            }
+            let pure = checked.get("pure").filter(|value| !value.is_null());
+            if pure.is_none() && decision == Decision::OpportunityPass {
+                return Err(super::validation::opportunity_requires_pure());
+            }
+            if pure.is_none() || checked.get("partial").and_then(Value::as_bool) == Some(true) {
+                self.execute(&policy.script(decision)?, &json!({"check": true}))
+                    .map_err(|e| io::Error::new(e.kind(), format!("{} binding: {e}", decision.as_str())))?;
+            }
+            if let Some(program) = pure {
+                policy.pure.insert(decision, program.clone());
+            }
         }
         Ok(policy)
     }
@@ -248,8 +288,18 @@ impl PolicyEngine {
         decision: Decision,
         data: &Value,
     ) -> io::Result<Value> {
-        policy.validate()?;
-        validate_data(decision, &policy.decisions[&decision], data)?;
+        let binding = &policy.decisions[&decision];
+        validate_data(decision, binding, data)?;
+        if let Some(program) = policy.pure_decision(decision) {
+            if let Some(result) = super::pure::evaluate(program, data, &binding.policy_config) {
+                let result = result.map_err(|error| invalid(format!("{} evaluation: {error}", decision.as_str())))?;
+                validate_result(decision, data, &result)?;
+                return Ok(result);
+            }
+        }
+        if decision == Decision::OpportunityPass {
+            return Err(super::validation::opportunity_requires_pure());
+        }
         let result = self
             .execute(&policy.script(decision)?, &json!({"data": data}))
             .map_err(|e| {
@@ -290,7 +340,7 @@ impl PolicyEngine {
         requests: usize,
         complete: &mut dyn FnMut(&Value, std::time::Instant) -> io::Result<Value>,
     ) -> io::Result<Value> {
-        self.evaluate_capability_request(policy, decision, data, models, requests, complete, None)
+        self.evaluate_capability_request(policy, decision, data, models, requests, complete, None, self.timeout)
     }
 
     /// Cancellation is checked during Python execution and provider IPC. On
@@ -304,6 +354,7 @@ impl PolicyEngine {
         requests: usize,
         provider: &super::ModelProviderProcess,
         cancelled: &std::sync::atomic::AtomicBool,
+        timeout: Option<Duration>,
     ) -> io::Result<Value> {
         self.evaluate_capability_request(
             policy,
@@ -315,6 +366,7 @@ impl PolicyEngine {
                 provider.complete_cancellable(request, deadline, Some(cancelled))
             },
             Some(cancelled),
+            timeout.unwrap_or(self.timeout),
         )
     }
 
@@ -327,10 +379,11 @@ impl PolicyEngine {
         requests: usize,
         complete: &mut dyn FnMut(&Value, Instant) -> io::Result<Value>,
         cancelled: Option<&std::sync::atomic::AtomicBool>,
+        timeout: Duration,
     ) -> io::Result<Value> {
         policy.validate()?;
         validate_data(decision, &policy.decisions[&decision], data)?;
-        let deadline = std::time::Instant::now() + self.timeout;
+        let deadline = Instant::now() + timeout;
         let mut remaining = requests;
         let request_id = tempfile::NamedTempFile::new()?
             .path()
@@ -341,6 +394,12 @@ impl PolicyEngine {
             .worker
             .lock()
             .map_err(|_| invalid("Policy worker lock poisoned"))?;
+        if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Policy evaluation cancelled"));
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "Policy deadline exceeded"));
+        }
         if !workers.contains_key(&script) {
             if workers.len() >= 10 {
                 workers.clear();
@@ -352,7 +411,7 @@ impl PolicyEngine {
         }
         let result = workers.get_mut(&script).unwrap().evaluate_cancellable(
             &json!({"data":data,"request_id":request_id}),
-            self.timeout,
+            deadline.saturating_duration_since(Instant::now()),
             &mut |request| {
                 let provider = request["provider"]
                     .as_str()

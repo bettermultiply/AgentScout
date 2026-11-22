@@ -1,53 +1,67 @@
-"""Exercise the holder's actual mutation function with controlled lock events."""
-import ast
-import io
-import shutil
+"""Verify canonical-path serialization through the native holder socket."""
+import json
 import os
 from pathlib import Path
+import select
+import socket
+import stat
+import struct
+import subprocess
 import tempfile
-import threading
-from concurrent.futures import ThreadPoolExecutor
-from types import SimpleNamespace
+import time
 
-source = Path(__file__).parents[1] / 'src/runtime/process/holder.py'
-nodes = ast.parse(source.read_text()).body
-namespace = {'os': os, 'tempfile': tempfile, 'FRAME_SIZE': 65536, 'shutil': shutil, 'send_event': lambda *_: True,
-             'mutation_registration': threading.Lock(), 'mutation_locks': {}}
-exec(compile(ast.Module(body=[n for n in nodes if isinstance(n, ast.FunctionDef) and n.name in ('atomic_write', 'file_operation')], type_ignores=[]), str(source), 'exec'), namespace)
-held, attempted, release = threading.Event(), threading.Event(), threading.Event()
-class ObservedLock:
-    def __init__(self):
-        self.lock = threading.Lock()
-    def __enter__(self):
-        if self.lock.locked():
-            attempted.set()
-        self.lock.acquire()
-    def __exit__(self, *_):
-        self.lock.release()
-namespace['threading'] = SimpleNamespace(Lock=ObservedLock)
-original = namespace['atomic_write']
-def write(path, content):
-    if content.getvalue() == b'first':
-        held.set()
-        assert release.wait(10), 'release event missing'
-    original(path, content)
-namespace['atomic_write'] = write
-with tempfile.TemporaryDirectory() as directory, ThreadPoolExecutor(2) as pool:
-    path = Path(directory)/'target'
-    alias = Path(directory)/'alias'
-    path.write_bytes(b'original')
-    alias.symlink_to(path)
-    operation = namespace['file_operation']
-    first = pool.submit(operation, None, 'write_file', {'path': str(path)}, io.BytesIO(b'first'), 5)
-    assert held.wait(10)
-    second = pool.submit(operation, None, 'write_file', {'path': str(alias)}, io.BytesIO(b'final'), 5)
-    try:
-        assert attempted.wait(10), 'alias did not reach the same canonical lock'
-        assert not second.done()
-        assert path.read_bytes() == b'original'
-    finally:
-        release.set()
-    first.result()
-    second.result()
-    assert path.read_bytes() == b'final'
-print('holder canonical aliases serialize: controlled lock acquisition and release events')
+BINARY = Path(__file__).resolve().parents[1] / 'target/debug/ascout-fs-holder'
+
+
+def request(address, operation, body):
+    connection = socket.socket(socket.AF_UNIX)
+    connection.settimeout(5)
+    connection.connect(str(address))
+    operation['body_length'] = len(body)
+    connection.sendall(json.dumps(operation).encode() + b'\n')
+    connection.sendall(struct.pack('>I', len(body)) + body + bytes(4))
+    return connection
+
+
+def result(connection):
+    with connection.makefile('rb') as stream:
+        return json.loads(stream.readline())
+
+
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    address, target, alias = (root / name for name in ('cmd.sock', 'target', 'alias'))
+    os.mkfifo(target)
+    alias.symlink_to(target)
+    with subprocess.Popen([BINARY, address]) as holder:
+        try:
+            deadline = time.monotonic() + 5
+            while not address.exists():
+                assert holder.poll() is None and time.monotonic() < deadline
+                time.sleep(0.005)
+            with request(address, {'op': 'replace_text', 'path': str(target),
+                                   'replacements': [{'old_length': 8, 'new_length': 5}]}, b'originalfirst') as first:
+                while True:
+                    try:
+                        writer = os.open(target, os.O_WRONLY | os.O_NONBLOCK)
+                        break
+                    except OSError:
+                        assert time.monotonic() < deadline, 'first mutation never opened the FIFO'
+                        time.sleep(0.005)
+                try:
+                    with request(address, {'op': 'write_file', 'path': str(alias)}, b'final') as second:
+                        assert not select.select([second], [], [], 0.1)[0], 'alias overtook held mutation'
+                        assert stat.S_ISFIFO(target.stat().st_mode)
+                        os.write(writer, b'original')
+                        os.close(writer)
+                        writer = None
+                        assert result(first)['value']['changed'] is True
+                        assert result(second)['value']['bytes_written'] == 5
+                finally:
+                    if writer is not None:
+                        os.close(writer)
+                assert target.read_bytes() == b'final'
+                assert alias.is_symlink()
+        finally:
+            holder.terminate()
+print('native holder canonical aliases serialize across the FIFO barrier')

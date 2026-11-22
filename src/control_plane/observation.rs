@@ -126,6 +126,19 @@ pub enum ObservationContent {
         finished_at_ms: Option<u64>,
         duration_ms: Option<u64>,
     },
+    ActionStarted {
+        branch_id: String,
+        action_id: String,
+        action_kind: ActionKind,
+        name: String,
+        timestamp_ms: u64,
+    },
+    ModelFinished {
+        branch_id: String,
+        action_id: String,
+        status: ActionStatus,
+        timestamp_ms: u64,
+    },
     ToolFinished {
         branch_id: String,
         action_id: String,
@@ -152,6 +165,8 @@ pub enum ObservationContent {
     Settlement {
         branch_id: String,
         hit: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        disposition: Option<String>,
         time_ms: ObservationAmount,
         money: ObservationAmount,
         /// 金钱维度的币种；该维度没有数据时为 null，不猜测。

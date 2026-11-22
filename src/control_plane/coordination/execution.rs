@@ -1,8 +1,8 @@
 //! Run ordering, Runtime result interpretation, and final environment cleanup.
 use super::session::{self, Prepared, Session};
+use super::{ControlActions, ControlResult, SpeculationCoordinator};
 use super::{Operation, Runtime, RuntimeCapabilities, RuntimeExecutionState, SpeculativeTree};
 use crate::control_plane::gateway::agent::protocol::{ActionKind, AgentCommand, AgentMessage};
-use super::{ControlActions, ControlResult, SpeculationCoordinator};
 use crate::control_plane::gateway::{
     agent,
     ui::{self, Request},
@@ -171,6 +171,7 @@ pub fn execute<Guard>(
         mut tree,
         policy,
         engine,
+        coordinator,
         saved,
         resume_model,
         ..
@@ -195,6 +196,7 @@ pub fn execute<Guard>(
             &mut tree,
             &policy,
             &engine,
+            coordinator,
             runtime,
             capabilities,
             channel,
@@ -236,6 +238,7 @@ impl<'a> Execution<'a> {
                 "runtime_binding": tree.runtime_binding(),
                 "capability_view": tree.capability_view(),
                 "local_policy_digest": tree.local_policy_digest(),
+                "workspace_path": tree.workspace_path(),
             },
         })) {
             system_log.history_failure(&run_id, &format!("record append failed: {error}"));
@@ -394,6 +397,7 @@ impl<'a> Execution<'a> {
             AgentMessage::ActionStarted {
                 branch_id,
                 action_id,
+                action_kind,
                 name,
                 timestamp_ms,
                 ..
@@ -402,7 +406,13 @@ impl<'a> Execution<'a> {
                     (branch_id.clone(), action_id.clone()),
                     (*timestamp_ms, name.clone()),
                 );
-                None
+                Some(ObservationContent::ActionStarted {
+                    branch_id: branch_id.clone(),
+                    action_id: action_id.clone(),
+                    action_kind: *action_kind,
+                    name: name.clone(),
+                    timestamp_ms: *timestamp_ms,
+                })
             }
             AgentMessage::Usage {
                 branch_id,
@@ -447,6 +457,23 @@ impl<'a> Execution<'a> {
                     started_at_ms,
                     finished_at_ms: Some(*timestamp_ms),
                     duration_ms: started_at_ms.and_then(|start| timestamp_ms.checked_sub(start)),
+                })
+            }
+            AgentMessage::ActionFinished {
+                branch_id,
+                action_id,
+                action_kind: ActionKind::ModelInference,
+                status,
+                timestamp_ms,
+                ..
+            } => {
+                self.action_starts
+                    .remove(&(branch_id.clone(), action_id.clone()));
+                Some(ObservationContent::ModelFinished {
+                    branch_id: branch_id.clone(),
+                    action_id: action_id.clone(),
+                    status: *status,
+                    timestamp_ms: *timestamp_ms,
                 })
             }
             AgentMessage::ActionFinished {
@@ -643,6 +670,7 @@ impl Execution<'_> {
         tree: &mut SpeculativeTree,
         policy: &CompiledPolicy,
         engine: &PolicyEngine,
+        mut coordinator: SpeculationCoordinator,
         runtime: &dyn Runtime,
         capabilities: &RuntimeCapabilities,
         channel: (mpsc::Sender<Event>, mpsc::Receiver<Event>),
@@ -704,6 +732,13 @@ impl Execution<'_> {
                     if matches!(&event, Event::Delivered(..)) {
                         outstanding = outstanding.saturating_sub(1);
                     }
+                    match &event {
+                        Event::Request(Request::Shutdown) => coordinator.cancel(),
+                        Event::Request(Request::Interrupt) if !task.tree.is_stopping() => {
+                            coordinator.interrupt()
+                        }
+                        _ => {}
+                    }
                     if matches!(
                         &event,
                         Event::Request(Request::Shutdown | Request::Interrupt)
@@ -760,11 +795,12 @@ impl Execution<'_> {
                     }
                     for (id, operation) in actions.operations {
                         let tree_state = task.tree.clone();
+                        let coordinator = coordinator.clone();
                         let sender = events.clone();
                         scope.spawn(move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    SpeculationCoordinator.perform(
+                                    coordinator.perform(
                                         &tree_state,
                                         policy,
                                         engine,
@@ -842,6 +878,7 @@ impl Execution<'_> {
                 }
                 failure.map_or(Ok(()), Err)
             })();
+            coordinator.cancel();
             drop(deliveries);
             for (_, token) in &pending_deliveries {
                 token.store(true, Ordering::Release);

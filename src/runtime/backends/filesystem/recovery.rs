@@ -1,6 +1,22 @@
 use super::*;
 use serde_json::{Value, json};
+use std::io::Write;
 use std::os::unix::fs::FileTypeExt;
+
+fn sync_saved_tree(path: &Path) -> Result<(), BackendError> {
+    let kind = fs::symlink_metadata(path).map_err(error)?.file_type();
+    if kind.is_dir() {
+        for entry in fs::read_dir(path).map_err(error)? {
+            sync_saved_tree(&entry.map_err(error)?.path())?;
+        }
+    }
+    if kind.is_file() || kind.is_dir() {
+        fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(error)?;
+    }
+    Ok(())
+}
 
 // Paths in the saved metadata always name the private generation, never the live upper.
 fn relocate(value: &mut Value, from: &Path, to: &Path) {
@@ -176,7 +192,22 @@ impl FilesystemBackend {
         record["subvolumes"] = json!(subvolumes);
         record["system_binding"] = system_binding(&self.config.bubblewrap_path)?;
         relocate(&mut record, &self.config.state_directory, &directory);
-        fs::write(path, serde_json::to_vec(&record).map_err(error)?).map_err(error)
+        sync_saved_tree(&directory)?;
+        let parent = path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut record_file = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
+        record_file
+            .write_all(&serde_json::to_vec(&record).map_err(error)?)
+            .map_err(error)?;
+        record_file.as_file().sync_all().map_err(error)?;
+        record_file
+            .persist(path)
+            .map_err(|failure| error(failure.error))?;
+        fs::File::open(parent)
+            .and_then(|file| file.sync_all())
+            .map_err(error)
     }
 
     pub(super) fn load_recovery(&self, path: &Path) -> Result<(), BackendError> {

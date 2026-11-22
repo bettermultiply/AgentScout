@@ -270,6 +270,17 @@ impl SpeculativeTree {
         }
         Ok(())
     }
+    pub fn with_workspace_path(
+        agent_id: impl Into<String>,
+        run_dir: impl Into<PathBuf>,
+        workspace: impl Into<PathBuf>,
+    ) -> io::Result<Self> {
+        let mut tree = Self::new(agent_id.into());
+        tree.workspace_root = run_dir.into();
+        tree.workspace_path = Some(workspace.into());
+        Ok(tree)
+    }
+
     pub fn with_workspace(
         agent_id: impl Into<String>,
         root: impl Into<PathBuf>,
@@ -287,7 +298,16 @@ impl SpeculativeTree {
         sequence: usize,
         bindings: &Value,
     ) -> io::Result<Self> {
-        let mut tree = Self::with_workspace("agent", run_dir)?;
+        let mut tree = Self::with_workspace_path(
+            "agent",
+            run_dir,
+            bindings
+                .get("workspace_path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| run_dir.join("workspace")),
+        )?;
+        fs::create_dir_all(tree.workspace())?;
         tree.run_id = Some(run_id.into());
         tree.set_execution_id(format!("{run_id}:{sequence}"))?;
         // Restore the saved values exactly, including omitted bindings and JSON nulls.
@@ -299,7 +319,13 @@ impl SpeculativeTree {
     }
 
     pub fn workspace(&self) -> PathBuf {
-        self.workspace_root.join("workspace")
+        self.workspace_path
+            .clone()
+            .unwrap_or_else(|| self.workspace_root.join("workspace"))
+    }
+
+    pub fn workspace_path(&self) -> Option<&Path> {
+        self.workspace_path.as_deref()
     }
 
     /// Runtime tools may only execute for the live authority recorded by the Tree.
@@ -517,9 +543,14 @@ impl SpeculativeTree {
         })
     }
 
-    pub(super) fn make_prepare_acceptance(&mut self, branch_id: &str, target_suspended: bool) -> io::Result<AgentCommand> {
+    pub(super) fn make_prepare_acceptance(
+        &mut self,
+        branch_id: &str,
+        target_suspended: bool,
+    ) -> io::Result<AgentCommand> {
         let generation = self.branch(branch_id)?.generation;
-        let authority_branch_id = self.acceptance_target(self.branch(branch_id)?)
+        let authority_branch_id = self
+            .acceptance_target(self.branch(branch_id)?)
             .ok_or_else(|| invalid_input("acceptance target is no longer eligible"))?
             .to_owned();
         let command_id = self.register(
@@ -546,6 +577,7 @@ impl SpeculativeTree {
         let command_id = self.register(branch_id, CommandOperation::Promote, None, generation)?;
         Ok(AgentCommand::Promote {
             branch_id: branch_id.to_string(),
+            reuse_parent_environment: false,
             notification,
             parent_branch_id: None,
             execution_access: None,

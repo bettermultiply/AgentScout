@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { readFileSync } from 'node:fs';
+import { SessionTree } from './session-tree.ts';
 
 /** Delivery is confirmed from native persisted entries, never queue acceptance. */
 export class Notifications {
@@ -18,7 +19,8 @@ export class Notifications {
         await session.sendCustomMessage({customType:'notification',content:command.notification,display:false,details:{command_id:command.command_id}},{triggerTurn:false});
     }
     confirm(manager) {
-        if(![...this.pending.values()].some(item=>item.session.sessionManager===manager))return;
+        if(![...this.pending].some(([id,item])=>item.session.sessionManager===manager&&this.entry(manager,id)))return;
+        SessionTree.persist(manager);
         const records=readFileSync(manager.getSessionFile(),'utf8').split('\n').filter(Boolean).map(JSON.parse);
         for(const [id,item] of this.pending){
             if(item.session.sessionManager!==manager)continue;

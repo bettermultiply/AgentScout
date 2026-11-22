@@ -7,10 +7,11 @@ mod decision;
 mod engine;
 mod provider;
 mod validation;
+mod pure;
 mod worker;
 pub use provider::ModelProviderProcess;
 
-pub use compile::CompiledPolicy;
+pub use compile::{CompiledPolicy, PolicyModelGrant};
 pub use decision::Decision;
 pub use engine::PolicyEngine;
 

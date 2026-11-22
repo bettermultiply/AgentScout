@@ -11,7 +11,16 @@ impl SpeculativeTree {
         chance_id: &str,
         prediction: Value,
     ) -> io::Result<AgentCommand> {
-        self.create_candidate(chance_id, prediction, false)
+        self.start_candidate_with_provenance(chance_id, prediction, None)
+    }
+
+    pub(super) fn start_candidate_with_provenance(
+        &mut self,
+        chance_id: &str,
+        prediction: Value,
+        provenance: Option<Value>,
+    ) -> io::Result<AgentCommand> {
+        self.create_candidate(chance_id, prediction, provenance, false)
     }
 
     pub fn start_model_candidate(
@@ -24,19 +33,22 @@ impl SpeculativeTree {
                 "branch_model requires a model inference boundary",
             ));
         }
-        self.create_candidate(chance_id, prediction, true)
+        self.create_candidate(chance_id, prediction, None, true)
     }
 
     fn create_candidate(
         &mut self,
         chance_id: &str,
         prediction: Value,
+        provenance: Option<Value>,
         deferred: bool,
     ) -> io::Result<AgentCommand> {
         let chance = self.chance(chance_id)?.clone();
         let parent = chance.parent_branch_id.as_str();
         let sequence = self.next_generation;
-        let branch_id = if let Some(scope) = self.reopened_execution_scope() {
+        let branch_id = if chance_id.starts_with("chance-local-") {
+            format!("candidate-{chance_id}")
+        } else if let Some(scope) = self.reopened_execution_scope() {
             format!("candidate-{scope}-{sequence}")
         } else {
             format!("candidate-{sequence}")
@@ -69,6 +81,7 @@ impl SpeculativeTree {
             chance_record.proposals.push(ProposalRecord {
                 proposal_id: proposal_id.clone(),
                 payload: prediction.clone(),
+                provenance,
             });
         }
         chance_record.branch_ids.push(branch_id.clone());
@@ -109,19 +122,28 @@ impl SpeculativeTree {
             OperationKind::StartCandidate,
         )?;
         self.branch_mut(&branch_id)?.execution_state.turn_active = true;
-        self.record_runtime_state(&branch_id, RuntimeExecutionState::EnvironmentRequested)?;
+        if !chance_id.starts_with("chance-local-") {
+            self.record_runtime_state(&branch_id, RuntimeExecutionState::EnvironmentRequested)?;
+        }
+        self.candidate_start_command(&branch_id, prediction)
+    }
+
+    pub(super) fn candidate_start_command(&self, branch_id: &str, prediction: Value) -> io::Result<AgentCommand> {
+        let branch = self.branch(branch_id)?;
+        let chance = self.chance(branch.chance_id.as_deref().ok_or_else(|| invalid_input("missing Candidate Chance"))?)?;
+        let parent = &chance.parent_branch_id;
         Ok(AgentCommand::StartCandidate {
-            environment_id: self.branches[&branch_id].environment_id.clone(),
+            environment_id: branch.environment_id.clone(),
             execution_access: None,
-            branch_id: branch_id.clone(),
-            parent_branch_id: parent.to_string(),
-            operation_id: chance.operation_id,
-            tool_name: chance.tool_name,
+            branch_id: branch_id.into(),
+            parent_branch_id: parent.clone(),
+            operation_id: chance.operation_id.clone(),
+            tool_name: chance.tool_name.clone(),
             workspace: self.workspace(),
             prediction,
-            checkpoint: chance.checkpoint,
+            checkpoint: chance.checkpoint.clone(),
             command_id: format!("start-{branch_id}"),
-            generation: self.branch(&branch_id)?.generation,
+            generation: branch.generation,
             history: self.transcripts.get(parent).cloned().unwrap_or_default(),
         })
     }
@@ -375,6 +397,7 @@ impl SpeculativeTree {
         self.active_actions.remove(branch_id);
         self.action_facts.remove(branch_id);
         self.speculations.remove(branch_id);
+        self.extent_disposals.remove(branch_id);
         self.model_usage.remove(branch_id);
         self.tool_finished_at_ms.remove(branch_id);
         self.branches

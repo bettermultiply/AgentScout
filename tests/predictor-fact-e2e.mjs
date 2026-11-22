@@ -23,18 +23,22 @@ for(const mode of ['single','advanced','full','part', ...(process.env.ASCOUT_TES
     fs.writeFileSync(root+'/policy/policy.yaml',saved.definition);
     for(const [path,original] of Object.entries(saved.files)){
         let source=original;
+        if (nested && path === saved.decisions['admit.opportunity_pass'].file) {
+            source = `def opportunity_pass(data, *, policy_config, capabilities):
+    op = data['op']
+    return op['has_predictor'] and (op['kind'] == 'nle_action' and op['authority'] or op['kind'] == 'read' and not op['authority'])
+`;
+        }
         if(speculativeFirst&&path==='decisions.py') {
             source=source.replace('def launch(data, *, policy_config, capabilities):\n    return True', 'def launch(data, *, policy_config, capabilities):\n    return False');
             source=source.replace('if evidence is None:\n        return {"verdict": "indeterminate"}', 'if not evidence:\n        return {"verdict": "compatible" if data["match_context"]["operation_id"] == "first-tool" and data["proposal"]["payload"] == "moved" else "incompatible"}');
-            if(mode==='part')source=source.replace('{"intent": "Promote"}', '{"intent": "Promote", "full": False, "part": {"scopes": [], "notification": data["context"]["candidate_proposal"]}}');
+            if (mode==='part') {
+                source = source.replace('{"intent": "Promote"}', '{"intent": "Reuse", "scopes": ["workspace"], "notification": data["context"]["candidate_proposal"]["payload"]}');
+            }
             if (nested) {
-                source = source.replace(/^def (opportunity_pass|predict|launch|match_proposal|dispose)\(/gm, 'def unused_$1(');
+                source = source.replace(/^def (predict|launch|match_proposal|dispose)\(/gm, 'def unused_$1(');
                 source = source.replace('return {"mode": "block"}', 'return {"mode": "allow"}');
                 source += `
-
-def opportunity_pass(data, *, policy_config, capabilities):
-    op = data['op']
-    return op['has_predictor'] and (op['kind'] == 'nle_action' and op['authority'] or op['kind'] == 'read' and not op['authority'])
 
 def predict(data, *, policy_config, capabilities):
     payload = 'nested guess' if data['chance_context']['tool_name'] == 'read' else 'moved'
@@ -57,15 +61,14 @@ def dispose(data, *, policy_config, capabilities):
         return {'actions': [{'intent': 'Discard'}]}
     if data['branch']['operation_id'] != 'first-tool' and ${innerFull ? 'False' : 'True'}:
         directory = next(r['result']['payload'].strip() for r in data['context']['candidate_results'] if r.get('action_id') == 'inner-write')
-        return {'actions': [{'intent': 'Promote', 'full': False, 'part': {'results': [{'id': 'local', 'files': [directory + '/nested-report.txt'], 'notification': 'nested part delivered'}]}}]}
+        return {'actions': [{'intent': 'Reuse', 'scopes': [directory + '/nested-report.txt'], 'notification': 'nested part delivered'}]}
     return {'actions': [{'intent': 'Promote'}]}
 `;
             }
             if(selective) {
                 source=source.replace('return {"mode": "block"}', 'return {"mode": "allow"}');
                 source=source.replace('    evidence = data["evidence"]', `    position = data["match_context"]["candidate"]["branch"]["execution_position"]\n    if position["transcript_index"] < 8:\n        return {"verdict": "indeterminate"}\n    evidence = data["evidence"]`);
-                // Select the files from the successful candidate tool result.
-                source=source.replace('{"intent": "Promote"}', `{"intent": "Promote", "full": False, "part": {"results": [\n            {"id": "report", "files": [next(r["result"]["payload"].strip() for r in data["context"]["candidate_results"] if r["action_id"] == "candidate-files") + "/report.txt"], "notification": "selected report"},\n            {"id": "conflict", "files": [next(r["result"]["payload"].strip() for r in data["context"]["candidate_results"] if r["action_id"] == "candidate-files") + "/conflict.txt"], "notification": "rejected conflict"}]}}`);
+                source=source.replace('{"intent": "Promote"}', `{"intent": "Reuse", "scopes": [next(r["result"]["payload"].strip() for r in data["context"]["candidate_results"] if r["action_id"] == "candidate-files") + "/report.txt"], "notification": "selected report"}`);
             }
         }
         fs.mkdirSync(root+'/policy/'+path.split('/').slice(0,-1).join('/'),{recursive:true});
@@ -112,7 +115,7 @@ def dispose(data, *, policy_config, capabilities):
     async function freePort(){const server=http.createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;await new Promise(r=>server.close(r));return port;}
     const port=await freePort(),runtimePort=await freePort();
     fs.writeFileSync(root+'/pi/models.json',JSON.stringify({providers:{fixture:{baseUrl:`http://127.0.0.1:${fake.address().port}/v1`,api:'openai-completions',apiKey:'local-fake',models:[{id:'fixture',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
-    const filesystem=(nested || process.env.ASCOUT_TEST_ACCEPTANCE_FS==='1')&&speculativeFirst
+    const filesystem=(nested || mode === 'part' || process.env.ASCOUT_TEST_ACCEPTANCE_FS==='1')&&speculativeFirst
         ?{state_directory:root+'/fs-state',isolated_paths:[runPath(root,'workspace')],passthrough_rw:[root]}
         :undefined;
     fs.writeFileSync(root+'/runtime.json',JSON.stringify({backend:'nle',control_address:`127.0.0.1:${runtimePort}`,adapter_instance:'predictor-fact',python:project+'/../.venv-nle/bin/python',bridge:project+'/examples/nle-runtime-bridge.py',guidebook:project+'/examples/nle/Guidebook.txt',seed:7,action_delay_seconds:1,env_id:'NetHackScore-v0',filesystem}));
@@ -193,7 +196,7 @@ def dispose(data, *, policy_config, capabilities):
     const tool=finished.find(e=>e.action_id==='first-tool'&&e.action_kind==='tool_execution');
     if(mode!=='full') {
         assert.equal(tool?.status,'succeeded');
-        assert.match(tool.result,/position=\(25,5\).*\nmap:/s,'tool received the real west-step public observation, not its predicted label');
+        assert.match(tool.result.payload,/position=\(25,5\).*\nmap:/s,'tool received the real west-step public observation, not its predicted label');
         assert.equal(tool.evidence.is_error,false);
     }
     assert.ok(rows.some(e=>e.message==='speculative_admission_request'&&e.action_kind==='model_inference'));
@@ -203,7 +206,7 @@ def dispose(data, *, policy_config, capabilities):
     if(speculativeFirst) {
         const accepted=rows.find(e=>e.message==='command_result'&&e.operation==='promote'&&e.status==='applied');
         assert.ok(accepted,'Policy acceptance must reach the Agent');
-        const receipt=rows.find(e=>e.disposition===(mode==='full'?'Promote':'Part'));
+        const receipt=rows.find(e=>e.disposition===(mode==='full'?'Promote':'Reuse'));
         assert.equal(receipt?.branch_id,accepted.branch_id);
         const transfer=rows.find(e=>e.event?.payload?.operation?.operation==='accept_environment')?.event;
         assert.ok(transfer,'acceptance uses the normal Runtime operation');
@@ -216,7 +219,7 @@ def dispose(data, *, policy_config, capabilities):
         if(selective) {
             assert.match(requests,/Accepted result: selected report/);
             assert.doesNotMatch(requests,/rejected conflict/);
-            assert.deepEqual(receipt.outcome,{part_results:{results:['report']}});
+            assert.deepEqual(receipt.outcome,{part_results:{results:['selected-paths']}});
             for(const [file, content] of Object.entries({'report.txt':'report','draft.txt':'authority draft','conflict.txt':'authority conflict'})) {
                 assert.equal(fs.readFileSync(runPath(root,`workspace/${file}`),'utf8'),content);
             }
@@ -227,11 +230,15 @@ def dispose(data, *, policy_config, capabilities):
             assert.ok(started.some(e=>e.branch_id===accepted.branch_id&&e.t_ms>=accepted.t_ms),'winner continues after commit');
         }
     } else if(multistep){
-        const promoted=rows.find(e=>e.message==='command_result'&&e.operation==='promote'&&e.status==='applied');
-        assert.equal(promoted,undefined,'later authority inference prevents full acceptance');
+        const promotions=rows.filter(e=>e.message==='command_result'&&e.operation==='promote'&&e.status==='applied');
+        assert.ok(promotions.length,'the result hold preserves the parent boundary during validation');
+        assert.equal(rows.find(e=>e.message==='task_completed').branch_id,promotions.at(-1).branch_id);
         assert.ok(rows.some(e=>e.operation==='prepare_acceptance'&&e.status==='applied'));
-        const tools=finished.filter(e=>e.action_kind==='tool_execution'&&e.status==='succeeded');
-        assert.equal(tools.length,5);
+        assert.ok(!started.some(e=>e.branch_id==='authority'&&e.action_kind==='model_inference'
+            && e.timestamp_ms>tool.timestamp_ms),'the old parent starts no inference after the tool result');
+        const winners = new Set(promotions.map(e => e.branch_id));
+        assert.ok(finished.some(e=>winners.has(e.branch_id)&&e.action_kind==='tool_execution'
+            && e.status==='succeeded'),'a promoted branch executed a follow-up tool');
         const entries=fs.readFileSync(runPath(root, 'session.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
         assert.ok(entries.some(e=>e.message?.role==='assistant'&&e.message.stopReason==='stop'&&e.message.content.some(p=>p.text==='local fixture completed')),'native session persists the complete final reply');
     }

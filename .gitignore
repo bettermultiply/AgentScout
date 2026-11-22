@@ -1,6 +1,9 @@
 /target/
 /webui/dist/
-/assets/
+/assets/*
+!/assets/policy/
+/assets/policy/*
+!/assets/policy/coding/
 /docs/survey/[0-9]*.pdf
 /docs/survey/[0-9]*.txt
 /Discussion.md

@@ -1,5 +1,6 @@
 //! bubblewrap LaunchFragment 翻译、spawn 与内层状态读取。
 
+use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
@@ -64,8 +65,52 @@ impl Processes {
             None => None,
         };
 
-        let use_bwrap = !fragment.mounts.is_empty();
-        let mut command = if use_bwrap {
+        let native = role == ProcessRole::NamespaceHolder;
+        let use_bwrap = !native && !fragment.mounts.is_empty();
+        let mut native_plan = None;
+        let mut command = if native {
+            let prepared = (|| {
+                let (source, target) = fragment
+                    .holder_bind
+                    .as_ref()
+                    .ok_or_else(|| BackendError::new("namespace holder requires a socket bind"))?;
+                let stage = tempfile::Builder::new()
+                    .prefix(".mount-root-")
+                    .tempdir_in(
+                        source
+                            .parent()
+                            .ok_or_else(|| BackendError::new("missing holder directory parent"))?,
+                    )
+                    .map_err(error)?;
+                let mut entries = fragment.mounts.clone();
+                // Native root setup recursively protects inherited mounts.
+                entries.retain(|entry| !matches!(entry, MountEntry::RoBind { source, target } if source == target && target != std::path::Path::new("/")));
+                entries.push(MountEntry::Bind {
+                    source: source.clone(),
+                    target: target.clone(),
+                });
+                let plan = serde_json::to_vec(&serde_json::json!({
+                    "entries": entries,
+                    "stage": stage.path(),
+                    "socket": target.join("cmd.sock"),
+                    "chdir": fragment.chdir.as_ref().unwrap_or(&launch.cwd),
+                    "parent": std::process::id(),
+                    "cgroup": cgroup_path,
+                }))
+                .map_err(error)?;
+                Ok((holder_executable()?, plan, stage))
+            })();
+            match prepared {
+                Ok((executable, plan, stage)) => {
+                    native_plan = Some((plan, stage));
+                    Command::new(executable)
+                }
+                Err(failure) => {
+                    remove_cgroup(&cgroup_path);
+                    return Err(failure);
+                }
+            }
+        } else if use_bwrap {
             let (read, write) = match status_pipe() {
                 Ok(pipe) => pipe,
                 Err(failure) => {
@@ -114,11 +159,11 @@ impl Processes {
 
         let cgroup_procs_fd = match cgroup_path
             .as_ref()
+            .filter(|_| !native)
             .map(|path| {
                 OpenOptions::new()
                     .write(true)
                     .open(path.join("cgroup.procs"))
-                    .map(|file| file.into_raw_fd())
             })
             .transpose()
         {
@@ -134,14 +179,13 @@ impl Processes {
                 if libc::setpgid(0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if let Some(fd) = cgroup_procs_fd {
-                    let pid = libc::getpid().to_string();
-                    let bytes = pid.as_bytes();
-                    let written = libc::write(fd, bytes.as_ptr().cast(), bytes.len());
+                if let Some(file) = &cgroup_procs_fd {
+                    // Writing zero moves the calling process. No allocation
+                    // is safe in this post-fork, pre-exec callback.
+                    let written = libc::write(file.as_raw_fd(), c"0".as_ptr().cast(), 1);
                     if written < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
-                    libc::close(fd);
                 }
                 Ok(())
             });
@@ -160,6 +204,12 @@ impl Processes {
             .stderr(Stdio::from(log))
             .envs(&launch.env)
             .envs(&fragment.env);
+        if native {
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(failure) => {
@@ -186,7 +236,53 @@ impl Processes {
         }
 
         let prepared = (|| -> Result<(u32, u64), BackendError> {
-            if use_bwrap {
+            if let Some((plan, _stage)) = native_plan {
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(&plan)
+                    .map_err(error)?;
+                let stdout = child.stdout.take().unwrap();
+                let mut poll = libc::pollfd {
+                    fd: stdout.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                loop {
+                    match unsafe { libc::poll(&mut poll, 1, 2_000) } {
+                        0 => return Err(BackendError::new("namespace holder readiness timed out")),
+                        n if n > 0 => break,
+                        _ => {
+                            let failure = std::io::Error::last_os_error();
+                            if failure.kind() != std::io::ErrorKind::Interrupted {
+                                return Err(error(failure));
+                            }
+                        }
+                    }
+                }
+                let mut line = String::new();
+                BufReader::new(stdout).read_line(&mut line).map_err(error)?;
+                let (pid, namespace) = parse_status(&line)?;
+                let observed = fs::metadata(format!("/proc/{pid}/ns/mnt"))
+                    .map_err(error)?
+                    .ino();
+                if observed != namespace {
+                    return Err(BackendError::new(
+                        "namespace holder reported a mismatched mount namespace",
+                    ));
+                }
+                #[cfg(test)]
+                if self
+                    .fail_mount_wait
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(BackendError::new(
+                        "injected overlay mount readiness failure",
+                    ));
+                }
+                Ok((pid, namespace))
+            } else if use_bwrap {
                 let (child_pid, namespace) = self.read_status(&context.environment_id)?;
                 let overlay_targets: Vec<_> = fragment
                     .mounts
@@ -232,7 +328,7 @@ impl Processes {
         // later namespace sweep kill the wrong processes. A short command can
         // already be reaped (and even reuse its pid), so only keep the fd when
         // it still denotes the namespace reported by bwrap.
-        let namespace_fd = if use_bwrap {
+        let namespace_fd = if native || use_bwrap {
             fs::File::open(format!("/proc/{inner_pid}/ns/mnt"))
                 .ok()
                 .and_then(|file| {
@@ -291,23 +387,7 @@ impl Processes {
         };
         drop(write);
         let line = read_status_line(&read)?;
-        let value: serde_json::Value = serde_json::from_str(line.trim())
-            .map_err(|error| BackendError::new(format!("invalid bwrap status: {error}")))?;
-        let child_pid = value
-            .get("child-pid")
-            .and_then(|value| value.as_u64())
-            .ok_or_else(|| BackendError::new("bwrap status did not report child-pid"))?
-            as u32;
-        let namespace = value
-            .get("mnt-namespace")
-            .and_then(|value| value.as_u64())
-            .ok_or_else(|| BackendError::new("bwrap status did not report mnt-namespace"))?;
-        let host_namespace = fs::metadata("/proc/self/ns/mnt").map_err(error)?.ino();
-        if namespace == host_namespace {
-            return Err(BackendError::new(
-                "bwrap child is still in the host mount namespace",
-            ));
-        }
+        let (child_pid, namespace) = parse_status(&line)?;
         // Keep draining so bwrap does not SIGPIPE on later status updates.
         let reader = read.try_clone().map_err(error)?;
         drop(read);
@@ -324,6 +404,47 @@ impl Processes {
         });
         Ok((child_pid, namespace))
     }
+}
+
+fn holder_executable() -> Result<PathBuf, BackendError> {
+    let executable = std::env::current_exe().map_err(error)?;
+    // Cargo may put integration-test executables under build/<package>/out.
+    let cargo_build_output = executable.parent().is_some_and(|parent| parent.ends_with("out")
+        && parent.ancestors().nth(3).is_some_and(|path| path.ends_with("build")));
+    let directory = executable
+        .ancestors()
+        .skip(1)
+        .take(if cfg!(test) || cargo_build_output { 5 } else { 2 })
+        .map(|path| path.join("ascout-fs-holder"))
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            BackendError::new(format!(
+                "ascout-fs-holder is missing alongside {} (build with cargo build --bins)",
+                executable.display()
+            ))
+        })?;
+    Ok(directory)
+}
+
+fn parse_status(line: &str) -> Result<(u32, u64), BackendError> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).map_err(|failure| {
+        BackendError::new(format!("invalid sandbox readiness status: {failure}"))
+    })?;
+    let child_pid = value["child-pid"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|&pid| pid != 0)
+        .ok_or_else(|| BackendError::new("sandbox status did not report child-pid"))?;
+    let namespace = value["mnt-namespace"]
+        .as_u64()
+        .ok_or_else(|| BackendError::new("sandbox status did not report mnt-namespace"))?;
+    let host_namespace = fs::metadata("/proc/self/ns/mnt").map_err(error)?.ino();
+    if namespace == host_namespace {
+        return Err(BackendError::new(
+            "sandbox child is still in the host mount namespace",
+        ));
+    }
+    Ok((child_pid, namespace))
 }
 
 /// spawn 之后任一准备步骤失败时的统一回收：杀掉整个进程组、等待回收、

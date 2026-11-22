@@ -4,8 +4,91 @@ use crate::runtime::process::FreezeMechanism;
 use serde_json::Value;
 use std::io::{BufRead, Write};
 use std::os::fd::AsRawFd;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::JoinHandle;
+
+type HolderResult = Result<(), BackendError>;
+
+pub(super) struct HolderStart {
+    ready: Mutex<Receiver<HolderResult>>,
+    result: std::sync::OnceLock<HolderResult>,
+    release: Option<Sender<()>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl HolderStart {
+    pub(super) fn wait(&self) -> HolderResult {
+        self.result.get_or_init(|| {
+            self.ready.lock().map_err(error)?.recv()
+                .map_err(|_| BackendError::new("holder startup worker exited without reporting readiness"))?
+        }).clone()
+    }
+}
+
+impl Drop for HolderStart {
+    fn drop(&mut self) {
+        self.release.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
 
 impl FilesystemBackend {
+    pub(super) fn wait_for_holder(&self, id: &str) -> HolderResult {
+        let start = self.holder_starts.lock().map_err(error)?.get(id).cloned();
+        start.map_or(Ok(()), |start| start.wait())
+    }
+
+    pub(super) fn start_child_holder(
+        &self,
+        context: &BackendContext,
+        launch: &AgentLaunch,
+    ) -> HolderResult {
+        let id = &context.environment_id;
+        let mut launches = self.launches.lock().map_err(error)?;
+        let mut starts = self.holder_starts.lock().map_err(error)?;
+        if starts.contains_key(id) || self.process.is_running(id)? {
+            return Ok(());
+        }
+        let fragment = self.holder_fragment(context, launch)?;
+        let process = Arc::clone(&self.process);
+        let context = context.clone();
+        let (sender, ready) = mpsc::channel();
+        let (release, finished) = mpsc::channel();
+        let worker = std::thread::Builder::new().name("ascout-holder".into()).spawn(move || {
+            let result = Self::launch_holder(&process, &context, &fragment);
+            let running = result.is_ok();
+            let _ = sender.send(result);
+            // Linux delivers the holder's parent-death signal on exit of the
+            // spawning thread. Keep this thread alive until the holder stops.
+            if running {
+                let _ = finished.recv();
+            }
+        }).map_err(error)?;
+        starts.insert(id.clone(), Arc::new(HolderStart {
+            ready: Mutex::new(ready),
+            result: Default::default(),
+            release: Some(release),
+            worker: Some(worker),
+        }));
+        launches.insert(id.clone(), launch.clone());
+        Ok(())
+    }
+
+    fn launch_holder(
+        process: &crate::runtime::process::Processes,
+        context: &BackendContext,
+        fragment: &LaunchFragment,
+    ) -> HolderResult {
+        if let Err(mut failure) = process.launch_holder(context, fragment) {
+            if let Err(cleanup) = process.cleanup(&context.environment_id) {
+                failure.add_cleanup_failure("filesystem", format!("stop failed holder: {cleanup}"));
+            }
+            return Err(failure);
+        }
+        Ok(())
+    }
     pub(super) fn start_holder(
         &self,
         context: &BackendContext,
@@ -13,24 +96,19 @@ impl FilesystemBackend {
     ) -> Result<(), BackendError> {
         let id = &context.environment_id;
         let mut launches = self.launches.lock().map_err(error)?;
+        let _ = self.wait_for_holder(id);
         if !self.process.is_running(id)? {
             self.process.stop(id)?;
-            let fragment = self.launch_fragment(context, launch)?;
-            if let Err(mut failure) = self.process.launch_holder(context, &fragment) {
-                if let Err(cleanup) = self.process.cleanup(id) {
-                    failure.add_cleanup_failure(
-                        "filesystem",
-                        format!("stop failed holder: {cleanup}"),
-                    );
-                }
-                return Err(failure);
-            }
+            self.holder_starts.lock().map_err(error)?.remove(id);
+            let fragment = self.holder_fragment(context, launch)?;
+            Self::launch_holder(&self.process, context, &fragment)?;
         }
         launches.insert(id.clone(), launch.clone());
         Ok(())
     }
 
     pub(super) fn drain_holder(&self, id: &str, cancel: bool) -> Result<(), BackendError> {
+        self.wait_for_holder(id)?;
         if !self.process.is_running(id)? {
             return Ok(());
         }
@@ -66,6 +144,7 @@ impl FilesystemBackend {
         previous: &mut dyn FnMut() -> Result<FilesystemResult, BackendError>,
     ) -> Result<FilesystemResult, BackendError> {
         let id = &context.environment_id;
+        self.wait_for_holder(id)?;
         if self.process.writer_active(id)? {
             return Err(BackendError::new(
                 "cannot materialize while Runtime-managed execution is active; task writers have not been confirmed drained",
@@ -110,6 +189,7 @@ impl FilesystemBackend {
         paused: bool,
         transition: impl FnOnce() -> Result<(), BackendError>,
     ) -> Result<(), BackendError> {
+        self.wait_for_holder(id)?;
         if !self.process.is_running(id)? {
             return transition();
         }
@@ -145,8 +225,8 @@ impl FilesystemBackend {
         use std::os::fd::AsRawFd;
         // launch_fragment prepares mount work directories and must never be
         // regenerated while the holder has those overlays mounted.
-        let plan: Value = serde_json::from_reader(
-            fs::File::open(
+        let plan: Value = serde_json::from_slice(
+            &fs::read(
                 self.config
                     .state_directory
                     .join("tool-plans")
@@ -236,6 +316,7 @@ impl FilesystemBackend {
             return apply(&context);
         };
         let id = &environment.id;
+        self.wait_for_holder(id)?;
         let running = self.process.is_running(id)?;
         let paused = running && environment.state == EnvironmentState::Suspended;
         let frozen = running && !paused && self.process.freeze_mechanism() != FreezeMechanism::None;
@@ -407,11 +488,11 @@ mod tests {
     #[test]
     fn filesystem_without_freeze_mechanism_still_runs_operations() {
         let (mut runtime, _root) = backend();
-        runtime.process = crate::runtime::process::Processes::with_mechanism(
+        runtime.process = Arc::new(crate::runtime::process::Processes::with_mechanism(
             "process",
             "bwrap",
             FreezeMechanism::None,
-        );
+        ));
         let (context, _log_dir) = launch_test_agent(&runtime, "/bin/sleep", vec!["3".into()]);
         let result = runtime
             .with_filesystem_execution(&context, &env_fork_operation(), |_| {

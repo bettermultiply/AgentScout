@@ -44,6 +44,12 @@ export class AscProxy {
     private cancelling=new Map<string,Promise<void>>();
     bind(branch:string,access:Access|undefined){if(access)this.accesses.set(branch,access)}
     unbind(branch:string){this.accesses.delete(branch)}
+    transfer(from:string,to:string){
+        const access=this.accesses.get(from);
+        if(!access)throw Error('Parent execution access missing');
+        this.accesses.set(to,access);
+        this.accesses.delete(from);
+    }
     has(branch:string){return this.accesses.has(branch)}
     private async request(access: Access, operation: string, command: string, extra: Record<string, unknown> = {}, accepted?: () => void, output?: (value: any) => void): Promise<any> {
         if (access.transport !== 'unix-json-lines') throw Error('Branch execution access missing or unsupported');

@@ -22,6 +22,7 @@ pub enum ControlOperation {
     Launch(ToolPending),
     Establish(AgentCommand),
     Validate(String),
+    Dispose(String, String),
     SuspendAcceptance(String),
     ResumeAcceptance(String),
     Promote(String, Value),
@@ -46,7 +47,7 @@ impl ControlOperation {
                 };
                 Some(branch_id)
             }
-            Self::Validate(id) | Self::SuspendAcceptance(id) | Self::ResumeAcceptance(id)
+            Self::Validate(id) | Self::Dispose(id, _) | Self::SuspendAcceptance(id) | Self::ResumeAcceptance(id)
             | Self::Promote(id, _) | Self::Terminate(id) | Self::Cleanup(id) => {
                 Some(id)
             }
@@ -65,6 +66,7 @@ impl ControlOperation {
 pub enum ControlResult {
     Selected(Vec<String>),
     Predictions(Vec<Value>),
+    Abstain(Option<String>),
     BranchModel(Value),
     Launch(bool),
     Outcome(Value, Value),
@@ -108,6 +110,7 @@ impl SpeculativeTree {
             operation,
             ControlOperation::Select(_)
                 | ControlOperation::Validate(_)
+                | ControlOperation::Dispose(_, _)
                 | ControlOperation::Rebalance
                 | ControlOperation::Predict(_)
                 | ControlOperation::Launch(_)
@@ -119,7 +122,7 @@ impl SpeculativeTree {
                     matches!(operation, ControlOperation::Launch(_))
                         && (self.authority_branch_id.as_ref() == Some(*branch)
                             || self.pending_candidates().contains(branch))
-                        || matches!(&operation, ControlOperation::Validate(candidate)
+                        || matches!(&operation, ControlOperation::Validate(candidate) | ControlOperation::Dispose(candidate, _)
                             if self.chance_parent(&self.branches[candidate]) == Some(branch.as_str()))
                         || operation
                             .branch()
@@ -171,7 +174,7 @@ impl SpeculativeTree {
             ControlOperation::Launch(tool) => {
                 json!({"parent": tool.branch_id, "candidates": self.pending_candidates()})
             }
-            ControlOperation::Validate(_) => json!({"authority": self.authority_branch_id}),
+            ControlOperation::Validate(_) | ControlOperation::Dispose(_, _) => json!({"authority": self.authority_branch_id}),
             _ => Value::Null,
         }
     }
@@ -218,6 +221,7 @@ impl SpeculativeTree {
             action_kind,
             parent_action_id,
             timestamp_ms,
+            fast_start,
         } = message
         else {
             return Err(io::Error::new(
@@ -248,7 +252,15 @@ impl SpeculativeTree {
             tool_name.clone(),
             parent_action_id,
         )?;
-        let actions = ControlActions::default();
+        let mut actions = ControlActions::default();
+        if self.branches[&branch_id].status == BranchStatus::Promoting {
+            // Admission can cross the acceptance pause in transit. The Agent
+            // still waits for acceptance before executing this action.
+            actions.commands.push(self.resolve_pending(
+                &branch_id, &operation_id, json!({"phase":"execute", "speculation_skipped":true}),
+            )?);
+            return Ok(actions);
+        }
         // A Chance may be admitted on any Branch that still exists in the
         // speculation, not only on the current authority: the nested Chance's
         // authority value is that Branch's own real execution result.
@@ -267,15 +279,38 @@ impl SpeculativeTree {
         // Admission was decided by the adapter that sent this explicit request.
         // The control plane does not re-run it; it only records the accepted
         // opportunity as a Pending Chance. `select` runs from `progress`.
+        let local_id = if let Some(fast) = &fast_start {
+            let id = fast["chance_id"].as_str().filter(|id| {
+                id.strip_prefix("chance-local-").is_some_and(|suffix| {
+                    suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            }).ok_or_else(|| invalid_input("invalid local Chance identity"))?;
+            if action_kind != ActionKind::ToolExecution || checkpoint.is_none()
+                || fast.get("prediction").is_none() || self.chances.contains_key(id)
+                || self.authority_branch_id.as_deref() != Some(&branch_id)
+                || !self.pending_candidates().is_empty() || self.acceptance_in_flight()
+            {
+                return Err(invalid_input("local speculation crossed a conflicting action"));
+            }
+            Some(id.to_owned())
+        } else {
+            None
+        };
         self.mark_operation_requested(&branch_id, &operation_id, OperationKind::Tool)?;
-        self.admit_chance(
+        let id = self.admit_chance_with_id(
             &branch_id,
             &operation_id,
             &tool_name,
             arguments,
             checkpoint,
             Some(timestamp_ms),
+            local_id,
         )?;
+        if let Some(fast) = fast_start {
+            self.change_chance_stage(&id, ChanceStage::Running, "Selected by Agent Adapter")?;
+            self.change_authority_state(&id, AuthorityState::Fetching)?;
+            self.complete_predict(self.tool_pending(&id)?, Ok(ControlResult::Predictions(vec![json!({"payload":fast["prediction"], "provenance":fast["provenance"]})])), &mut actions)?;
+        }
         Ok(actions)
     }
 
@@ -317,7 +352,7 @@ impl SpeculativeTree {
         }
         if matches!(
             work,
-            ControlOperation::Launch(_) | ControlOperation::Validate(_)
+            ControlOperation::Launch(_) | ControlOperation::Validate(_) | ControlOperation::Dispose(_, _)
         ) && context.as_ref().is_some_and(|context| {
             context.iter().any(|(branch, original)| {
                 !self.branches.contains_key(branch)
@@ -402,7 +437,10 @@ impl SpeculativeTree {
                 self.complete_establish(command, result, &mut actions, &branch.unwrap())?;
             }
             ControlOperation::Validate(candidate) => {
-                self.complete_validate(id, candidate, result, &mut actions)?;
+                self.complete_validate(id, candidate, None, result, &mut actions)?;
+            }
+            ControlOperation::Dispose(candidate, resolution) => {
+                self.complete_validate(id, candidate, Some(&resolution), result, &mut actions)?;
             }
             ControlOperation::SuspendAcceptance(candidate) => {
                 if result.is_ok() {
@@ -519,15 +557,15 @@ impl SpeculativeTree {
                 }
                 self.schedule(ControlOperation::Establish(command), actions);
             }
-            // An empty prediction set is not a failed speculation: this
-            // boundary has no hypothesis to test. The authority value is
-            // fetched as an ordinary action so the Agent's call is answered.
-            Ok(ControlResult::Predictions(predictions)) if predictions.is_empty() => {
+            Ok(ControlResult::Abstain(reason)) => {
+                self.change_chance_stage(chance_id, ChanceStage::Discarded(DiscardedReason::NotSelected),
+                    reason.as_deref().unwrap_or("Policy abstained"))?;
                 self.authorize_authority(chance_id, actions)?;
             }
             Ok(ControlResult::Predictions(predictions)) => {
                 for prediction in predictions {
-                    let command = self.start_candidate(chance_id, prediction)?;
+                    let command = self.start_candidate_with_provenance(chance_id,
+                        prediction["payload"].clone(), prediction.get("provenance").cloned())?;
                     let child = match &command {
                         AgentCommand::StartCandidate { branch_id, .. } => branch_id.clone(),
                         _ => unreachable!(),
@@ -539,7 +577,9 @@ impl SpeculativeTree {
                         "chance_id": chance_id,
                         "fork_at": self.branches[&child].execution_position.transcript_index
                     }));
-                    self.schedule(ControlOperation::Establish(command), actions);
+                    if !chance_id.starts_with("chance-local-") {
+                        self.schedule(ControlOperation::Establish(command), actions);
+                    }
                 }
             }
             Err(error) => {
@@ -626,11 +666,9 @@ impl SpeculativeTree {
                     actions.commands.push(AgentCommand::Resume { branch_id })
                 }
                 ("preempt", status) if status.is_live_candidate() => {
-                    actions.commands.extend(self.discard_candidate(
-                        &branch_id,
-                        DiscardedReason::BudgetExhausted,
-                        "Rebalance preempted this candidate",
-                    )?)
+                    if !self.pending_work.values().any(|work| work.branch() == Some(&branch_id)) {
+                        self.schedule(ControlOperation::Dispose(branch_id, "preempted".into()), actions);
+                    }
                 }
                 _ => {}
             }
@@ -665,7 +703,14 @@ impl SpeculativeTree {
                     *execution_access = access;
                 }
                 self.record_runtime_state(branch, RuntimeExecutionState::Ready)?;
-                if !self.stopping && self.branches[branch].status == BranchStatus::Created {
+                if !self.stopping && branch.starts_with("candidate-chance-local-")
+                    && self.branches[branch].status.is_live_candidate()
+                {
+                    if let AgentCommand::StartCandidate { operation_id, execution_access, .. } = command {
+                        actions.commands.push(self.resolve_pending(branch, &operation_id,
+                            json!({"phase":"bind_environment", "environment_id":environment_id, "execution_access":execution_access}))?);
+                    }
+                } else if !self.stopping && self.branches[branch].status == BranchStatus::Created {
                     actions.commands.push(command);
                 }
             }
@@ -708,7 +753,10 @@ impl SpeculativeTree {
                     ChanceStage::Discarded(DiscardedReason::Failed),
                     "Authority value unavailable",
                 )?;
-                return Err(io::Error::other(error));
+                self.discard_chance_candidates(&chance_id, DiscardedReason::Failed,
+                    "Authority value unavailable", actions)?;
+                actions.records.push(json!({"message":"authority_tool_failed", "chance_id":chance_id, "reason":error}));
+                return self.release_tool_continuation(&chance_id, actions);
             }
             _ => unreachable!(),
         };
@@ -720,14 +768,16 @@ impl SpeculativeTree {
         // against the authoritative value. Model Candidates have no Proposal
         // until their model call finishes and are closed by the Agent message
         // path when the authority arrives first.
-        if self.chance(&chance_id)?.branch_ids.is_empty() {
+        let chance = self.chance_mut(&chance_id)?;
+        chance.tool_continuation_pending = live;
+        if !chance.stage.is_terminal() && chance.branch_ids.is_empty() {
             // No Proposal was tested; nothing was speculated on this Chance.
             self.change_chance_stage(
                 &chance_id,
                 ChanceStage::Discarded(DiscardedReason::NotSelected),
                 "Authority value arrived without a candidate",
             )?;
-        } else {
+        } else if !self.chance(&chance_id)?.stage.is_terminal() {
             self.change_chance_stage(
                 &chance_id,
                 ChanceStage::Resolving,
@@ -746,12 +796,49 @@ impl SpeculativeTree {
                     "Authority value delivered",
                 )?;
             }
-            actions.commands.push(self.resolve_pending(
-                &branch_id,
-                &operation_id,
-                json!({"phase":"continue"}),
-            )?);
         }
+        self.release_tool_continuation(&chance_id, actions)
+    }
+
+    pub(super) fn discard_chance_candidates(
+        &mut self, id: &str, why: DiscardedReason, reason: &str, actions: &mut ControlActions,
+    ) -> io::Result<()> {
+        for branch in self.chance(id)?.branch_ids.clone() {
+            if self.branches.get(&branch).is_some_and(|b| b.status.is_live_candidate()) {
+                actions.commands.extend(self.discard_candidate(&branch, why, reason)?);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn release_tool_continuation(&mut self, id: &str, actions: &mut ControlActions) -> io::Result<()> {
+        let chance = self.chance(id)?;
+        if !chance.tool_continuation_pending {
+            return Ok(());
+        }
+        let parent = chance.parent_branch_id.clone();
+        let operation = chance.operation_id.clone();
+        let parent_retired = self.branch(&parent)?.status.is_discarding_or_later();
+        if parent_retired || chance.stage.is_terminal() {
+            // A Full acceptance retires the parent in the same transition that
+            // marks the Chance accepted. Part keeps the parent alive.
+            if !parent_retired {
+                actions.commands.push(self.resolve_pending(
+                    &parent,
+                    &operation,
+                    json!({"phase":"continue"}),
+                )?);
+            }
+            self.chance_mut(id)?.tool_continuation_pending = false;
+        }
+        Ok(())
+    }
+
+    fn establish_local_candidate(&mut self, branch: &str, actions: &mut ControlActions) -> io::Result<()> {
+        let prediction = self.branch_proposal(branch).ok_or_else(|| invalid_input("missing local Proposal"))?.payload.clone();
+        let command = self.candidate_start_command(branch, prediction)?;
+        self.record_runtime_state(branch, RuntimeExecutionState::EnvironmentRequested)?;
+        self.schedule(ControlOperation::Establish(command), actions);
         Ok(())
     }
 
@@ -759,10 +846,14 @@ impl SpeculativeTree {
         &mut self,
         validation_id: u64,
         candidate: String,
+        resolution: Option<&str>,
         result: Result<ControlResult, String>,
         actions: &mut ControlActions,
     ) -> io::Result<()> {
-        if self.stopping || !self.candidate_due(&candidate) {
+        if self.stopping || match resolution {
+            None => !self.candidate_due(&candidate),
+            Some(_) => !self.branch(&candidate)?.status.is_live_candidate(),
+        } {
             return Ok(());
         }
         let (compatible, verdict, notification, validated_at_ms, transfer, part, error) =
@@ -806,7 +897,9 @@ impl SpeculativeTree {
             .chance_id
             .clone()
             .ok_or_else(|| io::Error::other("candidate Chance is missing"))?;
-        if verdict == "indeterminate" {
+        let unbound_local = candidate.starts_with("candidate-chance-local-") && self.branch(&candidate)?.environment_id.is_none();
+        let salvage = part.as_ref().is_some_and(|part| part["intent"] == "Salvage");
+        if verdict == "wait" || (verdict == "indeterminate" && !salvage) {
             return Ok(());
         }
         // A Candidate without a Proposal cannot be compared. This happens on
@@ -830,7 +923,7 @@ impl SpeculativeTree {
             actions.records.push(record);
             return Ok(());
         }
-        if error.is_none()
+        if resolution.is_none() && error.is_none()
             && let Some(proposal) = &proposal
         {
             self.record_validation(
@@ -841,20 +934,38 @@ impl SpeculativeTree {
             );
         }
         let record = json!({"branch_id":candidate, "hypothesis":proposal.as_ref().map(|p|&p.payload), "verdict":verdict, "policy_error":error});
-        if self.can_accept(&candidate, compatible, transfer.is_some()) {
+        if self.can_accept(&candidate, compatible || (salvage
+            && !self.ancestor_assumptions_unresolved(self.branch(&candidate)?)), transfer.is_some()) {
+            if unbound_local && transfer == Some(false) {
+                self.establish_local_candidate(&candidate, actions)?;
+                return Ok(());
+            }
             let previous_status = self.branch(&candidate)?.status;
-            self.chance_mut(&chance_id)?.validation_id = Some(validation_id);
+            if resolution.is_none() {
+                self.chance_mut(&chance_id)?.validation_id = Some(validation_id);
+            }
             self.record_runtime_state(&candidate, RuntimeExecutionState::PromotionRequested)?;
             self.change_status(
                 &candidate,
                 BranchStatus::Promoting,
-                "Validation accepted; Runtime promotion requested",
+                if salvage { "Runtime salvage requested" } else { "Runtime acceptance requested" },
             )?;
             let mut record = record;
             if let Some(notification) = notification {
                 record["notification"] = json!(notification);
             }
-            if let Some(full) = transfer {
+            if unbound_local {
+                let mut command = self.make_promote_command(&candidate, record["notification"].as_str().map(str::to_owned))?;
+                if let AgentCommand::Promote { reuse_parent_environment, .. } = &mut command {
+                    *reuse_parent_environment = true;
+                }
+                self.record_runtime_state(&candidate, RuntimeExecutionState::Promoted)?;
+                record["disposition"] = json!("Promote");
+                record["outcome"] = json!("full");
+                self.pending_acceptance = Some((candidate, record.clone()));
+                actions.records.push(record);
+                actions.commands.push(command);
+            } else if let Some(full) = transfer {
                 record["previous_status"] = json!(previous_status);
                 record["full"] = json!(full);
                 record["part"] = part.unwrap_or(Value::Null);
@@ -880,6 +991,8 @@ impl SpeculativeTree {
         } else {
             let why = if error.is_some() {
                 DiscardedReason::Failed
+            } else if resolution == Some("preempted") {
+                DiscardedReason::BudgetExhausted
             } else {
                 DiscardedReason::MatchRejected
             };
@@ -940,7 +1053,9 @@ impl SpeculativeTree {
                         "full acceptance is missing target execution access",
                     ));
                 }
-                self.record_runtime_state(&candidate, RuntimeExecutionState::Promoted)?;
+                if !part {
+                    self.record_runtime_state(&candidate, RuntimeExecutionState::Promoted)?;
+                }
                 let mut command = self.make_promote_command(&candidate, notification)?;
                 if let AgentCommand::Promote {
                     execution_access,
@@ -954,7 +1069,11 @@ impl SpeculativeTree {
                     *execution_access = access;
                     *command_part = part;
                 }
-                record["disposition"] = json!(if part { "Part" } else { "Promote" });
+                record["disposition"] = if part {
+                    json!(record["part"]["intent"].as_str().unwrap_or("Reuse"))
+                } else {
+                    json!("Promote")
+                };
                 record["outcome"] = json!(outcome);
                 self.pending_acceptance = Some((candidate.clone(), record.clone()));
                 actions.commands.push(command);
@@ -1033,6 +1152,7 @@ impl SpeculativeTree {
         }
         let ids: Vec<String> = self.chances.keys().cloned().collect();
         for id in ids {
+            self.release_tool_continuation(&id, actions)?;
             let chance = self.chance(&id)?;
             if chance.speculation_kind == Some(ActionKind::ModelInference)
                 && chance.authority == AuthorityState::Arrived
@@ -1121,17 +1241,26 @@ impl SpeculativeTree {
                 self.schedule(ControlOperation::SuspendAcceptance(candidate), &mut actions);
             }
         }
-        self.sweep_chances()?;
+        self.sweep_chances(&mut actions)?;
         if !self.stopping {
             self.progress_chances(&mut actions)?;
             for candidate in self.pending_candidates() {
-                if self.candidate_due(&candidate)
-                    && !self
-                        .pending_work
-                        .values()
-                        .any(|work| work.branch() == Some(candidate.as_str()))
+                if self.pending_work.values().any(|work| work.branch() == Some(candidate.as_str())) {
+                    continue;
+                }
+                let branch = &self.branches[&candidate];
+                if candidate.starts_with("candidate-chance-local-")
+                    && branch.environment_id.is_none()
+                    && branch.execution_state.runtime == RuntimeExecutionState::EnvironmentRequested
                 {
+                    self.establish_local_candidate(&candidate, &mut actions)?;
+                } else if self.candidate_due(&candidate) {
                     self.schedule(ControlOperation::Validate(candidate), &mut actions);
+                } else if branch.status == BranchStatus::Blocked(BlockedReason::ExtentReached)
+                    && self.branch_proposal(&candidate).is_some()
+                    && self.extent_disposals.insert(candidate.clone())
+                {
+                    self.schedule(ControlOperation::Dispose(candidate, "extent_reached".into()), &mut actions);
                 }
             }
             if self.rebalance_epoch != Some(self.epoch)

@@ -32,13 +32,28 @@ impl SpeculativeTree {
         checkpoint: Option<Value>,
         speculation_started_at_ms: Option<u64>,
     ) -> io::Result<String> {
+        self.admit_chance_with_id(parent, operation_id, tool_name, arguments, checkpoint, speculation_started_at_ms, None)
+    }
+
+    pub(super) fn admit_chance_with_id(
+        &mut self,
+        parent: &str,
+        operation_id: &str,
+        tool_name: &str,
+        arguments: Value,
+        checkpoint: Option<Value>,
+        speculation_started_at_ms: Option<u64>,
+        local_id: Option<String>,
+    ) -> io::Result<String> {
         let parent_chance_id = self.branch(parent)?.chance_id.clone();
         let speculation_kind = self
             .active_actions
             .get(parent)
             .and_then(|actions| actions.get(operation_id))
             .map(|action| action.action_kind);
-        let chance_id = if let Some(scope) = self.reopened_execution_scope() {
+        let chance_id = if let Some(id) = local_id {
+            id
+        } else if let Some(scope) = self.reopened_execution_scope() {
             format!("chance-{scope}-{}", self.next_chance)
         } else {
             format!("chance-{}", self.next_chance)
@@ -66,6 +81,7 @@ impl SpeculativeTree {
                 speculation_started_at_ms,
                 validation_id: None,
                 speculation_kind,
+                tool_continuation_pending: false,
                 launch_epoch: None,
             },
         );
@@ -362,7 +378,7 @@ impl SpeculativeTree {
     }
 
     /// 丢弃失去权威等待点的 Chance，并释放已经收敛且无人引用的记录。
-    pub(crate) fn sweep_chances(&mut self) -> io::Result<()> {
+    pub(crate) fn sweep_chances(&mut self, actions: &mut ControlActions) -> io::Result<()> {
         let ids: Vec<String> = self.chances.keys().cloned().collect();
         for id in ids {
             let chance = self.chance(&id)?;
@@ -378,6 +394,10 @@ impl SpeculativeTree {
                     "Waiting point is no longer live",
                 )?;
             }
+            if let ChanceStage::Discarded(reason) = self.chance(&id)?.stage {
+                self.discard_chance_candidates(&id, reason, "Chance discarded", actions)?;
+                self.release_tool_continuation(&id, actions)?;
+            }
         }
         let removable: Vec<String> = self
             .chances
@@ -385,6 +405,7 @@ impl SpeculativeTree {
             .filter(|chance| {
                 chance.stage.is_terminal()
                     && chance.authority != AuthorityState::Fetching
+                    && !chance.tool_continuation_pending
                     // A model result still has an after-model hold to release.
                     // progress_chances delivers it before completing the action.
                     && !(chance.speculation_kind == Some(ActionKind::ModelInference)

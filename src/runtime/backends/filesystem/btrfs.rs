@@ -1,8 +1,46 @@
 //! btrfs 子卷、快照、send dump 与增量 diff。
 
+use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use super::*;
+
+// Linux btrfs UAPI (linux/btrfs.h). The v2 union is unused here.
+#[repr(C)]
+struct VolumeArgs {
+    fd: i64,
+    name: [u8; 4088],
+}
+
+#[repr(C)]
+struct SnapshotArgs {
+    fd: i64,
+    transid: u64,
+    flags: u64,
+    unused: [u64; 4],
+    name: [u8; 4040],
+}
+
+fn volume_target(path: &Path, name: &mut [u8]) -> std::io::Result<fs::File> {
+    let basename = path
+        .file_name()
+        .ok_or(std::io::ErrorKind::InvalidInput)?
+        .as_bytes();
+    if basename.len() >= name.len() || basename.contains(&0) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    name[..basename.len()].copy_from_slice(basename);
+    fs::File::open(path.parent().ok_or(std::io::ErrorKind::InvalidInput)?)
+}
+
+fn ioctl_result(result: libc::c_int) -> Result<(), BackendError> {
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(error(std::io::Error::last_os_error()))
+    }
+}
 
 fn btrfs_send_dump_with(
     btrfs_path: &Path,
@@ -100,6 +138,15 @@ impl FilesystemBackend {
     }
 
     pub(super) fn btrfs_create(&self, path: &Path) -> Result<(), BackendError> {
+        if self.config.btrfs_path == Path::new("btrfs") {
+            let mut args = VolumeArgs {
+                fd: 0,
+                name: [0; 4088],
+            };
+            let parent = volume_target(path, &mut args.name).map_err(error)?;
+            let request = libc::_IOW::<VolumeArgs>(0x94, 14);
+            return ioctl_result(unsafe { libc::ioctl(parent.as_raw_fd(), request, &args) });
+        }
         self.run_btrfs(&[
             std::ffi::OsStr::new("subvolume"),
             std::ffi::OsStr::new("create"),
@@ -113,6 +160,19 @@ impl FilesystemBackend {
         target: &Path,
         read_only: bool,
     ) -> Result<(), BackendError> {
+        if self.config.btrfs_path == Path::new("btrfs") {
+            let source = fs::File::open(source).map_err(error)?;
+            let mut args = SnapshotArgs {
+                fd: i64::from(source.as_raw_fd()),
+                transid: 0,
+                flags: if read_only { 1 << 1 } else { 0 }, // BTRFS_SUBVOL_RDONLY
+                unused: [0; 4],
+                name: [0; 4040],
+            };
+            let parent = volume_target(target, &mut args.name).map_err(error)?;
+            let request = libc::_IOW::<SnapshotArgs>(0x94, 23);
+            return ioctl_result(unsafe { libc::ioctl(parent.as_raw_fd(), request, &args) });
+        }
         let mut arguments = vec![
             std::ffi::OsStr::new("subvolume"),
             std::ffi::OsStr::new("snapshot"),

@@ -38,6 +38,7 @@ fn waiting() -> AgentMessage {
         name: "tool".into(),
         arguments: json!({}),
         checkpoint: None,
+        fast_start: None,
         timestamp_ms: 0,
     }
 }
@@ -67,7 +68,7 @@ fn held_authority_prediction_failure_or_empty_releases_tool_and_model_once() {
                     if failure {
                         Err("predict failed".into())
                     } else {
-                        Ok(ControlResult::Predictions(vec![]))
+                        Ok(ControlResult::Abstain(None))
                     },
                 )
                 .unwrap();
@@ -685,7 +686,7 @@ fn promoting_branch_keeps_its_inflight_model_waiting_point_live() {
     tree.change_authority_state("chance-2", AuthorityState::Fetching)
         .unwrap();
     tree.branches.get_mut(&branch_id).unwrap().status = BranchStatus::Promoting;
-    tree.sweep_chances().unwrap();
+    tree.sweep_chances(&mut crate::control_plane::speculative_tree::ControlActions::default()).unwrap();
     assert_eq!(
         tree.chances.get("chance-2").map(|chance| &chance.authority),
         Some(&AuthorityState::Fetching),
@@ -725,7 +726,7 @@ fn interrupt_invalidates_a_prediction_already_in_flight() {
     let actions = tree
         .complete_work(
             predict,
-            Ok(ControlResult::Predictions(vec![json!("guess")])),
+            Ok(ControlResult::Predictions(vec![json!({"payload":"guess"})])),
         )
         .unwrap();
     assert!(actions.operations.is_empty());
@@ -784,6 +785,7 @@ fn validation_cannot_promote_after_parent_enters_a_later_operation() {
         name: tool_name,
         arguments,
         checkpoint,
+        fast_start: None,
         timestamp_ms: 0,
     })
     .unwrap();
@@ -1017,7 +1019,7 @@ def dispose(data, *, policy_config, capabilities):
     else {
         unreachable!()
     };
-    let result = SpeculationCoordinator
+    let result = SpeculationCoordinator::default()
         .disposition(
             &policy,
             &engine,
@@ -1280,7 +1282,7 @@ fn firecracker_style_capabilities_route_establish_through_branch_environment() {
     let mut scheduled = ControlActions::default();
     tree.schedule(ControlOperation::Establish(command.clone()), &mut scheduled);
     assert!(tree.branches[&child].environment_id.is_none());
-    let result = SpeculationCoordinator
+    let result = SpeculationCoordinator::default()
         .perform(
             &tree,
             &policy,

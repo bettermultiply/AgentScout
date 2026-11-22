@@ -14,6 +14,10 @@ impl SpeculativeTree {
     /// 每次已准入投机恰好结算一次：Promoted 记为命中，Discarded 记为未命中。
     /// 已经结算过的 Branch 不再重复结算（例如被替换的旧权威随后进入 Discarded）。
     pub(super) fn queue_settlement(&mut self, branch_id: &str, hit: bool) -> io::Result<()> {
+        self.queue_disposition_settlement(branch_id, hit, if hit { "Promote" } else { "Discard" })
+    }
+
+    pub(super) fn queue_disposition_settlement(&mut self, branch_id: &str, hit: bool, disposition: &str) -> io::Result<()> {
         let Some(speculation) = self.speculations.get(branch_id) else {
             return Ok(());
         };
@@ -36,6 +40,7 @@ impl SpeculativeTree {
             .push(ObservationContent::Settlement {
                 branch_id: branch_id.into(),
                 hit,
+                disposition: Some(disposition.into()),
                 time_ms,
                 money,
                 currency,

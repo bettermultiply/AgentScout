@@ -108,8 +108,10 @@ export function ChatPane() {
 
   const [prompt, setPrompt] = useState('')
   const [model, setModel] = useState('')
+  const [thinking, setThinking] = useState('')
   const [busy, setBusy] = useState(false)
   const [requestError, setRequestError] = useState<string | null>(null)
+  const [nowMs, setNowMs] = useState(() => Date.now())
   const [pendingMessages, setPendingMessages] = useState<ConversationMessage[]>([])
   const textarea = useRef<HTMLTextAreaElement>(null)
 
@@ -120,6 +122,32 @@ export function ChatPane() {
   )
   const canSend = Boolean(selected && isCurrent && connected && ready && !busy)
   const notice = state.runStatus?.notice ?? ''
+  const activeModel = selected?.modelUsages.at(-1)?.model ?? '当前模型未知'
+  const activeThinking = '当前 thinking 未上报'
+  const pendingAction = selected?.latestAction
+  const lastActionStarted = selected?.lastActionStarted
+  const elapsedSeconds = lastActionStarted
+    ? Math.max(0, Math.floor((nowMs - lastActionStarted.timestamp_ms) / 1000))
+    : null
+  const lastModelOutcome = selected?.events
+    .filter((event) => event.event === 'model_finished')
+    .at(-1)
+  useEffect(() => {
+    if (!state.runStatus?.running || (!pendingAction && !lastActionStarted)) return
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [lastActionStarted, pendingAction, state.runStatus?.running])
+  const activity = state.runStatus?.running
+    ? lastModelOutcome && ['failed', 'timed_out'].includes(lastModelOutcome.status) && (!pendingAction || lastModelOutcome.sequence > pendingAction.sequence)
+      ? `上次模型请求失败，Agent 正在重试或等待恢复 · 已等待 ${elapsedSeconds ?? 0} 秒`
+      : pendingAction?.action_kind === 'tool_execution'
+        ? `工具 ${pendingAction.name} 运行中 · ${Math.max(0, Math.floor((nowMs - pendingAction.timestamp_ms) / 1000))} 秒`
+        : pendingAction?.action_kind === 'model_inference'
+          ? `模型请求中 · ${Math.max(0, Math.floor((nowMs - pendingAction.timestamp_ms) / 1000))} 秒`
+          : pendingAction
+            ? `当前阶段：${pendingAction.name} · ${Math.max(0, Math.floor((nowMs - pendingAction.timestamp_ms) / 1000))} 秒`
+            : 'Agent 正在继续执行…'
+    : null
 
   useEffect(() => {
     if (!conversation.data || pendingMessages.length === 0) return
@@ -223,9 +251,10 @@ export function ChatPane() {
           <button type="button" disabled={!connected} onClick={() => {
             void sendRequest({ action: 'pause' }).catch(error => setRequestError(String(error)))
           }}>暂停</button>
-          <input aria-label="模型 provider/model" placeholder="provider/model" value={model} onChange={event => setModel(event.target.value)} />
+          <label className="model-control"><span>模型</span><input aria-label="模型 provider/model" placeholder={activeModel} value={model} onChange={event => setModel(event.target.value)} /></label>
+          <label className="model-control"><span>Thinking</span><input aria-label="thinking level" placeholder={activeThinking} value={thinking} onChange={event => setThinking(event.target.value)} /></label>
           <button type="button" disabled={!connected || !model.trim()} onClick={() => {
-            void sendRequest({ action: 'model', model: model.trim() }).catch(error => setRequestError(String(error)))
+            void sendRequest({ action: 'model', model: model.trim(), ...(thinking.trim() ? { thinking: thinking.trim() } : {}) }).catch(error => setRequestError(String(error)))
           }}>切换模型</button>
           <button
             type="button"
@@ -307,6 +336,7 @@ export function ChatPane() {
         ) : null}
       </div>
 
+      {activity ? <div className="notice activity" role="status">{activity} {activeModel} · {activeThinking}</div> : null}
       {notice ? (
         <div className="notice" role="status">
           {notice}

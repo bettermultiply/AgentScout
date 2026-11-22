@@ -1,5 +1,15 @@
 # 测试删除与合并审查
 
+## 权威物化和 Coding Policy 回归
+
+物化的导出和发布优先使用系统 Python，并固定 `PYTHONHASHSEED`。导出沙盒挂载 `/dev`。控制面 Policy 优先采用显式配置的 Python，其次选择系统 Python。污染 `PATH` 的 Rust 用例在旧实现上因误调工作区 Python 而失败，在修复后确认宿主文件被更新。
+
+Coding Policy 按行识别前台验证，跳过 heredoc 正文并将引号错误限制在当前行。识别到写源码的混合命令时不准入投机。预测考虑上次成功验证以来的 shell 写入，跳过失败命令和退出码掩盖了失败输出的验证。匹配阶段使用同一组失败输出规则。Shell 写入与路径识别采用启发式规则，验证日志重定向仍可准入。离线验证覆盖 222 个 Rust 单元测试、10 个指定 Rust 集成测试和 22 个 Node 测试。Release binaries 离线构建通过。
+
+V1 Run 2 现场保存在 `/var/tmp/ascout-runs/v1-django-13195-run2`。唯一真实 session 从提交 prompt 到观察到任务成功为 71,004.294 ms，权威物化 239 ms。宿主工作区直接通过 Phase A 和 Phase B，均为 exit 0。5 个 Chance 中 2 次 Promote、3 次 Discard。两次 Promote 在权威返回前分别复用了 881 ms 和 923 ms 的候选推理。第 5 个 Chance 因 `/tmp` 为只读而无法创建重定向日志，测试未启动。`evidence.json` 保存动作时间和 token 明细，`workspace.diff` 与 `workspace-acceptance.log` 保存宿主验收证据。
+
+V2 串行对照保存在 `/var/tmp/ascout-runs/v2-serial-django-13195`。`serial-baseline` 将 `admit.opportunity_pass` 编译为内存中的常量 `false`。使用同一 release 二进制、FilesystemBackend、Pi、模型和 prompt 完成唯一一次会话，耗时 115,331.865 ms，比 V1 Run 2 多 44,327.571 ms（62.43%）。Chance 与 Candidate 均为 0，宿主验收 Phase A 与 Phase B 均为 exit 0。权威推理 13 次，记录 204,599 tokens，Pi 估算费用为 $0.222438。逐次耗时和用量见运行目录的 `evidence.json`。
+
 ## 已结束 run 的 `--resume` 就绪顺序
 
 Pi 在报告 `branch_started` 前先发完原生会话的继承历史，并修复兼容会话链接。回归测试从公开状态读取当前 Authority。测试在真实 Pi 适配器的发送入口扣住第一条历史消息，确认当前 Authority 的会话仍为空且输入未就绪，随后在首次公开 `ready` 时逐条核对历史。下一次重开在首次 `ready` 后提交 prompt，由本地假模型验证原生上下文和调用次数。
@@ -26,7 +36,7 @@ Pi 在报告 `branch_started` 前先发完原生会话的继承历史，并修�
 
 文件工具复现日志 `/tmp/opencode/filesystem-before-fix-20261116.log` 保存原第 100 行 `1 !== 0`。根因不是 namespace supervisor 漏等后代，而是临时 bwrap 路径根本没有代码注释和测试所说的串行队列：`early` 和 `after` 同时 spawn，`after` 在 `late` 写入前执行。最小修复是在该路径加每 Branch 工具集合的 promise 队列，前项等 namespace `close` 后才放行下一项；错误吞在队列尾部但仍向原调用者报告，失败写入不会堵死队列。取消/超时仍杀 namespace 入口，PID namespace 清理跨 process group 后代；stdin EPIPE/ECONNRESET 仍记录到 close 后报告，不提前释放队列。未延长 sleep、未改或删原断言。
 
-必须区分常驻 holder：`src/runtime/process/holder.py`、Rust `namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace` 测试和 reference-workload 已明确规定连接并发、直接 shell 结束可返回、后台工作归环境管理。本次不将临时 namespace 队列套到 holder，也不改变它的后台工作/取消契约。上述 Rust holder 并发测试本轮通过。两条路径的生命周期不同，没有新增全局语义或技术选型。
+必须区分常驻 holder：`src/bin/ascout-fs-holder.rs`、Rust `namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace` 测试和 reference-workload 已明确规定连接并发、直接 shell 结束可返回、后台工作归环境管理。本次不将临时 namespace 队列套到 holder，也不改变它的后台工作/取消契约。上述 Rust holder 并发测试本轮通过。两条路径的生命周期不同，没有新增全局语义或技术选型。
 
 最终本地结果：
 

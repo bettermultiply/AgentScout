@@ -56,6 +56,7 @@ impl Backend for FilesystemBackend {
         arguments: &crate::runtime::execution_wire::Message,
         cancel: &CancelHandle,
     ) -> Result<crate::runtime::execution_wire::Message, BackendError> {
+        self.wait_for_holder(&context.environment_id)?;
         if self.state(&context.environment_id) != Some(EnvironmentState::Available)
             || !self.process.is_running(&context.environment_id)?
         {
@@ -81,8 +82,10 @@ impl Backend for FilesystemBackend {
     }
 
     fn stop_environment_execution(&self) -> Result<(), BackendError> {
+        let _launches = self.launches.lock().map_err(error)?;
         let mut failure = BackendError::new("failed to stop filesystem execution");
         for id in self.environments() {
+            let _ = self.wait_for_holder(&id);
             if let Err(error) = self.process.cleanup(&id) {
                 failure.add_cleanup_failure(id, error.to_string());
             }
@@ -99,7 +102,11 @@ impl Backend for FilesystemBackend {
         context: &BackendContext,
         launch: &crate::protocol::contract::AgentLaunch,
     ) -> Result<(), BackendError> {
-        self.start_holder(context, launch)
+        if context.parent_environment_id.is_some() {
+            self.start_child_holder(context, launch)
+        } else {
+            self.start_holder(context, launch)
+        }
     }
 
     fn save_runtime(&self, path: &Path) -> Result<(), BackendError> {
@@ -111,6 +118,10 @@ impl Backend for FilesystemBackend {
         path: &Path,
         previous: &mut dyn FnMut() -> Result<(), BackendError>,
     ) -> Result<(), BackendError> {
+        let _launches = self.launches.lock().map_err(error)?;
+        for id in self.environments() {
+            self.wait_for_holder(&id)?;
+        }
         self.process.with_frozen(
             |id| self.state(id) != Some(EnvironmentState::Suspended),
             || {
@@ -425,6 +436,9 @@ impl Backend for FilesystemBackend {
         previous: &mut dyn FnMut() -> Result<(), BackendError>,
     ) -> Result<(), BackendError> {
         let id = &context.environment_id;
+        let mut launches = self.launches.lock().map_err(error)?;
+        // Failed starts have already attempted cleanup. Still stop any residual process.
+        let _ = self.wait_for_holder(id);
         let stopped = self.process.stop(id);
         let preceding = previous();
         if let Err(mut error) = stopped {
@@ -440,11 +454,13 @@ impl Backend for FilesystemBackend {
                 EnvironmentState::Terminated,
             )?;
         }
-        self.launches.lock().map_err(error)?.remove(id);
+        launches.remove(id);
         preceding
     }
 
     fn cleanup(&self, id: &str) -> Result<(), BackendError> {
+        let _launches = self.launches.lock().map_err(error)?;
+        let _ = self.wait_for_holder(id);
         self.process.cleanup(id)?;
         let (environment, garbage) = {
             let mut state = self.environment()?;
@@ -465,6 +481,7 @@ impl Backend for FilesystemBackend {
         };
         self.persist_all_snapshots()?;
         self.remove_environment_metadata(&environment.id)?;
+        self.holder_starts.lock().map_err(error)?.remove(id);
         let _ = fs::remove_dir_all(
             self.config
                 .state_directory

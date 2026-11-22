@@ -13,7 +13,7 @@ use std::{
 };
 
 /// Restore the saved execution or create its root control context before assembly.
-pub fn prepare(run_dir: &Path, resume: bool) -> io::Result<(SpeculativeTree, Option<Resume>)> {
+pub fn prepare(run_dir: &Path, resume: bool, workspace: Option<&Path>) -> io::Result<(SpeculativeTree, Option<Resume>)> {
     if resume {
         let (tree, saved) = crate::control_plane::recovery::load(run_dir)?;
         Ok((tree, Some(saved)))
@@ -21,7 +21,10 @@ pub fn prepare(run_dir: &Path, resume: bool) -> io::Result<(SpeculativeTree, Opt
         if run_dir.join("recovery.json").exists() {
             return Err(io::Error::other("Saved execution exists; use --resume"));
         }
-        Ok((SpeculativeTree::with_workspace("agent", run_dir)?, None))
+        Ok((match workspace {
+            Some(workspace) => SpeculativeTree::with_workspace_path("agent", run_dir, workspace.to_path_buf())?,
+            None => SpeculativeTree::with_workspace("agent", run_dir)?,
+        }, None))
     }
 }
 
@@ -38,6 +41,7 @@ pub struct Prepared {
     pub(super) tree: SpeculativeTree,
     pub(super) policy: CompiledPolicy,
     pub(super) engine: PolicyEngine,
+    pub(super) coordinator: SpeculationCoordinator,
     pub(super) saved: Option<Resume>,
     pub(super) resume_model: Option<String>,
     runtime_config: PathBuf,
@@ -54,6 +58,7 @@ impl Prepared {
         selected_policy: Option<PathBuf>,
         runtime_override: Option<PathBuf>,
         settings: AgentSettings,
+        workspace: Option<PathBuf>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let artifact_path = run_dir.join("policy.json");
         if !resume
@@ -70,7 +75,7 @@ impl Prepared {
             return Err("Saved Policy exists; refusing to overwrite run data".into());
         }
         // Establish task control state before starting its execution infrastructure.
-        let (mut tree, saved) = prepare(&run_dir, resume)?;
+        let (mut tree, saved) = prepare(&run_dir, resume, workspace.as_deref())?;
         let recovery_generation = match &saved {
             Some(recovery::Resume::Paused(path)) => Some(path.as_path()),
             _ => None,
@@ -150,6 +155,7 @@ impl Prepared {
             tree,
             policy,
             engine,
+            coordinator: SpeculationCoordinator::default(),
             saved,
             resume_model,
             runtime_config: config_path,
@@ -175,6 +181,10 @@ impl Prepared {
         &self.settings
     }
 
+    pub fn bind_policy_provider(&mut self, provider: crate::control_plane::policy::ModelProviderProcess) {
+        self.coordinator = SpeculationCoordinator::with_provider(provider);
+    }
+
     pub fn bind_runtime(
         &mut self,
         capabilities: &RuntimeCapabilities,
@@ -182,6 +192,9 @@ impl Prepared {
         self.engine.confirm_backends(&self.policy, capabilities)?;
         if self.saved.is_some() {
             recovery::validate_capabilities(&self.tree, capabilities)?;
+        }
+        if self.saved.is_none() {
+            self.runtime_digest = recovery::digest(&self.runtime_config)?;
         }
         self.tree.bind_execution(
             json!({"source": self.policy.source(), "artifact": "policy.json", "sha256": self.artifact_digest}),
@@ -328,6 +341,9 @@ pub fn start(
             branch.branch_id != authority
                 && (branch.status.is_live_candidate() || branch.status.is_live_authority())
         }) {
+            if branch.environment_id.is_none() && branch.branch_id.starts_with("candidate-chance-local-") {
+                continue;
+            }
             let started = runtime_call(
                 runtime,
                 branch
@@ -363,13 +379,21 @@ pub fn connected(
         .clone()
         .ok_or("authority missing")?;
     tree.record_runtime_state(&authority, RuntimeExecutionState::Ready)?;
-    let decisions = [
+    let local = [
         Decision::OpportunityPass,
         Decision::FeasibilityPass,
         Decision::Extent,
         Decision::Effect,
-    ]
-    .into_iter()
+    ];
+    let fast = [Decision::Select, Decision::Launch, Decision::Predict];
+    let decision_inputs = local.into_iter().chain(fast).filter_map(|decision| {
+        Some((decision.as_str().to_owned(), policy.decision_inputs(decision)?.to_vec()))
+    }).collect();
+    let policy_model_grant = policy.policy_model_grant().cloned().and_then(|mut grant| {
+        grant.decisions.retain(|decision| local.contains(decision) || fast.contains(decision));
+        (!grant.decisions.is_empty()).then_some(grant)
+    });
+    let decisions = local.into_iter()
     .map(|decision| {
         Ok((
             decision.as_str().to_string(),
@@ -383,6 +407,11 @@ pub fn connected(
             policy_digest: policy.digest().into(),
             has_predictor: policy.has_decision(Decision::Predict),
             decisions: Value::Object(decisions),
+            pure: local.into_iter().chain(fast).filter_map(|decision| {
+                Some((decision.as_str().to_owned(), policy.local_pure_decision(decision)?))
+            }).collect(),
+            decision_inputs: Some(decision_inputs),
+            policy_model_grant,
         },
         command,
     ])
@@ -473,7 +502,7 @@ impl Session {
                 self.lifecycle
                     .cancel(tree, matches!(request, Request::Shutdown))?
             }
-            Request::Model { model } => {
+            Request::Model { model, thinking } => {
                 if tree.recovering()
                     || tree.authority_running()
                     || tree.pending_work()
@@ -483,6 +512,9 @@ impl Session {
                     self.notice = "Model change failed: wait for an idle authority".into();
                 } else {
                     self.pending_model = Some(model);
+                    if let Some(thinking) = thinking {
+                        self.notice = format!("Thinking level queued: {thinking}");
+                    }
                 }
                 Vec::new()
             }

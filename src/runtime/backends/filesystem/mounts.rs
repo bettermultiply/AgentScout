@@ -134,7 +134,16 @@ impl FilesystemBackend {
         launch: &crate::protocol::contract::AgentLaunch,
     ) -> Result<LaunchFragment, BackendError> {
         let environment = self.launch_environment(context, launch)?;
-        self.fragment_for_environment(&environment, launch)
+        self.fragment_for_environment(&environment, launch, false)
+    }
+
+    pub(super) fn holder_fragment(
+        &self,
+        context: &BackendContext,
+        launch: &crate::protocol::contract::AgentLaunch,
+    ) -> Result<LaunchFragment, BackendError> {
+        let environment = self.launch_environment(context, launch)?;
+        self.fragment_for_environment(&environment, launch, true)
     }
 
     /// Load the environment, record the Agent workspace root and add mount
@@ -276,6 +285,7 @@ impl FilesystemBackend {
         &self,
         environment: &Environment,
         launch: &crate::protocol::contract::AgentLaunch,
+        native: bool,
     ) -> Result<LaunchFragment, BackendError> {
         let mut fragment = LaunchFragment {
             chdir: Some(
@@ -319,7 +329,17 @@ impl FilesystemBackend {
             });
             covered.insert(mount.target.clone());
         }
-        self.append_unmanaged_mounts(&mut fragment, &covered);
+        if !native {
+            self.append_unmanaged_mounts(&mut fragment, &covered);
+        }
+        for path in &self.config.passthrough_rw {
+            if path.exists() {
+                fragment.mounts.push(MountEntry::Bind {
+                    source: path.clone(),
+                    target: path.clone(),
+                });
+            }
+        }
         self.append_state_masks(&mut fragment);
         fragment.mounts.sort_by_key(|entry| match entry {
             MountEntry::RoBind { .. } | MountEntry::Proc { .. } | MountEntry::Dev { .. } => 0,
@@ -352,14 +372,6 @@ impl FilesystemBackend {
                 source: target.clone(),
                 target,
             });
-        }
-        for path in &self.config.passthrough_rw {
-            if path.exists() {
-                fragment.mounts.push(MountEntry::Bind {
-                    source: path.clone(),
-                    target: path.clone(),
-                });
-            }
         }
     }
 

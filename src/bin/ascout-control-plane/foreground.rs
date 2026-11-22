@@ -15,7 +15,12 @@ use serde_json::Value;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use std::{env, fs, io, path::Path, sync::mpsc, thread};
+use std::{
+    env, fs, io,
+    path::{Path, PathBuf},
+    sync::mpsc,
+    thread,
+};
 
 fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
     let path = env::var_os("PATH")?;
@@ -42,8 +47,12 @@ fn resolve_node() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
 }
 
 fn resolve_agent_entry() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let installed = env::var_os("HOME").map(|home| {
+        std::path::PathBuf::from(home).join(".local/share/ascout/instrumentation/pi/main.ts")
+    });
     let path = env::var_os("ASCOUT_AGENT_ENTRY")
         .map(std::path::PathBuf::from)
+        .or_else(|| installed.filter(|path| path.is_file()))
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("instrumentation/pi/main.ts")
         });
@@ -62,17 +71,50 @@ fn resolve_agent_entry() -> Result<std::path::PathBuf, Box<dyn std::error::Error
 fn start_adapter(
     config_path: &std::path::Path,
     run_dir: &std::path::Path,
+    adapter_override: Option<&Path>,
 ) -> Result<(std::process::Child, ControlSession, RuntimeCapabilities), Box<dyn std::error::Error>>
 {
-    let config: Value = serde_json::from_slice(&fs::read(config_path)?)?;
+    let mut config: Value = serde_json::from_slice(&fs::read(config_path)?)?;
     let address = config["control_address"]
         .as_str()
         .ok_or("runtime config missing control_address")?;
-    let server = ControlServer::bind(address)?;
+    let server = ControlServer::bind(address)
+        .map_err(|e| format!("Cannot bind Runtime control address {address}: {e}"))?;
     server.set_nonblocking(true)?;
-    let binary = env::var_os("ASCOUT_RUNTIME_ADAPTER")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("target/debug/ascout-runtime-adapter"));
+    if address.ends_with(":0") {
+        let actual = server.local_addr()?.to_string();
+        config["control_address"] = Value::String(actual);
+        fs::write(config_path, serde_json::to_vec_pretty(&config)?).map_err(|e| {
+            format!(
+                "Cannot update generated Runtime config {}: {e}",
+                config_path.display()
+            )
+        })?;
+    }
+    let nearby = env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|dir| dir.join("ascout-runtime-adapter")));
+    let profile = env::current_exe().ok().and_then(|path| {
+        path.parent()
+            .and_then(|directory| directory.file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+    });
+    let profile_binary = profile.as_deref().map(|name| {
+        PathBuf::from("target")
+            .join(name)
+            .join("ascout-runtime-adapter")
+    });
+    let binary = adapter_override
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("ASCOUT_RUNTIME_ADAPTER").map(PathBuf::from))
+        .or(nearby)
+        .or(profile_binary)
+        .or_else(|| find_in_path("ascout-runtime-adapter"))
+        .filter(|path| path.is_file())
+        .ok_or(
+            "Runtime Adapter executable not found. Set ASCOUT_RUNTIME_ADAPTER or install AScout",
+        )?;
     let log_path = run_dir.join("adapter.log");
     let log = fs::File::create(&log_path)?;
     let mut adapter = Command::new(binary)
@@ -161,11 +203,15 @@ pub fn run(
     pi_root: &Path,
     web_address: Option<&str>,
     system_log: &SystemLog,
+    adapter_override: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = prepared.run_dir().join("agent.sock");
     let listener = agent::Listener::bind(&socket)?;
-    let (mut adapter, session, capabilities) =
-        start_adapter(prepared.runtime_config(), prepared.run_dir())?;
+    let (mut adapter, session, capabilities) = start_adapter(
+        prepared.runtime_config(),
+        prepared.run_dir(),
+        adapter_override,
+    )?;
     // Every fallible assembly step after process launch shares this teardown.
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         prepared.bind_runtime(&capabilities)?;
@@ -191,12 +237,33 @@ pub fn run(
         if let Some(thinking) = &settings.thinking {
             agent_args.extend(["--thinking".into(), thinking.clone()]);
         }
-        let launch = prepared.agent_launch(
-            &capabilities,
-            resolve_node()?.display().to_string(),
-            agent_args,
-            [("ASCOUT_PI_ROOT".into(), pi_root.display().to_string())].into(),
-        )?;
+        let node = resolve_node()?;
+        let installed_provider = env::var_os("HOME").map(|home| {
+            PathBuf::from(home).join(".local/share/ascout/instrumentation/pi/policy-provider.ts")
+        });
+        let provider_entry = env::var_os("ASCOUT_POLICY_PROVIDER")
+            .map(PathBuf::from)
+            .or_else(|| installed_provider.filter(|path| path.is_file()))
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("instrumentation/pi/policy-provider.ts")
+            });
+        let mut provider_args = vec![
+            agent_args[0].clone(),
+            agent_args[1].clone(),
+            provider_entry.display().to_string(),
+        ];
+        if let Some(models) = &settings.models {
+            provider_args.extend(["--models".into(), models.display().to_string()]);
+        }
+        let env: std::collections::BTreeMap<String, String> =
+            [("ASCOUT_PI_ROOT".into(), pi_root.display().to_string())].into();
+        prepared.bind_policy_provider(ascout::control_plane::policy::ModelProviderProcess {
+            executable: node.clone(),
+            arguments: provider_args,
+            environment: env.clone(),
+        });
+        let launch =
+            prepared.agent_launch(&capabilities, node.display().to_string(), agent_args, env)?;
         let (events, receiver) = mpsc::channel();
         let runtime_events = events.clone();
         session.set_event_waker(move || {

@@ -24,6 +24,7 @@ fn nested_tree() -> (SpeculativeTree, String, String) {
         name: "tool".into(),
         arguments: json!({}),
         checkpoint: None,
+        fast_start: None,
         timestamp_ms: 0,
     })
     .unwrap();
@@ -49,6 +50,7 @@ fn nested_tree() -> (SpeculativeTree, String, String) {
         name: "tool".into(),
         arguments: json!({}),
         checkpoint: None,
+        fast_start: None,
         timestamp_ms: 1,
     })
     .unwrap();
@@ -428,6 +430,7 @@ fn admit(tree: &mut SpeculativeTree, branch: &str, action: &str) -> String {
         name: "tool".into(),
         arguments: json!({}),
         checkpoint: None,
+        fast_start: None,
         timestamp_ms: 2,
     })
     .unwrap();

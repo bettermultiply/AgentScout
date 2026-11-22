@@ -26,7 +26,7 @@ runtime proxy 可以使用 Runtime 原生隔离、权限控制、代理、拦截
 
 - **`establish_environment`（建立环境）**：从 control plane 指定的环境基础建立可用的隔离环境；
 - **`operate_environment`（环境内操作）**：执行环境级操作，并为运行提供 Agent 与 Instrumentation 的可信宿主；宿主位于 Branch 隔离环境外，由 Runtime 启动、监视和回收。用哪个 Agent 产品与版本由 control plane 决定并作为启动参数给出。工作区访问、shell、受管子程序和效果在对应 Environment 执行。agent supervisor 持有 run 唯一的 Agent 与 Instrumentation 宿主进程。各环境后端负责启动和回收自身的环境执行资源；
-- **`accept_environment`（接受）**：以该 Chance 的直接父级 Environment 为目标，并指定 SpB 的来源 Environment 和 Policy 已接受的方式。目标暂停后，Runtime 等待来源写者并按 Backend 能力移交。回执报告 full、实际接受的 part 结果 ID 或失败。每个文件级 part 结果声明所需文件，只有其依赖得到移交才报告该结果。Full 的执行访问方式指向目标 Environment。仅在事先允许 part 时可以降级。
+- **`accept_environment`（接受）**：以该 Chance 的直接父级 Environment 为目标，并指定 SpB 的来源 Environment 和 Policy 已接受的方式。目标暂停后，Runtime 等待来源写者并按 Backend 能力移交。回执报告 full、实际接受的 part 结果 ID 或失败。每个文件级 part 结果声明所需文件，只有其依赖得到移交才报告该结果。Full 的执行访问方式指向目标 Environment。Runtime 只能交付控制面指定的接受方式。
 - **`suspend_environment`（静止环境）**：阻止新的环境操作，并让正在进行的环境操作完成或返回明确的未完成状态；
 - **`resume_environment`（恢复环境）**：让仍然有效的静止环境继续接受操作，且已有状态和隔离边界保持不变；
 - **`terminate_environment`（终止环境）**：不可恢复地停止环境内由 Runtime 管理的执行；

@@ -57,7 +57,7 @@ Chance 具有与 Branch 不同的状态语义。`ChanceStage` 表达投机机会
 
 Chance 的权威值由它所依附的父 Branch 自己的真实执行产生。父 Branch 不必是整棵 Tree 的当前权威，只要仍作为权威或候选存活；因此候选 Branch 上再次 `admit` 的嵌套 Chance 使用同一套状态、验证和失效规则。嵌套候选 Branch 的 `AssumptionSet` 同时携带祖先未确认的 Proposal。确认内层 Proposal 后，只允许向携带相同未决依赖的直接父级接受结果。向全局权威提交仍要求所有祖先 Proposal 已确认。父 Proposal 被否定、承载它的 Branch 被抛弃时，该 Branch 上所有未收敛的 Chance 以 `AncestorInvalidated` 收敛，依赖它们的后代 Branch 随 Branch 抛弃流程取消和清理。
 
-Branch 自身的 `BranchStatus` 合并生命周期与运行状态：Created、Running、Blocked(reason)、Finished、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned。Blocked 的原因取 ExtentReached、Rebalanced 或 EffectGate，同一时刻只保留最近一次挡住它的 Decision；Finished 表示执行已跑完、等待裁决。Blocked 与 Running 可以随对应 Decision 来回切换，但 Blocked 不使 Branch 失效。
+Branch 自身的 `BranchStatus` 合并生命周期与运行状态：Created、Running、Blocked(reason)、Finished、Promoting、Promoted、Discarding、Discarded、Cleaning、Cleaned。Blocked 的原因取 ExtentReached、Rebalanced 或 EffectGate，同一时刻只保留最近一次挡住它的 Decision；Finished 表示执行已跑完、等待裁决。Blocked 与 Running 可以随对应 Decision 来回切换，但 Blocked 不使 Branch 失效。等待 Runtime 建立独立环境由 Runtime 执行状态表达，不构成 Policy 阻塞。
 
 Branch 的 capabilities 规定 control plane 可以代表哪些主体执行相关生命周期操作，以及哪些受控主体可以获得未来的协作权限。当前生命周期 authority 由 control plane 依据 Policy、task 配置和 Branch 状态维护；Evaluator/resolver 是 control plane 编排中的角色，不是另一种世界实体。未来显式 Agent 感知时，Agent-facing capability 也只能表达受控意图，不能替代 control plane 固定的生命周期、Policy 校验和执行承载约束。
 
@@ -103,7 +103,7 @@ Proposal 必须声明与真实 outcome 的 compatibility 条件，可以是 exac
 
 ### 4.5 Accept 与 winner continuation
 
-Accept 分为 full 和 part。两者都将获准的状态从 SpB 合入 AuB，保留 AuB 已有进展。Policy 必须先接受所选方式。full 只有在 Policy 也预先接受 part 时才能降为 part。
+Accept 分为 full 和 part。两者都将获准的状态从 SpB 合入 AuB，保留 AuB 已有进展。Policy 通过 `Promote` 请求 full，通过 `Reuse` 或 `Salvage` 请求 part。
 
 Full 合入 SpB 的全部变更，保留 SpB Branch、session 和独立 descendants。SpB 承接该 Chance 的胜者延续，后续调用使用 AuB 合入后的环境和 Backend。旧 AuB session 结束，原 SpB 环境和仍有依赖的资源在最后一个依赖释放后回收。旧 AuB 的进展若无法由该延续保留，则拒绝 full。Full 无需独立 descendants 完成，后代仍承担各自未决 Proposal。
 

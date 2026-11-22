@@ -14,17 +14,25 @@ cargo build
 
 ## 2. 启动
 
-先在 `~/.config/ascout/config.toml` 中把 `policy_dir` 设置为仓库 `assets/policy` 的绝对路径。运行记录目录由系统创建，结束输出 run id；`ascout-control-plane runs` 列出运行。
+先安装或构建 AScout，并准备 NLE 依赖。安装后可从任意目录使用 `ascout`，开发树中也可直接使用 `target/debug/ascout-control-plane`。
 
 ```sh
-./target/debug/ascout-control-plane \
-  ../pi \
-  --policy nle \
-  --model deepseek/deepseek-flash \
-  --thinking low
+make install
 ```
 
-`--model` 指定 Pi 使用的模型，认证使用 Pi 默认配置；`--thinking` 可选。
+运行记录目录由系统创建，结束时输出 run id。`ascout runs` 列出已有运行。
+
+```sh
+ascout --policy nle --model deepseek/deepseek-flash --thinking low
+```
+
+也可以显式指定 Pi 根目录或 Web UI：
+
+```sh
+ascout ../pi --policy nle --web
+```
+
+`--model` 指定 Pi 使用的模型，认证使用 Pi 默认配置。`--thinking` 可选。普通 filesystem 运行支持省略 Runtime JSON，NLE 仍需通过 Policy 或 `--runtime` 提供 NLE Runtime 配置。
 
 ## 3. 交互
 

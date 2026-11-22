@@ -98,6 +98,8 @@ impl FilesystemBackend {
             .base_snapshot_id
             .as_deref()
             .ok_or_else(|| BackendError::new("source has no fork base"))?;
+        self.wait_for_holder(&target.environment_id)?;
+        self.wait_for_holder(source)?;
         let handle = self.process.process_handle(&target.environment_id);
         if self.process.is_running(&target.environment_id)? && handle.is_none() {
             return Err(BackendError::new("target mount namespace is unavailable"));
@@ -266,8 +268,8 @@ impl FilesystemBackend {
                 let host = fs::metadata("/proc/self/ns/mnt").map_err(error)?.ino();
                 if actual == host {
                     return Err(BackendError::new(
-                        "target_mount_pid is in the host mount namespace (likely the outer bwrap pid); \
-                         pass the sandbox child pid from bwrap --json-status-fd",
+                        "target_mount_pid is in the host mount namespace. \
+                         Pass the recorded namespace holder PID",
                     ));
                 }
                 if actual != expected {
@@ -453,13 +455,6 @@ impl FilesystemBackend {
                 }
                 return Err(error);
             }
-        }
-        if let Err(mut error) = journal.sync() {
-            let (failures, _) = journal.rollback();
-            if !failures.is_empty() {
-                error.add_cleanup_failure("filesystem", failures.join(", "));
-            }
-            return Err(error);
         }
         journal.cleanup();
 

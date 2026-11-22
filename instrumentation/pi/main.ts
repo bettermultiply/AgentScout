@@ -5,10 +5,9 @@
 // compile-time contract for this small launcher.
 // @ts-nocheck
 import type { ToolCall, ToolResultMessage } from '../../../pi/packages/ai/src/types.ts';
-import { IdentityWindow, positiveSequence } from '../../../pi/packages/pi-integration/src/identity-window.ts';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
-import { evaluatePolicyArtifact } from '../../../pi/packages/pi-integration/src/local-policy.ts';
+import { loadModelRuntime } from './model-runtime.ts';
 import { createInterposer } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
 import { Notifications } from './notification.ts';
@@ -24,6 +23,16 @@ import { Interaction } from './interaction.ts';
 const root = process.env.ASCOUT_PI_ROOT;
 if (!root) throw Error('ASCOUT_PI_ROOT is required');
 const require = createRequire(resolve(root, 'package.json'));
+const identityWindowPath = resolve(root, 'packages/pi-integration/src/identity-window.ts');
+const localPolicyPath = resolve(root, 'packages/pi-integration/src/local-policy.ts');
+let IdentityWindow, positiveSequence, evaluatePolicyArtifact, piModelComplete;
+try {
+    ({ IdentityWindow, positiveSequence } = require(identityWindowPath));
+    ({ evaluatePolicyArtifact, piModelComplete } = require(localPolicyPath));
+} catch (error) {
+    const reason = error instanceof Error ? `: ${error.message}` : '';
+    throw Error(`Failed to load Pi integration modules at ${identityWindowPath} and ${localPolicyPath}${reason}`, {cause: error});
+}
 const { createAgentSession: createNativeAgentSession, DefaultResourceLoader, SettingsManager, getAgentDir, SessionManager, ModelRuntime, resolveCliModel } = require(resolve(root, 'packages/coding-agent/src/index.ts'));
 const nativeCommandSources = new WeakMap();
 async function createAgentSession(options) {
@@ -96,15 +105,7 @@ while (args.length) {
 if (!['off','minimal','low','medium','high','xhigh'].includes(thinkingLevel)) throw Error('Invalid thinking level');
 let modelRuntime, model;
 if (modelPattern || modelsPath) {
-    modelRuntime = await ModelRuntime.create();
-    if (modelsPath) {
-        const extra = JSON.parse(readFileSync(modelsPath, 'utf8'));
-        additionalModels = extra;
-        for (const [id, config] of Object.entries(extra.providers ?? {})) {
-            if (modelRuntime.getProvider(id)) throw Error(`Additional provider already exists: ${id}`);
-            modelRuntime.registerProvider(id, config);
-        }
-    }
+    ({ runtime: modelRuntime, additionalModels } = await loadModelRuntime(() => ModelRuntime.create(), modelsPath));
     if (modelPattern) {
     const resolved = resolveCliModel({ cliModel:modelPattern, cliThinking:thinkingLevel, modelRuntime });
     if (resolved.error || !resolved.model) throw Error(resolved.error ?? 'Unknown model');
@@ -127,10 +128,12 @@ const modelActions = new Map();
 const modelForks = new Map();
 const modelHolds = new Map();
 const modelResultHolds = new Map();
+const toolResultHolds = new Map<string, Map<string, PromiseWithResolvers<void>>>();
 const modelRestores = new Map();
 const transcriptQueues = new Map();
 const reportedEntries = new Set();
 const candidateWaiters = new Map();
+const candidateBindings = new Map();
 const branchTasks = new Map();
 const setupTasks = new Map();
 let saving=false;
@@ -160,6 +163,38 @@ async function acceptanceBoundary(branch, signal) {
         });
     }
     if (signal?.aborted || cancelled.has(branch) || closing) throw Error('Branch execution interrupted');
+}
+function releaseToolResults(branch, operation?) {
+    const holds = toolResultHolds.get(branch);
+    if (!holds) return;
+    if (operation !== undefined) {
+        holds.get(operation)?.resolve();
+        holds.delete(operation);
+        if (holds.size) return;
+    } else {
+        for (const hold of holds.values()) hold.resolve();
+    }
+    toolResultHolds.delete(branch);
+}
+function holdToolResult(branch, operation) {
+    const holds = toolResultHolds.get(branch) ?? new Map();
+    if (!holds.has(operation)) holds.set(operation, Promise.withResolvers<void>());
+    toolResultHolds.set(branch, holds);
+}
+async function waitForToolResults(branch, signal) {
+    while (toolResultHolds.has(branch)) {
+        const results = Promise.all([...toolResultHolds.get(branch).values()].map(hold => hold.promise));
+        await new Promise<void>((resolve, reject) => {
+            const cleanup = () => signal?.removeEventListener('abort', abort);
+            const abort = () => {
+                cleanup();
+                reject(Error('Tool result arbitration interrupted'));
+            };
+            signal?.addEventListener('abort', abort, {once:true});
+            void results.then(() => { cleanup(); resolve(); });
+            if (signal?.aborted) abort();
+        });
+    }
 }
 async function pauseBoundary(signal){
     if(!pauseRequested)return;
@@ -239,7 +274,9 @@ async function stopSession(branch) {
     await extensionBindings.get(branch)?.catch(()=>{});
     extensionBindings.delete(branch);
     const session=sessions.get(branch);
-    await session?.abort();
+    const stopped = session?.abort();
+    releaseToolResults(branch);
+    await stopped;
     await Promise.allSettled([...(branchTasks.get(branch)??[])]);
     // dispose() is synchronous and does not emit session_shutdown. Await the
     // native extension lifecycle while its append context is still valid.
@@ -276,7 +313,7 @@ function syncTranscript(branch) {
         tree.tails.set(branch,manager.getLeafId());
         pending.push({message:'transcript',branch_id:branch,entry:item.message,session_entry_id:entry.id});
     }
-    tree.settle();
+    if(branch===authority&&pending.length)tree.settle();
     for(const payload of pending)void report(payload);
 }
 async function reportSessionHistory(branch, manager) {
@@ -303,12 +340,28 @@ await ascProxy.open(socketPath);
 let transportError;
 const report = payload => {
     if(payload.message==='action_started'){activeActions.set(key(payload.branch_id,payload.action_id),payload);reportedActions.add(key(payload.branch_id,payload.action_id));}
-    if(payload.message==='action_finished')activeActions.delete(key(payload.branch_id,payload.action_id));
+    if(payload.message==='action_finished'){
+        const id=key(payload.branch_id,payload.action_id);
+        const started=activeActions.get(id);
+        activeActions.delete(id);
+        if(started)access.afterAction({branch:payload.branch_id,actionId:payload.action_id,
+            actionKind:payload.action_kind,name:started.name,status:payload.status,
+            isError:payload.status==='failed'||payload.result?.is_error===true});
+    }
     payload={source:'agent_adapter',...payload};
     return sendWire({kind:'message',payload});
 };
 const sendWire = wire => ascProxy.send(wire);
-const access = createInterposer({taskId,report,evaluate:evaluatePolicyArtifact});
+let policyModelRuntime;
+const access = createInterposer({taskId,report,evaluate:async (artifact, decision, data, signal) => {
+    const grant = artifact.policy_model_grant;
+    if (!grant?.decisions.includes(decision)) return evaluatePolicyArtifact(artifact, decision, data, signal);
+    const runtime = modelRuntime ?? await (policyModelRuntime ??= ModelRuntime.create());
+    return evaluatePolicyArtifact(artifact, decision, data, signal, {
+        decision, models: grant.models, requests: grant.max_requests, timeoutMs: grant.timeout_ms,
+        complete: piModelComplete(runtime),
+    });
+}});
 const key = (branch, operation) => JSON.stringify([branch,operation]);
 const text = value => typeof value==='string'?value:JSON.stringify(value);
 
@@ -381,13 +434,15 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     parkedModels.add(branch);
     await pauseBoundary(signal);
     await modelRestores.get(branch);
+    await waitForToolResults(branch, signal);
+    await pauseBoundary(signal);
     await acceptanceBoundary(branch, signal);
     syncTranscript(branch);
     // Model inference does not pass the tool effect gate; admission and extent
     // remain owned by the generic access layer.
     if(saving||closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
     const actionId=modelForks.get(branch)?.operation_id??`model-${nextAction++}`;
-    const op={kind:'model_inference',name:'model',arguments:{model:`${modelValue.provider}/${modelValue.id}`},branch_id:branch,predicting:modelForks.has(branch),authority:branch===authority};
+    const op={kind:'model_inference',name:'model',produces_result:true,result_pending:true,arguments:{model:`${modelValue.provider}/${modelValue.id}`},branch_id:branch,predicting:modelForks.has(branch),authority:branch===authority};
     op.has_predictor=await access.hasPredictor(branch);
     const hold=Promise.withResolvers();modelHolds.set(key(branch,actionId),hold);
     const disposition=await access.beforeAction({
@@ -398,9 +453,9 @@ async function beforeModelInference(branch, modelValue, context, signal) {
         arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length},
         op,
         contractContext:{model:`${modelValue.provider}/${modelValue.id}`,message_count:context.messages.length,runtime_capabilities:runtimeTools},
-        admit:true,
+        admit:!candidateBindings.has(branch),
         admissionFacts:()=>{
-            const saved=structuredClone(sessions.get(branch).messages),manager=tree.branches.get(branch).manager;
+            const saved=Object.freeze(sessions.get(branch).messages.slice()),manager=tree.branches.get(branch).manager;
             const checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${actionId}:${saved.length}`};
             checkpoints.set(key(branch,actionId),{saved,checkpoint,treeTail:tree.assertCheckpoint(branch,saved),manager,model:true});
             return {checkpoint};
@@ -460,6 +515,19 @@ function install(session,branch) {
         try {
         await pauseBoundary(signal);
         await acceptanceBoundary(branch, signal);
+        const binding=candidateBindings.get(branch);
+        if(binding) {
+            await report({message:'environment_requested',branch_id:branch});
+            await new Promise((resolve,reject)=>{
+                const abort=()=>reject(Error('Candidate tool cancelled before environment binding'));
+                signal?.addEventListener('abort',abort,{once:true});
+                binding.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
+                if(signal?.aborted)abort();
+            });
+            await pauseBoundary(signal);
+            await acceptanceBoundary(branch, signal);
+            if(cancelled.has(branch)||!ascProxy.has(branch))throw Error('Candidate execution unavailable');
+        }
         const previous=await before?.(context,signal);
         if(previous?.block||signal?.aborted){pendingHooks.delete(key(branch,context.toolCall.id));return previous;}
         let saved, checkpoint;
@@ -469,7 +537,7 @@ function install(session,branch) {
             syncTranscript(branch);
             const reconnect=suspendedHooks.get(hookKey);
             const index=reconnect?session.messages.findIndex(m=>m.role==='assistant'&&m.content?.some(p=>p.type==='toolCall'&&p.id===context.toolCall.id)):-1;
-            saved=structuredClone(index>=0?session.messages.slice(0,index+1):session.messages);
+            saved=Object.freeze(session.messages.slice(0,index>=0?index+1:undefined));
             checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${context.toolCall.id}:${saved.length}`};
             const manager=tree.branches.get(branch).manager;
             const treeTail=reconnect?manager.getEntries().find(e=>e.type==='message'&&JSON.stringify(e.message)===JSON.stringify(saved.at(-1)))?.id:tree.assertCheckpoint(branch,saved);
@@ -478,16 +546,39 @@ function install(session,branch) {
             return checkpoint;
         };
         const hold=Promise.withResolvers();toolHolds.set(hookKey,hold);
+        const canStartLocally=branch===authority && !saving && !pauseRequested && !recoveryPaused
+            && !acceptancePauses.size && !candidateBindings.size && !setupTasks.size
+            && !toolResultHolds.size && !suspendedHooks.has(hookKey)
+            && pendingHooks.size===1 && context.assistantMessage?.content?.filter(part=>part.type==='toolCall').length===1;
         const disposition=await access.beforeAction({
             branch,
             actionId:context.toolCall.id,
             actionKind:'tool_execution',
             name:context.toolCall.name,
             arguments:context.args,
-            op:{kind:context.toolCall.name,name:context.toolCall.name,arguments:context.args,authority:branch===authority,has_predictor:await access.hasPredictor(branch)},
+            op:{kind:context.toolCall.name,name:context.toolCall.name,produces_result:true,result_pending:true,arguments:context.args??{},authority:branch===authority,has_predictor:await access.hasPredictor(branch)},
             contractContext:{arguments:context.args,runtime_capabilities:runtimeTools,isolated:!runtimeTools.some(t=>t.name===context.toolCall.name)},
             admit:()=>branch===authority || !runtimeTools.some(tool => tool.name === context.toolCall.name),
-            admissionFacts:()=>({checkpoint:prepareCheckpoint()}),
+            admissionFacts:()=>{
+                const checkpoint = prepareCheckpoint();
+                checkpoints.get(hookKey).toolAdmitted = true;
+                return {checkpoint};
+            },
+            fastStart:canStartLocally?{
+                chanceId:`chance-local-${randomUUID().replaceAll('-','')}`,
+                start(prediction){
+                    const id=`candidate-${this.chanceId}`;
+                    const record=checkpoints.get(hookKey);
+                    record.fastStarted=true;
+                    candidateBindings.set(id,Promise.withResolvers());
+                    const task=handle({command:'start_candidate',branch_id:id,parent_branch_id:branch,
+                        operation_id:context.toolCall.id,tool_name:context.toolCall.name,
+                        workspace:session.sessionManager.getHeader().cwd,prediction,checkpoint:record.checkpoint,local:true})
+                        .catch(error=>report({message:'branch_failed',branch_id:id,reason:String(error)}));
+                    setupTasks.set(id,task);
+                    void task.finally(()=>setupTasks.delete(id)).catch(()=>ascProxy.destroy());
+                }
+            }:undefined,
             admitted:suspendedHooks.get(hookKey)?.admitted??false,
             signal,
         });
@@ -503,7 +594,8 @@ function install(session,branch) {
         await acceptanceBoundary(branch, signal);
         const toolCheckpoint=prepareCheckpoint();
         const hook=pendingHooks.get(hookKey);if(hook)hook.started=true;
-        await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
+        const started=report({message:'action_started',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',name:context.toolCall.name,arguments:context.args,checkpoint:toolCheckpoint,timestamp_ms:Date.now()});
+        if(!checkpoints.get(hookKey)?.fastStarted)await started;
         return previous;
         } catch(error) {
             toolHolds.delete(hookKey);
@@ -524,7 +616,18 @@ function install(session,branch) {
             for(const resolve of resultWaiters.get(resultKey)??[])resolve(result);
             resultWaiters.delete(resultKey);
             const execution=executionResults.get(resultKey);executionResults.delete(resultKey);
-            if(reportedActions.delete(key(branch,context.toolCall.id)))await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',status:signal?.aborted?'cancelled':isError?'failed':'succeeded',result:execution?.result??{payload:content.length===1&&content[0].type==='text'?content[0].text:null,content,is_error:isError},evidence:execution?.evidence,timestamp_ms:Date.now()})
+            const runtimeResult = execution?.result;
+            const resultFields = runtimeResult && typeof runtimeResult === 'object' && !Array.isArray(runtimeResult) ? runtimeResult : {};
+            const actionResult={payload:runtimeResult ?? (content.length===1&&content[0].type==='text'?content[0].text:null),
+                ...resultFields,content,is_error:isError,tool_name:context.toolCall.name,arguments:context.args??{},
+                details:previous?.details??context.result?.details??null};
+            if (reportedActions.delete(resultKey)) {
+                const status = signal?.aborted ? 'cancelled' : isError ? 'failed' : 'succeeded';
+                if (status !== 'cancelled' && checkpoint.toolAdmitted && !checkpoint.speculationSkipped) {
+                    holdToolResult(branch, context.toolCall.id);
+                }
+                await report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:context.toolCall.id,action_kind:'tool_execution',status,result:actionResult,evidence:execution?.evidence,timestamp_ms:Date.now()});
+            }
         }
         return previous;
     };
@@ -544,7 +647,7 @@ function install(session,branch) {
                 const pending=modelActions.get(branch),index=pending?.findIndex(action=>action.seen_message)??-1;
                 const action=index>=0?pending.splice(index,1)[0]:undefined;
                 if(pending?.length===0)modelActions.delete(branch);
-                if(action&&checkpoints.get(key(branch,action.action_id))?.model)modelResultHolds.set(branch,Promise.withResolvers());
+                if(action&&checkpoints.get(key(branch,action.action_id))?.model&&!checkpoints.get(key(branch,action.action_id))?.speculationSkipped)modelResultHolds.set(branch,{operation:action.action_id,...Promise.withResolvers()});
                 if(action)void report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:'model_inference',status:event.message.stopReason==='aborted'?'cancelled':event.message.stopReason==='error'?'failed':'succeeded',result:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},evidence:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},timestamp_ms:Date.now()});
                 const fork=modelForks.get(branch);
                 if(fork){modelForks.delete(branch);const restoring=session.setModel(fork.model).then(()=>session.setThinkingLevel(fork.thinkingLevel));modelRestores.set(branch,restoring);void restoring.catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error)}));}
@@ -623,7 +726,9 @@ async function handle(command) {
                     cancelled:[...cancelled],reportedEntries:[...reportedEntries],commands:commandRecords,
                     commandPrefix,commandAhead:[...commandAhead],
                     suspendedHooks:[...suspendedHooks],candidateSetups:[...candidateSetups],
+                    candidateBindings:[...candidateBindings.keys()],
                     interruptedBranches:[...interruptedBranches],
+                    toolResultHolds:[...toolResultHolds].map(([branch, holds]) => [branch, [...holds.keys()]]),
                     checkpoints:[...checkpoints].map(([id,c])=>[id,{...c,manager:sourceFiles.get(c.manager.getSessionFile())}])});
             }catch(reason){error=String(reason)}
             await report({message:'recovery_saved',path:command.path,error:error??null});
@@ -686,10 +791,16 @@ async function handle(command) {
                 for(const [id,value] of record.commands)commands.set(id,{serialized:value.serialized,result:Promise.resolve(value.reply),settled:true});
                 for(const [id,c] of record.checkpoints)checkpoints.set(id,{...c,manager:managers.get(c.manager)});
                 for(const [id,hook] of record.suspendedHooks??[])suspendedHooks.set(id,hook);
+                for(const id of record.candidateBindings??[]) {
+                    if(!ascProxy.has(id))candidateBindings.set(id,Promise.withResolvers());
+                }
                 for(const [id,setup] of record.candidateSetups??[]){
                     const execution_access=command.execution_accesses?.[id];
-                    if(!execution_access)throw Error('Recovered candidate execution access missing');
+                    if(!execution_access&&!setup.local)throw Error('Recovered candidate execution access missing');
                     candidateSetups.set(id,{...setup,execution_access});
+                }
+                for(const [branch, operations] of record.toolResultHolds??[]) {
+                    for(const operation of operations) holdToolResult(branch, operation);
                 }
                 for(const branch of record.interruptedBranches??[])interruptedBranches.add(branch);
                 for(const [branch,{manager,stopped}] of tree.branches){
@@ -796,14 +907,15 @@ async function handle(command) {
             if(!continuing)executeTurn(session,branch,()=>session.prompt(command.prompt,{streamingBehavior:'followUp'}));return;
         }
         case 'start_candidate': {
-            environments.set(branch,command.environment_id);
-            ascProxy.bind(branch,command.execution_access);
+            if(!command.local){
+                environments.set(branch,command.environment_id);
+                ascProxy.bind(branch,command.execution_access);
+            }
             candidateSetups.set(branch,structuredClone(command));
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
             if(command.prediction?.predict==='branch_model'){
-                const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail);
-                await access.control(command);
+                const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail,false);
                 const resolved=resolveCliModel({cliModel:command.prediction.model,cliThinking:parent.thinkingLevel,modelRuntime:parent.modelRuntime});
                 if(resolved.error||!resolved.model)throw Error(resolved.error??'Unknown predictor model');
                 const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:resolved.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
@@ -815,7 +927,7 @@ async function handle(command) {
             }
             const checkpointMessage=checkpoint.saved.findLast(message=>message.role==='assistant'&&message.content?.some(p=>p.type==='toolCall'&&p.id===command.operation_id&&p.name===command.tool_name));
             if(!checkpointMessage)throw Error('Invalid pending checkpoint');
-            const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail);
+            const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail,false);
             if(saving)return;
             const paired: ToolResultMessage[]=[];
             for(const part of checkpointMessage.content){
@@ -839,7 +951,6 @@ async function handle(command) {
             }
             const pairedEntryIds=paired.map(entry=>tree.append(branch,entry));
             tree.inputs.set(branch,{parent:command.parent_branch_id,source:checkpoint.manager,operation:command.operation_id,checkpoint:checkpoint.treeTail,prediction:pairedEntryIds[paired.findIndex(e=>e.toolCallId===command.operation_id)],pairedTail:pairedEntryIds.at(-1),operations:paired.map(e=>e.toolCallId)});
-            tree.settle();
             await access.control(command);
             const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
             bindInteraction(session,branch);
@@ -857,10 +968,30 @@ async function handle(command) {
             return;
         case 'resolve_pending': {
             if(command.outcome===undefined)return;
-            if(command.outcome?.phase==='execute'){toolHolds.get(key(branch,command.operation_id))?.resolve();modelHolds.get(key(branch,command.operation_id))?.resolve();return;}
+            if(command.outcome?.phase==='bind_environment'){
+                environments.set(branch,command.outcome.environment_id);
+                ascProxy.bind(branch,command.outcome.execution_access);
+                candidateBindings.get(branch)?.resolve();
+                candidateBindings.delete(branch);
+                return;
+            }
+            if(command.outcome?.phase==='execute'){
+                const actionKey=key(branch,command.operation_id);
+                const checkpoint=checkpoints.get(actionKey);
+                if(checkpoint&&command.outcome.speculation_skipped)checkpoint.speculationSkipped=true;
+                toolHolds.get(actionKey)?.resolve();modelHolds.get(actionKey)?.resolve();return;
+            }
+            if (command.outcome?.phase === 'continue') {
+                releaseToolResults(branch, command.operation_id);
+                const modelResult = modelResultHolds.get(branch);
+                if (modelResult?.operation === command.operation_id) {
+                    modelResult.resolve();
+                    modelResultHolds.delete(branch);
+                }
+                return;
+            }
             const modelHold=modelHolds.get(key(branch,command.operation_id));
             if(modelHold){modelHold.resolve();return;}
-            if(command.outcome?.phase==='continue'){modelResultHolds.get(branch)?.resolve();modelResultHolds.delete(branch);return;}
             const id=key(branch,command.operation_id),waiter=waiters.get(id);if(waiter){waiters.delete(id);waiter(command.outcome)}else results.set(id,command.outcome);
             return;
         }
@@ -889,6 +1020,10 @@ async function handle(command) {
                 await access.control({command:'promote',branch_id:branch});
             }
             releaseAcceptance(branch);
+            if(branch===authority&&ascProxy.has(branch)){
+                candidateBindings.get(branch)?.resolve();
+                candidateBindings.delete(branch);
+            }
             return;
         case 'promote': {
             if(cancelled.has(branch)||!sessions.has(branch))throw Error('Branch unavailable');
@@ -896,12 +1031,27 @@ async function handle(command) {
             if (command.part) {
                 if (!sessions.has(parent) || !acceptancePauses.has(parent)) throw Error('Target acceptance pause missing');
                 if (command.notification) {
-                    const inputs = acceptanceInputs.get(parent) ?? [];
-                    acceptanceInputs.set(parent, [...inputs, command.notification]);
+                    try {
+                        await notifications.accept(sessions.get(parent), command);
+                        syncTranscript(parent);
+                    } catch (error) {
+                        await report({message:'adapter_capability_gap',branch_id:parent,capability:'notification',status:'failed',reason:`${command.command_id}: ${error}`});
+                    }
                 }
                 return;
             }
-            if (command.execution_access) {
+            if (command.reuse_parent_environment) {
+                if(parent!==authority||!candidateBindings.has(branch)||!environments.has(parent))throw Error('Parent environment handoff unavailable');
+                ascProxy.transfer(parent,branch);
+                candidateBindings.get(branch)?.resolve();
+                candidateBindings.delete(branch);
+                environments.set(branch,environments.get(parent));
+                environments.delete(parent);
+                const inputs=acceptanceInputs.get(parent);
+                if(inputs?.length)acceptanceInputs.set(branch,[...inputs,...(acceptanceInputs.get(branch)??[])]);
+                acceptanceInputs.delete(parent);
+                await access.control(command);
+            } else if (command.execution_access) {
                 if (!acceptancePauses.has(branch) || !acceptancePauses.has(parent)) throw Error('Full acceptance pause missing');
                 if (environments.get(parent) !== command.execution_access.environment_id) throw Error('Full acceptance target mismatch');
                 ascProxy.unbind(parent);
@@ -915,7 +1065,10 @@ async function handle(command) {
                 await access.control(command);
             }
             tree.accept(branch, parent, parent === authority);
-            if (parent === authority) authority = branch;
+            if (parent === authority) {
+                authority = branch;
+                if (command.execution_access) await access.control(command);
+            }
             tree.settle();
             if(command.notification!==undefined){
                 try {
@@ -946,11 +1099,17 @@ async function handle(command) {
             interaction.cancel(branch);
             aborting.add(branch);
             reconnectControllers.get(branch)?.abort();
-            try { const stopped=sessions.get(branch)?.abort();await ascProxy.cancel(branch);await stopped;await finishActions(branch,'cancelled');await report({message:'turn_completed',branch_id:branch}); }
+            try { const stopped=sessions.get(branch)?.abort();releaseToolResults(branch);await ascProxy.cancel(branch);await stopped;await finishActions(branch,'cancelled');await report({message:'turn_completed',branch_id:branch}); }
             finally { aborting.delete(branch); }
             return;
-        case 'discard': interaction.cancel(branch);cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);await sessions.get(branch)?.abort();await ascProxy.cancel(branch);await finishActions(branch,'cancelled');tree.settle();return;
+        case 'discard': {
+            candidateBindings.get(branch)?.resolve();candidateBindings.delete(branch);
+            interaction.cancel(branch);cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);
+            releaseToolResults(branch);
+            await sessions.get(branch)?.abort();await ascProxy.cancel(branch);await finishActions(branch,'cancelled');tree.settle();return;
+        }
         case 'cleanup':
+            candidateBindings.get(branch)?.resolve();candidateBindings.delete(branch);
             interaction.cancel(branch);
             cancelled.add(branch);releaseCandidateWaiters(branch);
             reconnectControllers.get(branch)?.abort();

@@ -58,7 +58,7 @@ Backend 接口同时提供不带上下文的旧方法和带 `BackendContext` 的
 
 ## Full 与 part 接受
 
-`dispose` 的 `Promote` 默认请求 full。`part: {results: [{id, files, notification}]}` 为每个结果声明依赖的受管文件和交付文本。`files` 使用规范化的绝对路径，空列表表示此结果不依赖文件。`full: false` 只请求 part，同时允许 full 和 part 时才可降级。Policy 可从 `context.candidate_execution`、`context.candidate_results` 和 `context.candidate_proposal` 取证。旧的 `part: {scopes, notification}` 仍按挂载范围处理。
+`Promote` 请求全量接受。`Reuse` 或 `Salvage` 请求按结果 ID 或受管路径移交部分状态。结果 ID 引用候选已成功完成的工具动作，由控制面解析文件依赖。也可按 `workspace` 或 `tmp` 挂载范围选择，或传入规范化绝对路径。Policy 可通过 `context.candidate_execution`、`context.candidate_results` 和 `context.candidate_proposal` 判断交付内容。
 
 Pi 先阻止 parent 和 candidate 启动新调用，回报已在执行边界暂停。control plane 随即要求 Runtime 暂停目标环境。暂停确认后，Pi 等待 candidate 自己已经发出的模型调用收敛。Runtime 再关闭移交期间双方的写入准入，等待来源自己的受管写者，并将获准状态三方合并到目标。Full 成功要覆盖全部受管挂载。文件级 part 按结果检查依赖，仅交付 Runtime 回执 `part_results.results` 列出的结果。每个入选结果的全部文件必须可移交，冲突结果的通知不会送入目标 session。共享状态的 Backend 不重复写入。Runtime 完成移交并恢复目标环境后，Pi 仍在执行边界等待，直到回执应用且 control plane 确认才继续。
 

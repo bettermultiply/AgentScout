@@ -8,35 +8,99 @@
 
 ## 1. 已实现的路径
 
+### 纯表达式内存求值与工具错误裁决
+
+编译探针检查入口的 Python AST。`admit.opportunity_pass` 必须生成纯表达式树，否则编译返回 `InvalidInput`。其他 Decision 可在无法纯内存求值时回退到 Python 沙箱。可编译的纯表达式树随 `CompiledPolicy` 保存。`LocalPolicy` 将四个端侧 Decision 对应的树和参数交给 Node，并附带可编译的 `select`、`launch`、`predict` 表达式。Rust 和 Node 在内存中执行常量、容器、局部变量、条件、比较、基础算术、常用容器和字符串方法以及简单推导式。两端保持 Python 的真值和短路规则，并校验输入、输出与 JSON 边界。求值中遇到缺少键或类型错误时，错误直接返回给调用方。
+
+带导入、复杂语法、包入口或能力调用的绑定仍使用 Python worker。`extent` 可在简单条件中保留对模块内辅助函数的调用位置。只有执行到该表达式时才把整个 Decision 交给 Python worker 重算，遵守 Python 的短路规则。其他 Decision 遇到辅助函数调用继续使用 worker。值超出求值预算、整数或对象身份无法精确处理、Unicode 大小写规则依赖 Python 版本等情形也由 worker 求值。元数据省略时沿用 worker，已有 artifact 可继续加载，冻结 fixture 的 digest 不变。编译探针在导入 Policy 模块前检查 `admit.opportunity_pass` 中的模型能力引用，授权校验同时禁止将该 Decision 加入 `policy_model_grant.decisions`。
+
+已交付的工具错误仍以 `ActionFinished.status: failed` 记录，其结果同样交给 `match` 和 `dispose`。缺少权威结果时，控制面丢弃存活候选并按需释放父分支的继续执行等待。离线回归覆盖 `bash exit 1` 的两种预测结果，以及缺少权威结果时的候选回收。
+
+### 端到端投机启动耗时
+
+在真实 control plane、Pi SDK、FilesystemBackend 和 `assets/policy/coding` 上，用本机 SSE 假模型重复触发前台验证命令。每次新进程依次测首个机会、同一进程热运行的机会、空闲超过一秒后的机会。前两次错配让父分支恢复，第三次匹配并晋升。以 Chance 的 `speculation_started_at_ms` 和候选首个模型 `action_started.timestamp_ms` 为主指标。
+
+- Runtime TCP 两端启用 `TCP_NODELAY`。基线的权威 `action_started` 到 Runtime `operation_started` 为约 40 ms，符合长度头和 JSON 帧体分两次发送时 Nagle 算法与延迟 ACK 的表现。单独改 TCP 后，环境请求到就绪的 p50 从 43 ms 降到 2 ms。
+- 候选第一步继续正常求值 `extent`。编译探针保留简单条件和短路规则，执行到模块内辅助函数时用隔离 worker 重算。首步模型边界上的 coding `extent` 不需要该辅助函数。带授权的决策仍走原有授权路径。编译时保留沙箱绑定检查，已有 Policy 留档可按原版本继续恢复。
+- 每个 AST 编译探针结束即回收。原先探针和实际脚本共用十个位置，探针会把已经检查过的 Runtime Decision worker 挤出缓存。真实脚本的绑定检查与后续调用复用原 worker，首个机会到环境请求的 p50 从 49 ms 降到 18 ms。Node worker 的一秒空闲回收不变。
+
+| Chance start → candidate `action_started`（ms） | 基线 p50 / p95 | 仅 TCP | TCP + extent | 最终 |
+| --- | ---: | ---: | ---: | ---: |
+| 首个机会 | 134 / 136 | 95 / 96 | 56 / 56 | 24 / 26 |
+| 热运行 | 68 / 115 | 31 / 52 | 26 / 34 | 22 / 69 |
+| 空闲后 | 104 / 105 | 63 / 64 | 23 / 25 | 23 / 25 |
+
+每组 5 次，按最近秩计算 p95。最终热运行有一次 Runtime 环境操作耗时 47 ms。临时探针中，Pi extension 绑定等待为 0 ms，`session.continue()` 到模型 hook 为 0–1 ms，基线冷／空闲后的 `extent` worker 请求往返约 36 ms。模型动作到假 provider 的 p50 为 2 ms，错配后从权威工具结束到父分支请求到达 provider 的 p50 为 40 ms。进程启动到权威 `branch_ready` 的 p50 从 1,900 ms 降到 1,846 ms，p95 从 2,052 ms 升到 2,648 ms。按 250 ms 采样，进程树的峰值进程数从 46 降到 37，每次运行的峰值 RSS 合计中位数从约 507 MiB 降到 446 MiB，合计包含共享页。Django `run-S90Enb` 的账本用于定位，表内全部为隔离的 coding fixture 实测。
+
+证据及复现脚本位于 `/var/tmp/ascout-startup.euUADp/`，其中 `summary.json` 包含分阶段原始样本，`ab-*` 保留账本、假 provider 到达时间、工具进程启动时间、进程采样和探针日志。可在仓库根目录运行以下命令。`baseline-bin` 包含修改前的一组 release 二进制。
+
+```sh
+p=/var/tmp/ascout-startup.euUADp
+node "$p/make-bench.mjs" "$p"
+cargo build --offline --release --bins
+mkdir "$p/replay-before" "$p/replay-after"
+BENCH_BIN="$p/baseline-bin/ascout-control-plane" node "$p/bench.mjs" "$p/replay-before"
+node "$p/bench.mjs" "$p/replay-after"
+node "$p/summarize.mjs" "$p/replay-before" "$p/replay-after" > "$p/replay-summary.json"
+```
+
+串行 Rust 测试通过 230 项，Node 离线测试通过 40 项，另有 Filesystem 恢复测试通过。临时 `gate-check.mjs` 使用真实 Pi 与 FilesystemBackend，分别验证首步 `extent` 短路得到 `stop`、调用沙箱辅助函数得到 `stop`，以及 `effect` 阻止候选写入；三项均通过。原始验证命令和日志见同目录的 `verify.sh`、`rust-final-serial.log`、`node-final-serial.log`、`recovery-final.log` 和 `gate-verify.log`。
+
+### Django 原仓离线回放
+
+同一份 `run-S90Enb` 归档 Policy、prompt 和工具参数，在干净 Django 基线、原 Python 3.9 环境、真实 Pi 工具和 FilesystemBackend 上，用回环假模型交错运行优化前／最终 release，各 3 轮。Chance 3/4 合并的 `Chance start → candidate action_started` 中位数为 113 → 30 ms（范围 111–115 → 29–69 ms），到假 provider HTTP 接收为 115.9 → 32.9 ms（113.4–118.0 → 31.1–71.4 ms）。六轮各有两次 Promote，两条目标命令各通过 501 个测试，工作区 diff 与归档一致；真实外部模型请求为 0。
+
+原在线账本的 309/310 ms 未复现：`branch_ready → model action_started` 原为 231–234 ms，离线基线为 41–43 ms、最终为 0 ms（账本毫秒精度）。因此不能用本次 A/B 解释旧运行中该段多出的约 190 ms。小 fixture 的空闲后中位数 104 → 23 ms 则是独立样本，不是 Django 数据。逐次事件、校验、环境和复现脚本见 `/var/tmp/ascout-django-ab.niPBkd/`；复跑：`bash /var/tmp/ascout-django-ab.niPBkd/run-pairs.sh rerun-$(date +%s)`。
+
+### 工具的端侧先行
+
+Pi 只在权威分支没有挂起冲突、当前批次只有一个工具调用时尝试端侧先行。两个 `admit` 判断均须在内存中通过。`select` 须选中该机会，`launch` 须返回 `true`，`predict` 须返回恰好一个 Proposal。端侧只使用其能够完整重建的输入。目前这包括 `frontier_view` 和 `chance_context`。`abstain` 直接执行真实操作。若表达式依赖 `scheduling_context`、`history`、控制面观察、模型能力或其他端侧不可见数据，则沿用控制面路径。
+
+端侧把先行事实随 `speculative_admission_request` 发送。控制面记录 Chance、Proposal 和 Branch，保持 `match`、`dispose` 和 Settlement 流程。候选工具等待独立环境绑定或 Full 晋升后继承父环境。
+
 ### Instrumentation predictor 事实与准入顺序修复（2026-11-16）
 
-依据 `docs/design/policy-decisions.md` §2.1，`has_predictor` 是粗筛之前已有的“对该结果可用的预测手段”事实，粗筛本身不做预测。`CompiledPolicy` 要求十个函数绑定完整；当前 `predict` 由 control plane 求值，不通过 `createInterposer` 返回的 `Interposer` 接口调用。当前没有另一个按操作类别声明 predictor 的注册表或配置。
+依据 `docs/design/policy-decisions.md` §2.1，`has_predictor` 是粗筛之前已有的“对该结果可用的预测手段”事实，粗筛本身不做预测。`CompiledPolicy` 要求十个函数绑定完整。常规机会由 control plane 求值 `predict`，符合先行条件的机会在端侧求值。当前没有另一个按操作类别声明 predictor 的注册表或配置。
 
 因此 `Interposer.hasPredictor(branch)` 只读取 control plane 已交付的 `has_predictor` 事实，不调用任何 Decision，不依赖 `op` 或 `admit` 的结果；模型和工具 Hook 都先由该事实填充 `op.has_predictor`，再执行既有 `beforeAction`。工具入口同时保留原本查询时已有的 `authority` 事实，传入真正的准入输入。`admit` 仍决定当前具体操作是否值得作为入口；`predict` 仍决定当前输入能否产生 Proposal，允许空集合后走权威路径。可调用入口不承诺非空预测或预测正确性，不能把当前完整 Policy 总有 predict 绑定误解为对所有操作强制投机。未来若需按操作声明更细的预测能力，应先确认设计，不能在此修复中添加配置或工具白名单。
 
 原实现通过 `admit.opportunity_pass` 计算 `has_predictor`，构成循环依赖；模型首次请求和工具首次调用都可复现。修复没有改示例 Policy、预测算法、默认配置、control plane 裁决、single-winner 或 commit/discard，没有捕获并转换 Policy 异常。已交付 Policy 的继承、恢复和清理直接决定该事实，无额外缓存。
 
-回归 `tests/predictor-fact.mjs` 使用失败 session 留档 Policy 的完整 files/binding/config 和当前正式 runner 构造端侧脚本，通过真实隔离求值复现两个入口；还检查查询不求值、准入拒绝、空预测、继承/恢复/清理、缺少 predict 入口及异常继续传播。`tests/pi-access.mjs` 的手工 admission fixture 补全 predict 入口，避免把只有 admit/extent 的不完整 fixture 当成具有预测手段。默认留档路径为 `/tmp/opencode/runtime-id-real-e2e-20261116/session/policy.json`，可通过 `ASCOUT_PREDICTOR_POLICY` 指定同一证据的搬迁位置；这两项专用验收脚本依赖保留的失败证据，不是干净克隆自包含测试。
+回归 `tests/predictor-fact.mjs` 使用失败 session 留档 Policy 的完整 files/binding/config 和当前正式 runner 构造端侧脚本，通过真实隔离求值复现两个入口；还检查查询不求值、准入拒绝、空预测、继承/恢复/清理、缺少 predict 入口及异常继续传播。`tests/pi-access.mjs` 的手工 admission fixture 补全 predict 入口，避免把只有 admit/extent 的不完整 fixture 当成具有预测手段。默认 fixture 为 `tests/fixtures/predictor-fact-policy.json`，可通过 `ASCOUT_PREDICTOR_POLICY` 指定同一留档的其它位置。
 
 先红日志 `/tmp/opencode/predictor-fact-fix-20261116/red.log`：原实现 0/3，模型与工具均 `Policy evaluation failed`；首次修复后 `green.log` 3/3。最终命令、短 E2E 和已知未通过检查见 [验证 Workload](reference-workload.md) 的同日修复记录。原真实运行失败记录保留，尚未真实模型 E2E 通过。
 
-`src/control_plane/policy/` 导出的 `PolicyEngine` 可以读取 YAML，检查九类 Decision 的十个函数入口（`admit` 有两个），固定声明的文件内容和各函数的参数，在隔离环境中检查 Python 语法、导入及函数签名，生成 `CompiledPolicy`。编译不调用 Decision 函数体，但会在隔离环境中执行模块顶层代码。
+`src/control_plane/policy/` 导出的 `PolicyEngine` 可以读取 YAML，检查九类 Decision 的十个函数入口（`admit` 有两个），固定声明的文件内容和各函数的参数，在隔离环境中检查 Python 语法及函数入口，生成 `CompiledPolicy`。纯表达式绑定通过 AST 检查。其他绑定的签名检查会在隔离环境中执行模块顶层代码。编译阶段不调用 Decision 函数体。
 
-`CompiledPolicy` 可用 serde JSON 序列化。`script(decision)` 返回内含固定源码、该函数参数和执行入口的 Python 脚本。内容摘要覆盖源码、参数、入口、解释器标识和生成脚本使用的 runner；摘要不是来源认证，跨侧接收方仍须验证来源。当前接收方需要同版本的 AScout runner 和相同的 Python `sys.version`。这不是对标准库全部文件或动态库内容一致性的证明。
+`CompiledPolicy` 可用 serde JSON 序列化。`script(decision)` 返回内含固定源码、该函数参数和执行入口的 Python 脚本。内容摘要覆盖源码、参数、入口、解释器标识、生成脚本使用的 runner 及声明的 `policy_model_grant`。省略授权字段时保留既有摘要算法。摘要不是来源认证，跨侧接收方仍须验证来源。当前接收方需要同版本的 AScout runner 和相同的 Python `sys.version`。这不是对标准库全部文件或动态库内容一致性的证明。
 
-`PolicyEngine::evaluate` 对已编译结果求值，不再读取作者 YAML 或原始源码。Engine 最多持有十个按完整编译脚本区分的隔离 worker；同一脚本重复调用只通过有界 IPC 传递输入和结果。求值串行执行，超时、协议错误或进程退出后杀死并 wait，下一次重建；Engine 释放或池满清理时同样回收进程。Engine 不创建 Branch、不做效果操作，也不应用返回的选择。解释器身份探针仍为一次性进程。
+`PolicyEngine::evaluate` 使用已编译结果。可在内存求值的 Decision 直接返回通过校验的结果。Python 路径最多持有十个按完整编译脚本区分的隔离 worker；同一脚本重复调用只通过有界 IPC 传递输入和结果。求值串行执行，超时、协议错误或进程退出后杀死并 wait，下一次重建；Engine 释放或池满清理时同样回收进程。Engine 不创建 Branch、不做效果操作，也不应用返回的选择。解释器身份探针仍为一次性进程。
 
-Pi `packages/pi-integration/src/local-policy.ts` 使用最多十个 worker 的固定池和串行请求队列，提供 `disposePolicyWorker` 显式释放，并在空闲一秒后释放。每个 worker 只在启动时创建 bwrap namespace。保留 1 MiB 输入和响应上限、5 秒 wall deadline、启动前及运行中取消检查、stderr 排空，失败后杀死进程并等待 close 后清理。池满或失败当前释放整个本地池。`tests/policy-local-supervision.mjs` 覆盖重复请求计数连续、显式释放后重建、取消、超时及超大输入／输出。
+Pi `packages/pi-integration/src/local-policy.ts` 使用最多十个 worker 的固定池和串行请求队列，提供 `disposePolicyWorker` 显式释放，并在空闲一秒后释放。每个 worker 只在启动时创建 bwrap namespace。保留 1 MiB 输入和响应上限、默认 5 秒求值超时、启动前及运行中取消检查、stderr 排空，失败后杀死进程并等待 close 后清理。池满或失败当前释放整个本地池。`tests/policy-local-supervision.mjs` 覆盖重复请求计数连续、显式释放后重建、取消、超时及超大输入／输出。
 
 Python 常驻进程只执行可信监督逻辑，每次请求先清理 `/tmp` 和 `/dev/shm` 的遗留文件，再 fork 求值子进程；子进程安装 seccomp 后才加载 Policy，完成后退出，由监督进程 wait 后才发布最终结果；子进程只持有内部管道，无法直接读取宿主的下一请求。`/dev` 挂载只读（单独的 `/dev/shm` 挂载仍按请求清理）。Policy 修改标准库对象不会回写监督进程，不以清理模块作为安全边界。同脚本连续两次请求复用一个 namespace／监督 PID，创建两个求值子进程；求值 PID 不复用。这是每次一次 fork 的隔离代价，不是每次启动 bwrap。标准库和动态库仍只读可见，不宣称禁止全部文件读取。`tests/policy-isolation.mjs` 验证标准库对象和两个可写挂载的数据不跨请求残留；任意自写 artifact runner 不具备该保障，正常入口必须交付宿主编译生成的脚本。
 
-`model_complete` 通过 capability IPC 请求宿主。Node 的 `evaluatePolicyArtifact` 第五参数是显式 grant，包含 Decision、模型名单、次数和宿主 complete 函数，默认拒绝。宿主校验当前 request ID、Decision、模型、额度、大小及 5 秒 deadline，结束时 abort provider 信号。`piModelComplete(models)` 使用 Pi 已配置的 Models 和认证并禁用重试。Rust 授权入口复用同一有界监督进程池；`evaluate_with_provider` 接收宿主配置的 `ModelProviderProcess`（可执行文件与参数），通过单请求 JSON 行 IPC 连接 provider，`evaluate_with_provider_cancellable` 同时检查宿主 AtomicBool。超时、取消或失败会 kill/wait provider 和异常 worker，不留下阻塞回调线程。Pi 导出 `servePolicyModel(models)`，由宿主服务启动代码注入已配置的 Models；服务不得启动脱离所有权的后代进程。旧 `evaluate_with_capabilities` 同步回调入口仍不能强制取消，调用方应使用进程入口获得该保障。
+### Policy 模型授权
+
+在 Policy YAML 顶层按需声明：
+
+```yaml
+policy_model_grant:
+  decisions: [predict, match, extent]
+  models: [provider/model]
+  max_requests: 2
+  timeout_ms: 10000
+```
+
+`decisions` 必须非空且互不重复。`models` 必须非空，每个条目由非空的 provider 和 model 组成，以 `/` 分隔，禁止空白字符。`max_requests` 的范围为 `1..=16`，`timeout_ms` 的范围为 `100..=300_000`，额度和超时均按单次求值生效。编译和产物加载检查授权结构，产物加载也验证摘要。
+
+`model_complete` 通过 capability IPC 请求宿主。control plane 通过 `ModelProviderProcess` 启动 `instrumentation/pi/policy-provider.ts`，并将 `ASCOUT_PI_ROOT` 和可选 `--models` 交给桥接进程。Pi 端侧只收到本地 Decision 的授权和声明输入。`evaluatePolicyArtifact` 的第五参数携带授权 Decision、允许模型、请求额度、可选 `timeoutMs` 和宿主完成函数。未授权求值拒绝模型调用。两侧宿主检查当前请求 ID、Decision、模型、额度、大小及超时。两侧使用 Pi 的模型与凭证配置，`piModelComplete` 禁用自动重试。端侧结束求值时取消 provider 请求，Rust 端超时、取消或失败时终止并回收桥接进程及异常 worker。
 
 真实请求的既有证据 `/tmp/ascout-real.log` 和 `tests/policy-capability-real.mjs` 保留。本轮未运行该脚本，剩余真实请求额度为 0。该历史脚本手工构造 runner 且返回 `{ok:true}`，只证明调用链 smoke，不证明正常 Effect schema 或完整 E2E。
 
-`tests/policy_provider.rs` 使用正常 YAML 编译、真实隔离 runner、Rust 进程 IPC、Pi `servePolicyModel`／`piModelComplete` 和 fake Models，检查正常 Effect 输出与宿主 schema 拒绝、默认拒绝、额度撤销、取消、超时及失败后恢复。未接入普通 Agent 启动时的 grant 产品配置；独立宿主入口已经可用，但需要宿主决定 Models 实例、可执行服务及 grant 配置的归属。没有修改 Agent/Instrumentation 启动参数或 has_predictor。install-lock 过期由已授权包名迁移造成，已用现有生成器离线重建并通过 `--check`，未新增依赖。
+`tests/policy_provider.rs` 覆盖正常 YAML 编译、真实隔离 runner、Rust 进程 IPC、Pi provider 桥及 fake Models。`tests/policy-decision-e2e.mjs` 通过真实 control plane、Pi 与 Filesystem Runtime，使用 loopback OpenAI-compatible SSE 验证两侧授权和 Decision 输入。
 
-本轮验证命令包括 `cargo test --lib control_plane`、`cargo test --test policy --test policy_provider`、`cargo check --all-targets`，Node capability／supervision／isolation／predictor 回归与 Pi TypeScript 检查。最终结果以实际命令输出为准；没有真实 provider 验证。
+离线回归通过 `cargo check --all-targets`、`cargo build --bins`、`cargo test --lib --bins --test policy --test policy_provider` 和项目的 Node 离线测试集。Rust 使用 `RUST_TEST_THREADS=1` 串行运行涉及挂载的测试。端到端回归使用本机假模型，其中一笔 `predict` 请求延迟超过 5 秒，以验证声明的超时生效。真实模型请求次数为 0。
 
 ### 正常运行的 Policy 留档（2026-11-13）
 
@@ -46,7 +110,7 @@ control plane 在启动 Adapter 前保存 run 内 `policy.json`，复用 `Compil
 
 普通启动也拒绝含原生 session/events、recovery 或 Agent socket 的已有运行目录。恢复的完整文件摘要校验和反序列化使用同一份字节，不二次读取产物。写入／发布失败不留下半份目标文件；发布后目录同步失败时完整文件可能已经存在，仍报告失败，不启动 Adapter。示例 compile 的输出文件必须尚不存在，重新编译使用新输出路径；仅含 basename 的输出路径仍可使用。
 
-`--resume` 无 Policy 参数时读取 run 内 artifact，不重新编译外部源。有显式 Policy 参数时先编译核对 digest，仍使用留档版本；artifact 存在但损坏或绑定不符直接失败。artifact 缺失时要求显式提供 YAML，原 digest 与 Runtime 路径/内容检查通过才保存补充的 artifact，不回退默认策略。不提供旧 artifact 格式兼容。
+`--resume` 无 Policy 参数时读取 run 内 artifact，不重新编译外部源。有显式 Policy 参数时先编译核对 digest，仍使用留档版本；artifact 存在但损坏或绑定不符直接失败。artifact 缺失时要求显式提供 YAML，原 digest 与 Runtime 路径/内容检查通过才保存补充的 artifact，不回退默认策略。现有无 `policy_model_grant` 的产物仍可按原摘要加载。
 
 Runtime 环境变量仍是显式覆盖入口；恢复未指定时使用保存的 Runtime binding，照旧校验路径、内容和能力。普通启动的 Policy Runtime 相对路径仍按启动 cwd 解析，artifact 中另存解析路径，避免误改为 run 目录或 YAML 目录。Runtime 配置文件及环境仍需保留；本轮不复制完整 Runtime。自包含范围为 YAML 与已声明文件，不包括 Python 可执行文件、标准库、动态库、第三方服务或未声明动态依赖；现有隔离与明确拒绝规则不变。
 
@@ -113,7 +177,7 @@ def extent(data, *, policy_config, capabilities):
 
 - 参数只传给对应函数；省略 `policy_config` 时传空映射。不支持全局参数、继承或覆盖。
 - `inputs` 选择该类允许的可选输入；声明后调用方必须提供，未声明的数据被拒绝。
-- `capabilities` 仅在宿主显式授予时提供 `model_complete(request)`；默认调用不获得外部计算权限。grant 属于宿主本次求值上下文，不由 Policy 声明授权。声明 `requirements`、`outputs` 等尚未实现的 DSL 字段仍会报错。
+- `capabilities.model_complete(request)` 仅在宿主为本次 Decision 授权时可用。普通启动依据所选 Policy 的 `policy_model_grant` 构造该授权。声明 `requirements`、`outputs` 等尚未实现的 DSL 字段仍会报错。
 - 九类行为都必须显式绑定；不补系统默认函数。入口必须是模块顶层、未装饰的普通同步函数，能按上述形式调用；生成器和异步函数被拒绝。
 - YAML 拒绝重复键（包括参数内部）、锚点、别名、tag、指令、merge key、多文档、非字符串键及非有限数值。只按 YAML 1.2 规则识别布尔值，不将 `yes`／`on` 当成布尔值。
 - YAML 和全部声明源码分别限 1 MiB，文件最多 128 个，数据嵌套最多 32 层，整数限有符号 64 位。文件采用 UTF-8 文本；二进制资源尚不支持。
@@ -130,16 +194,16 @@ def extent(data, *, policy_config, capabilities):
 | `admit.feasibility_pass` | `op`、`state`、`contract_context` | 无 | 布尔值 |
 | `select` | `frontier_view`、`scheduling_context` | 无 | 输入 Chance ID（字段名 `chance_id`） 的无重复有序子集 |
 | `rebalance` | `active_view`、`paused_view`、`scheduling_context` | 无 | 输入 Branch 的 `pause`／`resume`／`preempt` 动作，每 Branch 最多一次 |
-| `extent` | `process_state` | `process_state.active_time`、`process_state.resource_counters`、`process_state.result_facts`、`process_state.semantic_facts` | `stop`／`continue` |
-| `predict` | `chance_context`、`process_context`、`assumption_set`、`capability_context` | `history` | batch `ProposalSet`，每项有 `payload`，可有 `provenance` |
+| `extent` | `process_state` | `process_state.hook_count`、`process_state.active_time`、`process_state.resource_counters`、`process_state.result_facts`、`process_state.semantic_facts` | `stop`／`continue` |
+| `predict` | `chance_context`、`process_context`、`assumption_set`、`capability_context` | `history` | 显式 `abstain` 或非空 batch。模型推理边界仍支持 `branch_model` |
 | `launch` | `chance_context`、`authority_state`、`candidate_view` | `scheduling_context` | 布尔值 |
-| `effect` | `effect_descriptor`、`context` | 无 | 只接受无附加参数的 `block`／`deny` 计划 |
-| `match` | `proposal`、`evidence`、`match_context` | `outcome` | 四类 verdict，不接受 score |
-| `dispose` | `branch`、`resolution`、`context` | 无 | 单个 `Discard`，或仅在 `accepted` 时单个 `Promote`；在 `indeterminate`／`error`／`extent_reached` 时可返回空动作列表 |
+| `effect` | `effect_descriptor`、`context` | 无 | `allow`、`deny`、`block`、`default`、`stage`、`simulate`，可附 `reason` |
+| `match` | `proposal`、`evidence`、`match_context` | `outcome` | 四类 `verdict`，可附数字 `score` 和对象 `details` |
+| `dispose` | `branch`、`resolution`、`context` | 无 | `Promote`、`Reuse`、`Salvage` 加 `Discard`，或 `Discard`。`indeterminate`／`error`／`extent_reached` 可返回空动作列表 |
 
 `op` 包含 `kind`、`produces_result`、`result_pending`、`has_predictor`；后三者是布尔值。`process_state` 至少包含非负整数 `steps_completed` 和字符串 `phase`。`frontier_view` 每项有 `chance_id`；active／paused 视图每项有 `branch_id`，集合不得重叠。`assumption_set` 是无重复的 `(chance_id, proposal_id)` 引用数组。
 
-表中未支持的合法目标能力不会被替换为另一种结果：增量预测、score 规则及阈值检查、其他效果模式、Reuse／Salvage 等交接计划会明确失败。这些是原型缺口，不是修改九类 Decision 的正式值域。本轮已补齐 `Promote` 的意图检查和 Pi 单候选会话接替，真实运行见 [首要验证 Workload](reference-workload.md)。Engine 只检查意图格式及 accepted 前提，不证明 Branch 已被接受；实际会话接替与清理由 Pi 接入调用方落实。`Reuse` 仍保留为后续深度嵌套投机所需的结果／受管状态交接能力。系统应用前的状态有效性、预算、Contract、依赖、Fidelity 和 single-winner 复核仍由状态拥有者完成，目前未接入完整 Speculation Coordinator。
+增量预测及外部效果协调器尚未接入。`stage`／`simulate` 在效果边界暂停并记录原因。引擎验证处置契约，控制面复核分支生命周期、等待点和 single-winner，Runtime 检查文件冲突后交付。`Salvage` 可以从验证裁决、范围暂停或抢占进入。任务级中断直接取消尚未提交的工作。
 
 ## 4. 执行与失败边界
 
@@ -160,11 +224,19 @@ def extent(data, *, policy_config, capabilities):
 
 ## Chance id 的当前实现
 
+`select.scheduling_context` 提供只读调度事实。`active_candidate_count` 和 `active_branches` 包含仍参与投机的候选，`blocked_candidate_count` 是其中处于 `Blocked` 状态的数量。`pending_chance_count` 是处于 `Pending` 状态的 Chance 数量。每个 `active_branches` 条目只有 `branch_id`、`chance_id`、`assumption_depth` 和 `status`。
+
+`launch.authority_state` 只包含 `branch_id`、`status`、`assumption_depth` 和 `turn_active`，父分支缺失时为 `{}`。`launch.candidate_view` 使用与 `select` 的 `active_branches` 相同的候选摘要。
+
 `admit` 通过时 Tree 创建 Chance 并生成 `chance-<n>` 不透明 id；`select` 的 `frontier_view`、`predict` 的 `assumption_set`、`launch`/`predict` 的 `chance_context` 以及观察事件中的 `chance_id` 都使用这个 id。`branch_created` 携带 Branch 所属 Chance；初始权威 Branch 为 null。control plane 不再用 operation id 冒充 Chance id。
 
 `extent` 与 `effect` 由 Instrumentation 的通用层在真实执行边界按同一编译 Policy 求值，并通过 `branch_suspended` 的原因让 control plane 记录 Blocked；`rebalance` 由 control plane 在 Tree 版本变化后求值并下发 pause/resume/preempt。control plane 不重复求值 extent/effect，因此没有其它接入形式的实现时，这两类 Decision 不会在 control plane 侧单独生效。
 
-当前是最小接线：extent 在 Pi 接入的工具与模型执行点按 action 计数求值，停止时 Branch 进入 `blocked/{"extent_reached"}`，由 `resolve_pending` 或取消释放；effect 对 candidate 工具效果求值，隔离能力与 Policy 同时允许时执行，否则 `block`/`deny`，模型推理不受该 gate 影响，`block` 使 Branch 进入 `blocked/{"effect_gate"}` 直到 Promote、Discard 或清理；rebalance 只按 Policy 返回的 branch_id 执行 pause/resume/preempt，没有独立的资源预算计算、全局成本模型或 effect 插件。三者都通过公共 `status_changed` 事件如实发布 Blocked 与其原因。
+`extent` 仅在候选分支执行模型或工具前求值。`steps_completed` 从候选创建时的 0 开始，每次收到完成通知递增。`phase` 表示下一动作类型。只有声明了相应 `inputs` 才提供进入边界的次数 `hook_count`、自创建以来的秒数 `active_time`、分类完成计数 `resource_counters`、最近完成动作摘要 `result_facts` 和下一动作的类型、名称与参数 `semantic_facts`。已准入动作重连沿用原计数。全局晋升释放 `extent` 等待，权威分支跳过 `extent`。停止时分支报告 `extent_reached`，`resolve_pending` 或取消也可结束等待。
+
+`admit` 的 `op` 提供动作标识、参数、结果是否待定，以及预测和权威状态。`admit.feasibility_pass` 还接收 `is_candidate`、`assumption_depth`、`steps_completed`、按工具名统计的成功与失败次数 `tool_counts`、最近最多 16 条已完成动作 `recent_actions`。候选继承父分支的工具统计与最近动作，自己的步数从 0 开始。保存与恢复保留这些值。
+
+`predict` 只在声明 `history` 时接收最近最多 16 条有界历史摘要。`match` 只在声明 `outcome` 时接收顶层实际结果。`dispose` 的 `candidate_results` 保留已经报告的工具标识、参数和详情。`effect` 仅在候选工具边界求值，隔离能力与 Policy 同时允许时才执行工具。`block` 挂起至放行、丢弃或清理。`rebalance` 按 Policy 返回的分支标识执行 pause、resume、preempt。
 
 嵌套 Chance 使用它所属父 Branch 的真实执行和等待点来验证。内层 Full 可把候选状态合入仍处于投机的父环境，保留胜者 session 及其后代，并让胜者承接原父 Branch 的外层 Chance。Part 只把回执确认的结果交给原父 session，并抛弃内层候选及后代。两者都保留祖先未决 Proposal，且祖先否定仍会丢弃相应的投机延续。文件级结果依赖、暂停顺序和后端限制见 [Runtime 生命周期](runtime-lifecycle.md#full-与-part-接受)。
 
@@ -182,3 +254,5 @@ control plane 从 `~/.config/ascout/config.toml` 读取 `policy_dir`、`runs_dir
 Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Policy 已引用的 Runtime 配置，以单个 `backend` 或 `backends` 数组中各项的 `id` 对照 Runtime hello 的 `capabilities.backends`；没有引用 Runtime 或配置未声明 backend 时不检查。此检查不改变 Policy 摘要或编译产物结构。失败走既有 Adapter teardown。接口解析仍属于 Runtime，不构成环境保证验证。
 
 调用方迁移：主入口、回放入口和五份本地 fixture 已切换到配置/session 路径，fixture 使用私有 HOME 配置、不写用户主目录。fixture 在启动 Runtime 前同步复制 workspace，消除 stderr 通知后的复制竞态。恢复中的 `launch evaluation: Broken pipe` 根因是缓存 worker 的 `--die-with-parent` 随创建线程退出杀死进程；由 Worker 的 Drop 负责清理后，新增线程退出回归测试通过（原实现先复现失败，日志 `/tmp/ascout-worker-before.log`）。最终 `cargo check --all-targets`、`cargo test --lib --bins --test policy` 通过；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 6/6 通过，日志 `/tmp/ascout-recovery-final.log`。回放新 session 必须选 `--policy NAME`，不加载源 session artifact；下游外部脚本仍需按新接口核查。
+
+`predict.chance_context` 携带工具参数，`process_context` 携带 `observation` 与 `steps_completed`。策略可用 `history: {mode: transcript_tail, max_entries: 30}` 声明历史投影，或用 `match.outcome: tool_output` 声明真实输出。`rebalance` 的每条分支视图提供 `branch_id`、`chance_id`、`steps_completed`、`tool_counts`、`tokens_used` 和 `age_ms`。

@@ -11,10 +11,20 @@
  * execution points into `ExecutionPoint` values and executes the disposition;
  * it does not evaluate `extent` or `effect` itself.
  */
+import { evaluatePureDecision, type PureDecision } from './pure-policy.ts';
+
 export type PolicyArtifact = {
     readonly digest: string;
     readonly has_predictor?: boolean;
     readonly decisions: Readonly<Record<string, string>>;
+    readonly pure?: Readonly<Record<string, PureDecision>>;
+    readonly decision_inputs?: Readonly<Record<string, readonly string[]>>;
+    readonly policy_model_grant?: {
+        readonly decisions: readonly string[];
+        readonly models: readonly string[];
+        readonly max_requests: number;
+        readonly timeout_ms: number;
+    };
 };
 
 export type EvaluatePolicy = (
@@ -40,6 +50,7 @@ export type ExecutionPoint = {
     admit: boolean | (() => boolean);
     /** Extra product facts copied into `speculative_admission_request`. */
     admissionFacts?: Record<string, unknown> | (() => Record<string, unknown>);
+    fastStart?: { chanceId: string; start: (prediction: unknown) => void };
     signal?: AbortSignal;
     /** Reconnect an already admitted hook; do not count or admit it twice. */
     admitted?: boolean;
@@ -55,11 +66,39 @@ export type ControlCommand = {
     [field: string]: unknown;
 };
 
+type ActionCompletion = {
+    branch: string;
+    actionId: string;
+    actionKind: string;
+    name: string;
+    status: string;
+    isError: boolean;
+};
+
+type ActionSummary = { kind: string; name: string; status: string; is_error: boolean };
+type BranchState = {
+    is_candidate: boolean;
+    assumption_depth: number;
+    steps_completed: number;
+    tool_counts: Record<string, { succeeded: number; failed: number }>;
+    recent_actions: ActionSummary[];
+};
+
+type BranchProgress = {
+    state: BranchState;
+    startedAt: number;
+    hookCount: number;
+    modelInferences: number;
+    toolExecutions: number;
+    lastAction?: ActionSummary;
+};
+
 export type Interposer = {
     setPolicy(branch: string, artifact: PolicyArtifact): void;
     /** Apply the hold bookkeeping for a control-plane command. */
     control(command: ControlCommand): Promise<void>;
     beforeAction(point: ExecutionPoint): Promise<Disposition>;
+    afterAction(action: ActionCompletion): void;
     releaseAll(): void;
     snapshot(): unknown;
     restore(record: any): void;
@@ -91,13 +130,126 @@ async function waitFor(hold: Hold, signal: AbortSignal | undefined, message: str
     });
 }
 
-export function createInterposer({ taskId, report, evaluate, now = Date.now }: Options): Interposer {
+export function createInterposer({ taskId, report, evaluate: sandbox, now = Date.now }: Options): Interposer {
+    const inMemory: EvaluatePolicy = async (artifact, decision, data, signal) => pure(artifact, decision, data, signal)?.result;
+    function pure(artifact: PolicyArtifact, decision: string, data: unknown, signal?: AbortSignal) {
+        const binding = artifact.pure?.[decision];
+        if (binding && !artifact.policy_model_grant?.decisions.includes(decision)) {
+            return evaluatePureDecision(binding, decision, data, artifact.decision_inputs?.[decision] ?? [], signal);
+        }
+    }
+    const evaluate: EvaluatePolicy = async (artifact, decision, data, signal) => {
+        const evaluated = pure(artifact, decision, data, signal);
+        if (evaluated) return evaluated.result;
+        if (decision === 'admit.opportunity_pass' && artifact.pure !== undefined) {
+            throw Error('admit.opportunity_pass could not be evaluated in memory');
+        }
+        return sandbox(artifact, decision, data, signal);
+    };
     const policies = new Map<string, PolicyArtifact>();
     const effectHolds = new Map<string, Hold>();
     const pauseHolds = new Map<string, Hold>();
     const extentHolds = new Map<string, Hold>();
-    const hookCounts = new Map<string, number>();
+    const progress = new Map<string, BranchProgress>();
     const countedHooks = new Set<string>();
+
+    // Reject whole-object or dynamic lookups of inputs whose values only the
+    // control plane knows. Inspect every arm, including unexecuted branches.
+    function localInputs(binding: PureDecision, roots: string[]) {
+        const argument = binding.program.argument;
+        function allowed(node: unknown): boolean {
+            if (!Array.isArray(node)) return true;
+            if (node[0] === 'var' && node[1] === argument) return false;
+            if (node[0] === 'index' && Array.isArray(node[1]) && node[1][0] === 'var' && node[1][1] === argument) {
+                const key = node[2];
+                return Array.isArray(key) && key[0] === 'const' && roots.includes(key[1]);
+            }
+            return node.every(allowed);
+        }
+        return allowed(binding.program.body);
+    }
+
+    function fastPrediction(artifact: PolicyArtifact, point: ExecutionPoint) {
+        const request = point.fastStart;
+        if (!request || point.op.authority !== true || [...progress.values()].some(value => value.state.is_candidate)) return;
+        const run = (decision: string, data: unknown, roots: string[]) => {
+            const binding = artifact.pure?.[decision];
+            if (!binding || artifact.policy_model_grant?.decisions.includes(decision) || !localInputs(binding, roots)) return;
+            const inputs = artifact.decision_inputs?.[decision] ?? [];
+            if (inputs.some(path => !roots.includes(path.split('.')[0]))) return;
+            return evaluatePureDecision(binding, decision, data, inputs, point.signal)?.result;
+        };
+        const chance = {chance_id: request.chanceId, tool_name: point.name, arguments: point.arguments ?? {}};
+        try {
+            const selection = run('select', {frontier_view: [chance]}, ['frontier_view']);
+            if (!Array.isArray(selection) || selection.length !== 1 || selection[0] !== request.chanceId) return;
+            if (run('launch', {chance_context: {chance_id: chance.chance_id, tool_name: chance.tool_name}}, ['chance_context']) !== true) return;
+            const result = run('predict', {chance_context: {...chance, kind: 'toolexecution'}, process_context: {}}, ['chance_context']);
+            const proposals = (result as {proposals?: {payload: unknown; provenance?: unknown}[]; abstain?: boolean} | undefined);
+            if (proposals?.abstain === true) return {abstain: true} as const;
+            if (proposals?.proposals?.length === 1) return proposals.proposals[0];
+        } catch {
+            // A program that cannot be evaluated with local facts uses normal admission.
+        }
+    }
+
+    function newProgress(parent?: BranchState, candidate = false): BranchProgress {
+        return {
+            state: {
+                is_candidate: candidate,
+                assumption_depth: candidate ? (parent?.assumption_depth ?? 0) + 1 : 0,
+                steps_completed: 0,
+                tool_counts: Object.assign(Object.create(null), structuredClone(parent?.tool_counts ?? {})),
+                recent_actions: structuredClone(parent?.recent_actions ?? []),
+            },
+            startedAt: now(), hookCount: 0, modelInferences: 0, toolExecutions: 0,
+        };
+    }
+
+    function branchProgress(branch: string) {
+        let value = progress.get(branch);
+        if (!value) progress.set(branch, value = newProgress());
+        return value;
+    }
+
+    async function extentGate(point: ExecutionPoint, branch: BranchProgress) {
+        const artifact = policies.get(point.branch);
+        if (!artifact || !branch.state.is_candidate) return;
+        const eventKey = `${point.branch}\u0000${point.actionId}`;
+        if (!countedHooks.has(eventKey)) {
+            countedHooks.add(eventKey);
+            branch.hookCount++;
+        }
+        const process_state: Record<string, unknown> = {
+            steps_completed: branch.state.steps_completed,
+            phase: point.actionKind,
+        };
+        for (const input of artifact.decision_inputs?.extent ?? []) {
+            switch (input) {
+                case 'process_state.hook_count': process_state.hook_count = branch.hookCount; break;
+                case 'process_state.active_time': process_state.active_time = Math.max(0, now() - branch.startedAt) / 1000; break;
+                case 'process_state.resource_counters':
+                    process_state.resource_counters = {model_inferences: branch.modelInferences, tool_executions: branch.toolExecutions};
+                    break;
+                case 'process_state.result_facts':
+                    process_state.result_facts = branch.lastAction ? {last_action: branch.lastAction} : {};
+                    break;
+                case 'process_state.semantic_facts':
+                    process_state.semantic_facts = {
+                        next_action: {kind: point.actionKind, name: point.name, arguments: point.arguments ?? {}},
+                        next_action_kind: point.actionKind, next_action_name: point.name, arguments: point.arguments ?? {},
+                    };
+                    break;
+            }
+        }
+        if (await evaluate(artifact, 'extent', {process_state}, point.signal) !== 'stop'
+            || !branch.state.is_candidate || point.signal?.aborted || progress.get(point.branch) !== branch) return;
+        const existing = extentHolds.get(point.branch);
+        const hold = existing ?? makeHold();
+        extentHolds.set(point.branch, hold);
+        if (!existing) await report({ message: 'branch_suspended', branch_id: point.branch, reason: 'extent_reached' });
+        await waitFor(hold, point.signal, 'Extent stop cancelled');
+    }
 
     // A Branch that has not been accepted yet may not produce effects. The
     // `effect` Decision is evaluated at the boundary; while the gate holds, the
@@ -106,6 +258,7 @@ export function createInterposer({ taskId, report, evaluate, now = Date.now }: O
         const hold = effectHolds.get(point.branch);
         if (!hold) return;
         const artifact = policies.get(point.branch);
+        let detail: string | undefined;
         if (artifact) {
             const plan = await evaluate(
                 artifact,
@@ -120,12 +273,19 @@ export function createInterposer({ taskId, report, evaluate, now = Date.now }: O
                 },
                 point.signal,
             );
-            if ((plan as { mode?: string } | null)?.mode === 'allow' && (point.contractContext as any)?.isolated === true) return;
-            if ((plan as { mode?: string } | null)?.mode === 'deny') {
+            const effect = plan as {mode?: string; reason?: string} | null;
+            if (effect?.mode === 'allow' && (point.contractContext as any)?.isolated === true) return;
+            if (effect?.mode === 'stage' || effect?.mode === 'simulate') {
+                detail = `${effect.mode}: external effect coordinator unavailable`;
+                if (effect.reason) detail += ` (${effect.reason})`;
+            } else {
+                detail = effect?.reason;
+            }
+            if (effect?.mode === 'deny') {
                 throw Error('Effect denied by Policy');
             }
         }
-        await report({ message: 'branch_suspended', branch_id: point.branch, reason: 'effect_gate' });
+        await report({ message: 'branch_suspended', branch_id: point.branch, reason: 'effect_gate', detail });
         await waitFor(hold, point.signal, 'Candidate cancelled');
         await report({ message: 'branch_resumed', branch_id: point.branch });
     }
@@ -141,21 +301,22 @@ export function createInterposer({ taskId, report, evaluate, now = Date.now }: O
 
     async function localAdmission(point: ExecutionPoint) {
         const artifact = policies.get(point.branch);
-        if (!artifact) return false;
-        const opportunity = await evaluate(
-            artifact,
-            'admit.opportunity_pass',
-            { op: point.op },
-            point.signal,
-        );
-        if (opportunity !== true) return false;
-        const feasibility = await evaluate(
-            artifact,
-            'admit.feasibility_pass',
-            { op: point.op, state: {}, contract_context: point.contractContext },
-            point.signal,
-        );
-        return feasibility === true;
+        if (!artifact) return {admitted:false, pure:false};
+        let entirelyLocal = true;
+        const admit = async (decision: string, data: unknown) => {
+            const result = await inMemory(artifact, decision, data, point.signal);
+            if (result !== undefined) return result;
+            entirelyLocal = false;
+            if (decision === 'admit.opportunity_pass' && artifact.pure !== undefined) {
+                throw Error('admit.opportunity_pass could not be evaluated in memory');
+            }
+            return sandbox(artifact, decision, data, point.signal);
+        };
+        if (await admit('admit.opportunity_pass', {op:point.op}) !== true) return {admitted:false, pure:entirelyLocal};
+        const feasibility = await admit('admit.feasibility_pass', {
+            op:point.op, state:branchProgress(point.branch).state, contract_context:point.contractContext ?? {},
+        });
+        return {admitted:feasibility === true, pure:entirelyLocal};
     }
 
     function setPolicy(branch: string, artifact: PolicyArtifact) {
@@ -174,15 +335,24 @@ export function createInterposer({ taskId, report, evaluate, now = Date.now }: O
 
         snapshot() {
             return {policies:[...policies],effectHolds:[...effectHolds.keys()],pauseHolds:[...pauseHolds.keys()],
-                extentHolds:[...extentHolds.keys()],hookCounts:[...hookCounts],countedHooks:[...countedHooks]};
+                extentHolds:[...extentHolds.keys()],progress:structuredClone([...progress]),countedHooks:[...countedHooks]};
         },
 
         restore(record) {
             for(const [branch,artifact] of record.policies)setPolicy(branch,artifact);
             for(const branch of record.effectHolds)effectHolds.set(branch,makeHold());
             for(const branch of record.pauseHolds)pauseHolds.set(branch,makeHold());
-            for(const branch of record.extentHolds)extentHolds.set(branch,makeHold());
-            for(const [branch,count] of record.hookCounts)hookCounts.set(branch,count);
+            // Older snapshots only recorded hook counts. The effect hold also
+            // identifies the candidates in those snapshots.
+            for (const branch of record.effectHolds) progress.set(branch, newProgress(undefined, true));
+            for (const [branch, count] of record.hookCounts ?? []) branchProgress(branch).hookCount = count;
+            for (const [branch, value] of record.progress ?? []) {
+                value.state.tool_counts = Object.assign(Object.create(null), value.state.tool_counts);
+                progress.set(branch, value);
+            }
+            for (const branch of record.extentHolds) {
+                if (progress.get(branch)?.state.is_candidate) extentHolds.set(branch, makeHold());
+            }
             for(const key of record.countedHooks)countedHooks.add(key);
         },
 
@@ -194,12 +364,17 @@ export function createInterposer({ taskId, report, evaluate, now = Date.now }: O
                         digest: command.policy_digest as string,
                         has_predictor: command.has_predictor === true,
                         decisions: command.decisions as Record<string, string>,
+                        pure: command.pure as PolicyArtifact['pure'],
+                        decision_inputs: command.decision_inputs as PolicyArtifact['decision_inputs'],
+                        policy_model_grant: command.policy_model_grant as PolicyArtifact['policy_model_grant'],
                     });
                     return;
                 }
                 case 'start_candidate': {
-                    const parentPolicy = policies.get(command.parent_branch_id as string);
+                    const parent = command.parent_branch_id as string;
+                    const parentPolicy = policies.get(parent);
                     if (parentPolicy) policies.set(branch, parentPolicy);
+                    if (!progress.has(branch)) progress.set(branch, newProgress(progress.get(parent)?.state, true));
                     if (!effectHolds.has(branch)) effectHolds.set(branch, makeHold());
                     return;
                 }
@@ -223,12 +398,15 @@ export function createInterposer({ taskId, report, evaluate, now = Date.now }: O
                     return;
                 }
                 case 'promote':
+                    branchProgress(branch).state.is_candidate = false;
+                    branchProgress(branch).state.assumption_depth = 0;
                     effectHolds.get(branch)?.release();
                     effectHolds.delete(branch);
                     extentHolds.get(branch)?.release();
                     extentHolds.delete(branch);
                     return;
                 case 'discard':
+                    if (progress.has(branch)) progress.get(branch)!.state.is_candidate = false;
                     effectHolds.get(branch)?.release();
                     effectHolds.delete(branch);
                     pauseHolds.get(branch)?.release();
@@ -244,7 +422,7 @@ export function createInterposer({ taskId, report, evaluate, now = Date.now }: O
                     extentHolds.get(branch)?.release();
                     extentHolds.delete(branch);
                     policies.delete(branch);
-                    hookCounts.delete(branch);
+                    progress.delete(branch);
                     for (const key of countedHooks) {
                         if (key.startsWith(`${branch}\u0000`)) countedHooks.delete(key);
                     }
@@ -254,26 +432,50 @@ export function createInterposer({ taskId, report, evaluate, now = Date.now }: O
             }
         },
 
+        afterAction({branch, actionId, actionKind, name, status, isError}) {
+            countedHooks.delete(`${branch}\u0000${actionId}`);
+            const value = progress.get(branch);
+            if (!value) return;
+            const {state} = value;
+            const summary = {kind: actionKind, name, status, is_error: isError};
+            value.lastAction = summary;
+            state.recent_actions.push(summary);
+            if (state.recent_actions.length > 16) state.recent_actions.shift();
+            if (actionKind === 'model_inference') value.modelInferences++;
+            if (actionKind === 'tool_execution') {
+                value.toolExecutions++;
+                const counts = state.tool_counts[name] ??= {succeeded: 0, failed: 0};
+                if (status === 'succeeded' && !isError) counts.succeeded++;
+                else if (status === 'failed' || isError) counts.failed++;
+            }
+            if (actionKind === 'model_inference' || actionKind === 'tool_execution') state.steps_completed++;
+        },
+
         async beforeAction(point) {
             const effectful = point.actionKind === 'tool_execution';
-            if (effectful) await effectGate(point);
+            const managed = effectful || point.actionKind === 'model_inference';
+            const branch = branchProgress(point.branch);
             await pauseGate(point.branch, point.signal);
             if (point.admitted) {
                 const hold = extentHolds.get(point.branch);
-                if (hold) await waitFor(hold, point.signal, 'Extent stop cancelled');
-                return {kind:'allow'};
+                if (hold && branch.state.is_candidate) await waitFor(hold, point.signal, 'Extent stop cancelled');
+            } else if (managed) {
+                await extentGate(point, branch);
             }
+            if (effectful) await effectGate(point);
+            if (point.admitted || !managed) return { kind: 'allow' };
 
             const admit = typeof point.admit === 'function' ? point.admit() : point.admit;
-            if (!admit || !policies.has(point.branch) || point.op.has_predictor === false) return { kind: 'allow' };
-            if (!(await localAdmission(point))) return { kind: 'allow' };
-            if (!effectful && point.actionKind !== 'model_inference') return { kind: 'allow' };
-
-            const artifact = policies.get(point.branch)!;
+            const artifact = policies.get(point.branch);
+            if (!admit || !artifact || point.op.has_predictor === false) return { kind: 'allow' };
+            const admission = await localAdmission(point);
+            if (!admission.admitted) return { kind: 'allow' };
             const facts = typeof point.admissionFacts === 'function'
                 ? point.admissionFacts()
                 : point.admissionFacts;
-            await report({
+            const prediction = admission.pure ? fastPrediction(artifact, point) : undefined;
+            if (prediction && 'abstain' in prediction) return {kind: 'allow'};
+            const sent = report({
                 message: 'speculative_admission_request',
                 task_id: taskId,
                 policy_digest: artifact.digest,
@@ -283,33 +485,15 @@ export function createInterposer({ taskId, report, evaluate, now = Date.now }: O
                 name: point.name,
                 arguments: point.arguments,
                 ...facts,
+                ...(prediction && 'payload' in prediction && {fast_start:{chance_id:point.fastStart!.chanceId, prediction:prediction.payload, provenance:prediction.provenance}}),
                 timestamp_ms: now(),
             });
-
-            const eventKey = `${point.branch}\u0000${point.actionId}`;
-            if (!countedHooks.has(eventKey)) {
-                countedHooks.add(eventKey);
-                hookCounts.set(point.branch, (hookCounts.get(point.branch) ?? 0) + 1);
+            if (prediction && 'payload' in prediction) {
+                void sent;
+                point.fastStart!.start(prediction.payload);
+                return { kind: 'allow' };
             }
-            const steps = hookCounts.get(point.branch) ?? 0;
-            const extent = await evaluate(
-                artifact,
-                'extent',
-                {
-                    process_state: {
-                        steps_completed: steps,
-                        hook_count: steps,
-                        phase: point.actionKind,
-                    },
-                },
-                point.signal,
-            );
-            if (extent === 'stop') {
-                const hold = makeHold();
-                extentHolds.set(point.branch, hold);
-                await report({ message: 'branch_suspended', branch_id: point.branch, reason: 'extent_reached' });
-                await waitFor(hold, point.signal, 'Extent stop cancelled');
-            }
+            await sent;
             return { kind: 'admit', policyDigest: artifact.digest };
         },
 

@@ -1,13 +1,14 @@
 //! cgroup v2 目录探测与冻结等待。
 
 use std::fs;
+use std::io::{Read, Seek};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use super::*;
 
-const FREEZE_WAIT_ATTEMPTS: usize = 200;
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+const FREEZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(super) fn probe_cgroup_root() -> Option<PathBuf> {
     let text = fs::read_to_string("/proc/self/cgroup").ok()?;
@@ -30,13 +31,32 @@ pub(super) fn probe_cgroup_root() -> Option<PathBuf> {
 }
 
 pub(super) fn wait_frozen(path: &Path) -> Result<(), BackendError> {
-    for _ in 0..FREEZE_WAIT_ATTEMPTS {
-        if let Ok(events) = fs::read_to_string(path.join("cgroup.events"))
-            && events.lines().any(|line| line.trim() == "frozen 1")
-        {
+    let mut file = fs::File::open(path.join("cgroup.events")).map_err(error)?;
+    let deadline = std::time::Instant::now() + FREEZE_TIMEOUT;
+    let mut events = String::new();
+    loop {
+        events.clear();
+        file.rewind().map_err(error)?;
+        file.read_to_string(&mut events).map_err(error)?;
+        if events.lines().any(|line| line.trim() == "frozen 1") {
             return Ok(());
         }
-        std::thread::sleep(POLL_INTERVAL);
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let mut fd = libc::pollfd {
+            fd: file.as_raw_fd(),
+            events: libc::POLLPRI,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut fd, 1, remaining.as_millis().max(1) as i32) };
+        if result < 0 {
+            let failure = std::io::Error::last_os_error();
+            if failure.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error(failure));
+            }
+        }
     }
     Err(BackendError::new("cgroup did not report frozen=1"))
 }

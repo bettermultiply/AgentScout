@@ -211,6 +211,21 @@ export interface ModelUsageEvent extends EventBase {
   duration_ms: number | null
 }
 
+export interface ActionStartedEvent extends EventBase {
+  event: 'action_started'
+  branch_id: string
+  action_id: string
+  action_kind: ActionKind
+  name: string
+}
+
+export interface ModelFinishedEvent extends EventBase {
+  event: 'model_finished'
+  branch_id: string
+  action_id: string
+  status: ActionStatus
+}
+
 export interface ToolFinishedEvent extends EventBase {
   event: 'tool_finished'
   branch_id: string
@@ -264,6 +279,8 @@ export type BranchObservationEvent =
   | EnvironmentCleanedEvent
   | ConversationUpdatedEvent
   | ModelUsageEvent
+  | ActionStartedEvent
+  | ModelFinishedEvent
   | ToolFinishedEvent
   | NleMapActionEvent
   | SettlementEvent
@@ -325,7 +342,7 @@ export interface Conversation {
 export type Request =
   | { action: 'ui_prompt_answer'; prompt_id: string; answer: unknown; cancelled?: boolean }
   | { action: 'get_commands'; request_id: string }
-  | { action: 'model'; model: string }
+  | { action: 'model'; model: string; thinking?: string }
   | { action: 'prompt'; prompt: string }
   | { action: 'interrupt' }
   | { action: 'pause' }

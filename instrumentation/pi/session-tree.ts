@@ -27,27 +27,31 @@ export class SessionTree {
 
     // Copy native records, never reconstruct them from model-visible messages.
     // Keep the full source index: custom/summary entries can refer off-path.
-    createBranch(branchId,workspace,source=this.manager,leaf=source.getLeafId()) {
-        const manager=source.constructor.create(workspace);
-        const file=manager.getSessionFile();
-        const header={...source.getHeader(),id:manager.getHeader().id,timestamp:new Date().toISOString(),cwd:workspace,parentSession:source.getSessionFile()};
-        const entries=structuredClone(source.getEntries());
-        // Native createBranchedSession mutates its receiver and recreates label
-        // IDs. Copy native records instead, preserving IDs and off-path custom
-        // references, and explicitly select the checkpoint on the new manager.
-        this.write(file,header,entries);
-        const opened=source.constructor.open(file,undefined,workspace);
-        if(leaf)opened.branch(leaf);else opened.resetLeaf();
-        // branch() only selects an in-memory leaf. A neutral native record
-        // persists the checkpoint path for an independent open of this file.
-        opened.appendCustomEntry('authority',{branch_id:branchId,parentId:leaf??null});
-        if(leaf)opened.branch(leaf);else opened.resetLeaf();
-        this.branches.set(branchId,{manager:opened,stopped:false});
+    createBranch(branchId,workspace,source=this.manager,leaf=source.getLeafId(),persist=true) {
+        const identity=source.constructor.create(workspace);
+        const header={...identity.getHeader(),parentSession:source.getSessionFile()};
+        const manager=source.constructor.inMemory(workspace,undefined,[header,...source.getEntries()]);
+        // Pi accepts preloaded entries but doesn't assign a path in memory mode.
+        // Reserve the native path without writing until a persistence boundary.
+        manager.sessionFile=identity.getSessionFile();
+        if(leaf)manager.branch(leaf);else manager.resetLeaf();
+        manager.appendCustomEntry('authority',{branch_id:branchId,parentId:leaf??null});
+        if(persist)SessionTree.persist(manager);
+        if(leaf)manager.branch(leaf);else manager.resetLeaf();
+        this.branches.set(branchId,{manager,stopped:false});
         this.tails.set(branchId,leaf);
-        return opened;
+        return manager;
     }
 
-    write(file,header,entries) {
+    static persist(manager) {
+        if(manager.isPersisted()&&existsSync(manager.getSessionFile()))return;
+        SessionTree.write(manager.getSessionFile(),manager.getHeader(),manager.getEntries());
+        // Keep the existing manager and its leaf. Pi appends subsequent entries.
+        manager.persist=true;
+        manager.flushed=true;
+    }
+
+    static write(file,header,entries) {
         const temporary=`${file}.${randomUUID()}.tmp`;
         writeFileSync(temporary,[header,...entries].map(e=>JSON.stringify(e)).join('\n')+'\n',{flag:'wx'});
         renameSync(temporary,file);
@@ -94,8 +98,8 @@ export class SessionTree {
     }
     assertCheckpoint(branchId,saved) {
         const manager=this.branches.get(branchId)?.manager??this.manager;
-        const last=saved.at(-1),entry=[...manager.getBranch()].reverse().find(e=>e.type==='message');
-        if((last||entry)&&(!entry||JSON.stringify(entry.message)!==JSON.stringify(last)))throw Error(`Checkpoint tree tail is not the saved final message for branch ${branchId}`);
+        const last=saved.at(-1), recorded=manager.buildSessionContext().messages.at(-1);
+        if(JSON.stringify(recorded)!==JSON.stringify(last))throw Error(`Checkpoint tree tail is not the saved final message for branch ${branchId}`);
         return manager.getLeafId();
     }
 
@@ -110,6 +114,7 @@ export class SessionTree {
         const copies=new Map();
         if(directory){
             for(const [file,manager] of managers){
+                SessionTree.persist(manager);
                 if(!existsSync(file))throw Error(`Pi session is not persisted: ${file}`);
                 const saved=manager.constructor.forkFrom(file,manager.getHeader().cwd);
                 const target=saved.getSessionFile();
@@ -199,13 +204,15 @@ export class SessionTree {
             if(last?.customType==='authority'&&last.data?.branch_id===this.authority&&last.data?.parentId===tail)return;
             this.manager.branch(tail);this.manager.appendCustomEntry('authority',{branch_id:this.authority,parentId:tail});return;
         }
-        const entries=new Map([...this.originalEntries].map(([id,e])=>[id,structuredClone(e)]));
+        for(const input of this.inputs.values())if(input.source&&input.parent===this.authority)SessionTree.persist(input.source);
+        const entries=new Map(this.originalEntries);
         for(const [branchId,{manager}] of this.branches){
+            if(branchId===this.authority||this.accepted?.has(branchId))SessionTree.persist(manager);
             this.tails.set(branchId,manager.getLeafId());
             for(const source of manager.getEntries()){
                 const previous=entries.get(source.id);
-                if(previous&&JSON.stringify(previous)!==JSON.stringify(source))throw Error(`Conflicting native Pi entry ID ${source.id}`);
-                entries.set(source.id,structuredClone(source));
+                if(previous&&previous!==source&&JSON.stringify(previous)!==JSON.stringify(source))throw Error(`Conflicting native Pi entry ID ${source.id}`);
+                entries.set(source.id,source);
             }
         }
         for(const [id,entry] of entries){
@@ -213,7 +220,7 @@ export class SessionTree {
             for(const field of ['targetId','firstKeptEntryId','fromId'])if(entry[field]&&entry[field]!=='root'&&!entries.has(entry[field]))throw Error(`Missing Pi ${field} ${entry[field]} for ${id}`);
             if(entry.type==='custom'&&entry.customType==='rollback-snapshot'&&entry.data?.targetId&&!entries.has(entry.data.targetId))throw Error(`Missing rollback target ${entry.data.targetId} for ${id}`);
         }
-        this.originalEntries=new Map([...entries].map(([id,e])=>[id,structuredClone(e)]));
+        this.originalEntries=new Map(entries);
         for(const branchId of this.accepted??[]){
             const input=this.inputs.get(branchId);if(!input)continue;
             const source=input.source??this.branches.get(input.parent)?.manager;
@@ -254,7 +261,7 @@ export class SessionTree {
             if(!first)continue;
             input.first=first.id;
             if(!input.realTail)continue;
-            entries.get(first.id).parentId=input.realTail;
+            entries.set(first.id,{...entries.get(first.id),parentId:input.realTail});
         }
         for(const entry of entries.values()){
             const path=new Set();let current=entry;
@@ -264,7 +271,7 @@ export class SessionTree {
             }
         }
         const tail=this.tail(this.authority),marker={type:'custom',customType:'authority',id:randomUUID(),parentId:tail,timestamp:new Date().toISOString(),data:{branch_id:this.authority,parentId:tail}};
-        this.write(this.manager.getSessionFile(),this.manager.getHeader(),[...entries.values(),marker]);
+        SessionTree.write(this.manager.getSessionFile(),this.manager.getHeader(),[...entries.values(),marker]);
         // Re-open only the assembly manager. Runtime managers keep their own
         // original predicted contexts, including any inference already in flight.
         this.manager=this.manager.constructor.open(this.manager.getSessionFile());

@@ -15,6 +15,13 @@ use super::decision::Decision;
 pub(super) fn invalid(message: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
+pub(super) fn opportunity_requires_pure() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "admit.opportunity_pass must compile to a pure in-memory expression",
+    )
+}
+
 pub(super) fn require(condition: bool, message: &str) -> io::Result<()> {
     if condition {
         Ok(())
@@ -181,6 +188,29 @@ pub(super) fn check_json(value: &Value, depth: usize) -> io::Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+pub(super) fn validate_model_grant(grant: &super::PolicyModelGrant) -> io::Result<()> {
+    require(
+        !grant.decisions.contains(&Decision::OpportunityPass),
+        "policy_model_grant cannot include admit.opportunity_pass",
+    )?;
+    require(
+        !grant.decisions.is_empty()
+            && grant.decisions.iter().collect::<BTreeSet<_>>().len() == grant.decisions.len(),
+        "policy_model_grant decisions must be nonempty and unique",
+    )?;
+    require(
+        !grant.models.is_empty() && grant.models.iter().all(|id| {
+            id.split_once('/').is_some_and(|(provider, model)| {
+                !provider.is_empty() && !model.is_empty()
+                    && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+            })
+        }),
+        "policy_model_grant models must use provider/model format",
+    )?;
+    require((1..=16).contains(&grant.max_requests), "invalid policy_model_grant max_requests")?;
+    require((100..=300_000).contains(&grant.timeout_ms), "invalid policy_model_grant timeout_ms")
 }
 
 pub(super) fn validate_binding(
@@ -416,7 +446,7 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                 || (result.as_object().is_some_and(|m| m.len() == 2)
                     && result["generation"] == "batch"
                     && result["proposals"].as_array().is_some_and(|items| {
-                        items.iter().all(|p| {
+                        !items.is_empty() && items.iter().all(|p| {
                             p.as_object().is_some_and(|m| {
                                 m.contains_key("payload")
                                     && m.keys()
@@ -424,13 +454,17 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                             })
                         })
                     }))
+                || (result["abstain"] == true && result.as_object().is_some_and(|m| {
+                    m.keys().all(|k| ["abstain", "reason"].contains(&k.as_str()))
+                        && result.get("reason").is_none_or(Value::is_string)
+                }))
         }
-        // Only plans without plugin-specific state/effect transfer can be checked yet.
         Decision::Effect => {
-            result.as_object().is_some_and(|m| m.len() == 1)
-                && result["mode"]
-                    .as_str()
-                    .is_some_and(|s| ["block", "deny", "allow"].contains(&s))
+            result.as_object().is_some_and(|m| m.keys().all(|k| ["mode", "reason"].contains(&k.as_str())))
+                && result.get("reason").is_none_or(Value::is_string)
+                && result["mode"].as_str().is_some_and(|s| {
+                    ["block", "deny", "allow", "default", "stage", "simulate"].contains(&s)
+                })
         }
         Decision::Match => {
             let facts_valid = data["match_context"].as_object().is_some_and(|context| {
@@ -441,11 +475,12 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
             facts_valid
                 && result
                     .as_object()
-                    .is_some_and(|m| m.keys().all(|k| ["verdict", "score"].contains(&k.as_str())))
+                    .is_some_and(|m| m.keys().all(|k| ["verdict", "score", "details"].contains(&k.as_str())))
                 && result["verdict"].as_str().is_some_and(|v| {
                     ["compatible", "incompatible", "indeterminate", "error"].contains(&v)
                 })
-                && result.get("score").is_none()
+                && result.get("score").is_none_or(|v| v.is_number())
+                && result.get("details").is_none_or(Value::is_object)
         }
         Decision::Dispose => {
             result.as_object().is_some_and(|m| m.len() == 1)
@@ -455,26 +490,20 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                             ["indeterminate", "error", "extent_reached"].contains(&r)
                         });
                     }
-                    actions.iter().all(|action| {
-                        let valid_notification = action.get("notification").is_none_or(|value| {
-                            value.as_str().is_some_and(|text| !text.trim().is_empty())
-                        });
-                        action.as_object().is_some_and(|m| {
-                            m.keys().all(|key| {
-                                ["intent", "notification", "full", "part"].contains(&key.as_str())
-                            }) && (m.len() == 1 || action["intent"] == "Promote")
-                                && valid_notification
-                                && action.get("full").is_none_or(|full| full.is_boolean())
-                                && (action["full"] != false || action.get("part").is_some())
-                                && action.get("part").is_none_or(valid_part)
-                        }) && (action["intent"] == "Reuse"
-                            || action["intent"] == "Salvage"
-                            || action["intent"] == "Re-execute"
-                            || action["intent"] == "Discard"
-                            || action["intent"] == "Compensate"
-                            || action["intent"] == "Overwrite"
-                            || (action["intent"] == "Promote" && data["resolution"] == "accepted"))
-                    })
+                    let resolution = &data["resolution"];
+                    let discard = json_discard();
+                    let first = &actions[0];
+                    match first["intent"].as_str() {
+                        Some("Promote") => resolution == "accepted" && actions.len() == 1
+                            && first.as_object().unwrap().keys().all(|key| ["intent", "notification"].contains(&key.as_str()))
+                            && first.get("notification").is_none_or(nonblank),
+                        Some("Reuse") => resolution == "accepted" && valid_partial(first)
+                            && (actions.len() == 1 || actions[1..] == [discard]),
+                        Some("Salvage") => resolution != "accepted" && valid_partial(first)
+                            && actions[1..] == [discard],
+                        Some("Discard") => actions == &[discard],
+                        _ => false,
+                    }
                 })
         }
     };
@@ -487,30 +516,38 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
     )
 }
 
-fn valid_part(part: &Value) -> bool {
-    use crate::protocol::contract::{PartResult, PartSelection};
-    let nonblank = |value: &Value| value.as_str().is_some_and(|text| !text.trim().is_empty());
-    let Some(fields) = part.as_object() else { return false };
-    if let Some(results) = part["results"].as_array() {
-        if fields.len() != 1 {
-            return false;
-        }
-        let dependencies: Option<Vec<PartResult>> = results.iter().map(|result| {
-            if result.as_object()?.len() != 3 || !nonblank(&result["notification"]) {
-                return None;
-            }
-            serde_json::from_value(serde_json::json!({"id": result["id"], "files": result["files"]})).ok()
-        }).collect();
-        return dependencies.is_some_and(|results| PartSelection::valid_results(&results));
+fn json_discard() -> Value {
+    serde_json::json!({"intent": "Discard"})
+}
+
+fn nonblank(value: &Value) -> bool {
+    value.as_str().is_some_and(|text| !text.trim().is_empty())
+}
+
+fn valid_partial(action: &Value) -> bool {
+    let fields = action.as_object().unwrap();
+    let mut seen = BTreeSet::new();
+    if let Some(results) = action["results"].as_array() {
+        return fields.len() == 2 && !results.is_empty() && results.iter().all(|result| {
+            result.as_object().is_some_and(|fields| fields.len() == 2)
+                && result["id"].as_str().is_some_and(|id| !id.trim().is_empty() && seen.insert(id))
+                && nonblank(&result["notification"])
+        });
     }
-    fields.keys().all(|key| ["scopes", "notification"].contains(&key.as_str()))
-        && part["scopes"].as_array().is_some_and(|scopes| {
-            scopes.len() <= 2
-                && scopes.iter().all(|scope| scope == "workspace" || scope == "tmp")
-                && (scopes.len() < 2 || scopes[0] != scopes[1])
-                && (!scopes.is_empty() || part.get("notification").is_some())
+    fields.keys().all(|key| ["intent", "scopes", "notification"].contains(&key.as_str()))
+        && action["scopes"].as_array().is_some_and(|scopes| {
+            !scopes.is_empty()
+                && (scopes.iter().all(|scope| scope.as_str().is_some_and(|p| p.starts_with('/')))
+                    || scopes.iter().all(|scope| scope == "workspace" || scope == "tmp"))
+                && scopes.iter().all(|scope| {
+                scope.as_str().is_some_and(|path| {
+                    (matches!(path, "workspace" | "tmp") || crate::protocol::contract::PartSelection::valid_results(&[
+                        crate::protocol::contract::PartResult { id: "scope".into(), files: vec![path.into()] }
+                    ])) && seen.insert(path)
+                })
+            })
         })
-        && part.get("notification").is_none_or(nonblank)
+        && action.get("notification").is_none_or(nonblank)
 }
 
 pub(super) fn ids(value: &Value, key: &str) -> io::Result<BTreeSet<String>> {

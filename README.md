@@ -4,7 +4,7 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 ## 仓库状态
 
-仓库现在有一个按 control plane ownership 实现的 Agent 管理原型：Rust control plane 拥有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入；Agent 与 Instrumentation 由 agent supervisor 在可信宿主启动，control plane 只决定用哪个产品并把路径交给它。Runtime 侧已提供文件系统 Backend（overlay 与 btrfs 两种数据面），由其管理环境内的 namespace holder（bubblewrap、cgroup 冻结）；实现范围与已知偏差见 [文件系统 Backend 当前实现状态](docs/fs-backend/current-state.md)。Pi 是首个接入实现，不是 AScout 的架构组成；NLE 是当前验证 workload，不属于 AScout 实现。二者都不应把产品路径、工具或专用语义写进核心契约。它还不是正确完成的投机验证闭环、完整 Runtime、通用 Agent 产品或 coding workload。
+仓库现在有一个按 control plane ownership 实现的 Agent 管理原型：Rust control plane 拥有 Tree/Branch 状态，通过 Unix socket 管理 Pi Agent 接入；Agent 与 Instrumentation 由 agent supervisor 在可信宿主启动，control plane 只决定用哪个产品并把路径交给它。Runtime 侧已提供文件系统 Backend（overlay 与 btrfs 两种数据面），由其管理环境内的原生 namespace holder，支持 cgroup 冻结；实现范围与已知偏差见 [文件系统 Backend 当前实现状态](docs/fs-backend/current-state.md)。Pi 是首个接入实现，不是 AScout 的架构组成；NLE 是当前验证 workload，不属于 AScout 实现。二者都不应把产品路径、工具或专用语义写进核心契约。它还不是正确完成的投机验证闭环、完整 Runtime、通用 Agent 产品或 coding workload。
 
 目标语义与一级架构已经形成。AScout 按 `Instrumentation -> control plane -> runtime proxy -> Runtime` 组织控制生命周期。工具执行使用独立连接：Pi Product Integration 在已有宿主内独立适配 read/edit/write/bash 参数、schema 与结果格式，一次工具调用对应一次完整 Runtime 操作，文件编辑在目标环境内完成；Runtime 校验 Environment 与请求身份后交给文件系统 holder 或 Firecracker guest agent 原生执行，不加载 Pi SDK，也不逐工具启动 Node 或创建环境。NLE 声明工具共用接收与取消生命周期，游戏语义保留在 backend。control plane 只管理生命周期／Policy 和转交执行访问描述，不代执行工具。runtime proxy 对 control plane 提供稳定 typed contract，并负责目标 Runtime 的能力映射与协议适配。设计文档是语义权威；开发文档记录已接受的实现选择与剩余任务。
 
@@ -14,27 +14,27 @@ AScout（Agent Scout）是面向 Agent 投机执行的通用底座，位于投�
 
 目标系统通过 Gateway 统一接入 Agent、UI 与 Runtime 的通信，将请求交给相应控制逻辑；实际启动、监视和回收 Agent 及接入进程由 Runtime 负责。Gateway 属于 control plane，不独立部署，由 control plane 统一启动和停止；UI 同样不独立部署，由 control plane 启动和停止。Gateway 与 Runtime 采用网络通信；这些边界不规定必须同进程，也不要求自动打开浏览器，见 [control plane §2.1](docs/design/control-plane.md#21-gateway)。三侧通信入口的源码职责已归入 Gateway，实现现状见 [Gateway 实现核查](docs/development/gateway.md)。当前原型使用 Pi 作为首个接入实现；Pi 接入只运行 AgentSession、收集 Agent 行为事实和执行控制命令，不是用户入口。
 
-先在仓库根目录构建（需要 Make、Rust 与 Node 22.12 或更新版本）：
+先在仓库根目录构建，或先配置 Pi 源码根目录再安装：
 
 ```sh
 make
+PI_ROOT=/path/to/pi make install
 ```
 
-`make` 先准备前端依赖并构建 WebUI，再执行 `cargo build`，`make -j` 同样保证此顺序；任一步失败即停止。前端产物在本地生成并嵌入 Rust 二进制，不入库，具体规则见 [control plane WebUI](docs/development/web-ui.md#生产构建)。
-
-配置文件为 `~/.config/ascout/config.toml`。可在仓库根目录执行以下命令安装[配置样例](config.example.toml)（已有配置时请手动合并）：
+`make install` 在 `PI_ROOT` 未提供且相邻 `../pi` 不存在时会明确失败。安装配置会写入 Pi 根目录，运行时可从任意项目目录使用 `ascout --web`。首次安装会创建 `~/.config/ascout/config.toml`、安装内置 `coding` Policy，并保留已有配置。卸载使用 `make uninstall`，彻底清理配置和运行记录使用 `make purge`。两个命令都会拒绝删除仍被 `run.lock` 持有的活跃运行。
+配置文件为 `~/.config/ascout/config.toml`。
 
 ```sh
 mkdir -p ~/.config/ascout
 cp -n config.example.toml ~/.config/ascout/config.toml
 ```
 
-配置文件不存在时仅使用内置默认值，不会自动安装 Policy。样例与内置默认值一致，仅使用以下键：
+配置文件不存在时，安装命令会生成开箱即用的配置。手动运行二进制时使用内置默认值，默认 Policy 为 `coding`，默认 Backend 为 `filesystem`。未显式传入 `--policy` 且配置也没有 `default_policy` 时，交互终端才会列出可选 Policy 并询问。
 
 ```toml
 policy_dir = "~/.local/share/ascout/policies"
 runs_dir = "~/.local/share/ascout/runs"
-default_policy = "policy"
+default_policy = "coding"
 log_path = "~/.local/share/ascout/ascout.log"
 ```
 
@@ -42,19 +42,22 @@ log_path = "~/.local/share/ascout/ascout.log"
 
 仓库示例请将 `policy_dir` 设置为本仓库 `assets/policy` 的绝对路径；不要把开发策略复制到用户目录。每份 Policy 是含 `policy.yaml` 和 `decisions.py` 的子目录。交互启动会列出并询问 Policy，允许改选；非交互启动使用 `--policy <name>` 或默认 Policy，不等待输入。
 
-从真实终端启动（系统自动创建运行记录目录）：
+从当前项目目录启动：
 
 ```sh
-ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
-cargo run --bin ascout-control-plane -- ../pi
+ascout --web
 ```
 
-如果更方便使用浏览器页面，可让 control plane 绑定本机地址：
+也可以显式指定工作目录、Pi 根目录或高级 Runtime 配置：
 
 ```sh
-ASCOUT_RUNTIME_CONFIG=/path/to/runtime.json \
-cargo run --bin ascout-control-plane -- ../pi --web 127.0.0.1:8080
+ascout --cwd /path/to/project --web 127.0.0.1:8080
+ascout /path/to/pi --runtime /path/to/runtime.json
 ```
+
+`--web` 不带值时使用配置中的 `web_address`。启动后终端会打印 Web UI 地址。普通 filesystem 运行会在 run 目录自动生成 Runtime 配置、随机 loopback 控制端口和独立 `fs-state`，Agent 的工作目录就是当前项目目录。
+
+旧的完整启动方式仍可使用。安装时通过 `PI_ROOT=/path/to/pi make install` 配置 Pi，运行时也可以用位置参数、`ASCOUT_PI_ROOT` 或配置文件覆盖它。手写 `runtime.json` 和设置 `ASCOUT_RUNTIME_ADAPTER` 仍只用于高级配置。
 
 当前程序在前台运行，每次启动管理一个 run。TUI 的 Ctrl-C 中断当前 task 并保留会话，Ctrl-D 请求收尾并退出。Web 模式下关闭浏览器页面只断开页面连接。要正常停止前台进程，可发送 SIGTERM 或使用 Shutdown。保存暂停点需显式使用 `/pause`。
 
@@ -70,7 +73,7 @@ node tools/replay/run.ts /path/to/source-run ../pi \
 
 源 `policy.json` 优先；缺失时用 `--policy <name>` 选择原 Policy。用 `--runtime` 明确提供新运行环境。源目录只读；普通 AScout 负责新 run 的记录和恢复。工具终端输入 `pause` 暂停自动输入后，可在 WebUI 手动输入或切换模型；`resume` 继续，`status` 查看消费情况，`quit` 协调正常保存退出。完成或缺键仅停止自动输入，保留系统。详见[回放工具](tools/replay/README.md)及[开发边界](docs/development/replay.md)。
 
-唯一位置参数是 Pi 源码路径。运行记录目录由系统在配置的运行根目录下创建，结束时输出 run id。`ascout-control-plane runs` 列出已有运行。`ascout-control-plane ../pi --resume <run-id>` 按原 id 打开运行：已保存暂停的 task 等待 `/continue`，已结束的 Agent 会话显示原权威对话并等待下一条 prompt 开始新 task。旧 `session-*` 目录名仍是有效的 run id，无需迁移目录或提供 Agent 的 session 路径。Agent 原生 session id 保持独立。agent supervisor 在 Branch 环境外启动 Agent 与 Instrumentation，control plane 只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。TUI 中 ↑/↓ 滚动。运行记录目录及 `agent.log` 保留用于检查。
+唯一位置参数是 Pi 源码路径。运行记录目录由系统在配置的运行根目录下创建，结束时输出 run id。`ascout runs` 列出已有运行。`ascout --resume <run-id>` 按原 id 打开运行：已保存暂停的 task 等待 `/continue`，已结束的 Agent 会话显示原权威对话并等待下一条 prompt 开始新 task。旧 `session-*` 目录名仍是有效的 run id，无需迁移目录或提供 Agent 的 session 路径。Agent 原生 session id 保持独立。agent supervisor 在 Branch 环境外启动 Agent 与 Instrumentation，control plane 只选择产品并传入路径与版本；模型可用 `--model <provider>/<model>` 指定，认证仍用 Pi 自身配置，不写死 provider。模型配置文件的优先级为显式 `--models`、配置文件中的 `models`、`PI_CODING_AGENT_DIR/models.json`、Pi 默认的 `~/.pi/agent/models.json`。自动发现的文件不存在时继续使用 Pi 内置 provider；找到后同一路径会传给 Agent 和 Policy provider。Pi 接入通过公开 SDK 报告消息和执行事实，AScout 自己排版，不使用或修改 Pi 主界面。TUI 中输入 `/ascout` 查看当前 Tree，再输入编号查看 Branch；输入 `/events` 查看事件记录；再次输入对应命令或按 Esc 返回主对话。浏览器 UI 提供权威窗口对话与只读的投机树、分支详情。TUI 中 ↑/↓ 滚动。运行记录目录及 `agent.log` 保留用于检查。
 
 已接通工具与模型执行前等待点：Candidate 在独立 session 使用预测工具结果或替代模型续跑。eager 并行放行权威调用；speculative-first 保持原调用等待，由 Policy 依据真实结果或明确的可接受性规则裁决。接受时 Promote 候选 session 并取消旧 Parent，不向旧调用注入候选结果；全部候选不可接受时原调用放行一次。用户仍使用同一个主对话。默认 Policy 禁用候选；可显式启用字符串枚举预测示例：
 

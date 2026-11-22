@@ -483,7 +483,7 @@ fn suspend_interrupts_a_real_in_flight_guest_operation() {
                 .call(
                     environment,
                     Operation::OperateEnvironment {
-                        command: arguments(&["sh", "-c", "sleep 30 & wait"]),
+                        command: arguments(&["sh", "-c", "sleep 30 & echo $! > /tmp/ascout-interrupted-pid; wait"]),
                         agent: None,
                     },
                 )
@@ -522,7 +522,14 @@ fn suspend_interrupts_a_real_in_flight_guest_operation() {
     assert_command(
         &harness.session,
         environment,
-        &["sh", "-c", "! pgrep -x sleep"],
+        &[
+            "sh", "-c",
+            "pid=$(cat /tmp/ascout-interrupted-pid) || exit 1; \
+             for i in 1 2 3 4 5 6 7 8 9 10; do \
+               state=$(awk '{print $3}' /proc/$pid/stat 2>/dev/null); \
+               case \"$state\" in ''|Z) exit 0;; esac; sleep 0.1; \
+             done; exit 1",
+        ],
         0,
         "",
     );
@@ -679,6 +686,7 @@ fn ssh_diagnostic_reaches_a_real_microvm() {
 }
 
 #[test]
+#[ignore = "requires a real external model service"]
 fn codex_starts_and_reaches_the_model_service() {
     let _serial = serial_test();
     let harness = AdapterHarness::start("codex");

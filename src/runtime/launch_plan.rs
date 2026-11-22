@@ -16,7 +16,7 @@ pub struct LaunchFragment {
     pub holder_bind: Option<(PathBuf, PathBuf)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum MountEntry {
     RoBind {
         source: PathBuf,
@@ -58,7 +58,7 @@ pub struct MountSpec {
 }
 
 impl MountEntry {
-    fn target(&self) -> Option<&Path> {
+    pub fn target(&self) -> Option<&Path> {
         match self {
             MountEntry::RoBind { target, .. }
             | MountEntry::Bind { target, .. }
@@ -78,7 +78,7 @@ impl MountEntry {
 /// holding read-only binds of every top-level host entry that is not itself
 /// replaced by a mount entry.  The visible top level is unchanged for existing
 /// paths; only the absent targets become creatable.
-fn sandbox_root_needs_assembly(entries: &[MountEntry]) -> bool {
+pub fn sandbox_root_needs_assembly(entries: &[MountEntry]) -> bool {
     entries
         .iter()
         .filter_map(MountEntry::target)

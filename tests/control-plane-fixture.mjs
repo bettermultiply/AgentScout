@@ -7,7 +7,7 @@ export function runPath(root, file) {
   const runs = path.join(root, 'runs');
   const ids = fs.existsSync(runs) ? fs.readdirSync(runs).filter(id => fs.statSync(path.join(runs,id)).isDirectory()) : [];
   if (ids.length > 1) throw Error('Fixture expected one run');
-  if (!ids.length && file.startsWith('workspace')) return path.join(root,file);
+  if (file.startsWith('workspace')) return path.join(root,file);
   return path.join(runs, ids[0] ?? 'not-started', file);
 }
 
@@ -50,5 +50,5 @@ const child = cp.spawn(${JSON.stringify(adapter)}, process.argv.slice(2), {stdio
 for (const signal of ['SIGTERM','SIGINT']) process.on(signal, () => child.kill(signal));
 child.on('exit', code => process.exit(code ?? 1));
 `, {mode:0o755});
-  return spawn(binary,[piRoot,...rest],{...options,env:{...options.env,HOME:home,ASCOUT_RUNTIME_ADAPTER:launcher}});
+  return spawn(binary,[piRoot,'--cwd',path.join(root,'workspace'),...rest],{...options,env:{...options.env,HOME:home,ASCOUT_RUNTIME_ADAPTER:launcher}});
 }

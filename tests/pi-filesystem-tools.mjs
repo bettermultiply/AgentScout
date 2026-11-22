@@ -14,11 +14,24 @@ const {detectSupportedImageMimeType}=require('../../pi/packages/coding-agent/src
 async function fixture(t,workspace){
  const root=fs.mkdtempSync('/tmp/ascout-tools-');
  for(const name of ['plans','workspace','view'])fs.mkdirSync(join(root,name));
- const cwd=workspace??join(root,'workspace'),socket=join(root,'plans','holder.sock');
- const holder=spawn('bwrap',['--die-with-parent','--unshare-user','--unshare-pid','--as-pid-1','--ro-bind','/','/','--proc','/proc','--dev','/dev','--bind',join(root,'view'),cwd,'--bind',join(root,'plans'),join(root,'plans'),'--','python3',new URL('../src/runtime/process/holder.py',import.meta.url).pathname,socket],{stdio:['ignore','ignore','pipe']});
+ const cwd=workspace??join(root,'workspace'),socket=join(root,'plans','cmd.sock');
+ const stage=join(root,'mount-root');
+ fs.mkdirSync(stage);
+ const holder=spawn(new URL('../target/debug/ascout-fs-holder',import.meta.url).pathname,[],{stdio:['pipe','pipe','pipe']});
  let errors='';holder.stderr.on('data',b=>errors+=b);
- t.after(async()=>{holder.kill();await new Promise(r=>holder.exitCode!==null?r():holder.once('exit',r));fs.rmSync(root,{recursive:true,force:true})});
- for(let n=0;!fs.existsSync(socket);n++){assert.ok(n<500&&holder.exitCode===null,errors);await new Promise(r=>setTimeout(r,10))}
+ t.after(async()=>{
+  if(holder.exitCode===null&&holder.signalCode===null){
+   const exited=new Promise(r=>holder.once('exit',r));holder.kill();await exited;
+  }
+  fs.rmSync(root,{recursive:true,force:true});
+ });
+ holder.stdin.end(JSON.stringify({parent:process.pid,stage,socket:'/dev/ascout-holder/cmd.sock',chdir:cwd,entries:[
+  {RoBind:{source:'/',target:'/'}},{Proc:{target:'/proc'}},{Dev:{target:'/dev'}},
+  {Bind:{source:join(root,'view'),target:cwd}},{Bind:{source:join(root,'plans'),target:'/dev/ascout-holder'}},
+ ]}));
+ let ready='';for await(const chunk of holder.stdout)ready+=chunk;
+ assert.ok(ready.trim(),errors);
+ assert.ok(JSON.parse(ready)['child-pid']>1);
  const request=async(value,signal,output)=>{
   const {metadata,parts}=operationBody(value.op,value);
   const client=connect(socket);

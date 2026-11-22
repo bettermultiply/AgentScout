@@ -1,0 +1,49 @@
+version: 1
+language: python
+files: [decisions.py]
+fidelity: Best-effort
+decisions:
+  admit:
+    opportunity_pass:
+      file: decisions.py
+      function: opportunity_pass
+    feasibility_pass:
+      file: decisions.py
+      function: feasibility_pass
+      policy_config:
+        max_assumption_depth: 1
+  select:
+    file: decisions.py
+    function: select
+    policy_config:
+      max_active_candidates: 2
+  launch:
+    file: decisions.py
+    function: launch
+  predict:
+    file: decisions.py
+    function: predict
+    history: {mode: transcript_tail, max_entries: 30}
+  extent:
+    file: decisions.py
+    function: extent
+    inputs: [process_state.result_facts, process_state.semantic_facts]
+    policy_config:
+      max_steps: 4
+  effect:
+    file: decisions.py
+    function: effect
+  rebalance:
+    file: decisions.py
+    function: rebalance
+    policy_config:
+      max_active_candidates: 2
+  match:
+    file: decisions.py
+    function: match_proposal
+    outcome: tool_output
+  dispose:
+    file: decisions.py
+    function: dispose
+    policy_config:
+      salvage_independent_results: false

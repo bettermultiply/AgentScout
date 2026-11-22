@@ -1,15 +1,17 @@
 // Regression for the saved 2026-11-16 first-request failure. No model calls.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import {savedPolicy,runner} from './fixtures/predictor-fact-policy.mjs';
 import {createInterposer} from '../instrumentation/core/index.ts';
 import {evaluatePolicyArtifact} from '../../pi/packages/pi-integration/src/local-policy.ts';
 
 // Frozen real Policy, with provenance paths sanitized; no temporary evidence input.
 const saved=savedPolicy();
+const python=execFileSync('/usr/bin/python3',['-c','import sys; print(sys.version)'],{encoding:'utf8'}).trim();
 const localDecisions=['admit.opportunity_pass','admit.feasibility_pass','extent','effect'];
 const artifact={digest:saved.digest,has_predictor:Object.hasOwn(saved.decisions,'predict'),decisions:Object.fromEntries(Object.entries(saved.decisions).filter(([decision])=>localDecisions.includes(decision)).map(([decision,binding])=>{
-    const manifest={version:saved.version,python:saved.python,files:saved.files,binding,decision,digest:saved.digest};
+    const manifest={version:saved.version,python,files:saved.files,binding,decision,digest:saved.digest};
     return [decision,`import os,json\nos.dup2(1,3)\nos.dup2(2,1)\nMANIFEST = json.loads(${JSON.stringify(JSON.stringify(manifest))})\n${runner}`];
 }))};
 
@@ -24,7 +26,7 @@ for(const kind of ['model_inference','nle_action'])test(`saved Policy receives p
     assert.equal(op.has_predictor,true);
     assert.deepEqual(decisions,[],'predictor availability must not execute any Decision');
     assert.equal((await access.beforeAction({branch:'authority',actionId:kind,actionKind:kind==='model_inference'?kind:'tool_execution',name:kind,op,admit:true})).kind,'admit');
-    assert.deepEqual(decisions,['admit.opportunity_pass','admit.feasibility_pass','extent']);
+    assert.deepEqual(decisions,['admit.opportunity_pass','admit.feasibility_pass'],'authority does not evaluate extent');
     assert.equal(reports.filter(m=>m.message==='speculative_admission_request').length,1);
     assert.equal(access.predict,undefined,'prediction is evaluated only by the control plane');
     assert.deepEqual(Object.keys(artifact.decisions),localDecisions);

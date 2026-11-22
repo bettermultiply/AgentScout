@@ -104,6 +104,52 @@ fn authority_continuation_waits_for_promotion_and_prunes_only_after_confirmation
 }
 
 #[test]
+fn unavailable_tool_result_discards_candidates_and_releases_parent() {
+    let mut tree = tree();
+    tree.create_authority("authority", "").unwrap();
+    tree.handle_message(AgentMessage::BranchStarted {
+        branch_id: "authority".into(),
+    })
+    .unwrap();
+    let chance = tree
+        .admit_chance("authority", "op", "tool", json!({}), None, None)
+        .unwrap();
+    let AgentCommand::StartCandidate { branch_id, .. } =
+        tree.start_candidate(&chance, json!("guess")).unwrap()
+    else {
+        unreachable!()
+    };
+    tree.chance_mut(&chance).unwrap().tool_continuation_pending = true;
+    let mut actions = ControlActions::default();
+    tree.complete_tool_outcome(
+        ToolPending {
+            chance_id: chance.clone(),
+            branch_id: "authority".into(),
+            operation_id: "op".into(),
+            tool_name: "tool".into(),
+            arguments: json!({}),
+        },
+        Err("transport interrupted".into()),
+        &mut actions,
+    )
+    .unwrap();
+    assert_eq!(
+        tree.chance(&chance).unwrap().stage,
+        ChanceStage::Discarded(DiscardedReason::Failed)
+    );
+    assert_eq!(
+        tree.chance(&chance).unwrap().authority,
+        AuthorityState::Unavailable
+    );
+    assert!(!tree.chance(&chance).unwrap().tool_continuation_pending);
+    assert_eq!(tree.branches[&branch_id].status, BranchStatus::Discarding);
+    assert!(actions.commands.iter().any(
+        |command| matches!(command, AgentCommand::Discard { branch_id: id, .. } if id == &branch_id)
+    ));
+    assert!(actions.commands.iter().any(|command| matches!(command, AgentCommand::ResolvePending { operation_id, outcome: Some(value), .. } if operation_id == "op" && value["phase"] == "continue")));
+}
+
+#[test]
 fn authority_branch_failure_fails_the_run_without_discard() {
     let mut tree = tree();
     tree.branches.insert(

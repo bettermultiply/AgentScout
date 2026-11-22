@@ -64,6 +64,8 @@ export interface BranchState {
   createdTimestampMs: number
   environment: EnvironmentState | null
   environmentCleaned: EnvironmentCleanState | null
+  latestAction: Extract<BranchObservationEvent, { event: 'action_started' }> | null
+  lastActionStarted: Extract<BranchObservationEvent, { event: 'action_started' }> | null
   modelUsages: Array<Extract<BranchObservationEvent, { event: 'model_usage' }>>
   tools: Array<Extract<BranchObservationEvent, { event: 'tool_finished' }>>
   settlements: SettlementEvent[]
@@ -139,6 +141,8 @@ function newBranch(
     environment: null,
     environmentCleaned: null,
     modelUsages: [],
+    latestAction: null,
+    lastActionStarted: null,
     tools: [],
     settlements: [],
     events: [],
@@ -333,10 +337,18 @@ export function applyEvent(state: RunState, event: ObservationEvent): RunState {
       case 'conversation_updated':
         branch.conversationUpdatedSequence = event.sequence
         break
+      case 'action_started':
+        branch.latestAction = event
+        branch.lastActionStarted = event
+        break
+      case 'model_finished':
+        if (branch.latestAction?.action_id === event.action_id) branch.latestAction = null
+        break
       case 'model_usage':
         branch.modelUsages = [...branch.modelUsages, event]
         break
       case 'tool_finished':
+        if (branch.latestAction?.action_id === event.action_id) branch.latestAction = null
         branch.tools = [...branch.tools, event]
         break
       case 'nle_map_action':

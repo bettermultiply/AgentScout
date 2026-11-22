@@ -68,7 +68,7 @@ control plane 组件提供 Decision 输入
 
 系统按每类 Decision 的输入约定提供允许读取的数据值或快照，而不是 control plane 内部对象、可变系统引用或任意查询入口。算法可以修改自己的输入副本和中间结果，但不能因此修改系统真实状态；如需模型等外部能力，也只能在明确授权范围内使用。数据可见范围和执行权限必须由系统实际落实，不能仅依赖函数参数、声明格式或静态检查。
 
-外部模型能力通过 `capabilities.model_complete(request)` 请求；宿主依据自己持有的当前求值和 Decision、显式 grant、模型 allowlist、额度与 deadline 逐次授权。Policy 提供的 Decision 或授权声明不构成权限依据。capability 消息与求值结果须明确区分并绑定宿主生成的当前请求 ID；旧请求、跨请求及未授权调用拒绝，求值结束、取消或超时后授权撤销，取消须传播到宿主 provider。凭证只由宿主持有。实现进度、每次求值的状态隔离、进程 provider 入口及产品配置缺口见 [开发说明](../../development/policy-engine.md)。
+Policy 可在自身定义的 `policy_model_grant` 中声明外部模型使用范围。宿主加载选定 Policy 时采纳该声明，并在每次求值中按该 Decision、模型允许列表、请求上限和超时检查每个 `capabilities.model_complete(request)` 请求。宿主将能力消息与求值结果分别处理，并校验自己生成的当前请求 ID。求值结束、取消或超时后，授权立即失效，取消须传播到宿主 provider。凭证始终由宿主持有。部署与隔离实现见 [开发说明](../../development/policy-engine.md)。
 
 求值结果须按该 Decision 的输出约定进行检查。相关状态的拥有组件仍须根据当前事实复核并落实决定，不能把算法返回的选择当成已经发生的状态变化。
 
@@ -82,7 +82,7 @@ Policy Engine 返回的只是本次 Policy Decision，不是已经完成的状�
 
 ## 4. 跨侧运行与组件边界
 
-Policy Engine 编译全部 Decision。会改写全局控制状态或必须在多个 Chance、Branch、Proposal 之间协调的 Decision（包括 `predict`），由 control plane 调用 Policy Engine 求值并落实，所缺的本地事实由 Instrumentation 计算后提交；control plane 仅将 Instrumentation 实际求值的 `admit.opportunity_pass`、`admit.feasibility_pass`、`extent` 和 `effect` 编译结果经 Gateway 交付，Instrumentation 按相同语义求值。Instrumentation 不能自行加载、编译或修改 Policy。
+Policy Engine 编译全部 Decision。会改写全局控制状态或必须在多个 Chance、Branch、Proposal 之间协调的 Decision（包括 `predict`），由 control plane 调用 Policy Engine 求值并落实，所缺的本地事实由 Instrumentation 计算后提交；control plane 经 Gateway 交付端侧 `admit.opportunity_pass`、`admit.feasibility_pass`、`extent` 和 `effect` 的编译结果、声明的输入及适用的模型授权。Instrumentation 按相同语义求值。`admit.opportunity_pass` 必须编译为纯内存表达式。Instrumentation 不能自行加载、编译或修改 Policy。
 
 各组件围绕这两项职责与 Policy Engine 协作：
 

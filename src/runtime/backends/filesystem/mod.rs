@@ -12,7 +12,7 @@
 //! through the same semantic view.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -86,7 +86,8 @@ use state::{
 /// A Backend whose sole responsibility is the Agent-visible filesystem.
 pub struct FilesystemBackend {
     config: FilesystemConfig,
-    process: crate::runtime::process::Processes,
+    process: Arc<crate::runtime::process::Processes>,
+    holder_starts: Mutex<HashMap<String, Arc<execution::HolderStart>>>,
     launches: Mutex<HashMap<String, crate::protocol::contract::AgentLaunch>>,
     mechanism: FilesystemMechanism,
     /// Strict `btrfs subvolume delete` ioctl succeeded during the probe.
@@ -123,7 +124,8 @@ impl FilesystemBackend {
         };
         let probe = Self {
             config: config.clone(),
-            process: crate::runtime::process::Processes::new("filesystem", &config.bubblewrap_path),
+            process: Arc::new(crate::runtime::process::Processes::new("filesystem", &config.bubblewrap_path)),
+            holder_starts: Mutex::default(),
             launches: Mutex::default(),
             mechanism: FilesystemMechanism::Overlay,
             fast_delete: false,
@@ -197,7 +199,8 @@ impl FilesystemBackend {
             mechanism == FilesystemMechanism::Btrfs || fork_cost == ForkCost::BtrfsSnapshot;
         let delete_worker = Arc::new(DeleteWorker::new(&config, use_btrfs, fast_delete));
         let backend = Self {
-            process: crate::runtime::process::Processes::new("filesystem", &config.bubblewrap_path),
+            process: Arc::new(crate::runtime::process::Processes::new("filesystem", &config.bubblewrap_path)),
+            holder_starts: Mutex::default(),
             launches: Mutex::default(),
             config,
             mechanism,
@@ -457,21 +460,9 @@ impl FilesystemBackend {
             .parent()
             .ok_or_else(|| BackendError::new("metadata path has no parent"))?;
         fs::create_dir_all(parent).map_err(error)?;
-        let file_name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("metadata");
-        let temporary = parent.join(format!(".{file_name}.tmp"));
-        {
-            let bytes = serde_json::to_vec_pretty(value).map_err(error)?;
-            let mut file = File::create(&temporary).map_err(error)?;
-            file.write_all(&bytes).map_err(error)?;
-            file.sync_all().map_err(error)?;
-        }
-        fs::rename(&temporary, path).map_err(error)?;
-        if let Ok(directory) = File::open(parent) {
-            let _ = directory.sync_all();
-        }
+        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
+        temporary.write_all(&serde_json::to_vec_pretty(value).map_err(error)?).map_err(error)?;
+        temporary.persist(path).map_err(|failure| error(failure.error))?;
         Ok(())
     }
 
@@ -741,6 +732,12 @@ impl FilesystemBackend {
 
 impl Drop for FilesystemBackend {
     fn drop(&mut self) {
+        let starts = self.holder_starts.get_mut().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for start in starts.values() {
+            let _ = start.wait();
+        }
+        self.process.stop_all();
+        starts.clear();
         // Stop the worker, but do not wait: any unfinished trash entries are
         // reclaimed by the next startup.
         self.delete_worker.shutdown();

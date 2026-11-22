@@ -51,11 +51,11 @@ impl BranchStatus {
         )
     }
 
-    /// Candidate 可以被裁决接受：没有被 extent 或 rebalance 挡住。
+    /// Extent 和 effect 暂停候选的下一步，仍允许裁决已完成的工作。
     pub fn is_decidable(self) -> bool {
         matches!(
             self,
-            Self::Running | Self::Finished | Self::Blocked(BlockedReason::EffectGate)
+            Self::Running | Self::Finished | Self::Blocked(BlockedReason::EffectGate | BlockedReason::ExtentReached)
         )
     }
 
@@ -238,6 +238,8 @@ pub struct Assumption {
 pub struct ProposalRecord {
     pub proposal_id: String,
     pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Value>,
 }
 
 /// 被 `admit` 接纳的投机机会，从创建到收敛一直由 control plane 持有。
@@ -271,6 +273,9 @@ pub struct ChanceRecord {
     pub(crate) validation_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speculation_kind: Option<ActionKind>,
+    /// The adapter has a tool result and is waiting for this Chance to settle.
+    #[serde(default)]
+    pub(crate) tool_continuation_pending: bool,
     /// 最近一次 `launch` 求值时的 Tree 版本；版本不变就不重复求值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_epoch: Option<u64>,
@@ -309,6 +314,8 @@ pub(crate) struct ModelUsageFact {
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
     pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub tokens_used: u64,
     pub cost: Option<f64>,
 }
 
@@ -357,6 +364,8 @@ pub struct SpeculativeTree {
     pending_commands: BTreeMap<String, PendingCommand>,
     #[serde(default)]
     queued_prompts: VecDeque<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workspace_path: Option<PathBuf>,
     #[serde(default)]
     pub(crate) workspace_root: PathBuf,
     #[serde(default)]
@@ -393,6 +402,7 @@ pub struct SpeculativeTree {
     epoch: u64,
     #[serde(default)]
     rebalance_epoch: Option<u64>,
+    extent_disposals: BTreeSet<String>,
     #[serde(default)]
     stopping: bool,
     #[serde(default)]
@@ -447,6 +457,7 @@ impl SpeculativeTree {
             pending_commands: BTreeMap::new(),
             queued_prompts: VecDeque::new(),
             workspace_root: PathBuf::new(),
+            workspace_path: None,
             completed_work: BTreeMap::new(),
             pending_work: BTreeMap::new(),
             pending_acceptance: None,
@@ -464,6 +475,7 @@ impl SpeculativeTree {
             next_chance: 1,
             epoch: 0,
             rebalance_epoch: None,
+            extent_disposals: BTreeSet::new(),
             stopping: false,
             recovering: false,
             task_finishing: false,

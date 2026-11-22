@@ -1,9 +1,9 @@
 //! Presentation folding and conversations. Ledger owns all observation events.
-use ascout::control_plane::gateway::agent::protocol::BranchRole;
-use ascout::control_plane::speculative_tree::{BranchStatus, RuntimeExecutionState};
 use ascout::control_plane::coordination::execution::{PresentationUpdate, PresentationUpdates};
+use ascout::control_plane::gateway::agent::protocol::BranchRole;
 pub use ascout::control_plane::gateway::ui::Request;
 use ascout::control_plane::observation::{ObservationContent, StateEventSet};
+use ascout::control_plane::speculative_tree::{BranchStatus, RuntimeExecutionState};
 use ascout::control_plane::ui_projection::UiProjection;
 use serde::Serialize;
 use serde_json::Value;
@@ -48,7 +48,13 @@ pub struct ObservedTree {
 }
 
 pub struct AScoutRunView {
-    pub prompts: BTreeMap<String, (String, ascout::control_plane::gateway::agent::protocol::UiPrompt)>,
+    pub prompts: BTreeMap<
+        String,
+        (
+            String,
+            ascout::control_plane::gateway::agent::protocol::UiPrompt,
+        ),
+    >,
     pub commands: Vec<Value>,
     pub tree: ObservedTree,
     pub events: Vec<Value>,

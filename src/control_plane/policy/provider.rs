@@ -15,6 +15,7 @@ use std::{
 pub struct ModelProviderProcess {
     pub executable: std::path::PathBuf,
     pub arguments: Vec<String>,
+    pub environment: std::collections::BTreeMap<String, String>,
 }
 impl ModelProviderProcess {
     pub fn complete(&self, request: &Value, deadline: Instant) -> io::Result<Value> {
@@ -30,6 +31,7 @@ impl ModelProviderProcess {
         pipe.set_nonblocking(true)?;
         let mut child = Command::new(&self.executable)
             .args(&self.arguments)
+            .envs(&self.environment)
             .stdin(Stdio::from(std::os::fd::OwnedFd::from(remote.try_clone()?)))
             .stdout(Stdio::from(std::os::fd::OwnedFd::from(remote)))
             .stderr(Stdio::null())

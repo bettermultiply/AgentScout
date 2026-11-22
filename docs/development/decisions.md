@@ -1,10 +1,44 @@
 # 开发决策
 
+## 本地候选按需绑定执行环境
+
+本地候选遇到首个工具调用时，Pi Adapter 提交内部环境请求并等待绑定。控制面将 Runtime 执行状态推进到 `EnvironmentRequested`，随后调度环境建立，绑定后放行工具。等待期间公开 Branch 状态保持 `Running`，整轮执行结束时才记为 `Finished`。Policy 报告的阻塞仍使用 `ExtentReached`、`Rebalanced` 和 `EffectGate`。
+
+## 工具投机的裁决栅栏（方案 R2）
+
+工具真实结果立即交给 Parent。只要这次操作还有存活候选待裁决，Parent 就在下一次模型推理前等待。全部候选被丢弃或 Part 保留 Parent 时，control plane 按 operation 放行一次。Full 接替时，旧 Parent 走原有淘汰流程。
+
+选择 R2 是为了避免父分支启动下一轮推理后，进展相容性检查拒绝原本可以提交的候选，同时避免多发一次模型请求。方案 R1 允许中止已开始但尚未输出的推理，可作为后续权衡，它能减少候选都被丢弃时的等待，但需要处理请求费用、取消以及输出竞态。
+
+带结果的工具失败属于已交付的权威结果。事件保留 `failed`，候选仍由 `match` 和 `dispose` 裁决。权威结果不可用时回收存活候选并释放父分支的继续执行等待。
+
+## Policy 模型授权归属与通用 Decision 事实补齐
+
+选定 Policy 的 `policy_model_grant` 随编译结果留档并纳入摘要。两侧宿主按当前 Decision 和该声明强制执行模型授权。凭证和 provider 配置归 Pi 宿主持有。未获得授权的 Decision 只使用本次传入的数据。无授权字段的既有编译产物继续使用原摘要。
+
+候选分支在可管理动作开始前检查 `extent`，以完成通知更新计数。权威分支只执行准入等适用 Decision。准入读取分支历史统计，`predict` 与 `match` 按声明接收 `history` 和 `outcome`，`dispose` 可读取已经报告的工具结果及详情。晋升期间到达的准入请求由接收暂停保护，获准在暂停结束后执行。实现与示例见 [Policy Engine 开发说明](policy-engine.md)。
+
+## 纯表达式内存求值
+
+编译后的纯表达式树供 Rust 和 Node 共用。两侧校验输入和输出。`admit.opportunity_pass` 必须编译出纯表达式树。静态无法编译时返回 `InvalidInput`，并且该 Decision 不可请求模型能力。其他 Decision 在无法纯内存求值时可使用 Python 沙箱。表达式表是编译派生数据，保留既有 executable digest，并随完整 artifact 进行来源与完整性检查。
+
+## Filesystem 运行期写入与 holder 启动
+
+运行期环境与快照使用普通磁盘目录，通过同文件系统的原子 rename 发布元数据和 staging 层。`/pause` 同步独立保存代，最终 materialize 同步宿主目标和环境元数据。默认 btrfs 子卷创建、快照使用内核 ioctl。原生 `ascout-fs-holder` 在挂载与 Unix socket 监听后通过管道报告宿主侧 holder PID 与 mount namespace，供 live-mount accept 校验和重放。完整冷启动可用 `cargo run --example fs_holder_bench` 测量。本机 release 构建在普通磁盘目录上，建立和派生小环境后读首个文件的 p50 分别为 3.10 ms、3.05 ms。100 文件的数据层测试仍有逐文件克隆开销，链式 reflink 的 fork 和 mark p50 分别为 10.26 ms、0.97 ms。
+
+## 候选启动与 Pi 会话历史
+
+派生环境同步完成文件系统 fork 并准备 holder 地址。Runtime 返回执行访问后，Pi 可以先推理。工具执行、冻结、合并和保存需要 holder 时等待同一个启动结果，清理等待启动收敛后停止进程。
+
+Pi 候选在内存中建立独立的会话索引，与源会话共享已完成的消息和原生记录。Checkpoint 仅复制消息列表。晋升、通知确认和 `/pause` 按原有持久化契约写盘。最终权威会话仍将胜出候选接到真实工具结果上，候选自己的历史保持原样。
+
+工具准入与后续三个 Decision 均可用端侧已有数据求值时，空闲的权威分支可放行单个工具调用并并行启动一个候选。候选需要调用工具时才请求绑定环境。若已通过 Full 裁决且候选尚未获得独立环境，则在确认晋升时把父环境的使用权交给候选。控制面继续负责结果裁决、单一胜者和结算。
+
 ## Runtime 的 full 与 part 接受
 
-Full 与 part 都先由 Policy 接受。Proposal 有效且候选进展与 AuB 相容时，Runtime 才从 SpB 向 AuB 移交状态。Full 保留 SpB session 与后代，并让后续调用使用 AuB 合并后的环境。Part 保留原 AuB session，按实际提交内容反馈，并丢弃 SpB 与全部后代。Full 只能降为事先获准的 part。此前继续使用候选环境的决定由本条取代。
+Policy 通过 `Promote` 请求全量移交，采用候选会话与后代。`Reuse` 和 `Salvage` 保留父会话，交付 Runtime 回执确认的结果并回收候选。`Reuse` 计入命中，`Salvage` 保留整体未命中的结算。结算均记录处置名称。
 
-已确认两种 part 选择范围。Policy 可以主动检查 SpB 的受控可见执行记录来发现结果，也可以使用只列 SpB 或工具明确给出的结果的快速选项。两者可以并存，由 Policy 选择。快速选项仅缩小搜索范围，结果依据、依赖状态和 AuB 进展仍须相容，且均须先接受再合入。实现边界见 [Runtime 生命周期](runtime-lifecycle.md#full-与-part-接受)。
+`predict` 用 `abstain` 显式放弃预测，批量预测必须至少提供一个 Proposal。控制面保留 Proposal 来源，并向 `dispose` 透传 `match` 对象供处置参考。
 
 ## Agent 协议与 Speculative Tree 分离
 
@@ -188,7 +222,7 @@ SIGINT 与 SIGTERM 分离：SIGINT、TUI Ctrl-C、Web Interrupt 共用 task 终�
 当前实现：
 
 - `agent-access/pi/main.ts` 是宿主上的单一进程，托管 authority 与全部 candidate；Runtime 只启动一次宿主 Pi，不为每个 Branch 启动第二个 Pi。
-- 每个环境有一个低成本常驻 namespace-holder（`src/runtime/process/holder.py`），运行在该 Branch 的 mount namespace 中，通过 Branch 专属 Unix socket 接收文件工具命令并代执行。holder 不是 Agent、不持有 transcript 或 Policy，也不让 Pi 进入 Branch namespace。
+- 每个环境有一个常驻的 `ascout-fs-holder`（`src/bin/ascout-fs-holder.rs`），在该 Branch 的 mount namespace 内，通过 Branch 专属 Unix socket 代执行文件工具命令。holder 不持有 transcript 或 Policy，Pi 留在宿主进程。
 - holder 的连接各自独立处理，不引入全局串行队列；一条命令使用独立 session/process group，直接 shell 退出即返回结果，后台后代继续留在 Branch namespace。取消或超时只结束该命令的 process group；环境结束时通过 cgroup/process group 与 mount namespace 扫描结束 holder 和残留后代。
 - 物化会发布 Authority 增量并轮换 execution generation，因此先结束旧 holder，发布后按新环境重新建立 holder；旧 holder 的 mount 不再是新 generation 的视图。
 - `/app` 映射由 FilesystemBackend 的 `isolated_paths: [{path, target}]` 表达：host 目录仍是 overlay lower 与 publication 目标，Branch 内看到的是 target。tool plan 同时携带 host/target，Pi 文件工具在 Branch 内使用 sandbox path。
@@ -1238,3 +1272,9 @@ Branch 只在 control plane 与 Instrumentation 中用于查找 Environment。Ru
 独立程序的工具调用使用既有执行内容帧。工具声明到 Agent 的交付留在约定范围之外。普通工具取消按 Environment 和 operation identity 通知程序，Runtime 等待工具终态，保留共享实例。超过时限或通信失败时，Runtime 回收共享进程并将其所有 Environment 标为部分可用。无法确认的资源回收会报告失败。
 
 验证通过 `cargo check --all-targets`、218 项 Rust 库测试、两项 FS 集成测试、12 项 Pi 执行与恢复测试，以及真实 Firecracker 的无模型工具测试。默认并发的首次全量库测试有两项 FS holder 挂载超时，限制为四线程后全量通过。旧组件索引的加载用既存的 NLE 与 FS 保存代验证。上一轮独立程序验收覆盖两个 Environment 的归属、失败建立的回滚、文件和命令的二进制帧与结构化工具结果。同一 Runtime 二进制分别载入原配置和增加程序后的配置，SHA-256 保持一致。本轮取消回归经 Instrumentation 的 ASC-Proxy 验证了相同实例 PID、取消与完成竞争、上传与输出分片、等待发送的取消、故障报告及关闭回收。
+
+## 2026-11-18 用户启动与安装入口收敛
+
+用户入口采用 `make install`、`make uninstall` 和 `make purge`。安装生成默认配置并同步内置 Policy、Agent 接入脚本和三个可执行文件。卸载保留配置与运行记录，清理命令才删除全部用户数据。两个清理入口通过 `run.lock` 拒绝影响活跃运行。
+
+普通 filesystem 运行以用户启动目录作为 Agent workspace。控制面在 run 目录中生成带随机控制端口的 Runtime 配置和独立 `fs-state`，并将 workspace 写入 Tree 持久化数据。恢复和旧存档继续使用旧的 run-local workspace 兼容路径。单 run 内动态切换 Policy 或 Backend，以及上游超时重试控制仍待讨论，见根目录 `Discussion.md`。

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::os::fd::{IntoRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::Child;
@@ -214,44 +214,14 @@ impl Processes {
         fragment: &LaunchFragment,
     ) -> Result<(), BackendError> {
         let launch = AgentLaunch {
-            command: "python3".into(),
-            args: vec![
-                "-c".into(),
-                include_str!("holder.py").into(),
-                "/dev/ascout-holder/cmd.sock".into(),
-            ],
+            command: String::new(),
+            args: Vec::new(),
             cwd: PathBuf::from("/"),
             log: PathBuf::from("/dev/null"),
             instance_id: Some(format!("namespace-holder:{}", context.environment_id)),
             env: std::collections::BTreeMap::new(),
         };
-        self.launch_with_role(context, &launch, fragment, ProcessRole::NamespaceHolder)?;
-        if let Some((directory, _)) = &fragment.holder_bind {
-            // sockaddr_un limits the whole pathname, not the Environment id.
-            // Resolve through an open directory without truncating identity.
-            use std::os::fd::AsRawFd;
-            let directory_fd = std::fs::File::open(directory).map_err(error)?;
-            let socket = PathBuf::from(format!(
-                "/proc/self/fd/{}/cmd.sock",
-                directory_fd.as_raw_fd()
-            ));
-            for _ in 0..200 {
-                if socket.exists() && std::os::unix::net::UnixStream::connect(&socket).is_ok() {
-                    return Ok(());
-                }
-                if !self.is_running(&context.environment_id)? {
-                    return Err(BackendError::new(
-                        "namespace holder exited before accepting commands",
-                    ));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            return Err(BackendError::new(format!(
-                "namespace holder did not open command socket {}",
-                socket.display()
-            )));
-        }
-        Ok(())
+        self.launch_with_role(context, &launch, fragment, ProcessRole::NamespaceHolder)
     }
 
     /// Whether a real Agent process is still running in this environment.  A
