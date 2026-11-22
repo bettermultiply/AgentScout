@@ -95,7 +95,10 @@ impl Connection {
     ) -> io::Result<()> {
         self.next_delivery += 1;
         let id = self.next_delivery;
-        let message = AgentWireMessage::Delivery { id, command };
+        let span = tracing::info_span!(target: "ascout_otel", "ascout.agent.send");
+        crate::telemetry::parent(&span, crate::telemetry::current());
+        let _entered = span.enter();
+        let message = AgentWireMessage::Delivery { id, command, trace_context: crate::telemetry::Carrier::current() };
         // A write error can leave a partial frame. Retry only receipt timeouts.
         for _ in 0..3 {
             if cancelled.load(std::sync::atomic::Ordering::Acquire) {
@@ -139,7 +142,7 @@ impl Connection {
 
     pub fn receive(
         &mut self,
-        deliver: impl Fn(io::Result<Option<AgentMessage>>) -> bool + Send + 'static,
+        deliver: impl Fn(io::Result<Option<AgentMessage>>, Option<crate::telemetry::Carrier>) -> bool + Send + 'static,
     ) -> io::Result<()> {
         if self.reader.is_some() {
             return Err(io::Error::other("Agent reader already started"));
@@ -147,7 +150,15 @@ impl Connection {
         let mut reader = self.stream.try_clone()?;
         let receipts = self.receipts.clone();
         self.reader = Some(thread::spawn(move || loop {
-            let message = match transport::read_message(&mut reader) {
+            let mut carrier = None;
+            let wire = transport::read_message::<_, serde_json::Value>(&mut reader).and_then(|wire| {
+                wire.map(|mut value| {
+                    carrier = value.as_object_mut().and_then(|fields| fields.remove("trace_context"))
+                        .and_then(|value| serde_json::from_value(value).ok());
+                    serde_json::from_value::<AgentWireMessage>(value).map_err(io::Error::other)
+                }).transpose()
+            });
+            let message = match wire {
                 Ok(Some(AgentWireMessage::Message(message))) => Ok(Some(message)),
                 Ok(Some(AgentWireMessage::Received { id })) => {
                     let mut receipt = receipts.0.lock().unwrap();
@@ -163,7 +174,7 @@ impl Connection {
                 Err(error) => Err(error),
             };
             let done = !matches!(message, Ok(Some(_)));
-            if !deliver(message) || done {
+            if !deliver(message, carrier) || done {
                 break;
             }
         }));

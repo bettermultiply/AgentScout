@@ -104,6 +104,8 @@ printf '%s\n' '{"process_state":{"steps_completed":5,"hook_count":5,"phase":"rea
 
 ## 文档
 
+[OpenTelemetry 追踪](docs/usage/tracing.md)说明如何启用追踪、连接 Jaeger 并运行本地模拟模型验证。
+
 ### 记录回放验收
 
 回放工具和验收脚本位于 [`tools/replay/`](tools/replay/README.md)。它们只使用伪造模型或已经录制的模型输出，不调用真实模型：

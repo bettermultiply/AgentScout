@@ -34,6 +34,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 1. [Agent 接入状态](usage/agent-guide.md)：当前可用性和计划中的接入边界。
 2. [试一次 AScout 投机执行（NLE）](usage/try-speculation.md)：从准备 Pi 配置到观察 Promote／Discard 的完整操作说明。
 3. [FAQ](usage/faq.md)：不依赖具体 backend 的目标级问答。
+4. [OpenTelemetry 追踪](usage/tracing.md)：部署接收端、用 Trace ID 查看执行、运行本地端到端验证。
 
 ## 开发文档
 

@@ -289,6 +289,8 @@ pub struct FilesystemResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<crate::telemetry::Carrier>,
     pub request_id: String,
     /// Fences delayed filesystem results; legacy callers default to zero.
     #[serde(default)]

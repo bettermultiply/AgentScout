@@ -449,7 +449,12 @@ pub enum AgentMessage {
 #[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
 pub enum AgentWireMessage {
     Command(AgentCommand),
-    Delivery { id: u64, command: AgentCommand },
+    Delivery {
+        id: u64,
+        command: AgentCommand,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trace_context: Option<crate::telemetry::Carrier>,
+    },
     Received { id: u64 },
     Message(AgentMessage),
 }

@@ -1,5 +1,9 @@
 # 开发决策
 
+## OpenTelemetry 与执行记录
+
+追踪由 control plane、Pi Adapter 和 Runtime Adapter 批量发送。Ledger 继续负责执行事实、恢复和 SSE 重放，仅在已有的 `task_started` 增加可选 `trace_id`。Trace Context 作为内部传输元数据，不参与命令、工具请求或 Runtime 请求的去重。暂停目录独立保存可选上下文，缺失时仍可恢复。追踪分别记录 Policy 决策和 Agent 实际应用的晋升。接收失败不改变执行结果，用户可见警告仍走原有渠道。部署与验证见 [OpenTelemetry 追踪](../usage/tracing.md)。
+
 ## 本地候选按需绑定执行环境
 
 本地候选遇到首个工具调用时，Pi Adapter 提交内部环境请求并等待绑定。控制面将 Runtime 执行状态推进到 `EnvironmentRequested`，随后调度环境建立，绑定后放行工具。等待期间公开 Branch 状态保持 `Running`，整轮执行结束时才记为 `Finished`。Policy 报告的阻塞仍使用 `ExtentReached`、`Rebalanced` 和 `EffectGate`。

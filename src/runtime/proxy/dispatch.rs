@@ -20,11 +20,13 @@ fn operation_context(environment_id: &str, request: &OperationRequest) -> Backen
 }
 
 impl Shared {
-    pub(super) fn dispatch(self: &Arc<Self>, request: OperationRequest) {
+    pub(super) fn dispatch(self: &Arc<Self>, mut request: OperationRequest) {
         use sha2::{Digest, Sha256};
+        let carrier = request.trace_context.take();
         let fingerprint: [u8; 32] =
             Sha256::digest(serde_json::to_vec(&request).expect("operation requests serialize"))
                 .into();
+        request.trace_context = carrier;
         {
             let mut seen = self.seen.lock().unwrap();
             if let Some((original, completed)) = seen.get(&request.request_id) {

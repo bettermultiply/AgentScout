@@ -93,6 +93,7 @@ type Options = {
     report: (message: Record<string, unknown>) => Promise<void>;
     evaluate: EvaluatePolicy;
     now?: () => number;
+    traceEvaluation?: <T>(decision: string, path: string, run: () => T) => T;
 };
 
 function makeHold(): Hold {
@@ -110,12 +111,12 @@ async function waitFor(hold: Hold, signal: AbortSignal | undefined, message: str
     });
 }
 
-export function createInterposer({ taskId, report, evaluate: sandbox, now = Date.now }: Options): Interposer {
+export function createInterposer({ taskId, report, evaluate: sandbox, now = Date.now, traceEvaluation = (_decision, _path, run) => run() }: Options): Interposer {
     const inMemory: EvaluatePolicy = async (artifact, decision, data, signal) => pure(artifact, decision, data, signal)?.result;
     function pure(artifact: PolicyArtifact, decision: string, data: unknown, signal?: AbortSignal) {
         const binding = artifact.pure?.[decision];
         if (binding && !artifact.policy_model_grant?.decisions.includes(decision)) {
-            return evaluatePureDecision(binding, decision, data, artifact.decision_inputs?.[decision] ?? [], signal);
+            return traceEvaluation(decision, 'pure', () => evaluatePureDecision(binding, decision, data, artifact.decision_inputs?.[decision] ?? [], signal));
         }
     }
     const evaluate: EvaluatePolicy = async (artifact, decision, data, signal) => {
@@ -155,7 +156,7 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             if (!binding || artifact.policy_model_grant?.decisions.includes(decision) || !localInputs(binding, roots)) return;
             const inputs = artifact.decision_inputs?.[decision] ?? [];
             if (inputs.some(path => !roots.includes(path.split('.')[0]))) return;
-            return evaluatePureDecision(binding, decision, data, inputs, point.signal)?.result;
+            return traceEvaluation(decision, 'local_fast', () => evaluatePureDecision(binding, decision, data, inputs, point.signal))?.result;
         };
         const chance = {chance_id: request.chanceId, tool_name: point.name, arguments: point.arguments ?? {}};
         try {

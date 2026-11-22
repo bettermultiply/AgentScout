@@ -79,6 +79,11 @@ impl Queue {
                     pending = self.signal.wait(pending).unwrap();
                 }
             };
+            let span = tracing::info_span!(target: "ascout_otel", "ascout.runtime.operation", result = tracing::field::Empty);
+            if let Some(carrier) = &request.trace_context {
+                crate::telemetry::parent(&span, carrier.context());
+            }
+            let _entered = span.enter();
             if let Err(error) = shared.out.send(AdapterMessage::Event(Event {
                 environment_id: request.environment_id.clone(),
                 request_id: Some(request.request_id.clone()),
@@ -102,6 +107,12 @@ impl Queue {
                     result
                 }
             };
+            span.record("result", match result.status {
+                ResultStatus::Completed => "completed",
+                ResultStatus::PartiallyCompleted => "partially_completed",
+                _ => "failed",
+            });
+            if result.status == ResultStatus::Failed { crate::telemetry::finish(&span, &Err::<(), _>(())); }
             {
                 let evicted = shared
                     .results

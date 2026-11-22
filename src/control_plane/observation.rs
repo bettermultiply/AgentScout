@@ -4,13 +4,31 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ObservationEvent {
     pub sequence: u64,
     pub timestamp_ms: u64,
     pub task_id: String,
     #[serde(flatten)]
     pub content: ObservationContent,
+}
+
+// Action observations share the envelope's timestamp_ms key on the wire.
+// Deserialize the envelope and payload independently so replay sees that key twice.
+impl<'de> Deserialize<'de> for ObservationEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Envelope {
+            sequence: u64,
+            timestamp_ms: u64,
+            task_id: String,
+        }
+        let value = Value::deserialize(deserializer)?;
+        let envelope = Envelope::deserialize(&value).map_err(serde::de::Error::custom)?;
+        let content = ObservationContent::deserialize(value).map_err(serde::de::Error::custom)?;
+        Ok(Self { sequence: envelope.sequence, timestamp_ms: envelope.timestamp_ms,
+            task_id: envelope.task_id, content })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

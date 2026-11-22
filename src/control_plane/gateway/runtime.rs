@@ -333,6 +333,7 @@ impl ControlSession {
         operation: Operation,
     ) -> io::Result<()> {
         let message = ControlMessage::Request(OperationRequest {
+            trace_context: crate::telemetry::Carrier::current(),
             request_id: request_id.to_string(),
             generation: 0,
             environment_id: environment_id.to_string(),

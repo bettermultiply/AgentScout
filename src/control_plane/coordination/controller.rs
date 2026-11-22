@@ -320,6 +320,28 @@ impl SpeculationCoordinator {
         decision: Decision,
         data: &Value,
     ) -> io::Result<Value> {
+        let span = tracing::info_span!(target: "ascout_otel", "ascout.policy.evaluate",
+            decision = decision.as_str(), result = tracing::field::Empty, allowed = tracing::field::Empty,
+            result_count = tracing::field::Empty);
+        crate::telemetry::parent(&span, crate::telemetry::current());
+        let result = span.in_scope(|| self.evaluate_inner(engine, policy, decision, data));
+        if let Ok(value) = &result {
+            if let Some(allowed) = value.as_bool() { span.record("allowed", allowed); }
+            if let Some(items) = value.as_array() { span.record("result_count", items.len()); }
+            let outcome = value["actions"][0]["intent"].as_str()
+                .or_else(|| value["verdict"].as_str()).or_else(|| value.as_str());
+            if let Some(outcome @ ("Promote" | "PartialPromote" | "Discard" | "Retain" | "compatible" | "incompatible" | "indeterminate" | "continue" | "stop")) = outcome {
+                span.record("result", outcome);
+            }
+        }
+        crate::telemetry::finish(&span, &result);
+        result
+    }
+
+    fn evaluate_inner(
+        &self, engine: &PolicyEngine, policy: &CompiledPolicy,
+        decision: Decision, data: &Value,
+    ) -> io::Result<Value> {
         if let Some(grant) = policy
             .policy_model_grant()
             .filter(|grant| grant.decisions.contains(&decision))

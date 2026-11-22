@@ -4,8 +4,10 @@ use std::path::PathBuf;
 mod config;
 
 fn main() {
+    let telemetry = ascout::telemetry::init("ascout-runtime");
     if let Err(error) = run() {
         eprintln!("ascout-runtime-adapter: {error}");
+        drop(telemetry);
         std::process::exit(1);
     }
 }

@@ -13,6 +13,9 @@ use crate::control_plane::recovery::Resume;
 use crate::control_plane::system_log::SystemLog;
 use crate::control_plane::ui_projection::UiProjection;
 use crate::protocol::contract::{AgentLaunch, OperationResult};
+use crate::telemetry::{self, Carrier};
+use opentelemetry::{Context, trace::TraceContextExt};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io;
@@ -93,7 +96,7 @@ pub fn cleanup(
 
 pub enum Event {
     Interaction(Request, mpsc::Sender<Result<(), String>>),
-    Agent(io::Result<Option<AgentMessage>>),
+    Agent(io::Result<Option<AgentMessage>>, Option<Carrier>),
     Request(Request),
     Completed(u64, Result<ControlResult, String>),
     Materialized(Result<OperationResult, String>),
@@ -182,9 +185,21 @@ pub fn execute<Guard>(
         system_log,
         presentation,
     );
+    if let Some(generation) = generation {
+        let parent = (|| {
+            use std::io::Read;
+            let file = std::fs::File::open(generation.join("trace-context.json")).ok()?;
+            let mut bytes = Vec::new();
+            file.take(4096).read_to_end(&mut bytes).ok()?;
+            serde_json::from_slice::<Carrier>(&bytes).ok().map(|carrier| carrier.context())
+        })().unwrap_or_default();
+        execution.start_trace(true, parent);
+    }
     let result = (|| {
+        let context = execution.trace_context.clone().attach();
         let (mut connection, commands) =
             execution.connect(&mut tree, runtime, launch, generation, listener, &policy)?;
+        drop(context);
         let _guard = before_run()?;
         execution.run(
             &mut connection,
@@ -209,6 +224,8 @@ pub struct Execution<'a> {
     presentation: &'a dyn PresentationUpdates,
     run_id: String,
     last_status: Option<ObservationContent>,
+    trace: Option<tracing::Span>,
+    trace_context: Context,
     action_starts: BTreeMap<(String, String), (u64, String)>,
 }
 
@@ -251,8 +268,19 @@ impl<'a> Execution<'a> {
             presentation,
             run_id,
             last_status,
+            trace: None,
+            trace_context: Context::new(),
             action_starts: BTreeMap::new(),
         }
+    }
+
+    fn start_trace(&mut self, resumed: bool, parent: Context) {
+        let name = if resumed && parent.has_active_span() { "ascout.task.resume" } else { "ascout.task" };
+        let span = tracing::info_span!(target: "ascout_otel", "ascout.task", otel.name = name,
+            resumed, result = tracing::field::Empty);
+        telemetry::parent(&span, parent);
+        self.trace_context = span.context();
+        self.trace = Some(span);
     }
 
     pub fn connect(
@@ -280,6 +308,11 @@ impl<'a> Execution<'a> {
         run_dir: &Path,
         result: Result<(), Box<dyn std::error::Error>>,
     ) -> Vec<String> {
+        if let Some(span) = self.trace.take() {
+            span.record("result", if result.is_err() { "failed" } else if tree.recovering() { "paused" } else { "stopped" });
+            telemetry::finish(&span, &result);
+        }
+        let _context = self.trace_context.clone().attach();
         let runtime_result = cleanup(runtime, capabilities, tree);
         let mut observation_result = self.flush_observations(tree);
         let task_id = tree.execution_id();
@@ -569,7 +602,7 @@ impl Task<'_, '_> {
                 self.control.timer(self.tree)?;
                 ControlActions::default()
             }
-            Event::Agent(message) => {
+            Event::Agent(message, _) => {
                 let message = match message {
                     Ok(Some(message)) => message,
                     result => {
@@ -674,10 +707,10 @@ impl Execution<'_> {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (events, receiver) = channel;
         let sender = events.clone();
-        connection.receive(move |message| sender.send(Event::Agent(message)).is_ok())?;
+        connection.receive(move |message, carrier| sender.send(Event::Agent(message, carrier)).is_ok())?;
         let mut writer = connection.delivery_writer()?;
         let (deliveries, delivery_queue) =
-            mpsc::channel::<(AgentCommand, std::sync::Arc<AtomicBool>)>();
+            mpsc::channel::<Delivery>();
         let mut pending_deliveries: Vec<(String, std::sync::Arc<AtomicBool>)> = Vec::new();
         let mut task = Task {
             tree,
@@ -692,7 +725,8 @@ impl Execution<'_> {
         let result = thread::scope(|scope| {
             let completed = events.clone();
             scope.spawn(move || {
-                while let Ok((command, cancellation)) = delivery_queue.recv() {
+                while let Ok((command, cancellation, context)) = delivery_queue.recv() {
+                    let _context = context.attach();
                     let result = writer.send_cancellable(command.clone(), &cancellation);
                     if completed.send(Event::Delivered(command, result)).is_err() {
                         break;
@@ -703,7 +737,10 @@ impl Execution<'_> {
             let result = (|| -> io::Result<()> {
                 task.publish()?;
                 let mut outstanding = initial_commands.len();
-                queue_deliveries(&deliveries, &mut pending_deliveries, initial_commands)?;
+                {
+                    let _context = task.execution.trace_context.clone().attach();
+                    queue_deliveries(&deliveries, &mut pending_deliveries, initial_commands)?;
+                }
                 loop {
                     let event = match if task.tree.recovering() {
                         None
@@ -741,7 +778,24 @@ impl Execution<'_> {
                             token.store(true, Ordering::Release);
                         }
                     }
-                    let actions = match task.handle(event) {
+                    let _context = task.execution.trace_context.clone().attach();
+                    let incoming = match &event {
+                        Event::Agent(_, Some(carrier)) => {
+                            let context = carrier.context();
+                            let expected = task.execution.trace_context.span();
+                            let actual = context.span();
+                            (actual.span_context().is_valid()
+                                && actual.span_context().trace_id() == expected.span_context().trace_id())
+                                .then_some(context)
+                        }
+                        _ => None,
+                    };
+                    let handled = if let Some(context) = incoming.as_ref().filter(|cx| cx.has_active_span()) {
+                        let span = tracing::info_span!(target: "ascout_otel", "ascout.agent.receive");
+                        telemetry::parent(&span, context.clone());
+                        span.in_scope(|| task.handle(event))
+                    } else { task.handle(event) };
+                    let actions = match handled {
                         Ok(Some(actions)) => actions,
                         Ok(None) => break,
                         Err(error) if task.delivery_failed && !task.tree.is_stopping() => {
@@ -779,9 +833,16 @@ impl Execution<'_> {
                     task.publish()?;
                     for command in &actions.commands {
                         if let AgentCommand::Prompt { branch_id, .. } = command {
-                            task.execution.ledger.record_durable(json!({"message":"task_started","task_id":task.tree.execution_id(),"branch_id":branch_id}))?;
+                            task.execution.start_trace(false, Context::new());
+                            let mut row = json!({"message":"task_started","task_id":task.tree.execution_id(),"branch_id":branch_id});
+                            let span = task.execution.trace_context.span();
+                            if span.span_context().is_valid() {
+                                row["trace_id"] = json!(span.span_context().trace_id().to_string());
+                            }
+                            task.execution.ledger.record_durable(row)?;
                         }
                     }
+                    let _context = task.execution.trace_context.clone().attach();
                     outstanding += actions.commands.len();
                     queue_deliveries(&deliveries, &mut pending_deliveries, actions.commands)?;
                     for record in actions.records {
@@ -791,7 +852,12 @@ impl Execution<'_> {
                         let tree_state = task.tree.clone();
                         let coordinator = coordinator.clone();
                         let sender = events.clone();
+                        let context = incoming.clone().filter(Context::has_active_span).unwrap_or_else(telemetry::current);
                         scope.spawn(move || {
+                            let _context = context.attach();
+                            let span = tracing::info_span!(target: "ascout_otel", "ascout.control.operation");
+                            telemetry::parent(&span, telemetry::current());
+                            let _entered = span.enter();
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     coordinator.perform(
@@ -804,6 +870,7 @@ impl Execution<'_> {
                                     )
                                 }))
                                 .unwrap_or_else(|_| Err("Control operation panicked".into()));
+                            telemetry::finish(&span, &result);
                             let _ = sender.send(Event::Completed(id, result));
                         });
                     }
@@ -812,6 +879,7 @@ impl Execution<'_> {
                     let system_log = task.execution.system_log;
                     let run_id = task.tree.run_id().to_string();
                     let task_id = task.tree.execution_id().to_string();
+                    let mut completed = None;
                     let (commands, wake, finish) = task.control.settle(
                         task.tree,
                         runtime,
@@ -821,6 +889,9 @@ impl Execution<'_> {
                         |mut value| {
                             value["t_ms"] = json!(started.elapsed().as_millis() as u64);
                             value["task_id"] = json!(task_id);
+                            if value["message"] == "task_completed" {
+                                completed = value["status"].as_str().map(str::to_owned);
+                            }
                             if let Err(error) = ledger.record(value) {
                                 system_log.history_failure(
                                     &run_id,
@@ -831,7 +902,9 @@ impl Execution<'_> {
                         },
                         |environment| {
                             let sender = events.clone();
+                            let context = telemetry::current();
                             scope.spawn(move || {
+                                let _context = context.attach();
                                 let result =
                                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         runtime_call(
@@ -846,6 +919,12 @@ impl Execution<'_> {
                             });
                         },
                     )?;
+                    if let Some(status) = completed {
+                        if let Some(span) = task.execution.trace.take() {
+                            span.record("result", status.as_str());
+                            if status == "failed" { telemetry::finish(&span, &Err::<(), _>(())); }
+                        }
+                    }
                     outstanding += commands.len();
                     queue_deliveries(&deliveries, &mut pending_deliveries, commands)?;
                     if wake {
@@ -888,8 +967,10 @@ impl Execution<'_> {
     }
 }
 
+type Delivery = (AgentCommand, std::sync::Arc<AtomicBool>, Context);
+
 fn queue_deliveries(
-    sender: &mpsc::Sender<(AgentCommand, std::sync::Arc<AtomicBool>)>,
+    sender: &mpsc::Sender<Delivery>,
     pending: &mut Vec<(String, std::sync::Arc<AtomicBool>)>,
     commands: Vec<AgentCommand>,
 ) -> io::Result<()> {
@@ -923,7 +1004,7 @@ fn queue_deliveries(
             pending.push((branch, token.clone()));
         }
         sender
-            .send((command, token))
+            .send((command, token, telemetry::current()))
             .map_err(|_| io::Error::other("Agent delivery worker stopped"))?;
     }
     Ok(())
@@ -953,7 +1034,7 @@ mod tests {
             }],
         )
         .unwrap();
-        let (_, startup) = queue.recv().unwrap();
+        let (_, startup, _) = queue.recv().unwrap();
         // The delivery worker is still waiting. The control path can enqueue
         // cancellation and cleanup without waiting for any reception receipt.
         queue_deliveries(
@@ -975,8 +1056,8 @@ mod tests {
         )
         .unwrap();
         assert!(startup.load(Ordering::Acquire));
-        let (_, abort) = queue.recv().unwrap();
-        let (_, cleanup) = queue.recv().unwrap();
+        let (_, abort, _) = queue.recv().unwrap();
+        let (_, cleanup, _) = queue.recv().unwrap();
         assert!(!abort.load(Ordering::Acquire));
         assert!(!cleanup.load(Ordering::Acquire));
     }

@@ -2,6 +2,7 @@
 import type { ToolCall, ToolResultMessage } from '../../../pi/packages/ai/src/types.ts';
 import { createRequire } from 'node:module';
 import { resolve, dirname } from 'node:path';
+import * as telemetry from './telemetry.ts';
 import { loadModelRuntime } from './model-runtime.ts';
 import { createInterposer } from '../core/index.ts';
 import { SessionTree } from './session-tree.ts';
@@ -334,19 +335,26 @@ const report = payload => {
             isError:payload.status==='failed'||payload.result?.is_error===true});
     }
     payload={source:'agent_adapter',...payload};
-    return sendWire({kind:'message',payload});
+    return sendWire({kind:'message',payload,trace_context:telemetry.observe(payload)});
 };
 const sendWire = wire => ascProxy.send(wire);
 let policyModelRuntime;
-const access = createInterposer({taskId,report,evaluate:async (artifact, decision, data, signal) => {
+const access = createInterposer({taskId,report,traceEvaluation:telemetry.evaluate,evaluate:(artifact, decision, data, signal) => telemetry.evaluate(decision, 'sandbox', async () => {
     const grant = artifact.policy_model_grant;
     if (!grant?.decisions.includes(decision)) return evaluatePolicyArtifact(artifact, decision, data, signal);
     const runtime = modelRuntime ?? await (policyModelRuntime ??= ModelRuntime.create());
     return evaluatePolicyArtifact(artifact, decision, data, signal, {
         decision, models: grant.models, requests: grant.max_requests, timeoutMs: grant.timeout_ms,
-        complete: piModelComplete(runtime),
+        complete: ((complete) => (...args) => telemetry.policyModel(() => complete(...args)))(piModelComplete({
+            getModel: runtime.getModel.bind(runtime),
+            complete: async (...args) => {
+                const response = await runtime.complete(...args);
+                telemetry.recordPolicyModelUsage(response.usage);
+                return response;
+            },
+        })),
     });
-}});
+})});
 const key = (branch, operation) => JSON.stringify([branch,operation]);
 const text = value => typeof value==='string'?value:JSON.stringify(value);
 
@@ -400,13 +408,13 @@ function tools(branch) {
     const execution = {
         operation: async (...args) => {
             await acceptanceBoundary(branch, args[5]);
-            return ascProxy.operation(...args);
+            return telemetry.toolContext(branch,args[1],()=>ascProxy.operation(...args));
         },
     };
     const builtins=environmentTools(execution,branch,detect,taskId);
     return [...builtins,...runtimeTools.map(spec=>({...spec,label:spec.name,parameters:Type.Unsafe(spec.parameters),execute:async(operation,args,signal,onUpdate)=>{
         await acceptanceBoundary(branch, signal);
-        const value=await ascProxy.execute(branch,operation,spec.name,args,{task_id:taskId,tool_call_id:operation},signal,onUpdate);
+        const value=await telemetry.toolContext(branch,operation,()=>ascProxy.execute(branch,operation,spec.name,args,{task_id:taskId,tool_call_id:operation},signal,onUpdate));
         executionResults.set(key(branch,operation),value);
         return value.result?.content?value.result:{content:[{type:'text',text:text(value.result)}],details:undefined};
     }}))];
@@ -650,6 +658,7 @@ function executeTurn(session,branch,operation) {
 }
 async function handle(command) {
     const branch=command.branch_id;
+    if (command.command === 'start_candidate') telemetry.startBranch(branch, 'candidate', command.parent_branch_id, command.local === true);
     if(!['start_candidate','promote'].includes(command.command))await access.control(command);
     switch(command.command){
         case 'model': {
@@ -746,6 +755,7 @@ async function handle(command) {
                 const managers=restored.recoveryManagers;
                 for(const [,checkpoint] of record.checkpoints)if(!managers.has(checkpoint.manager))throw Error('Recovery checkpoint manager missing');
                 tree=restored;authority=record.authority;nextAction=record.nextAction;
+                for (const [branch] of record.tree.branches) telemetry.recover(branch, authority);
                 access.restore(record.access);
                 for(const [id,value] of record.generations)generations.set(id,value);
                 for(const [id,value] of record.results)results.set(id,value);
@@ -811,6 +821,7 @@ async function handle(command) {
         }
         case 'continue':
         case 'prompt': {
+            if (command.command === 'prompt') telemetry.prompt(branch);
             const continuing=command.command==='continue';
             if(!continuing)tree.readOnlyUntilPrompt=false;
             interaction.resume(branch);
@@ -1020,11 +1031,13 @@ async function handle(command) {
             } else {
                 await access.control(command);
             }
-            tree.accept(branch, parent, parent === authority);
-            if (parent === authority) {
+            const replacesAuthority = parent === authority;
+            tree.accept(branch, parent, replacesAuthority);
+            if (replacesAuthority) {
                 authority = branch;
                 if (command.execution_access) await access.control(command);
             }
+            telemetry.promote(branch, parent, replacesAuthority);
             tree.settle();
             if(command.notification!==undefined){
                 try {
@@ -1077,7 +1090,10 @@ async function handle(command) {
         default:throw Error(`Unknown command ${command.command}`);
     }
 }
-async function dispatch(command){
+async function dispatch(command, incoming?: unknown){
+    return telemetry.command(command.command, incoming, () => applyCommand(command));
+}
+async function applyCommand(command){
     const operation=['abort','prepare_acceptance','cancel_acceptance','promote','resolve_pending','discard','cleanup'].includes(command.command)?command.command:undefined;
     let reason;
     const acknowledgement=status=>({message:'command_result',command_id:command.command_id,branch_id:command.branch_id,operation,status,generation:command.generation??0,...(command.operation_id?{operation_id:command.operation_id}:{})});
@@ -1126,10 +1142,11 @@ try{
             if(!old&&['abort','discard','cleanup'].includes(command.command))interaction.cancel(command.branch_id);
             // Candidate setup can await a tool result that only a later command delivers.
             // Save must interrupt that wait immediately.
+            const dispatchDelivery = () => dispatch(command, wire.payload.trace_context);
             const result=old?.result??(['save','suspend_recovery','ui_prompt_answer','prepare_acceptance'].includes(command.command)
-                ?dispatch(command):command.command==='start_candidate'
-                ?commandQueue.then(()=>dispatch(command))
-                :(commandQueue=commandQueue.then(()=>dispatch(command))));
+                ?dispatchDelivery():command.command==='start_candidate'
+                ?commandQueue.then(dispatchDelivery)
+                :(commandQueue=commandQueue.then(dispatchDelivery)));
             if(command.command==='start_candidate'){
                 setupTasks.set(command.branch_id,result);
                 void result.finally(()=>{if(setupTasks.get(command.branch_id)===result)setupTasks.delete(command.branch_id)}).catch(()=>{});
@@ -1146,6 +1163,7 @@ try{
 }finally{
     if(saving){
         await ascProxy.close();
+        await telemetry.shutdown(true);
         process.exit(transportError||ascProxy.error?1:0);
     }
     closing=true;interaction.cancel();access.releaseAll();
@@ -1166,5 +1184,6 @@ try{
     await ascProxy.close();
     // A cancelled local-policy evaluator can leave child stdio open after the socket closes.
     if(transportError)console.error('Agent control connection failed:',transportError);
+    await telemetry.shutdown(false);
     process.exit(transportError||ascProxy.error?1:0);
 }

@@ -1,4 +1,5 @@
 import {connect} from 'node:net';
+import { carrier } from './telemetry.ts';
 import {executionMessages, operationBody, writeExecution} from './execution-wire.ts';
 type Access = {transport:string;address:string;environment_id:string};
 export class AscProxy {
@@ -52,7 +53,7 @@ export class AscProxy {
     has(branch:string){return this.accesses.has(branch)}
     private async request(access: Access, operation: string, command: string, extra: Record<string, unknown> = {}, accepted?: () => void, output?: (value: any) => void): Promise<any> {
         if (access.transport !== 'unix-json-lines') throw Error('Branch execution access missing or unsupported');
-        const request = { ...extra, command, operation_id: operation, environment_id: access.environment_id };
+        const request = { ...extra, command, operation_id: operation, environment_id: access.environment_id, trace_context: carrier() };
         let parts: Uint8Array[] | undefined;
         if (typeof extra.operation === 'string') {
             const body = operationBody(extra.operation, extra.arguments as Record<string, unknown>);

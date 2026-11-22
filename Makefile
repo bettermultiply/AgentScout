@@ -1,11 +1,11 @@
-.PHONY: all frontend install uninstall purge
+.PHONY: all frontend pi-deps install uninstall purge
 
 BINDIR ?= $(HOME)/.local/bin
 DATADIR ?= $(HOME)/.local/share/ascout
 CONFIGDIR ?= $(HOME)/.config/ascout
 PI_ROOT ?= $(shell if test -d "$(abspath ../pi)"; then printf '%s' "$(abspath ../pi)"; fi)
 
-all: frontend
+all: frontend pi-deps
 	cargo build
 
 frontend: webui/node_modules/.install-stamp
@@ -15,7 +15,13 @@ webui/node_modules/.install-stamp: webui/package.json webui/package-lock.json
 	cd webui && npm ci
 	touch $@
 
-install: frontend
+pi-deps: instrumentation/pi/node_modules/.install-stamp
+
+instrumentation/pi/node_modules/.install-stamp: instrumentation/pi/package.json instrumentation/pi/package-lock.json
+	npm ci --prefix instrumentation/pi
+	touch $@
+
+install: frontend pi-deps
 	@set -eu; \
 	if test -z "$(PI_ROOT)" || test ! -d "$(PI_ROOT)"; then \
 		echo "Pi source root is required for installation. Run PI_ROOT=/path/to/pi make install." >&2; \

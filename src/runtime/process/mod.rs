@@ -119,11 +119,8 @@ impl Processes {
         } else {
             FreezeMechanism::ProcessGroup
         };
-        eprintln!(
-            "process: freeze_mechanism={} cgroup_root={:?}",
-            freeze.as_str(),
-            cgroup_root
-        );
+        let _diagnostic = tracing::info_span!(target: "ascout_otel", "ascout.runtime.process_configuration",
+            freeze_mechanism = freeze.as_str());
         Self::empty(bubblewrap_path, freeze, cgroup_root)
     }
 

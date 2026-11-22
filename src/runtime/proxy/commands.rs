@@ -469,10 +469,15 @@ fn serve(
         )
     };
     let mut reader = BufReader::new(stream.try_clone()?);
-    let (meta, length) = match wire::read_header(&mut reader) {
+    let (mut meta, length) = match wire::read_header(&mut reader) {
         Ok(header) => header,
         Err(error) => return reject(&mut stream, &error),
     };
+    let carrier = meta.as_object_mut().and_then(|fields| fields.remove("trace_context"))
+        .and_then(|value| serde_json::from_value::<crate::telemetry::Carrier>(value).ok());
+    let span = tracing::info_span!(target: "ascout_otel", "ascout.runtime.tool_rpc");
+    if let Some(carrier) = carrier { crate::telemetry::parent(&span, carrier.context()); }
+    let _entered = span.enter();
     let request: Request = match serde_json::from_value(meta.clone()) {
         Ok(request) => request,
         Err(error) => return reject(&mut stream, &error),
@@ -683,7 +688,11 @@ fn serve(
                 let entry = entry.clone();
                 let environment = key.0.clone();
                 let operation = key.1.clone();
+                let trace_context = crate::telemetry::current();
                 std::thread::spawn(move || {
+                    let span = tracing::info_span!(target: "ascout_otel", "ascout.runtime.tool_execute", result = tracing::field::Empty);
+                    crate::telemetry::parent(&span, trace_context);
+                    let _entered = span.enter();
                     let _guard = guard;
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if entry.cancel.is_cancelled() {
@@ -741,6 +750,10 @@ fn serve(
                     let terminal = result.unwrap_or_else(|error| {
                         json!({"event":"terminal","status":if error.cancelled { "cancelled" } else if error.error_category == "timed_out" { "timed_out" } else { "failed" },"error_category":error.error_category,"reason":error.to_string()}).into()
                     });
+                    if let Some(status @ ("succeeded" | "cancelled" | "timed_out" | "failed")) = terminal.meta["status"].as_str() {
+                        span.record("result", status);
+                        if matches!(status, "timed_out" | "failed") { crate::telemetry::finish(&span, &Err::<(), _>(())); }
+                    }
                     *entry.terminal.lock().unwrap() = Some(terminal);
                     entry.ready.notify_all();
                 });

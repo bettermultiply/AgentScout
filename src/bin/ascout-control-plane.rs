@@ -130,6 +130,7 @@ fn make_runtime_config(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _telemetry = ascout::telemetry::init("ascout-control");
     let mut args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h")) {
         print!("{HELP}");

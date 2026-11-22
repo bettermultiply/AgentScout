@@ -139,7 +139,14 @@ impl Recovery {
                 },
             )
             .map_err(|error| io::Error::other(error.to_string()))?;
-            recovery::publish(run_dir, generation, tree)
+            recovery::publish(run_dir, generation, tree)?;
+            if let Some(carrier) = crate::telemetry::Carrier::current() {
+                // Optional correlation only. Recovery remains usable if this write fails.
+                if let Ok(bytes) = serde_json::to_vec(&carrier) {
+                    let _ = std::fs::write(generation.join("trace-context.json"), bytes);
+                }
+            }
+            Ok(())
         })();
         self.saved = false;
         self.loaded = true;

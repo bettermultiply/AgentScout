@@ -24,9 +24,24 @@ impl ModelProviderProcess {
         deadline: Instant,
         cancelled: Option<&std::sync::atomic::AtomicBool>,
     ) -> io::Result<Value> {
+        let span = tracing::info_span!(target: "ascout_otel", "ascout.policy.provider");
+        crate::telemetry::parent(&span, crate::telemetry::current());
+        let result = span.in_scope(|| self.complete_inner(request, deadline, cancelled));
+        crate::telemetry::finish(&span, &result);
+        result
+    }
+
+    fn complete_inner(
+        &self, request: &Value, deadline: Instant,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> io::Result<Value> {
         let (mut pipe, remote) = UnixStream::pair()?;
         pipe.set_nonblocking(true)?;
-        let mut child = Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        if let Some(carrier) = crate::telemetry::Carrier::current() {
+            carrier.inject_env(&mut command);
+        }
+        let mut child = command
             .args(&self.arguments)
             .envs(&self.environment)
             .stdin(Stdio::from(std::os::fd::OwnedFd::from(remote.try_clone()?)))
