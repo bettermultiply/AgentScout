@@ -440,8 +440,13 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
             })
         }
         Decision::Predict => {
-            (result.get("predict") == Some(&Value::String("branch_model".into()))
-                && result.get("model").is_some_and(Value::is_string))
+            result.get("predict") == Some(&Value::String("branch_model".into()))
+                && result.get("model").is_some_and(Value::is_string)
+                && result.as_object().is_some_and(|object| object.keys().all(|key| ["predict", "model", "thinking", "candidates", "candidate_guidance"].contains(&key.as_str())))
+                && result.get("candidate_guidance").is_none_or(nonblank)
+                && result.get("candidates").is_none_or(|count| {
+                    count.as_u64().is_some_and(|count| (1..=4).contains(&count))
+                })
                 || (result.as_object().is_some_and(|m| m.len() == 2)
                     && result["generation"] == "batch"
                     && result["proposals"].as_array().is_some_and(|items| {

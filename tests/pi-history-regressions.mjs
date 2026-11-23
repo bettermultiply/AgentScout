@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 const pi=resolve('../pi');
 function check(script) {
-    const directory=mkdtempSync('/tmp/opencode/pi-history-review-');
-    execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',`
+    const directory=mkdtempSync('/var/tmp/pi-history-review-');
+    try {
+        execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',`
         import assert from 'node:assert/strict';
         import {SessionManager} from '${pi}/packages/coding-agent/src/core/session-manager.ts';
         import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
@@ -15,7 +16,10 @@ function check(script) {
         const tree=new SessionTree(main),parent=tree.createBranch('authority',directory,main,call);
         const result=(text,id='op')=>({role:'toolResult',toolCallId:id,toolName:'read',content:[{type:'text',text}],timestamp:2});
         ${script}
-    `,directory],{encoding:'utf8'});
+        `,directory],{encoding:'utf8',env:{...process.env,PI_CODING_AGENT_DIR:join(directory,'agent'),JITI_FS_CACHE:'false'}});
+    } finally {
+        rmSync(directory, {recursive:true, force:true});
+    }
 }
 
 test('real result is on source checkpoint path, never a later off-path prediction with reused call ID',()=>check(`

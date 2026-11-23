@@ -139,6 +139,8 @@ export function observe(payload: any) {
             const action = actions.get(id);
             if (!action) break;
             action.span.setAttribute('result', statuses.has(payload.status) ? payload.status : 'unknown');
+            action.span.setAttribute('ascout.action.cancelled', payload.status === 'cancelled');
+            if (payload.speculation_skipped === true) action.span.setAttribute('ascout.authority.skipped', true);
             if (payload.status === 'failed') action.span.setStatus({ code: SpanStatusCode.ERROR });
             if (action.model) action.finished = payload.timestamp_ms;
             else {

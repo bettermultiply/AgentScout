@@ -195,6 +195,7 @@ pub fn lock_run(run_id: &str, run_dir: &Path) -> Result<fs::File, Box<dyn std::e
 pub fn run(
     mut prepared: Prepared,
     pi_root: &Path,
+    pi_agent_dir: Option<&Path>,
     web_address: Option<&str>,
     system_log: &SystemLog,
     adapter_override: Option<&Path>,
@@ -248,8 +249,16 @@ pub fn run(
         if let Some(models) = &settings.models {
             provider_args.extend(["--models".into(), models.display().to_string()]);
         }
-        let env: std::collections::BTreeMap<String, String> =
-            [("ASCOUT_PI_ROOT".into(), pi_root.display().to_string())].into();
+        let mut env = std::collections::BTreeMap::from([(
+            "ASCOUT_PI_ROOT".into(),
+            pi_root.display().to_string(),
+        )]);
+        if let Some(directory) = pi_agent_dir {
+            let directory = directory
+                .to_str()
+                .ok_or("Pi agent directory must be UTF-8")?;
+            env.insert("PI_CODING_AGENT_DIR".into(), directory.into());
+        }
         prepared.bind_policy_provider(ascout::control_plane::policy::ModelProviderProcess {
             executable: node.clone(),
             arguments: provider_args,

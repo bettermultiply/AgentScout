@@ -75,6 +75,7 @@ pub enum ControlResult {
         Option<u64>,
         bool,
         Option<Value>,
+        Option<Value>,
     ),
     Acceptance(
         Option<crate::protocol::contract::Acceptance>,
@@ -160,6 +161,17 @@ impl SpeculativeTree {
             )?);
         }
         Ok(())
+    }
+
+    pub(crate) fn validation_snapshot(&self, candidate: &str) -> Value {
+        let operation = ControlOperation::Validate(candidate.to_owned());
+        let parent = self.chance_parent(&self.branches[candidate]);
+        json!({
+            "dependencies": self.policy_dependencies_for(&operation),
+            "candidate": self.policy_branch_context(candidate, &operation),
+            "parent": parent.map(|id| self.policy_branch_context(id, &operation)),
+            "outcome": self.candidate_outcome(candidate),
+        })
     }
 
     fn policy_dependencies_for(&self, operation: &ControlOperation) -> Value {
@@ -534,12 +546,18 @@ impl SpeculativeTree {
             return Ok(());
         }
         match result {
-            Ok(ControlResult::BranchModel(prediction)) => {
-                let command = self.start_model_candidate(chance_id, prediction)?;
-                if let AgentCommand::StartCandidate { branch_id, .. } = &command {
-                    actions.records.push(json!({"message":"candidate_created","branch_id":branch_id,"parent":tool.branch_id,"chance_id":chance_id,"fork_at":self.branches[branch_id].execution_position.transcript_index}));
+            Ok(ControlResult::BranchModel(mut prediction)) => {
+                let count = prediction.get("candidates").and_then(Value::as_u64).unwrap_or(1).clamp(1, 4);
+                if let Some(fields) = prediction.as_object_mut() {
+                    fields.remove("candidates");
                 }
-                self.schedule(ControlOperation::Establish(command), actions);
+                for _ in 0..count {
+                    let command = self.start_model_candidate(chance_id, prediction.clone())?;
+                    if let AgentCommand::StartCandidate { branch_id, .. } = &command {
+                        actions.records.push(json!({"message":"candidate_created","branch_id":branch_id,"parent":tool.branch_id,"chance_id":chance_id,"fork_at":self.branches[branch_id].execution_position.transcript_index}));
+                    }
+                    self.schedule(ControlOperation::Establish(command), actions);
+                }
             }
             Ok(ControlResult::Abstain(reason)) => {
                 self.change_chance_stage(chance_id, ChanceStage::Discarded(DiscardedReason::NotSelected),
@@ -821,6 +839,9 @@ impl SpeculativeTree {
         result: Result<ControlResult, String>,
         actions: &mut ControlActions,
     ) -> io::Result<()> {
+        if let Ok(ControlResult::AcceptanceDisposition(.., Some(audit))) = &result {
+            actions.records.push(json!({"message": "policy_audit", "branch_id": candidate, "audit": audit}));
+        }
         if self.stopping || match resolution {
             None => !self.candidate_due(&candidate),
             Some(_) => !self.branch(&candidate)?.status.is_live_candidate(),
@@ -836,6 +857,7 @@ impl SpeculativeTree {
                     validated_at_ms,
                     full,
                     part,
+                    _,
                 )) => (
                     compatible,
                     verdict,
@@ -871,8 +893,11 @@ impl SpeculativeTree {
         let unbound_local = candidate.starts_with("candidate-chance-local-") && self.branch(&candidate)?.environment_id.is_none();
         let salvage = part.as_ref().is_some_and(|part| part["intent"] == "Salvage");
         if verdict == "wait" || (verdict == "indeterminate" && !salvage) {
+            let snapshot = self.validation_snapshot(&candidate);
+            self.deferred_validations.insert(candidate, snapshot);
             return Ok(());
         }
+        self.deferred_validations.remove(&candidate);
         if proposal.is_none() {
             let record = json!({
                 "branch_id": candidate,
@@ -1213,7 +1238,12 @@ impl SpeculativeTree {
                 {
                     self.establish_local_candidate(&candidate, &mut actions)?;
                 } else if self.candidate_due(&candidate) {
-                    self.schedule(ControlOperation::Validate(candidate), &mut actions);
+                    // Apply each verdict before checking the next sibling's live count.
+                    let chance = &branch.chance_id;
+                    if !self.pending_work.values().any(|work| matches!(work,
+                        ControlOperation::Validate(id) if &self.branches[id].chance_id == chance)) {
+                        self.schedule(ControlOperation::Validate(candidate), &mut actions);
+                    }
                 } else if branch.status == BranchStatus::Blocked(BlockedReason::ExtentReached)
                     && self.branch_proposal(&candidate).is_some()
                     && self.extent_disposals.insert(candidate.clone())

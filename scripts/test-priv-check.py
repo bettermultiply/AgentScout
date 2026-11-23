@@ -124,20 +124,37 @@ elif name == 'fake-tests':
         if failed or (mode == 'process-fail' and 'privileged::priv_' not in args[0]) or (
                 mode == 'priv-exit-fail' and 'privileged::priv_' in args[0]):
             sys.exit(1)
+elif name == 'mktemp':
+    import subprocess
+    result = subprocess.run(['/usr/bin/mktemp', *args], text=True, stdout=subprocess.PIPE)
+    if result.returncode == 0:
+        with open(os.environ['FAKE_DIRS'], 'a') as f:
+            f.write(result.stdout)
+        print(result.stdout, end='')
+    sys.exit(result.returncode)
 elif name == 'btrfs':
-    if args[:2] == ['subvolume','create']: pathlib.Path(args[2]).mkdir()
+    if args[:2] == ['subvolume','create']:
+        pathlib.Path(args[2]).mkdir()
+        with open(os.environ['FAKE_VOLUMES'], 'a') as f:
+            f.write(args[2] + '\n')
     elif args[:2] == ['subvolume','snapshot']:
+        if mode == 'raw-fail' and args[-1].endswith('/snap2'):
+            sys.exit(1)
         shutil.copytree(args[-2],args[-1])
+        with open(os.environ['FAKE_VOLUMES'], 'a') as f:
+            f.write(args[-1] + '\n')
         if '-r' in args:
             with open(os.environ['FAKE_READONLY'], 'a') as f:
                 f.write(str(pathlib.Path(args[-1]).resolve())+'\n')
     elif args[:2] == ['subvolume','delete']:
-        for p in args[2:]: shutil.rmtree(p)
+        for p in args[2:]:
+            if p != '--': shutil.rmtree(p)
     elif args[:2] == ['subvolume','show']:
-        sys.exit(1)
+        registry = pathlib.Path(os.environ['FAKE_VOLUMES'])
+        sys.exit(0 if registry.exists() and args[2] in registry.read_text().splitlines() else 1)
     elif args[:2] == ['receive','--dump']: print('modified.txt base.txt renamed')
 elif name == 'rm':
-    if mode == 'cleanup-fail' and any('/overlay-' in a for a in args): sys.exit(1)
+    if mode == 'cleanup-fail' and any('/.ascout-priv-workspace.' in a for a in args): sys.exit(1)
     os.execv('/usr/bin/rm', ['rm']+args)
 elif name == 'sudo':
     # Never invoke the real sudo, even when exercising the escalation branch.
@@ -193,7 +210,7 @@ def real_test_binary(root):
 
 
 def run(mode, log_dir, real_bin):
-    with tempfile.TemporaryDirectory(prefix="priv-check-fake-") as tmp:
+    with tempfile.TemporaryDirectory(dir="/var/tmp", prefix="priv-check-fake-") as tmp:
         root = Path(tmp)
         fake = root / "bin"
         fake.mkdir()
@@ -201,7 +218,7 @@ def run(mode, log_dir, real_bin):
         dispatcher.write_text(DISPATCH)
         dispatcher.chmod(0o755)
         for name in ["id", "stat", "findmnt", "cargo", "btrfs", "unshare",
-                     "bwrap", "chown", "rm", "sudo", "fake-tests"]:
+                     "bwrap", "chown", "rm", "sudo", "mktemp", "fake-tests"]:
             (fake / name).symlink_to(dispatcher)
         names = list(NAMES)
         if mode == "missing-test":
@@ -221,6 +238,8 @@ def run(mode, log_dir, real_bin):
             FAKE_NAMES=json.dumps(names),
             FAKE_READONLY=str(root / "readonly"),
             FAKE_CALLS=str(root / "calls"),
+            FAKE_DIRS=str(root / "dirs"),
+            FAKE_VOLUMES=str(root / "volumes"),
             FAKE_STATE_ROOT=str(root / "state"),
             FAKE_WORKSPACE_ROOT=str(root / "workspace"),
             FAKE_STATE_MOUNT="/home" if mode == "overlap-layout" else "/",
@@ -230,6 +249,9 @@ def run(mode, log_dir, real_bin):
         env.pop("ASCOUT_PRIV_STATE_DIR", None)
         env.pop("ASCOUT_PRIV_WORKSPACE_DIR", None)
         if mode != "no-layout":
+            for name in ("state", "workspace"):
+                (root / name).mkdir()
+                (root / name / "existing").write_text("keep")
             env["ASCOUT_PRIV_STATE_DIR"] = str(root / "state")
             env["ASCOUT_PRIV_WORKSPACE_DIR"] = str(root / "workspace")
         result = subprocess.run(
@@ -242,15 +264,22 @@ def run(mode, log_dir, real_bin):
         log = log_dir / ("priv-check-" + mode + ".log")
         log.write_text(result.stdout + result.stderr)
         calls = (root / "calls").read_text() if (root / "calls").exists() else ""
+        created = [Path(path) for path in (root / "dirs").read_text().splitlines()]
+        assert created, (mode, log)
+        left = [path for path in created if path.exists() or path.is_symlink()]
+        if mode == "cleanup-fail":
+            assert len(left) == 1 and left[0].parent == root / "workspace", (left, log)
+            assert "FAIL: workspace cleanup" in result.stdout, log
+        else:
+            assert not left, (mode, left, log)
+        if mode != "no-layout":
+            for name in ("state", "workspace"):
+                assert (root / name / "existing").read_text() == "keep", log
         return result, calls, log
 
 
-if __name__ == "__main__":
+def main(log_dir):
     import sys
-    configured_logs = os.environ.get("ASCOUT_PRIV_CHECK_TEST_LOG_DIR")
-    log_dir = Path(configured_logs).resolve() if configured_logs else Path(tempfile.mkdtemp(prefix="priv-check-regression-"))
-    log_dir.mkdir(parents=True, exist_ok=True)
-    print(f"diagnostics retained in {log_dir}")
     real_bin = real_test_binary(log_dir)
     modes = [
         "success",
@@ -262,6 +291,7 @@ if __name__ == "__main__":
         "missing-test",
         "skip",
         "build-fail",
+        "raw-fail",
         "nonbtrfs",
         "no-layout",
         "overlap-layout",
@@ -323,4 +353,15 @@ if __name__ == "__main__":
                 assert "NO_VALID_STATE_LAYOUT" in output, (mode, log)
             if mode == "overlap-layout":
                 assert "inside a mount the backend isolates" in output, (mode, log)
-        print(f"PASS {mode}: {log}")
+        print(f"PASS {mode}")
+
+
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory(dir="/var/tmp", prefix="priv-check-regression-") as tmp:
+        log_dir = Path(tmp)
+        try:
+            main(log_dir)
+        except Exception:
+            for log in log_dir.glob("priv-check-*.log"):
+                print(f"\n{log.name}\n{log.read_text()}", flush=True)
+            raise

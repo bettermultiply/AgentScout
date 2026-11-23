@@ -102,7 +102,7 @@ impl SpeculationCoordinator {
                     },
                 )
                 .map(
-                    |(compatible, verdict, notification, validated_at_ms, full, part)| {
+                    |(compatible, verdict, notification, validated_at_ms, full, part, audit)| {
                         ControlResult::AcceptanceDisposition(
                             compatible,
                             verdict,
@@ -110,6 +110,7 @@ impl SpeculationCoordinator {
                             validated_at_ms,
                             full,
                             part,
+                            audit,
                         )
                     },
                 )
@@ -346,10 +347,9 @@ impl SpeculationCoordinator {
             .policy_model_grant()
             .filter(|grant| grant.decisions.contains(&decision))
         {
-            let provider = self
-                .provider
-                .as_ref()
-                .ok_or_else(|| io::Error::other("Policy model provider is not configured"))?;
+            let Some(provider) = self.provider.as_ref() else {
+                return engine.evaluate(policy, decision, data);
+            };
             engine.evaluate_with_provider_cancellable(
                 policy,
                 decision,
@@ -490,7 +490,12 @@ impl SpeculationCoordinator {
             policy,
             Decision::Launch,
             &json!({
-                "chance_context": {"chance_id": tool.chance_id, "tool_name": tool.tool_name},
+                "chance_context": {
+                    "chance_id": tool.chance_id,
+                    "tool_name": tool.tool_name,
+                    "arguments": tool.arguments,
+                    "kind": tree.chances.get(&tool.chance_id).and_then(|chance| chance.speculation_kind),
+                },
                 "authority_state": authority,
                 "candidate_view": candidates
             }),
@@ -567,6 +572,7 @@ impl SpeculationCoordinator {
             Option<u64>,
             bool,
             Option<Value>,
+            Option<Value>,
         ),
         Box<dyn std::error::Error>,
     > {
@@ -592,6 +598,7 @@ impl SpeculationCoordinator {
             Option<u64>,
             bool,
             Option<Value>,
+            Option<Value>,
         ),
         Box<dyn std::error::Error>,
     > {
@@ -609,19 +616,13 @@ impl SpeculationCoordinator {
         if declares_input(policy, Decision::Match, "outcome") {
             data["outcome"] = outcome.clone();
         }
-        let result = if resolution.is_none() {
-            self.evaluate(engine, policy, Decision::Match, &data)?
-        } else {
-            Value::Null
-        };
+        let mut result = Value::Null;
         // Match is the validation operation; Dispose and Promote may take
         // arbitrarily longer. Capture here before either is invoked.
         let validated_at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
             .and_then(|duration| u64::try_from(duration.as_millis()).ok());
-        let verdict = result["verdict"].as_str().unwrap_or("indeterminate").to_string();
-        let compatible = verdict == "compatible";
         let candidate_execution = tree
             .transcripts
             .get(candidate_id)
@@ -631,17 +632,37 @@ impl SpeculationCoordinator {
             .and_then(|parent| tree.transcripts.get(parent))
             .map(Vec::as_slice)
             .unwrap_or_default();
+        let task_prompt: String = parent_execution.iter().find(|entry| entry["role"] == "user")
+            .map(|entry| {
+                let content = &entry["content"];
+                match content.as_array() {
+                    Some(parts) => parts.iter().filter(|part| part["type"] == "text")
+                        .filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n"),
+                    None => content.as_str().unwrap_or_default().to_owned(),
+                }
+            })
+            .unwrap_or_default().chars().take(6000).collect();
+        let chance_id = &tree.branches[candidate_id].chance_id;
+        let sibling_candidate_count = tree.pending_candidates().iter()
+            .filter(|id| id.as_str() != candidate_id && &tree.branches[*id].chance_id == chance_id)
+            .count();
+        data["match_context"]["task_prompt"] = json!(task_prompt);
+        data["match_context"]["sibling_candidate_count"] = json!(sibling_candidate_count);
         let inherited = candidate_execution
             .iter()
             .zip(parent_execution)
             .take_while(|(candidate, parent)| candidate == parent)
             .count();
-        let mut candidate_results: Vec<_> = tree.action_facts.get(candidate_id).into_iter()
+        let mut tool_facts: Vec<_> = tree.action_facts.get(candidate_id).into_iter()
             .flat_map(|facts| facts.values())
-            .filter(|fact| fact.status == ActionStatus::Succeeded
+            .filter(|fact| matches!(fact.status, ActionStatus::Succeeded | ActionStatus::Failed)
                 && fact.action_kind == ActionKind::ToolExecution)
+            .collect();
+        tool_facts.sort_by(|a, b| (a.timestamp_ms, &a.action_id).cmp(&(b.timestamp_ms, &b.action_id)));
+        let mut candidate_results: Vec<_> = tool_facts.into_iter()
             .map(|fact| {
-                let mut entry = json!({"action_id": fact.action_id, "result": fact.result, "evidence": fact.evidence});
+                let mut entry = json!({"action_id": fact.action_id, "timestamp_ms": fact.timestamp_ms,
+                    "status": fact.status, "result": fact.result, "evidence": fact.evidence});
                 for key in ["tool_name", "arguments", "details"] {
                     if let Some(value) = fact.result.as_ref().and_then(|result| result.get(key)) {
                         entry[key] = value.clone();
@@ -657,6 +678,12 @@ impl SpeculationCoordinator {
                 .filter(|entry| entry["role"] == "assistant" && entry["stopReason"] == "stop")
                 .map(|entry| json!({"result": entry["content"]})),
         );
+        data["match_context"]["candidate_results"] = Value::Array(candidate_results.clone());
+        if resolution.is_none() {
+            result = self.evaluate(engine, policy, Decision::Match, &data)?;
+        }
+        let verdict = result["verdict"].as_str().unwrap_or("indeterminate").to_string();
+        let compatible = verdict == "compatible";
         let disposition = self.evaluate(
             engine,
             policy,
@@ -692,6 +719,7 @@ impl SpeculationCoordinator {
                                 let path = path.strip_prefix("./").unwrap_or(path);
                                 vec![tree.workspace().join(path)]
                             }
+                            Some("bash") => Vec::new(),
                             _ => return Err("cannot determine the file dependencies of the selected result".into()),
                         };
                         result["files"] = json!(files);
@@ -709,7 +737,13 @@ impl SpeculationCoordinator {
         let verdict = if resolution.is_some() && action.is_null() { "wait".into() }
             else if resolution.is_some() && part.is_none() { "discard".into() }
             else { verdict };
-        Ok((compatible && (full || part.is_some()), verdict, notification, validated_at_ms, full, part))
+        let audit = result["details"]["audit"].as_str().map(|finding| json!({
+            "finding": finding,
+            "model": result["details"]["audit_model"],
+            "prompt_chars": result["details"]["audit_prompt_chars"],
+            "reply_chars": result["details"]["audit_reply_chars"],
+        }));
+        Ok((compatible && (full || part.is_some()), verdict, notification, validated_at_ms, full, part, audit))
     }
 }
 

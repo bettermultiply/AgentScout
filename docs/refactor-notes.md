@@ -142,9 +142,6 @@
   fork 实测约 1.2–1.4s，仍随 N 增长，不是严格 O(1)。裸
   `btrfs subvolume snapshot -r` 对 100k 文件测到首次约 0.22s、后续接近 0，
   说明剩余成本在完整 fork 的 per-mount snapshot/prepare 流程；本轮未继续优化。
-- `target/tmp` 中仍有少量空的只读 btrfs 子卷根，来自手工探测；普通用户
-  `btrfs subvolume delete` EPERM。此为当轮诊断，不是所有后续残留的结论；
-  后续必须重新检查挂载、权限、子卷和后台删除状态，不能据此排除测试残留。
 - 长函数拆分、firecracker 两个 start 的重复代码、ops 前置检查提取、firecracker
   超时常量未处理，已在上一节列出原因。
 

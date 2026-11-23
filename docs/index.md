@@ -55,4 +55,4 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 - **目标语义**：不依赖具体实现、系统必须满足的行为。
 - **开发决策**：已经接受的实现架构或验证选择。
 - **原型状态**：当前树包含 Pi/NLE 原型闭环，但尚不是经过完整能力验证的通用实现。
-- **已实现**：当前树中同时存在代码和验证证据。文件系统 Backend（overlay/btrfs 数据面）、进程 Backend 与 live accept 已有实现和测试；覆盖范围、已知偏差与需高权限验证的项目见 [文件系统 Backend 当前实现状态](fs-backend/current-state.md)。
+- **已实现**：当前树中同时存在代码和验证证据。文件系统 Backend（overlay/btrfs 数据面）、进程 Backend 与 live accept 已有实现和测试。覆盖范围、已知偏差与需高权限验证的项目见 [文件系统 Backend 当前实现状态](fs-backend/current-state.md)。普通测试与性能基准的命令见 [测试与基准复跑](fs-backend/current-state.md#测试与基准复跑)。

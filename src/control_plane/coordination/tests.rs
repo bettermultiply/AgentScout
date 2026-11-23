@@ -956,26 +956,42 @@ fn dispose_receives_authority_outcome_without_replacing_match_evidence() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
         root.path().join("policy.yaml"),
-        include_str!("../../../assets/policy/policy/policy.yaml"),
+        r#"
+version: 1
+language: python
+files: [decisions.py]
+fidelity: Best-effort
+decisions:
+  admit:
+    opportunity_pass: {file: decisions.py, function: opportunity_pass}
+    feasibility_pass: {file: decisions.py, function: unused}
+  select: {file: decisions.py, function: unused}
+  rebalance: {file: decisions.py, function: unused}
+  extent: {file: decisions.py, function: unused}
+  predict: {file: decisions.py, function: unused}
+  launch: {file: decisions.py, function: unused}
+  effect: {file: decisions.py, function: unused}
+  match: {file: decisions.py, function: match_proposal, outcome: tool_output}
+  dispose: {file: decisions.py, function: dispose}
+"#,
     )
     .unwrap();
-    let base = include_str!("../../../assets/policy/policy/decisions.py")
-        .split("def match_proposal(")
-        .next()
-        .unwrap();
-    let source = format!(
-        "{}\n{}",
-        base,
+    std::fs::write(
+        root.path().join("decisions.py"),
         r#"
+def opportunity_pass(data, *, policy_config, capabilities):
+    return {"admit": False}
+def unused(data, *, policy_config, capabilities):
+    raise AssertionError("unexpected policy decision")
 def match_proposal(data, *, policy_config, capabilities):
     assert data["evidence"] == {"verifier": "evidence"}
     return {"verdict": "compatible"}
 def dispose(data, *, policy_config, capabilities):
     assert data["context"]["match"]["verdict"] == "compatible"
     return {"actions": [{"intent": "Promote", "notification": data["context"]["authority_outcome"]["actual"]}]}
-"#
-    );
-    std::fs::write(root.path().join("decisions.py"), source).unwrap();
+"#,
+    )
+    .unwrap();
     let policy = PolicyEngine::default()
         .compile(&root.path().join("policy.yaml"))
         .unwrap();

@@ -200,6 +200,8 @@ impl SpeculativeTree {
         });
         (self.candidate_outcome(candidate).is_some() || held_proposal)
             && branch.status.is_decidable()
+            && !self.deferred_validations.get(candidate)
+                .is_some_and(|saved| saved == &self.validation_snapshot(candidate))
     }
 
     /// Promote only at the original wait point to avoid rolling back executed authority work.
@@ -374,6 +376,7 @@ impl SpeculativeTree {
         self.action_facts.remove(branch_id);
         self.speculations.remove(branch_id);
         self.extent_disposals.remove(branch_id);
+        self.deferred_validations.remove(branch_id);
         self.model_usage.remove(branch_id);
         self.tool_finished_at_ms.remove(branch_id);
         self.branches
@@ -431,6 +434,7 @@ impl SpeculativeTree {
                 || (after_acceptance && id == branch_id && status == BranchStatus::Promoting)
             {
                 self.change_status(&id, BranchStatus::Discarding, reason)?;
+                self.deferred_validations.remove(&id);
                 commands.push(self.make_discard_command(&id)?);
                 chance_ids.extend(self.branch(&id)?.chance_id.clone());
             }

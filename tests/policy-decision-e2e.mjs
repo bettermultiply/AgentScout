@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { runPath, spawnControl } from './control-plane-fixture.mjs';
 import { createInterposer } from '../instrumentation/core/index.ts';
@@ -146,15 +146,17 @@ async function freePort() {
 const tool = (id, name, args) => ({ tool_calls: [{ index: 0, id, type: 'function',
     function: { name, arguments: JSON.stringify(args) } }] });
 
-for (const failingTools of [false, true]) test(failingTools
-    ? 'failed bash results resolve against successful and failed predictions'
+for (const [failingTools, nativeModels] of [[false, false], [true, false], [false, true]]) test(nativeModels
+    ? 'ordinary startup uses the Pi openai override for Agent and Policy requests'
+    : failingTools ? 'failed bash results resolve against successful and failed predictions'
     : 'compiled Decision grants and facts reach real control plane, Pi and Filesystem Runtime', { timeout: 45000 }, async t => {
     const root = fs.mkdtempSync(join(tmpdir(), 'ascout-policy-decision-'));
     for (const dir of ['workspace', 'policy', 'pi']) fs.mkdirSync(join(root, dir));
     fs.writeFileSync(join(root, 'workspace/input.txt'), 'fixture input');
+    const provider = nativeModels ? 'openai' : 'fixture';
     const config = {
         version: 1, language: 'python', files: ['decisions.py'], fidelity: 'Best-effort', decisions: bindings,
-        policy_model_grant: { decisions: ['predict', 'match', 'extent'], models: ['fixture/policy'], max_requests: 1, timeout_ms: 10000 },
+        policy_model_grant: { decisions: ['predict', 'match', 'extent'], models: [`${provider}/policy`], max_requests: 1, timeout_ms: 10000 },
     };
     const policyPath = join(root, 'policy/policy.yaml');
     fs.writeFileSync(policyPath, JSON.stringify(config));
@@ -169,7 +171,7 @@ for (const failingTools of [false, true]) test(failingTools
         .replace("actual == 'actual-2' and len(data['match_context']['candidate']['usage'] or []) < 3", "len(data['match_context']['candidate']['usage'] or []) < (3 if actual == 'actual-2' else 1)")
         .replace("'compatible' if actual == 'actual-2' else 'incompatible'", "'compatible' if predicted['isError'] == outcome['is_error'] else 'incompatible'")
         : policy;
-    fs.writeFileSync(join(root, 'policy/decisions.py'), source);
+    fs.writeFileSync(join(root, 'policy/decisions.py'), source.replace("'provider': 'fixture'", `'provider': '${provider}'`));
     const prompts = [], agentRequests = [], firstPrediction = new Set();
     const fake = http.createServer(async (req, res) => {
         const body = JSON.parse(Buffer.concat(await Array.fromAsync(req)).toString());
@@ -205,8 +207,8 @@ for (const failingTools of [false, true]) test(failingTools
     fake.listen(0, '127.0.0.1');
     await once(fake, 'listening');
     t.after(() => { fake.closeAllConnections(); fake.close(); });
-    const models = join(root, 'models.json');
-    fs.writeFileSync(models, JSON.stringify({ providers: { fixture: {
+    const models = join(nativeModels ? join(root, 'pi') : root, 'models.json');
+    fs.writeFileSync(models, JSON.stringify({ providers: { [provider]: {
         baseUrl: `http://127.0.0.1:${fake.address().port}/v1`, api: 'openai-completions', apiKey: 'fake',
         models: ['agent', 'policy'].map(id => ({ id, reasoning: false, input: ['text'], contextWindow: 32768, maxTokens: 256 })),
     } } }));
@@ -215,9 +217,11 @@ for (const failingTools of [false, true]) test(failingTools
     const runtime = join(root, 'runtime.json');
     fs.writeFileSync(runtime, JSON.stringify({ backend: 'filesystem', control_address: `127.0.0.1:${runtimePort}`,
         adapter_instance: 'decision-fixture', filesystem: { state_directory: join(root, 'fs'), isolated_paths: [join(root, 'workspace')], passthrough_rw: [root] } }));
+    const piDir = join(root, 'pi');
+    const agentDir = nativeModels ? relative(process.cwd(), piDir) : piDir;
     const child = spawnControl(resolve('target/debug/ascout-control-plane'), [root, resolve('../pi'), policyPath,
-        '--web', address, '--model', 'fixture/agent', '--models', models, '--thinking', 'off'], {
-        env: { ...process.env, PI_CODING_AGENT_DIR: join(root, 'pi'), ASCOUT_RUNTIME_CONFIG: runtime }, stdio: ['ignore', 'pipe', 'pipe'],
+        '--web', address, '--model', `${provider}/agent`, ...(nativeModels ? [] : ['--models', models]), '--thinking', 'off'], {
+        env: { ...process.env, PI_OFFLINE: '1', PI_CODING_AGENT_DIR: agentDir, ASCOUT_RUNTIME_CONFIG: runtime }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let logs = '';
     for (const stream of [child.stdout, child.stderr]) stream.on('data', b => { logs += b; });
@@ -244,7 +248,18 @@ for (const failingTools of [false, true]) test(failingTools
         }
         assert.fail(`Timed out waiting for ${label}: ${root}\n${logs}\n${JSON.stringify(prompts)}`);
     }
-    await waitFor(e => e.message === 'branch_ready', 'Pi startup');
+    const assertNoDuplicateProvider = () => {
+        const agentLog = runPath(root, 'agent.log');
+        const duplicate = /Additional provider already exists/;
+        assert.ok(!duplicate.test(logs) && !(fs.existsSync(agentLog) && duplicate.test(fs.readFileSync(agentLog, 'utf8'))),
+            'Pi reported Additional provider already exists');
+    };
+    try {
+        await waitFor(e => e.message === 'branch_ready', 'Pi startup');
+    } finally {
+        assertNoDuplicateProvider();
+    }
+    if (nativeModels) assert.equal(fs.existsSync(runPath(root, 'models.json')), false);
     assert.equal((await post('prompt', { prompt: 'Read a file and run two commands.' })).status, 202);
     const done = await waitFor(e => e.message === 'task_completed', 'task completion');
     assert.equal(done.status, 'succeeded', `${root}\n${logs}`);

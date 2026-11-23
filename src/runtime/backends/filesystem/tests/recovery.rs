@@ -3,10 +3,7 @@ use super::support::*;
 
 #[test]
 fn recovery_overlay_executes_independently_and_rejects_corruption() {
-    let root = tempfile::Builder::new()
-        .prefix("fs-recovery-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/tmp", "fs-recovery-").unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     fs::write(workspace.join("inherited"), "original lower").unwrap();
@@ -81,10 +78,7 @@ fn recovery_overlay_executes_independently_and_rejects_corruption() {
 
 #[test]
 fn combined_save_failure_thaws_process_and_preserves_previous_generation() {
-    let root = tempfile::Builder::new()
-        .prefix("fs-recovery-combined-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/tmp", "fs-recovery-combined-").unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     let backend = Arc::new(new_overlay_backend(root.path()));
@@ -146,10 +140,7 @@ fn combined_save_failure_thaws_process_and_preserves_previous_generation() {
 #[test]
 fn recovery_btrfs_and_snapshot_copy_layouts() {
     for force_overlay in [false, true] {
-        let root = tempfile::Builder::new()
-            .prefix("ascout-recovery-btrfs-")
-            .tempdir_in("/var/tmp")
-            .unwrap();
+        let root = ScratchDir::new("/var/tmp", "ascout-recovery-btrfs-").unwrap();
         let workspace = root.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
         let mut config = FilesystemConfig::new(root.path().join("state"));

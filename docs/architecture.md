@@ -129,7 +129,7 @@ src/
   runtime proxy 或 control plane。
 - `bin/` 读取并规范化启动配置，使用库的公开 API 装配各组件。
 
-control plane 入口保留参数、配置、组件装配、进程与界面生命周期。`coordination::session` 根据记录准备 Tree，校验 Policy／Runtime 绑定并协调 Agent 启动或恢复。`coordination::execution` 负责事件循环、命令交付、观察发布和收尾。Tree／BranchRecord 的领域转换通过库接口完成。实现与验证范围见[源码责任边界核查](development/source-boundary-audit-2026-11-16.md)。
+control plane 入口保留参数、配置、组件装配、进程与界面生命周期。`coordination::session` 根据记录准备 Tree，校验 Policy／Runtime 绑定并协调 Agent 启动或恢复。`coordination::execution` 负责事件循环、命令交付、观察发布和收尾。Tree／BranchRecord 的领域转换通过库接口完成。实现与验证范围见 [源码责任边界与验证入口](development/runtime-adapter.md)。
 
 `BaseRuntime` 根据登记项创建实例，使用统一的 `Backend` 接口为 Environment 协调所有实际参与的实例。`FilesystemBackend` 管理文件视图、holder 冻结和恢复、挂载轮换与清理。独立程序通过标准接口接收生命周期和工具操作消息。见 [独立程序接入](development/executable-backend.md)。
 

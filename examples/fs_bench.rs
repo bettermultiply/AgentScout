@@ -1,4 +1,3 @@
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,14 +9,16 @@ use ascout::runtime::backend::{Backend, BackendContext};
 use ascout::runtime::backends::filesystem::{FilesystemBackend, FilesystemConfig};
 use ascout::runtime::launch_plan::MountEntry;
 
+#[path = "../src/runtime/backends/filesystem/scratch_dir.rs"]
+mod scratch_dir;
+use scratch_dir::{ScratchDir, mount_id};
+
 const CHANGED_FILES: usize = 10;
 
 struct Case {
     name: &'static str,
-    root: PathBuf,
-    state: PathBuf,
-    workspace: PathBuf,
-    cleanup: Vec<PathBuf>,
+    base: &'static str,
+    separate_state: bool,
     flatten_limit: usize,
     isolate_unmanaged: bool,
 }
@@ -53,150 +54,193 @@ fn run() -> Result<(), String> {
         .ok()
         .map(|value| value.split(',').filter_map(|v| v.parse().ok()).collect())
         .unwrap_or_else(|| vec![100, 10_000, 100_000]);
-    let pid = std::process::id();
-    let project = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let cases = vec![
-        Case {
-            name: "reflink-flatten",
-            root: project.join(format!("target/fs-bench-{pid}-reflink-flatten")),
-            state: project.join(format!("target/fs-bench-{pid}-reflink-flatten/state")),
-            workspace: project.join(format!("target/fs-bench-{pid}-reflink-flatten/ws")),
-            cleanup: vec![project.join(format!("target/fs-bench-{pid}-reflink-flatten"))],
-            flatten_limit: usize::MAX,
-            isolate_unmanaged: true,
+    let cases = [
+        ("reflink-flatten", "/var/tmp", false, usize::MAX, true),
+        ("reflink-lower", "/var/tmp", true, 0, true),
+        ("reflink-chain-nonoverlap", "/var/tmp", true, 0, false),
+        (
+            "reflink-flatten-nonoverlap",
+            "/var/tmp",
+            true,
+            usize::MAX,
+            false,
+        ),
+        ("tmpfs-flatten", "/tmp", false, usize::MAX, true),
+        (
+            "btrfs-snapshot-flatten",
+            "/var/tmp",
+            false,
+            usize::MAX,
+            true,
+        ),
+        ("btrfs-snapshot-lower", "/var/tmp", true, 0, true),
+    ]
+    .map(
+        |(name, base, separate_state, flatten_limit, isolate_unmanaged)| Case {
+            name,
+            base,
+            separate_state,
+            flatten_limit,
+            isolate_unmanaged,
         },
-        Case {
-            name: "reflink-lower",
-            root: project.join(format!("target/fs-bench-{pid}-reflink-lower")),
-            state: PathBuf::from(format!("/var/tmp/ascout-fs-bench-state-{pid}")),
-            workspace: project.join(format!("target/fs-bench-{pid}-reflink-lower/ws")),
-            cleanup: vec![
-                project.join(format!("target/fs-bench-{pid}-reflink-lower")),
-                PathBuf::from(format!("/var/tmp/ascout-fs-bench-state-{pid}")),
-            ],
-            flatten_limit: 0,
-            isolate_unmanaged: true,
-        },
-        Case {
-            name: "reflink-chain-nonoverlap",
-            root: project.join(format!("target/fs-bench-{pid}-chain-nonoverlap")),
-            state: PathBuf::from(format!("/var/tmp/ascout-fs-bench-chain-state-{pid}")),
-            workspace: project.join(format!("target/fs-bench-{pid}-chain-nonoverlap/ws")),
-            cleanup: vec![
-                project.join(format!("target/fs-bench-{pid}-chain-nonoverlap")),
-                PathBuf::from(format!("/var/tmp/ascout-fs-bench-chain-state-{pid}")),
-            ],
-            flatten_limit: 0,
-            isolate_unmanaged: false,
-        },
-        Case {
-            name: "reflink-flatten-nonoverlap",
-            root: project.join(format!("target/fs-bench-{pid}-flat-nonoverlap")),
-            state: PathBuf::from(format!("/var/tmp/ascout-fs-bench-flat-state-{pid}")),
-            workspace: project.join(format!("target/fs-bench-{pid}-flat-nonoverlap/ws")),
-            cleanup: vec![
-                project.join(format!("target/fs-bench-{pid}-flat-nonoverlap")),
-                PathBuf::from(format!("/var/tmp/ascout-fs-bench-flat-state-{pid}")),
-            ],
-            flatten_limit: usize::MAX,
-            isolate_unmanaged: false,
-        },
-        Case {
-            name: "tmpfs-flatten",
-            root: PathBuf::from(format!("/tmp/ascout-fs-bench-{pid}")),
-            state: PathBuf::from(format!("/tmp/ascout-fs-bench-{pid}/state")),
-            workspace: PathBuf::from(format!("/tmp/ascout-fs-bench-{pid}/ws")),
-            cleanup: vec![PathBuf::from(format!("/tmp/ascout-fs-bench-{pid}"))],
-            flatten_limit: usize::MAX,
-            isolate_unmanaged: true,
-        },
-        Case {
-            name: "btrfs-snapshot-flatten",
-            root: project.join(format!("target/fs-bench-{pid}-snapshot-flatten")),
-            state: project.join(format!("target/fs-bench-{pid}-snapshot-flatten/state")),
-            workspace: project.join(format!("target/fs-bench-{pid}-snapshot-flatten/ws")),
-            cleanup: vec![project.join(format!("target/fs-bench-{pid}-snapshot-flatten"))],
-            flatten_limit: usize::MAX,
-            isolate_unmanaged: true,
-        },
-        Case {
-            name: "btrfs-snapshot-lower",
-            root: project.join(format!("target/fs-bench-{pid}-snapshot-lower")),
-            state: PathBuf::from(format!("/var/tmp/ascout-fs-bench-snapshot-state-{pid}")),
-            workspace: project.join(format!("target/fs-bench-{pid}-snapshot-lower/ws")),
-            cleanup: vec![
-                project.join(format!("target/fs-bench-{pid}-snapshot-lower")),
-                PathBuf::from(format!("/var/tmp/ascout-fs-bench-snapshot-state-{pid}")),
-            ],
-            flatten_limit: 0,
-            isolate_unmanaged: true,
-        },
-    ];
+    );
 
-    let execution = (|| -> Result<(), String> {
-        println!("machine:");
-        println!("  kernel: {}", uname("-r"));
-        println!("  cpu: {}", cpu_model());
-        for case in &cases {
-            fs::create_dir_all(&case.root).map_err(|e| format!("create root: {e}"))?;
-            fs::create_dir_all(&case.state).map_err(|e| format!("create state: {e}"))?;
-            fs::create_dir_all(&case.workspace).map_err(|e| format!("create workspace: {e}"))?;
-            let fs_type = Command::new("stat")
-                .args(["-f", "-c", "%T"])
-                .arg(&case.state)
-                .output()
-                .ok()
-                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            println!("  case {} state_fs={fs_type}", case.name);
+    let source = fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
+        .map_err(|error| format!("resolve source directory: {error}"))?;
+    let state_base = std::env::var_os("ASCOUT_PRIV_STATE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    println!("machine:");
+    println!("  kernel: {}", uname("-r"));
+    println!("  cpu: {}", cpu_model());
+    println!("\ncase,N,operation,p50_ms,p95_ms,fork_cost,mechanism,overlaps");
+    let filter = std::env::var("ASCOUT_BENCH_CASES").unwrap_or_default();
+    for case in &cases {
+        if !filter.is_empty() && !case.name.contains(&filter) {
+            continue;
         }
-
-        println!("\ncase,N,operation,p50_ms,p95_ms,fork_cost,mechanism,overlaps");
-        let filter = std::env::var("ASCOUT_BENCH_CASES").unwrap_or_default();
-        for case in &cases {
-            if !filter.is_empty() && !case.name.contains(&filter) {
-                continue;
-            }
-            for &n in &sizes {
-                if let Err(error) = run_case(case, n, iterations) {
-                    match error {
-                        CaseError::Unsupported(error) => {
-                            println!("{},{},{},SKIP: {},,,", case.name, n, "all", error);
-                        }
-                        CaseError::Failed(error) => {
-                            return Err(format!("{} N={n}: {error}", case.name));
-                        }
-                    }
+        for &n in &sizes {
+            match with_case_dirs(case, &source, state_base.as_deref(), n, iterations) {
+                Ok(()) => (),
+                Err(CaseError::Unsupported(error)) => {
+                    println!("{},{n},all,SKIP: {error},,,,", case.name);
+                }
+                Err(CaseError::Failed(error)) => {
+                    return Err(format!("{} N={n}: {error}", case.name));
                 }
             }
         }
-        Ok(())
-    })();
-    let cleanup_errors = cleanup_paths(cases.iter().flat_map(|case| case.cleanup.iter()));
-    match (execution, cleanup_errors.is_empty()) {
-        (result, true) => result,
-        (result, false) => Err(format!(
-            "{}cleanup failed: {}",
-            result.err().map(|e| format!("{e}; ")).unwrap_or_default(),
-            cleanup_errors.join("; ")
-        )),
     }
+    Ok(())
 }
 
-fn cleanup_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> Vec<String> {
-    let mut cleanup_errors = Vec::new();
-    for path in paths {
-        if let Err(error) = fs::remove_dir_all(path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                cleanup_errors.push(format!("remove {}: {error}", path.display()));
+fn outside_source(path: &Path, source: &Path) -> Result<PathBuf, CaseError> {
+    let resolved =
+        fs::canonicalize(path).map_err(|error| format!("resolve {}: {error}", path.display()))?;
+    if resolved.starts_with(source) {
+        return Err(format!("{} resolves inside the source tree", path.display()).into());
+    }
+    Ok(resolved)
+}
+
+fn fs_type(path: &Path) -> Option<String> {
+    let output = Command::new("stat")
+        .args(["-f", "-c", "%T"])
+        .arg(path)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn separate_state_dir(
+    case: &Case,
+    workspace_base: &Path,
+    source: &Path,
+    state_base: Option<&Path>,
+) -> Result<ScratchDir, CaseError> {
+    let workspace_mount = mount_id(workspace_base).map_err(|error| error.to_string())?;
+    let prefix = "ascout-fs-bench-state-";
+    if let Some(path) = state_base {
+        let base = outside_source(path, source)?;
+        if mount_id(&base).map_err(|error| format!("{}: {error}", base.display()))?
+            == workspace_mount
+        {
+            return Err(CaseError::Unsupported(format!(
+                "ASCOUT_PRIV_STATE_DIR={} must be on a different mount from {}",
+                base.display(),
+                workspace_base.display()
+            )));
+        }
+        return ScratchDir::new(&base, prefix)
+            .map_err(|error| format!("ASCOUT_PRIV_STATE_DIR={}: {error}", base.display()).into());
+    }
+
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from);
+    let home_cache = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"));
+    let needs_btrfs = case.name.starts_with("btrfs-snapshot");
+    for candidate in [cache, home_cache]
+        .into_iter()
+        .flatten()
+        .filter(|p| p.is_absolute())
+    {
+        let Ok(base) = outside_source(&candidate, source) else {
+            continue;
+        };
+        if mount_id(&base).is_ok_and(|id| id != workspace_mount)
+            && (!needs_btrfs || fs_type(&base).as_deref() == Some("btrfs"))
+        {
+            if let Ok(dir) = ScratchDir::new(&base, prefix) {
+                return Ok(dir);
             }
         }
     }
-    cleanup_errors
+    let fs_requirement = if needs_btrfs { " btrfs" } else { "" };
+    Err(CaseError::Unsupported(format!(
+        "no writable{fs_requirement} cache directory outside the source tree on a different mount from {}; set ASCOUT_PRIV_STATE_DIR",
+        workspace_base.display()
+    )))
 }
 
-fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
-    let mut config = FilesystemConfig::new(&case.state);
+fn with_case_dirs(
+    case: &Case,
+    source: &Path,
+    state_base: Option<&Path>,
+    n: usize,
+    iterations: usize,
+) -> Result<(), CaseError> {
+    let failed_io = |error: std::io::Error| CaseError::Failed(error.to_string());
+    let workspace_base = outside_source(Path::new(case.base), source)?;
+    let root = ScratchDir::new(&workspace_base, "ascout-fs-bench-").map_err(failed_io)?;
+    let mut state_root = None;
+    let result = (|| {
+        if case.separate_state {
+            state_root = Some(separate_state_dir(
+                case,
+                &workspace_base,
+                source,
+                state_base,
+            )?);
+        }
+        let state = state_root.as_ref().unwrap_or(&root).path().join("state");
+        let workspace = root.path().join("ws");
+        fs::create_dir(&state).map_err(failed_io)?;
+        fs::create_dir(&workspace).map_err(failed_io)?;
+        if let Some(fs_type) = fs_type(&state) {
+            eprintln!("  case {} state_fs={fs_type}", case.name);
+        }
+        run_case(case, &state, &workspace, n, iterations)
+    })();
+    let cleanup_errors = state_root
+        .into_iter()
+        .chain([root])
+        .filter_map(|dir| dir.close().err().map(|e| e.to_string()))
+        .collect::<Vec<_>>();
+    if cleanup_errors.is_empty() {
+        result
+    } else {
+        Err(CaseError::Failed(format!(
+            "{}cleanup failed: {}",
+            match result {
+                Ok(()) => String::new(),
+                Err(CaseError::Failed(error) | CaseError::Unsupported(error)) =>
+                    format!("{error}; "),
+            },
+            cleanup_errors.join("; ")
+        )))
+    }
+}
+
+fn run_case(
+    case: &Case,
+    state: &Path,
+    workspace: &Path,
+    n: usize,
+    iterations: usize,
+) -> Result<(), CaseError> {
+    let mut config = FilesystemConfig::new(state);
     config.force_overlay = !case.name.starts_with("btrfs-snapshot");
     config.isolate_unmanaged_mounts = case.isolate_unmanaged;
     config.fork_flatten_entry_limit = case.flatten_limit;
@@ -224,10 +268,10 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
         ));
     }
     let mechanism = backend.mechanism().as_str().to_string();
-    let cwd = case.workspace.clone();
+    let cwd = workspace;
     let mut total = BTreeMap::<&'static str, Vec<Duration>>::new();
     backend.establish("root").map_err(|e| e.to_string())?;
-    let root_upper = workspace_upper(&backend, "root", &cwd)?;
+    let root_upper = workspace_upper(&backend, "root", cwd)?;
     for index in 0..n {
         write_bench_file(&root_upper, index)?;
     }
@@ -246,7 +290,7 @@ fn run_case(case: &Case, n: usize, iterations: usize) -> Result<(), CaseError> {
             .mark(&child, &mark, &[])
             .map_err(|e| e.to_string())?;
         total.entry("mark").or_default().push(mark_start.elapsed());
-        let child_upper = workspace_upper(&backend, &child, &cwd)?;
+        let child_upper = workspace_upper(&backend, &child, cwd)?;
         for index in 0..CHANGED_FILES.min(n) {
             write_bench_file(&child_upper, index)?;
         }

@@ -1,16 +1,17 @@
 import {test} from 'node:test';
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync} from 'node:fs';
-import {resolve} from 'node:path';
+import {mkdtempSync,rmSync} from 'node:fs';
+import {join,resolve} from 'node:path';
 
 test('recovery binds auto-loaded resources and external rollback Git identity without resetting workspace',()=>{
- const directory=mkdtempSync('/tmp/opencode/recovery-binding-'),pi=resolve('../pi');
- execFileSync(process.execPath,['--import='+pi+'/packages/coding-agent/src/experimental/source-resolver.ts','--experimental-strip-types','--input-type=module','-e',`
+ const pi=resolve('../pi'),directory=mkdtempSync('/var/tmp/recovery-binding-');
+ try {
+  execFileSync(process.execPath,['--import='+pi+'/packages/coding-agent/src/experimental/source-resolver.ts','--experimental-strip-types','--input-type=module','-e',`
  import assert from 'node:assert/strict';
  import {mkdirSync,writeFileSync} from 'node:fs';
  import {execFileSync} from 'node:child_process';
  import {recoveryBinding,snapshotResources} from '${resolve('instrumentation/pi/recovery-binding.ts')}';
- const root=process.argv[1],pi=process.argv[2];process.env.PI_CODING_AGENT_DIR=root+'/agent';
+ const root=process.argv[1],pi=process.argv[2];
  mkdirSync(root+'/agent/extensions',{recursive:true});mkdirSync(root+'/workspace');
  writeFileSync(root+'/agent/extensions/example.ts','export default ()=>{}');
   const first=await recoveryBinding(pi,[root+'/workspace']);
@@ -35,5 +36,8 @@ test('recovery binds auto-loaded resources and external rollback Git identity wi
  writeFileSync(root+'/workspace/value','continued');assert.deepEqual(snapshotResources(sources,binding),binding);
   git('update-ref','-d',ref);assert.deepEqual(snapshotResources(sources,binding),binding);
   git('update-ref','-d',binding[0].retainedRef);assert.throws(()=>snapshotResources(sources,binding));
- `,directory,pi],{encoding:'utf8'});
+  `,directory,pi],{encoding:'utf8',env:{...process.env,PI_CODING_AGENT_DIR:join(directory,'agent'),JITI_FS_CACHE:'false'}});
+ } finally {
+  rmSync(directory, {recursive:true, force:true});
+ }
 });

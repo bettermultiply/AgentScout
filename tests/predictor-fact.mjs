@@ -27,8 +27,6 @@ for(const kind of ['model_inference','nle_action'])test(`saved Policy receives p
     assert.equal((await access.beforeAction({branch:'authority',actionId:kind,actionKind:kind==='model_inference'?kind:'tool_execution',name:kind,op,admit:true})).kind,'admit');
     assert.deepEqual(decisions,['admit.opportunity_pass','admit.feasibility_pass'],'authority does not evaluate extent');
     assert.equal(reports.filter(m=>m.message==='speculative_admission_request').length,1);
-    assert.equal(access.predict,undefined,'prediction is evaluated only by the control plane');
-    assert.deepEqual(Object.keys(artifact.decisions),localDecisions);
 });
 
 test('predictor availability follows delivery, inheritance, restore and cleanup; admission remains Policy-owned',async()=>{

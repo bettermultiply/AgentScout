@@ -708,4 +708,6 @@ impl Drop for FilesystemBackend {
 }
 
 #[cfg(test)]
+mod scratch_dir;
+#[cfg(test)]
 mod tests;

@@ -85,33 +85,35 @@ fn resolve_pi_root(
         .map_err(|e| format!("Pi root {} cannot be opened: {e}", candidate.display()).into())
 }
 
-fn resolve_models(
-    explicit: Option<PathBuf>,
+fn resolve_pi_agent_dir(
     config: &config::Config,
 ) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
-    if let Some(path) = explicit {
-        return Ok(Some(path));
-    }
-    if let Some(path) = &config.models {
-        return fs::canonicalize(path)
-            .map(Some)
-            .map_err(|e| format!("Models file {} cannot be opened: {e}", path.display()).into());
-    }
-    let candidates = env::var_os("PI_CODING_AGENT_DIR")
-        .map(PathBuf::from)
-        .map(|directory| directory.join("models.json"))
-        .into_iter()
-        .chain(env::var_os("HOME").map(|home| {
-            PathBuf::from(home).join(".pi/agent/models.json")
-        }));
-    for candidate in candidates {
-        if candidate.is_file() {
-            return fs::canonicalize(&candidate).map(Some).map_err(|e| {
-                format!("Models file {} cannot be opened: {e}", candidate.display()).into()
-            });
+    if let Some(value) = env::var_os("PI_CODING_AGENT_DIR").filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(value);
+        // The Agent runs from the workspace, while the Policy provider runs from the launcher cwd.
+        if path.is_absolute()
+            || path.starts_with("~")
+            || path.as_os_str().as_encoded_bytes().starts_with(b"file://")
+        {
+            return Ok(Some(path));
         }
+        return Ok(Some(env::current_dir()?.join(path)));
     }
-    Ok(None)
+    let Some(path) = &config.models else {
+        return Ok(None);
+    };
+    if path.file_name().and_then(|name| name.to_str()) != Some("models.json") {
+        return Err("AScout config `models` must point to Pi's main models.json. Use --models for an additional provider file.".into());
+    }
+    if !path.is_file() {
+        return Err(format!("Pi models file {} cannot be opened", path.display()).into());
+    }
+    // Resolve the directory, preserving models.json as the lookup name even if it is a symlink.
+    let directory = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    Ok(Some(fs::canonicalize(directory)?))
 }
 
 fn make_runtime_config(
@@ -153,11 +155,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = take_option(&mut args, "--cwd", false)?;
     let resume = resume_id.is_some();
     let config = config::Config::load()?;
-    let models = resolve_models(explicit_models, &config)?;
     let system_log = ascout::control_plane::system_log::SystemLog::open(&config.log_path)?;
     if args == ["runs"] {
         return config.list();
     }
+    let pi_agent_dir = resolve_pi_agent_dir(&config)?;
     if args.len() > 1 {
         return Err("Usage: ascout [pi-root] [options]. See ascout --help.".into());
     }
@@ -202,7 +204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(runtime),
         session::AgentSettings {
             model: model.or(config.default_model),
-            models,
+            models: explicit_models,
             thinking: thinking.or(config.default_thinking),
         },
         Some(workspace),
@@ -219,6 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     foreground::run(
         prepared,
         &pi_root,
+        pi_agent_dir.as_deref(),
         web_address.as_deref(),
         &system_log,
         config.runtime_adapter.as_deref(),

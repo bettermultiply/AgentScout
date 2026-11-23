@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, readFileSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, copyFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 
 test('native Pi history preserves compaction/custom/IDs, rewires only final history, retains live sources', () => {
-    const directory=mkdtempSync('/tmp/opencode/pi-history-');
     const pi=resolve('../pi');
     const script=`
         import assert from 'node:assert/strict';
@@ -36,19 +35,21 @@ test('native Pi history preserves compaction/custom/IDs, rewires only final hist
         reopened=SessionManager.open(file);assert.equal(reopened.getEntries().at(-1).parentId,candidate.getLeafId());
         const bad=candidate.getEntry(next);bad.parentId='missing-parent';
         assert.throws(()=>tree.settle());assert.ok(existsSync(candidate.getSessionFile()));
-        console.log(directory);
     `;
-    execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script,directory],{encoding:'utf8'});
-    const entries=readFileSync(`${directory}/session.jsonl`,'utf8').trim().split('\n').map(JSON.parse);
-    assert.ok(entries.some(e=>e.type==='compaction'));
-    assert.ok(existsSync(`${directory}/session.jsonl`));
+    const directory=mkdtempSync('/var/tmp/pi-history-');
+    try {
+        execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script,directory],{encoding:'utf8',env:{...process.env,PI_CODING_AGENT_DIR:join(directory,'agent'),JITI_FS_CACHE:'false'}});
+        const entries=readFileSync(`${directory}/session.jsonl`,'utf8').trim().split('\n').map(JSON.parse);
+        assert.ok(entries.some(e=>e.type==='compaction'));
+        assert.ok(existsSync(`${directory}/session.jsonl`));
+    } finally {
+        rmSync(directory, {recursive:true, force:true});
+    }
 });
 
 test('installed pi-code-rollback snapshot references survive assembly with their Git objects', () => {
-    const directory=mkdtempSync('/tmp/opencode/pi-rollback-');
-    copyFileSync('/home/betmul/.pi/agent/npm/node_modules/pi-code-rollback/index.ts',`${directory}/rollback.ts`);
     const pi=resolve('../pi');
-    const script=`
+    const script=(directory)=>`
         import assert from 'node:assert/strict';
         import {writeFileSync,readFileSync,existsSync} from 'node:fs';
         import {execFileSync} from 'node:child_process';
@@ -88,5 +89,11 @@ test('installed pi-code-rollback snapshot references survive assembly with their
         assert.equal(readFileSync(directory+'/task.txt','utf8'),'baseline');
         assert.equal(existsSync(directory+'/new.txt'),false);
     `;
-    execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script,directory],{encoding:'utf8'});
+    const directory=mkdtempSync('/var/tmp/pi-rollback-');
+    try {
+        copyFileSync('/home/betmul/.pi/agent/npm/node_modules/pi-code-rollback/index.ts',`${directory}/rollback.ts`);
+        execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script(directory),directory],{encoding:'utf8',env:{...process.env,PI_CODING_AGENT_DIR:join(directory,'agent'),JITI_FS_CACHE:'false'}});
+    } finally {
+        rmSync(directory, {recursive:true, force:true});
+    }
 });

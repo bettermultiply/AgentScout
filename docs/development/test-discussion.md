@@ -1,140 +1,30 @@
-# 测试删除与合并审查
+# 测试筛选与复跑
 
-## 本轮语义筛选（基线为开始时的工作区）
+## 筛选标准
 
-E2E Tests 通过实际 CLI、协议或工具入口检查调用方可观察的结果。Deterministic Simulation Tests 用受控的替身、故障或事件序列检查状态转换、恢复和模块间行为。
+- 原型阶段默认不新增测试。遇到可稳定复现、且可能再次发生的故障时，先让回归测试复现，再修复。
+- 端到端测试从实际 CLI、协议或工具入口检查调用方可见的结果。确定性模拟用手工事件、替身或故障注入验证状态转换、取消、重试和恢复。
+- 删除重复断言和只检查内部字段或布局的用例。仅在保留关键断言和独立故障覆盖时合并启动流程。发布重试与重启恢复、Pi 通知交付与协议重传、Firecracker 的 SSH 与 vsock 各覆盖不同故障边界。
 
-| 范围 | 筛选前 | 筛选后 |
-| --- | ---: | ---: |
-| Cargo 枚举，含忽略用例 | 134 | 103 |
-| 其中 Rust 库 | 117 | 92 |
-| 其中 Filesystem Backend 库测试 | 62 | 46 |
-| `runtime::process` 库测试 | 6 | 2 |
-| Coordination / Speculative Tree 合计 | 43 | 38 |
-| `tests/*.mjs` 顶层 `test()` 声明 | 58 | 48 |
-| `tests/*.py` 直接测试入口 | 2 | 1 |
+## 执行约束
 
-Node 按源码声明计数，参数循环和子测试在运行时另外展开。脚本预检模拟仍有 24 个场景，回放仍有 3 个验收入口。外部任务验收 fixture 的 3 项检查保持原样。
+普通测试的工作目录由本次运行独占，默认通过或失败均清理临时产物。本机日志无需写入文档。用手工事件或本地伪模型验证，真实模型调用须单独授权。
 
-- Filesystem 保留从 Runtime 或 holder 请求到隔离视图、发布和清理的路径，以及受控故障下的回滚、回执、失败重试和重启恢复。删除直接状态表引用与布局探测、扫描计数、局部文件及导出检查。进程管理保留注入启动及 cgroup 写失败后的资源回收。特权脚本执行 3 项 btrfs 生命周期和 4 项进程／冻结检查，独立的宿主 `lower=/` 预检和输出核对仍执行。
-- Coordination 和 Speculative Tree 保留手工事件驱动的提交、迟到反馈、取消与恢复。删除直接操作内部完成记录、读写单字段或设置期限后只检查错误的用例。Policy 保留授予与取消跨 provider/worker 的模拟，以及实际控制面决策 E2E。删除 `tests/policy.rs`、混合文件中的直接调用和纯解释器用例，以及只构造 runner 的真实模型冒烟脚本。
-- Pi 保留实际入口、协议取消、原生会话重连和通知交付过程，删除单独的交互等待对象测试。NLE 保留固定轨迹及世界恢复，删除地图历史的局部投影和 Policy 提议顺序检查。回放保留 CLI 导出、HTTP 消费及 Pi 并行续跑，清除直接对规范化函数的断言。保留这些路径使用的 fixtures。
-- 核对通过 `cargo check --offline --all-targets`、`cargo test --offline -- --list`、保留的 Node/回放入口 `node --check`、`bash -n scripts/priv-check.sh` 及 `git diff --check`。Rust 库报告 92 项完成，包含按环境提前返回的特权用例。离线运行另有 3 项 Rust 集成测试、NLE 恢复 1 项、24 个预检模拟场景和 3 个回放入口通过。两份混合 Policy 文件 6/6 通过。Node 重点联合回归报 59 通过、2 失败，失败是 Authority 公开状态子用例及其父用例，Ledger 读取仍报 `missing field timestamp_ms`，发布重试与干净退出已执行。Predictor Fact 的单步 E2E 通过。Filesystem 恢复和已结束 run 的 `--resume` 在修正夹具启动配置后也进入主流程，公开接口均因相同的 Ledger 读取错误断开连接。真实模型、Firecracker 实机和宿主特权预检未执行。运行日志在 `/tmp/ascout-semantic/`。
+`tests/` 下的 `pi-history-regressions.mjs`、`pi-notification.mjs`、`pi-recovery-binding.mjs`、`pi-recovery-sources.mjs`、`pi-session-history.mjs`、`pi-standalone-continuation.mjs` 当前在 `/var/tmp` 创建独立目录，将 `PI_CODING_AGENT_DIR` 指向各自的 `agent` 子目录，禁用 Jiti 磁盘缓存，并在 `finally` 清理。Authority 和下表两份恢复脚本目前仍会留下运行目录。
 
-## Authority、Coding Policy 与 Pi 通知的重复检查
+## 故障实例与复跑入口
 
-- `tests/authority-filesystem.mjs` 的两个模式共用一次 Control Plane、Runtime 和 Pi 启动。原退出码用例作为同一会话中的独立输入，逐项核对两条工具的开始和完成记录、失败标记、退出 7 提示、两条输出以及三次模型请求。发布后和最终退出时都核对文件内容为 `xy`，以检查后续发布没有重放写入。保留后台写者、部分发布失败与重试、HTTP interrupt、SIGINT、暂停和 SIGTERM 干净退出的检查。原退出码用例单独使用的 HTTP shutdown 仍由 Coding Policy 的三个端到端用例验证。
-- `tests/coding-policy-e2e.mjs` 只在 Promote/Discard 用例检查浏览器地址恰好打印一次，删除已有宿主文件内容佐证的 `second-fix` 成功记录检查。三个端到端用例仍分别检查对应决策、文件结果及通知正文和次数。Reuse 和 Salvage 保留独立运行及各自的 settlement 结果。
-- `tests/pi-notification.mjs` 以重开后的完整条目相等覆盖正文，保留原生 Pi 双工具批次、下一次模型请求可见、空闲无新请求、原生 ID、去重和写失败后重试。`tests/pi-notification-adapter.mjs` 保留九个停止与故障场景。相同命令的重传集中在自然完成及故障用例，仍验证交付前后 ACK、冲突 payload 拒绝和写失败时的重传行为。模型次数统一在结束时核对。
-- 实跑中修正了两处测试夹具启动阻塞。Authority 走显式 `--models`，避免重复加载 `fixture` provider。Adapter 夹具从相邻 Pi 挂入 `packages/pi-integration`，保留伪 SDK 和真实 `SessionManager`。启动失败日志保存在 `/tmp/opencode/test-consolidation-e2e.log` 和 `/tmp/opencode/test-consolidation-notification.log`。
+| 故障与应保留的检查 | 仓库入口 |
+| --- | --- |
+| 大文件写入曾因命令参数过长报 `E2BIG`。保留大内容读写、隔离视图和有序编辑检查。常驻 holder 允许命令并发，直接 shell 退出后可返回，后台工作归环境管理。 | `node --test tests/pi-filesystem-tools.mjs`，`cargo test --offline --lib namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace` |
+| 物化曾误用工作区 `PATH` 中的 Python。回归检查污染 `PATH` 时仍能发布文件。 | `cargo test --offline --lib materialization_ignores_workspace_python` |
+| 首次准入曾因缺失 `has_predictor` 失败。仓库 fixture 支持手工事件和本地 SSE 复跑，也覆盖 Promote 后在途模型等待点曾丢失的故障。 | `node --test tests/predictor-fact.mjs tests/predictor-fact-e2e.mjs` |
+| 已结束的 run 曾在继承历史送完前报告 `ready`。回归扣住首条历史消息，检查输入保持关闭，并在首次就绪时核对完整历史。 | `node --test tests/resume-ended.mjs` |
 
-最终以本地伪模型和 SDK double 串行运行 `node --test --test-concurrency=1 tests/authority-filesystem.mjs tests/coding-policy-e2e.mjs tests/pi-notification.mjs tests/pi-notification-adapter.mjs`。Coding Policy 7/7，Pi 通知 10/10。Authority 的发布失败提示断言单独报告失败，父用例也因此标记失败。`/api/observation/state-event-set` 读取 Ledger 时报告 `missing field timestamp_ms` 并断开连接。保留这一公开 API 断言，后续文件发布重试、工具退出状态和输出、无重复写入及 SIGTERM 干净退出均走到并通过。联合输出为 `/tmp/opencode/test-consolidation-final.log`，Authority 证据保存在 `/tmp/opencode/authority-filesystem-hrq9yA`。
+## 待核实与覆盖缺口
 
-四个测试文件的 `node --check` 与全工作区 `git diff --check` 均通过。本次改动限于测试与本记录，保留共享工作区已有改动。未调用真实模型或 subagent，未提交。
+- Authority 发布失败后的公开状态曾读 Ledger 报 `missing field timestamp_ms` 并断开连接，Filesystem 恢复和结束后重开也遇到同一错误。保留公开 API 断言。复跑 `node --test --test-concurrency=1 tests/authority-filesystem.mjs tests/recovery-filesystem.mjs tests/resume-ended.mjs` 前，三份夹具均需处理对已缺失的 `assets/policy/policy/decisions.py` 的引用。另见 [恢复](recovery.md)。
+- btrfs snapshot-copy 的 overlay 挂载曾报 `Device or resource busy`，单项复跑通过，稳定性仍待确认。见 [文件系统测试与基准复跑](../fs-backend/current-state.md#测试与基准复跑)。
+- 真实 NLE 多步验收已在修复 Promote 等待点后补验通过。纯 Filesystem 的真实短任务覆盖隔离、物化和 Discard，仍缺仓库内持久入口及 Promote 后续跑覆盖。实验统计见 [参考负载](reference-workload.md)。
 
-## 权威物化和 Coding Policy 回归
-
-物化的导出和发布优先使用系统 Python，并固定 `PYTHONHASHSEED`。导出沙盒挂载 `/dev`。控制面 Policy 优先采用显式配置的 Python，其次选择系统 Python。污染 `PATH` 的 Rust 用例在旧实现上因误调工作区 Python 而失败，在修复后确认宿主文件被更新。
-
-Coding Policy 按行识别前台验证，跳过 heredoc 正文并将引号错误限制在当前行。识别到写源码的混合命令时不准入投机。预测考虑上次成功验证以来的 shell 写入，跳过失败命令和退出码掩盖了失败输出的验证。匹配阶段使用同一组失败输出规则。Shell 写入与路径识别采用启发式规则，验证日志重定向仍可准入。离线验证覆盖 222 个 Rust 单元测试、10 个指定 Rust 集成测试和 22 个 Node 测试。Release binaries 离线构建通过。
-
-V1 Run 2 现场保存在 `/var/tmp/ascout-runs/v1-django-13195-run2`。唯一真实 session 从提交 prompt 到观察到任务成功为 71,004.294 ms，权威物化 239 ms。宿主工作区直接通过 Phase A 和 Phase B，均为 exit 0。5 个 Chance 中 2 次 Promote、3 次 Discard。两次 Promote 在权威返回前分别复用了 881 ms 和 923 ms 的候选推理。第 5 个 Chance 因 `/tmp` 为只读而无法创建重定向日志，测试未启动。`evidence.json` 保存动作时间和 token 明细，`workspace.diff` 与 `workspace-acceptance.log` 保存宿主验收证据。
-
-V2 串行对照保存在 `/var/tmp/ascout-runs/v2-serial-django-13195`。`serial-baseline` 将 `admit.opportunity_pass` 编译为内存中的常量 `false`。使用同一 release 二进制、FilesystemBackend、Pi、模型和 prompt 完成唯一一次会话，耗时 115,331.865 ms，比 V1 Run 2 多 44,327.571 ms（62.43%）。Chance 与 Candidate 均为 0，宿主验收 Phase A 与 Phase B 均为 exit 0。权威推理 13 次，记录 204,599 tokens，Pi 估算费用为 $0.222438。逐次耗时和用量见运行目录的 `evidence.json`。
-
-## 已结束 run 的 `--resume` 就绪顺序
-
-Pi 在报告 `branch_started` 前先发完原生会话的继承历史，并修复兼容会话链接。回归测试从公开状态读取当前 Authority。测试在真实 Pi 适配器的发送入口扣住第一条历史消息，确认当前 Authority 的会话仍为空且输入未就绪，随后在首次公开 `ready` 时逐条核对历史。下一次重开在首次 `ready` 后提交 prompt，由本地假模型验证原生上下文和调用次数。
-
-修复前扣住历史时输入已返回 `ready: true`，见 `/tmp/ascout-resume-ended-before.log`。修复后活动恢复、文件系统恢复和结束后重开合计 8/8，见 `/tmp/ascout-resume-ended-after.log`。补强逐条核对后，重开用例单独复跑通过，见 `/tmp/ascout-resume-ended-exact-history.log`。
-
-## 无 NLE 的 FS 真实模型短任务通过（2026-11-16）
-
-付费前发现并复现的纯 FS 装配缺口已按授权修复：正常 Adapter 新增单 filesystem 装配，BaseRuntime 的物化写者检查覆盖纯 FS holder。初始三种配置拒绝证据保留于 `/tmp/opencode/fs-real-20261116-preflight`，其中零请求与阻塞状态只描述当时预检。没有用 NLE 或宿主工具绕过。
-
-修复后本地伪模型全链路证据 `/tmp/opencode/fs-local-20261116-MGZZSb`；唯一真实 session `/tmp/opencode/fs-real-20261116-mfUC97`，21.333 秒成功，11 次模型启动，Authority 4 次工具、候选 1 次只读工具，结果、最终回复、隔离、正常物化和 Shutdown 均通过。5 Candidate／5 Discard／0 Promote，不能声称覆盖晋级或晋级后续跑。Pi 估算 $0.0156748（非账单；取消零 usage 不保证不计费）；9 个 response ID、7 个 completed，5 条 aborted 中有 1 条已 completed 且有完整 usage。统计和完整边界见 [参考负载](reference-workload.md)。
-
-离线构建、文件工具 5/5、Runtime 单元测试 141/141 通过。未提交、未派生 subagent，保留已有修改与旧证据。纯 FS 入口用例目前仅在临时 runner 中，尚未纳入仓库持久回归；主 Agent 需审查这两处最小改动及该测试缺口，不再自动付费补验 Promote。
-
-## 重新授权真实调用后的阻塞交接（2026-11-16）
-
-单次真实 session 已执行，证据 `/tmp/opencode/runtime-id-real-success-20261116`，完整统计见 [参考负载](reference-workload.md)。真实模型 2 次均成功，真实 NLE 西移 1 次、compatible／Promote Applied 1 次，两个 Branch 取得不同 Runtime 返回 ID；随后候选模型结果的 continuation hold 未收到释放命令，第二个工具调用挂起。120 秒截止取消，未完成 5 步与最终总结，因此仍不得宣称真实模型多步 E2E 通过。
-
-本次只做构建、运行和离线检查，不再付费重试、不改实现或新增测试；需主 Agent 后续用手工事件／本地模型稳定复现“工具候选 Promote 后模型完成却无 continue”的路径，再修复。旧失败证据与全部工作树修改保留，未提交、未派生 subagent。估算费用 $0.0060204（非服务账单），两 Branch 和自有进程正常清理，相关端口释放。
-
-## Predictor fixture 与文件工具后代等待收口（2026-11-16）
-
-两份 predictor 测试默认改读仓库 `tests/fixtures/predictor-fact-policy.json`，不再读本次临时证据目录。与原失败留档逐字段比较，除 `source` 与 `runtime_config_path` 脱敏外完全相同；未修改 Policy 语义、绑定或原 digest。共享 helper 按 Rust 编译产物的顺序验证 executable digest，E2E 重新编译后检查原 YAML、源码、绑定及 runtime；Python 完整版本属于 digest 输入，不同 Python build 时仅允许这一字段解释摘要变化。fixture 无认证、prompt、模型回复。其余输入为仓库源码、相邻 Pi、现有 NLE venv 与构建后二进制，临时 run 只保存输出。原真实失败证据不动。
-
-文件工具复现日志 `/tmp/opencode/filesystem-before-fix-20261116.log` 保存原第 100 行 `1 !== 0`。根因不是 namespace supervisor 漏等后代，而是临时 bwrap 路径根本没有代码注释和测试所说的串行队列：`early` 和 `after` 同时 spawn，`after` 在 `late` 写入前执行。最小修复是在该路径加每 Branch 工具集合的 promise 队列，前项等 namespace `close` 后才放行下一项；错误吞在队列尾部但仍向原调用者报告，失败写入不会堵死队列。取消/超时仍杀 namespace 入口，PID namespace 清理跨 process group 后代；stdin EPIPE/ECONNRESET 仍记录到 close 后报告，不提前释放队列。未延长 sleep、未改或删原断言。
-
-必须区分常驻 holder：`src/bin/ascout-fs-holder.rs`、Rust `namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace` 测试和 reference-workload 已明确规定连接并发、直接 shell 结束可返回、后台工作归环境管理。本次不将临时 namespace 队列套到 holder，也不改变它的后台工作/取消契约。上述 Rust holder 并发测试本轮通过。两条路径的生命周期不同，没有新增全局语义或技术选型。
-
-最终本地结果：
-
-- `node --test tests/predictor-fact.mjs tests/pi-filesystem-tools.mjs`：9/9，`/tmp/opencode/closeout-focused-20261116.log`。
-- `node --test tests/pi-*.mjs tests/predictor-fact.mjs`：35/35，`/tmp/opencode/closeout-pi-core-20261116.log`，含取消、超时、失败写入恢复、EPIPE/早关管道和 setsid 后代等待；全部原断言保留。
-- `node --test tests/predictor-fact-e2e.mjs`：1/1，`/tmp/opencode/closeout-local-e2e-20261116.log`；run `/tmp/opencode/predictor-fact-e2e-afEJS9`，3 次 loopback 伪模型请求、3 个模型 action、4 次准入、1 个 Candidate、真实西移动作成功、退出码 0。
-- `cargo test --offline --lib --bins`：首次 lib 为 169/170，btrfs snapshot-copy 子环境 overlay mount 报 `Device or resource busy`，完整失败证据 `/tmp/opencode/closeout-rust-core-20261116.log`。单项复跑 1/1，`/tmp/opencode/closeout-rust-btrfs-rerun-20261116.log`；不据此抹去首次失败，也未在本轮修改 Rust 挂载逻辑。bin 单独运行通过，日志 `/tmp/opencode/closeout-rust-bins-20261116.log`。
-- `node --check instrumentation/pi/filesystem-tools.ts`、`git diff --check` 通过。
-
-没有调用真实模型、没有再启动 subagent、没有提交，原有共享修改均保留。**真实模型 E2E 仍未通过，未重跑付费验证。**
-
-## 首次模型请求失败的必要回归（2026-11-16）
-
-本次仅因已发生且可稳定复现的 `has_predictor` 循环依赖新增测试，遵守先红后绿：`tests/predictor-fact.mjs` 以真实失败 session 保存的 Policy 和手工事件复现模型/工具两路，`tests/predictor-fact-e2e.mjs` 以同份 Policy、正常 control plane/真实 Runtime/Pi 和本地 SSE 验证首次请求通过。两个脚本的留档依赖、日志、误断言修正及未通过的已有文件工具测试，均记于 [验证记录](reference-workload.md)。没有引入真实模型调用或通用测试框架，没有改动既有文件工具的并行工作；原真实 E2E 仍未通过，保留原失败证据待主审复核。
-
-## 早期合并审查记录
-
-以下各节记录当时的用例与运行结果。当前测试范围和运行结果见本文首节。
-
-### 范围与执行约定
-
-本轮只清理有直接证据的重复测试和重复资源启动，不改产品行为、不修复路径、不移动真实模型测试、不提交。开始时已检查 git 状态与根 AGENTS.md；工作区已有大量修改及未跟踪测试，均按现状保留。仓库内未发现其他 AGENTS.md。
-
-审查入口包括 src 内全部 Rust 测试声明、tests 下脚本与 Rust 入口、tools/replay/verify、scripts 下测试检查脚本和 Cargo/package/Makefile 入口。静态清单中 src 有 28 个含测试文件、162 个测试声明；合并后的 tests 有 17 个含测试声明文件、44 个声明；当时 replay 有 4 个测试文件、11 个声明；本次清理后为 3 个测试文件、8 个声明。参数循环会展开更多案例；这不是运行数量，也不是全部测试通过的声明。对候选重复项进一步核对断言、调用方与文档记录；其余按场景清单保留，不声称已逐行证明所有测试都不可再简化。
-
-## 已实施的决定
-
-1. `tests/firecracker_e2e.rs:294`：将独立 establish smoke 测试合并进完整 vsock 生命周期测试，进程存在断言移到 establish 成功后、首次 guest 操作前（第 307 行）。两者原来同用 AdapterHarness::start、同一建立请求与 Available 断言。hello 协议版本、adapter instance 仍由共同 harness 检查；完整测试继续检查 suspend/resume、guest 磁盘内容、terminate、cleanup 和进程/目录回收。减少一次 Adapter 启动、独立 rootfs 副本和 microVM 建立。覆盖断言不减少；失去的是独立 smoke 的测试名和单独失败报告，且其结果现在受较长生命周期案例整体结果影响。
-2. `tests/tree-layout.mjs:13`、`:17`：原独立 stem placement 六项案例及全部断言原样移入布局测试，共用现有 Vite server 与 after close，删除原独立文件。保留无邻居、同侧切换、双侧间距、固定角度、距离范围、排序与确定性覆盖；布局原有八项也保留。减少一个 Node 测试文件与一次 Vite loader 创建，失去独立文件运行入口。用户已有 normalizeTuning 修改保持不变。相关开发文档中的测试位置同步更新。
-
-## 候选但未处理
-
-| 候选 | 证据 | 建议及未处理原因 |
-| --- | --- | --- |
-| `tests/pi-access.mjs:18` 的五种 shutdownAt | 每种都建立协议客户端与伪造 Pi，包含大量共同基础流程 | completed、tool_wait、candidate_gate、admission、EOF 是不同停止时机；合为一次进程将削弱独立退出状态验证。保留，可后续仅抽取共同夹具。 |
-| `tests/tree-layout-cache.mjs:4` 与 `tests/tree-layout.mjs:8` | 都创建 Vite server 并加载布局模块 | 可继续合并以减少一次 loader，但 cache 包含 store/global window 与模块缓存状态，需专门检查相互影响；本轮只合并无这类状态的 stem placement。 |
-| `tests/firecracker_e2e.rs:564` SSH 与 `:294` vsock 生命周期 | 都启动真实 VM，SSH 还有独立诊断通道 | 不能用 vsock 成功证明 SSH 通路成功。共享 VM 会绑定两种故障定位，保留；未运行任一真实 VM 测试。 |
-
-## 保留不同故障与重要回归
-
-- Firecracker E2E 的重发 establish（359）、运行中 suspend（387）、kill 事件（451）、siblings 内存/磁盘继承（490）、SSH（564）及现存 Codex（599）未删除或移动。Codex 测试未执行。
-- Firecracker mock 测试中跨 ID 不阻塞、同 ID 清理复用等待、恢复失败、snapshot 与 resume 同时失败、停止/网络清理失败保留重试资源，是不同故障点；不因共用 harness 删除。
-- Filesystem `ops.rs:525/530` 的 overlay 与 btrfs round trip 使用不同机制；`privileged.rs:148/153` 则明确要求真实高权限 btrfs chain/flatten，与普通回退路径不同。`ops.rs:299/372/416/473` 的 replay 注入失败、opaque、目录替换、rollback 失败保留。
-- Filesystem authority/materialize/recovery、BaseRuntime、adapter、主入口测试分属不同边界。后台 writer、部分发布重试、receipt、存档损坏、配置资源变化等覆盖不按名字相似合并。工作区新 materialize 和 authority 测试未删。
-- Pi history 的 reused call ID、off-path checkpoint、parallel result、nested accepted path、compaction/custom、rollback Git identity 以及 standalone continuation 分别保留；notification 单元交付与主入口命令重传/失败是不同边界。恢复的 none/retry/continue/multiple/filesystem 五个参数不是重复输入。
-- transport 的读/写大小限制、contract 序列化、gateway 队列有界、Policy 编译与 proposal 顺序、NLE 初始化与地图历史、priv-check 的伪造 runner/输出检查、replay 的取消超时/断开/源文件保护等均保留。本轮未以测试数量或文件大小作为删除依据。
-
-## 离线验证
-
-- `cargo check --offline --test firecracker_e2e` 通过；只编译检查目标，不启动 VM、Codex 或模型。
-- `node --test tests/tree-layout.mjs`：14 passed、0 failed、0 skipped。只使用现有本地依赖与 Vite middleware，不调用模型或外网。
-- replay 本次清理后执行 `npm test --prefix tools/replay`：12 passed、0 failed、0 skipped；`npm run check --prefix tools/replay` 通过。仅使用本地手造记录与 loopback 服务，未调用真实模型或访问外网。
-- 修改文件的 `git diff --check` 通过。
-
-未执行完整 cargo/node 测试集，也没有声称真实 VM 合并后的端到端运行已验证。
-
-## Authority 文件工具专项审查（2026-11-14）
-
-本轮只修复已复现的大内容传输错误，不提交、不回滚共享修改、不重复完整测试、不调用真实模型。`tests/pi-filesystem-tools.mjs` 通过伪 SDK 调用真实 `filesystemTools`，使用独立 `/tmp/opencode/pi-filesystem-tools-*` 目录与真实 bwrap 私有 PID namespace；将测试 view 挂到宿主 workspace 路径，确认工具只修改 view。
-
-原实现把整个 write/edit 内容 base64 编码后加入 `bash -c` 的单一参数。先新增回归再运行 `node --test tests/pi-filesystem-tools.mjs`：write、edit 均在 `filesystem-tools.ts:37` 抛 `spawn E2BIG`，证据目录 `/tmp/opencode/pi-filesystem-tools-3j6LwD`。修复为原始 Buffer 通过 stdin 管道传入隔离进程，不创建宿主临时内容文件。stdin 错误只记录，仍等待进程 close 后释放串行队列，以保留 namespace supervisor 等待全部后代结束的协议。
-
-回归覆盖大 UTF-8 内容 write/edit/read 往返、宿主文件保持不变、取消与超时的大输入、失败写入后的队列恢复，以及关闭 stdio 并 setsid 的后台后代等待；取消也检查另一个进程组的后代不会继续写入。针对性命令为 `node --test tests/pi-filesystem-tools.mjs`；语法检查为 `node --check instrumentation/pi/filesystem-tools.ts` 和 `node --check tests/pi-filesystem-tools.mjs`。
-
-后续修复（2026-11-14）：
-
-- `materialize.py` 目录路径固定改用 `O_PATH|O_NOFOLLOW`，权限用 pinned fd 的 `/proc/self/fd` 路径更新，避免读取目录或临时放宽权限。新增普通用户回归：0300 根目录/嵌套父目录可写入文件而权限不提前变化；0300 目录可设置为 0755；后续 symlink 目录边界失败时保留此前回执，去除边界冲突后重试完成。原始 0300 PermissionError 复现已修复。目录子树删除仍要求目录可读，失败保留回执供重试。
-- `filesystem-tools.ts` read operations 现在在对应 Branch 隔离环境调用 Pi 自有 `detectSupportedImageMimeTypeFromFile`，二进制读取仍经 Branch 的 `readFile`。伪 SDK 回归用隔离 view 中的 PNG 与相反内容的宿主同路径验证 MIME 检测、二进制读取和文本路径；`node --test tests/pi-filesystem-tools.mjs` 5/5 通过。直接导入 Pi `read.ts` 仍被缺失的 `@earendil-works/pi-tui/dist/index.js` 阻止，故本回归没有执行 SDK 的 `processImage`/最终内容构造；未更改 Pi 工作区或依赖。
-- 验证：新增物化回归先失败后通过；materialize 定向测试 10/10、`cargo check --offline --all-targets`、`cargo build --offline --bins` 通过。Authority/recovery 七项端到端以本地伪模型运行，7/7 通过，未调用真实模型。证据目录为 `/tmp/opencode/authority-filesystem-aSg3ZK`、`recovery-active-{DvwWdc,Leke3s,eBiB8P,xkYuw2,h1UF5T}` 和 `recovery-filesystem-xtNNn3`（均位于 `/tmp/opencode`）；文件工具最后一次证据为 `pi-filesystem-tools-{vkRZut,EjGoOh,wk9ynC}`。
+Django #13195 的投机与串行对照数据仅见于本页。两组各一次真实会话，使用同一 release 二进制，宿主两阶段验收均通过。投机组耗时 71.004 秒，权威物化 239 ms。两次 Promote 分别复用 881 ms 和 923 ms 的候选推理。三次 Discard 中有一次因只读 `/tmp` 无法写入重定向日志，测试未启动。串行组关闭投机准入，耗时 115.332 秒，比投机组长 62.43%。

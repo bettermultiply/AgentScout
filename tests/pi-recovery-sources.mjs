@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import {mkdtempSync} from 'node:fs';
+import {mkdtempSync,rmSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
-import {resolve} from 'node:path';
+import {join,resolve} from 'node:path';
 import {test} from 'node:test';
 
 test('native recovery sources remain independently restorable after original and restored execution',()=>{
-    const directory=mkdtempSync('/tmp/opencode/pi-recovery-sources-'),pi=resolve('../pi');
+    const pi=resolve('../pi');
     const script=`
         import assert from 'node:assert/strict';
         import {mkdirSync,readFileSync,unlinkSync} from 'node:fs';
@@ -34,5 +34,10 @@ test('native recovery sources remain independently restorable after original and
         unlinkSync(snapshot.sources[0].file);
         assert.throws(()=>SessionTree.restore(snapshot,SessionManager,directory+'/missing.jsonl'),/ENOENT/);
     `;
-    execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script,directory],{encoding:'utf8'});
+    const directory=mkdtempSync('/var/tmp/pi-recovery-sources-');
+    try {
+        execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script,directory],{encoding:'utf8',env:{...process.env,PI_CODING_AGENT_DIR:join(directory,'agent'),JITI_FS_CACHE:'false'}});
+    } finally {
+        rmSync(directory, {recursive:true, force:true});
+    }
 });

@@ -422,16 +422,23 @@ function tools(branch) {
 // Host tool fallbacks would bypass filesystem isolation.
 const filesystemToolSelection={tools:['read','bash','edit','write',...runtimeTools.map(tool=>tool.name)]};
 async function beforeModelInference(branch, modelValue, context, signal) {
+    const fork = modelForks.get(branch);
     parkedModels.add(branch);
     await pauseBoundary(signal);
     await modelRestores.get(branch);
+    if (fork && fork.steps < fork.maxSteps) {
+        await fork.session.setModel(fork.candidateModel);
+        await fork.session.setThinkingLevel(fork.candidateThinking);
+        modelValue = fork.candidateModel;
+    }
     await waitForToolResults(branch, signal);
     await pauseBoundary(signal);
     await acceptanceBoundary(branch, signal);
     syncTranscript(branch);
     if(saving||closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
-    const actionId=modelForks.get(branch)?.operation_id??`model-${nextAction++}`;
-    const op={kind:'model_inference',name:'model',produces_result:true,result_pending:true,arguments:{model:`${modelValue.provider}/${modelValue.id}`},branch_id:branch,predicting:modelForks.has(branch),authority:branch===authority};
+    const actionId=fork && fork.steps === 0 ? fork.operation_id : `model-${nextAction++}`;
+    const candidateModelAction=Boolean(fork && fork.steps < fork.maxSteps);
+    const op={kind:'model_inference',name:'model',produces_result:true,result_pending:true,arguments:{model:`${modelValue.provider}/${modelValue.id}`},branch_id:branch,predicting:Boolean(fork),authority:branch===authority};
     op.has_predictor=await access.hasPredictor(branch);
     const hold=Promise.withResolvers();modelHolds.set(key(branch,actionId),hold);
     const disposition=await access.beforeAction({
@@ -442,13 +449,14 @@ async function beforeModelInference(branch, modelValue, context, signal) {
         arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length},
         op,
         contractContext:{model:`${modelValue.provider}/${modelValue.id}`,message_count:context.messages.length,runtime_capabilities:runtimeTools},
-        admit:!candidateBindings.has(branch),
+        admit:!candidateBindings.has(branch) && !fork,
         admissionFacts:()=>{
             const saved=Object.freeze(sessions.get(branch).messages.slice()),manager=tree.branches.get(branch).manager;
             const checkpoint={kind:'checkpoint',adapter:'pi',opaqueId:`${branch}:${actionId}:${saved.length}`};
             checkpoints.set(key(branch,actionId),{saved,checkpoint,treeTail:tree.assertCheckpoint(branch,saved),manager,model:true});
             return {checkpoint};
         },
+        admitted:Boolean(fork && fork.steps === 0),
         signal,
     });
     if(disposition.kind==='admit')await new Promise((resolve,reject)=>{
@@ -470,10 +478,16 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     parkedModels.delete(branch);
     const startedAt=Date.now();
     const queue=modelActions.get(branch)??[];
-    const action={action_id:actionId,started_at_ms:startedAt,seen_message:false};
+    const action={action_id:actionId,started_at_ms:startedAt,seen_message:false,candidateModelAction};
     queue.push(action);
     modelActions.set(branch,queue);
     await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',name:'model',arguments:{model:modelValue.provider+'/'+modelValue.id,message_count:context.messages.length},timestamp_ms:startedAt});
+    // Scope the guidance to this request. Promotion can release a parked hook.
+    if (candidateModelAction && branch !== authority && modelForks.get(branch) === fork && fork.candidateGuidance) {
+        const index = context.messages[0]?.role === 'system' ? 1 : 0;
+        context.messages = [...context.messages.slice(0, index),
+            {role:'system', content:fork.candidateGuidance, timestamp:0}, ...context.messages.slice(index)];
+    }
     return async status=>{
         if(status==='succeeded')return;
         // Stream completion precedes message_end, which still needs the action ID.
@@ -631,7 +645,14 @@ function install(session,branch) {
                 if(action&&checkpoints.get(key(branch,action.action_id))?.model&&!checkpoints.get(key(branch,action.action_id))?.speculationSkipped)modelResultHolds.set(branch,{operation:action.action_id,...Promise.withResolvers()});
                 if(action)void report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:'model_inference',status:event.message.stopReason==='aborted'?'cancelled':event.message.stopReason==='error'?'failed':'succeeded',result:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},evidence:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},timestamp_ms:Date.now()});
                 const fork=modelForks.get(branch);
-                if(fork){modelForks.delete(branch);const restoring=session.setModel(fork.model).then(()=>session.setThinkingLevel(fork.thinkingLevel));modelRestores.set(branch,restoring);void restoring.catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error)}));}
+                if(fork && action?.candidateModelAction) {
+                    fork.steps += 1;
+                    if (fork.steps >= fork.maxSteps) {
+                        const restoring=session.setModel(fork.authorityModel).then(()=>session.setThinkingLevel(fork.authorityThinking));
+                        modelRestores.set(branch,restoring);
+                        void restoring.catch(error=>report({message:'branch_failed',branch_id:branch,reason:String(error)}));
+                    }
+                }
                 const started_at_ms=Number.isFinite(event.message.timestamp)?event.message.timestamp:(action?.started_at_ms??Date.now());
                 const duration_ms=Number.isFinite(event.message.durationMs)?event.message.durationMs:Math.max(0,Date.now()-started_at_ms);
                 void report({message:'usage',branch_id:branch,action_id:action?.action_id??null,started_at_ms,finished_at_ms:started_at_ms+duration_ms,model:event.message.model,thinking_level:event.message.thinkingLevel,usage:event.message.usage??{}});
@@ -704,6 +725,7 @@ async function handle(command) {
                     commandPrefix,commandAhead:[...commandAhead],
                     suspendedHooks:[...suspendedHooks],candidateSetups:[...candidateSetups],
                     candidateBindings:[...candidateBindings.keys()],
+                    modelForks:[...modelForks].map(([branch,fork])=>[branch,{authorityModel:fork.authorityModel,authorityThinking:fork.authorityThinking,candidateModel:fork.candidateModel,candidateThinking:fork.candidateThinking,candidateGuidance:fork.candidateGuidance,maxSteps:fork.maxSteps,steps:fork.steps,operation_id:fork.operation_id}]),
                     interruptedBranches:[...interruptedBranches],
                     toolResultHolds:[...toolResultHolds].map(([branch, holds]) => [branch, [...holds.keys()]]),
                     checkpoints:[...checkpoints].map(([id,c])=>[id,{...c,manager:sourceFiles.get(c.manager.getSessionFile())}])});
@@ -770,6 +792,7 @@ async function handle(command) {
                 for(const id of record.candidateBindings??[]) {
                     if(!ascProxy.has(id))candidateBindings.set(id,Promise.withResolvers());
                 }
+                for(const [branch,fork] of record.modelForks??[])modelForks.set(branch,fork);
                 for(const [id,setup] of record.candidateSetups??[]){
                     const execution_access=command.execution_accesses?.[id];
                     if(!execution_access&&!setup.local)throw Error('Recovered candidate execution access missing');
@@ -783,6 +806,8 @@ async function handle(command) {
                     if(stopped||candidateSetups.has(branch))continue;
                     const {session}=await createAgentSession({...filesystemToolSelection,cwd:manager.getHeader().cwd,sessionManager:manager,model,modelRuntime,thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
                     bindInteraction(session,branch);
+                    const fork = modelForks.get(branch);
+                    if (fork) fork.session = session;
                 }
                 await reportSessionHistory(authority, tree.branches.get(authority)?.manager ?? tree.manager);
                 linkSession(tree.manager);
@@ -888,9 +913,16 @@ async function handle(command) {
                 const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail,false);
                 const resolved=resolveCliModel({cliModel:command.prediction.model,cliThinking:parent.thinkingLevel,modelRuntime:parent.modelRuntime});
                 if(resolved.error||!resolved.model)throw Error(resolved.error??'Unknown predictor model');
-                const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:resolved.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+                const candidateThinking=command.prediction?.thinking??parent.thinkingLevel;
+                if(!['off','minimal','low','medium','high','xhigh'].includes(candidateThinking))throw Error('Invalid candidate thinking level');
+                await access.control(command);
+                const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:resolved.model,modelRuntime:parent.modelRuntime,thinkingLevel:candidateThinking,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
                 bindInteraction(session,branch);
-                modelForks.set(branch,{model:parent.model,thinkingLevel:parent.thinkingLevel,operation_id:command.operation_id});
+                if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
+                modelForks.set(branch,{authorityModel:parent.model,authorityThinking:parent.thinkingLevel,
+                    candidateModel:resolved.model,candidateThinking,maxSteps:command.prediction.max_candidate_model_steps ?? Infinity,
+                    candidateGuidance:command.prediction.candidate_guidance,
+                    steps:0,operation_id:command.operation_id,session});
                 candidateSetups.delete(branch);
                 await report({message:'branch_created',branch_id:branch});await report({message:'branch_started',branch_id:branch});await report({message:'branch_ready',branch_id:branch});
                 if(!saving&&!recoveryPaused)executeTurn(session,branch,()=>session.continue());else interruptedBranches.add(branch);return;
@@ -1000,6 +1032,11 @@ async function handle(command) {
                 if (command.notification) {
                     try {
                         await notifications.accept(sessions.get(parent), command);
+                        if (parkedModels.has(parent)) {
+                            // The held inference already captured its context before the notification arrived.
+                            const inputs = acceptanceInputs.get(parent) ?? [];
+                            acceptanceInputs.set(parent, [...inputs, command.notification]);
+                        }
                         syncTranscript(parent);
                     } catch (error) {
                         await report({message:'adapter_capability_gap',branch_id:parent,capability:'notification',status:'failed',reason:`${command.command_id}: ${error}`});
@@ -1035,6 +1072,12 @@ async function handle(command) {
             tree.accept(branch, parent, replacesAuthority);
             if (replacesAuthority) {
                 authority = branch;
+                const fork = modelForks.get(branch);
+                if (fork) {
+                    modelForks.delete(branch);
+                    await fork.session.setModel(fork.authorityModel);
+                    await fork.session.setThinkingLevel(fork.authorityThinking);
+                }
                 if (command.execution_access) await access.control(command);
             }
             telemetry.promote(branch, parent, replacesAuthority);
@@ -1070,12 +1113,14 @@ async function handle(command) {
             finally { aborting.delete(branch); }
             return;
         case 'discard': {
+            modelForks.delete(branch);
             candidateBindings.get(branch)?.resolve();candidateBindings.delete(branch);
             interaction.cancel(branch);cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);
             releaseToolResults(branch);
             await sessions.get(branch)?.abort();await ascProxy.cancel(branch);await finishActions(branch,'cancelled');tree.settle();return;
         }
         case 'cleanup':
+            modelForks.delete(branch);
             candidateBindings.get(branch)?.resolve();candidateBindings.delete(branch);
             interaction.cancel(branch);
             cancelled.add(branch);releaseCandidateWaiters(branch);

@@ -70,12 +70,16 @@ impl Config {
                     .unwrap_or("~/.local/share/ascout/ascout.log"),
                 &home,
             ),
-            policy_dir: expand(
-                file.policy_dir
-                    .as_deref()
-                    .unwrap_or("~/.local/share/ascout/policies"),
-                &home,
-            ),
+            policy_dir: std::env::var_os("ASCOUT_POLICY_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    expand(
+                        file.policy_dir
+                            .as_deref()
+                            .unwrap_or("~/.local/share/ascout/policies"),
+                        &home,
+                    )
+                }),
             runs_dir: expand(
                 file.runs_dir
                     .as_deref()

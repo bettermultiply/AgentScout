@@ -58,18 +58,14 @@ fn btrfs_layout_backend(
     workspace_base: &Path,
     flatten_entry_limit: usize,
 ) -> (
-    tempfile::TempDir,
-    tempfile::TempDir,
+    ScratchDir,
+    ScratchDir,
     FilesystemBackend,
     PathBuf,
 ) {
-    let state = tempfile::Builder::new()
-        .prefix("priv-btrfs-state-")
-        .tempdir_in(state_base)
+    let state = ScratchDir::new(state_base, "priv-btrfs-state-")
         .expect("create privileged state tempdir");
-    let workspace = tempfile::Builder::new()
-        .prefix("priv-btrfs-workspace-")
-        .tempdir_in(workspace_base)
+    let workspace = ScratchDir::new(workspace_base, "priv-btrfs-workspace-")
         .expect("create privileged workspace tempdir");
     let base = workspace.path().join("base");
     fs::create_dir_all(&base).unwrap();

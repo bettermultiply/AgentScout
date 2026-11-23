@@ -1,4 +1,5 @@
 use super::super::*;
+use super::support::ScratchDir;
 use crate::protocol::contract::AgentLaunch;
 use crate::runtime::execution_wire::{self as wire, Body, Message};
 use crate::runtime::process::Processes;
@@ -50,10 +51,7 @@ fn launch(backend: &FilesystemBackend, environment: &str, workspace: &Path) -> P
 
 #[test]
 fn namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace() {
-    let root = tempfile::Builder::new()
-        .prefix("namespace-holder-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/var/tmp", "namespace-holder-").unwrap();
     let workspace = root.path().join("workspace");
     let probe = root.path().join("probe");
     fs::create_dir(&workspace).unwrap();

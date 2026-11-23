@@ -16,5 +16,6 @@ default_backend = "filesystem"
 web_address = "127.0.0.1:8080"
 # default_model = "openai/gpt-6.2-sol"
 # default_thinking = "medium"
-# 可选。Pi 模型配置文件。未设置时依次使用 PI_CODING_AGENT_DIR/models.json 和 ~/.pi/agent/models.json。
+# 可选。PI_CODING_AGENT_DIR 为空或未设置时，使用此主 models.json 所在目录作为 Pi 配置目录。
+# 两者均未设置时使用 Pi 默认目录。额外 provider 文件通过 --models 指定。
 # models = "~/.pi/agent/models.json"

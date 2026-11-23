@@ -1,12 +1,9 @@
 use super::super::*;
-use super::support::{mount_for, run_in_environment};
+use super::support::{ScratchDir, mount_for, run_in_environment};
 
 #[test]
 fn workspace_is_mounted_at_its_sandbox_target_and_publishes_back() {
-    let root = tempfile::Builder::new()
-        .prefix("workspace-target-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/var/tmp", "workspace-target-").unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     fs::write(workspace.join("NOTE_FROM_ATTACKER.txt"), "note").unwrap();

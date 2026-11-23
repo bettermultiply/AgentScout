@@ -20,7 +20,7 @@ Runtime 仍在状态目录写入 `tool-plans/<environment>.json`，BaseRuntime �
 
 执行协议包含接受、增量 output、终态、cancel 和 confirm。取消等待端点接受后转发并等待 backend 返回终态。NLE 工具模拟延迟在 backend 内可取消等待，并用独立动作锁维持共享世界动作顺序，不再占住 bridge 阻塞候选环境创建；请求已进入 bridge 后仍发送取消并等待其终态，动作已进入同步游戏调用时等待调用返回。Branch 取消还调用 holder 的 `drain(cancel:true)`，清理已完成工具留下的后代。确认释放结果正文与增量输出；请求使用已有 `req-N` 连续序号窗口，保留最近身份指纹及未确认操作，超窗旧序号拒绝重放，长期序号缺口或未确认操作占满 1024 槽位时明确拒绝新增操作。回归覆盖连续 1299 个已确认操作，不能将窗口有界理解为终身最多执行 1024 次。
 
-Pi 目前保留 SDK 宿主，不启动原生 CLI：原生 RPC 的 fork/clone 切换单一当前 session，缺少并行候选、待决工具恢复与当前 continue 的对应命令。原生 `context` 可等待并用 `ctx.abort()` 在 fake transport 前取消；`before_provider_request` 的取消仍可能进入 provider，不能把它当作请求前强制阻止保证。生产命令发现已通过原生 inline extension 的公开 `getCommands()` 实现，保留默认资源加载。集成参数 `--models` 继续解释为 provider JSON，不等同于原生 CLI 模型列表。
+Pi 目前保留 SDK 宿主，不启动原生 CLI：原生 RPC 的 fork/clone 切换单一当前 session，缺少并行候选、待决工具恢复与当前 continue 的对应命令。原生 `context` 可等待并用 `ctx.abort()` 在 fake transport 前取消；`before_provider_request` 的取消仍可能进入 provider，不能把它当作请求前强制阻止保证。生产命令发现已通过原生 inline extension 的公开 `getCommands()` 实现，保留默认资源加载。Pi 原生从配置目录读取主 `models.json`，应用内置 provider 覆盖。普通入口给 Agent 和 Policy provider 传入一致的配置目录。优先采用非空的 `PI_CODING_AGENT_DIR`，其次采用 AScout 配置项 `models` 指向的主 `models.json` 所在目录，最后采用 Pi 默认目录。集成参数 `--models` 加载额外 provider JSON，重名 provider 仍会报错。Pi 原生 CLI 的模型列表参数具有独立语义。
 
 Agent 与 Instrumentation 宿主在所有 BaseRuntime 路径都位于 Branch 隔离外，由 Runtime 启停；有 holder 的文件系统路径仅把 holder 和受管命令放进环境。Adapter 的直接启动路径（包括 Firecracker）同样在宿主运行；Guest Agent 留在 guest 提供 Runtime 命令服务。扩展直接使用 Node 的工作区读写、进程启动或直接 shell 不会自动得到 Branch 视图；只有已适配的文件工具和 Runtime 工具受到当前环境约束。内建文件工具的覆盖不等于任意自定义工具已隔离。所有网络无需统一绕行 Runtime。
 
@@ -72,7 +72,8 @@ Branch cancellation 与 Execute 使用同一 admission 锁：开始取消时推�
 2. Hook 通过当前 Policy 的 `admit.opportunity_pass`／`admit.feasibility_pass` 判断是否有机会。Policy 的 `predict` 返回 `branch_model` 及候选模型（当前实现从 Policy artifact 的场景选择该模型），而不是由 control plane 或 Pi 硬编码模型选择。
 3. control plane 先按该等待点建立候选 Branch，再让候选使用指定模型继续推理；候选模型产生的 assistant 结果中，完整的 `tool_calls` 列表是比较输入。当前语义不是先创建一个只作占位的 Proposal 再补候选产出：候选先启动，模型完成后才以完整调用列表形成可比较的结果。
 4. 完整列表参与匹配：调用名称、参数以及调用数量／顺序均属于候选与权威模型调用列表的比较范围；不能只比较第一个调用，也不能用普通文本、思考文本或其他 assistant 输出判定命中。未满足确定等价规则的调用列表不能 Promote。
-5. 候选的模型推理和工具调用在 Promote 前仍受候选生命周期约束。候选不能把工具效果写入权威路径；Promote 只保留一个胜者并切换后续权威会话，旧 Parent 与其他候选按既有清理流程处置；Discard 取消并清理该候选，未验证输出不进入主对话。
+5. `branch_model` 的 `predict` 可以返回 `candidate_guidance`。Pi 只将该文本加入候选模型的单次请求，不把它写入公共提示或会话历史。候选恢复为权威模型后（包括 Promote），后续推理不再附带该文本。
+6. 候选的模型推理和工具调用在 Promote 前仍受候选生命周期约束。候选不能把工具效果写入权威路径；Promote 只保留一个胜者并切换后续权威会话，旧 Parent 与其他候选按既有清理流程处置；Discard 取消并清理该候选，未验证输出不进入主对话。
 
 上述语义只说明当前已接通的模型投机接缝，不表示已经解决所有模型投机策略问题。调用列表等价的规范化／语义相似规则、多模型成本与失败回退仍由 `Discussion.md` 第 40 项保留为未决问题。
 
@@ -148,7 +149,7 @@ Policy 的 `predict` 通过现有 proposal `payload` 交付预测值。Pi 在实
 
 验证：`node --test tests/pi-access.mjs tests/pi-session-history.mjs` 共 7 项通过，覆盖 checkpoint 原生记录、原生 ID、真实结果重挂、运行 manager 不变、活跃源保留、停止后清理、失败保留和已安装 `pi-code-rollback` 的同仓库快照关联。快照在 `/tmp/opencode` 临时 Git 仓库生成，核对 `targetId`、`repoRoot`、`ref^{tree}`、Git blob 可读及重开后的启动 GC；没有执行用户仓库恢复。`node tools/replay/verify/b1-pi.ts` 通过，使用本地回放服务，产物 `/tmp/opencode/ascout-replay-b1-pi-ENK910`。
 
-后续审查已补上同仓库独立真实 Pi 文件任务继续及临时 Git 实际 rollback 恢复，并修复结果误选、候选重挂路径、独立重开位置和异步 shutdown 记录遗漏；完整命令、范围和剩余项见 [Pi session 审查修复](pi-session-review-2026-11-13.md)。跨仓库 Git ref/object、NLE 外部资源迁移不在当前范围（暂缓），不能把复制 session 文件当作完整 `pi-code-rollback` 支持。compaction 摘要已确认保留原文，不阻塞汇总或满足其他条件后的源清理，不重新生成摘要。
+后续审查已补上同仓库独立真实 Pi 文件任务继续及临时 Git 实际 rollback 恢复，并修复结果误选、候选重挂路径、独立重开位置和异步 shutdown 记录遗漏。跨仓库 Git ref/object、NLE 外部资源迁移不在当前范围（暂缓），不能把复制 session 文件当作完整 `pi-code-rollback` 支持。compaction 摘要已确认保留原文，不阻塞汇总或满足其他条件后的源清理，不重新生成摘要。
 
 ### 4.1 Promote notification
 

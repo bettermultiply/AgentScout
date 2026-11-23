@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 test('native notification waits for the full tool batch, persists once, and never starts a turn',()=>{
-    const pi=resolve('../pi'),directory=mkdtempSync('/tmp/opencode/pi-notification-');
-    execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',`
+    const pi=resolve('../pi'),directory=mkdtempSync('/var/tmp/pi-notification-');
+    try {
+        execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',`
         import assert from 'node:assert/strict';
         import {mkdirSync,writeFileSync} from 'node:fs';
         import http from 'node:http';
@@ -13,7 +14,7 @@ test('native notification waits for the full tool batch, persists once, and neve
         import {Notifications} from '${resolve('instrumentation/pi/notification.ts')}';
         import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
         import {requestKey,messageBody} from '${resolve('tools/replay/normalize.ts')}';
-        const directory=process.argv[1],agentDir=directory+'/pi';mkdirSync(agentDir);
+        const directory=process.argv[1],agentDir=directory+'/agent';mkdirSync(agentDir);
         const requests=[];let received;const first=new Promise(r=>received=r);let release;
         const server=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',async()=>{
             const request=JSON.parse(body);requests.push(request);
@@ -71,5 +72,8 @@ test('native notification waits for the full tool batch, persists once, and neve
             manager._persist=persist;await notifications.drain(session);
             assert.equal(notifications.pending.size,0);
         } finally {await session?.abort();session?.dispose();server.closeAllConnections();await new Promise(r=>server.close(r))}
-    `,directory],{encoding:'utf8',timeout:30000});
+        `,directory],{encoding:'utf8',timeout:30000,env:{...process.env,PI_CODING_AGENT_DIR:join(directory,'agent'),JITI_FS_CACHE:'false'}});
+    } finally {
+        rmSync(directory, {recursive:true, force:true});
+    }
 });

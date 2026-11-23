@@ -1,12 +1,10 @@
 use super::super::*;
+use super::support::ScratchDir;
 
 #[test]
 fn materialize_final_view_permissions_types_and_retry() {
     use std::os::unix::fs::{PermissionsExt, symlink};
-    let root = tempfile::Builder::new()
-        .prefix("materialize-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/var/tmp", "materialize-").unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     fs::write(workspace.join("file"), "before").unwrap();
@@ -87,10 +85,7 @@ fn run_helper(operation: &str, root: &Path, package: &Path) -> Result<(), Backen
 
 #[test]
 fn materialize_plan_failure_retains_receipts_and_reload_uses_new_root() {
-    let root = tempfile::Builder::new()
-        .prefix("materialize-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/var/tmp", "materialize-").unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     let mut config = FilesystemConfig::new(root.path().join("state"));
@@ -137,10 +132,7 @@ fn materialize_plan_failure_retains_receipts_and_reload_uses_new_root() {
 #[test]
 fn materialize_partial_retry_skips_completed_opaque_directory() {
     use std::os::unix::fs::symlink;
-    let root = tempfile::Builder::new()
-        .prefix("materialize-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/var/tmp", "materialize-").unwrap();
     let view = root.path().join("view");
     let host = root.path().join("host");
     let package = root.path().join("package");
@@ -173,10 +165,7 @@ fn materialize_partial_retry_skips_completed_opaque_directory() {
 #[test]
 fn materialize_changes_unreadable_directory_mode_and_retries_without_following_symlink() {
     use std::os::unix::fs::{PermissionsExt, symlink};
-    let root = tempfile::Builder::new()
-        .prefix("materialize-permission-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/var/tmp", "materialize-permission-").unwrap();
     let host = root.path().join("host");
     let package = root.path().join("package");
     let outside = root.path().join("outside");
@@ -267,10 +256,7 @@ fn materialize_changes_unreadable_directory_mode_and_retries_without_following_s
 #[test]
 fn materialize_writes_through_unreadable_parent_without_changing_its_mode_on_failure() {
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::Builder::new()
-        .prefix("materialize-permission-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/var/tmp", "materialize-permission-").unwrap();
     let host = root.path().join("host");
     let package = root.path().join("package");
     fs::create_dir_all(host.join("restricted")).unwrap();
@@ -313,10 +299,7 @@ fn materialize_writes_through_unreadable_parent_without_changing_its_mode_on_fai
 
 #[test]
 fn materialize_retired_root_failure_keeps_execution_plan_on_old_generation() {
-    let root = tempfile::Builder::new()
-        .prefix("materialize-retain-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/var/tmp", "materialize-retain-").unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     let mut config = FilesystemConfig::new(root.path().join("state"));
@@ -345,10 +328,7 @@ fn materialize_retired_root_failure_keeps_execution_plan_on_old_generation() {
 
 #[test]
 fn candidate_continues_after_parent_cleanup_and_publishes_without_old_delta_replay() {
-    let root = tempfile::Builder::new()
-        .prefix("materialize-candidate-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    let root = ScratchDir::new("/var/tmp", "materialize-candidate-").unwrap();
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     let mut config = FilesystemConfig::new(root.path().join("state"));

@@ -334,6 +334,7 @@ pub struct SpeculativeTree {
     retained_source_environments: BTreeSet<String>,
     #[serde(skip)]
     policy_dependencies: BTreeMap<u64, Value>,
+    pub(crate) deferred_validations: BTreeMap<String, Value>,
     capability_revision: u64,
     policy_chance_revisions: BTreeMap<String, (u64, u64)>,
     policy_record_revisions: BTreeMap<String, u64>,
@@ -411,6 +412,7 @@ impl SpeculativeTree {
             pending_acceptance: None,
             retained_source_environments: BTreeSet::new(),
             policy_dependencies: BTreeMap::new(),
+            deferred_validations: BTreeMap::new(),
             capability_revision: 0,
             policy_chance_revisions: BTreeMap::new(),
             policy_record_revisions: BTreeMap::new(),

@@ -1,17 +1,17 @@
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 test('standalone real Pi resumes assembled history and completes a built-in write tool task using a local fake model',()=>{
-    const pi=resolve('../pi'),directory=mkdtempSync('/tmp/opencode/pi-standalone-');
+    const pi=resolve('../pi');
     const script=`
         import assert from 'node:assert/strict';
         import http from 'node:http';
         import {writeFileSync,readFileSync,mkdirSync} from 'node:fs';
         import {createAgentSession,SessionManager,ModelRuntime,resolveCliModel} from '${pi}/packages/coding-agent/src/index.ts';
         import {SessionTree} from '${resolve('instrumentation/pi/session-tree.ts')}';
-        const directory=process.argv[1],agentDir=directory+'/pi';mkdirSync(agentDir);
+        const directory=process.argv[1],agentDir=directory+'/agent';mkdirSync(agentDir);
         const requests=[];
         const server=http.createServer((req,res)=>{let body='';req.on('data',b=>body+=b);req.on('end',()=>{
             const request=JSON.parse(body);requests.push(request);
@@ -55,9 +55,12 @@ test('standalone real Pi resumes assembled history and completes a built-in writ
             await session.extensionRunner.emit({type:'session_shutdown',reason:'quit'});
             await session.waitForIdle();
             assert.ok(SessionManager.open(directory+'/session.jsonl').getEntries().some(e=>e.customType==='async-shutdown-fixture'&&e.data.complete));
-            console.log(directory);
         } finally {await session?.abort();session?.dispose();server.closeAllConnections();await new Promise(r=>server.close(r))}
     `;
-    const output=execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script,directory],{encoding:'utf8',timeout:30000});
-    console.log(output.trim());
+    const directory=mkdtempSync('/var/tmp/pi-standalone-');
+    try {
+        execFileSync(process.execPath,['--no-warnings','--experimental-strip-types','--import',`${pi}/packages/coding-agent/src/experimental/source-resolver.ts`,'--input-type=module','-e',script,directory],{encoding:'utf8',timeout:30000,env:{...process.env,PI_CODING_AGENT_DIR:join(directory,'agent'),JITI_FS_CACHE:'false'}});
+    } finally {
+        rmSync(directory, {recursive:true, force:true});
+    }
 });

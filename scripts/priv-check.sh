@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
-set -euxo pipefail
+set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SUMMARY_FAIL=0
-LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ascout-priv-check.XXXXXX")"
-exec > >(tee "$LOG_DIR/check.log") 2>&1
-echo "diagnostics retained in $LOG_DIR"
-
+LOG_DIR=""
 WORKSPACE=""
 STATE=""
-OVER=""
 SUDO=""
 BTRFS_AVAILABLE=0
+PRIV_WRITES=no
 BTRFS_BIN=""
 TEST_BIN=""
 PROCESS_RUN_COUNT=0
@@ -74,32 +71,49 @@ step() {
     echo "===== $* ====="
 }
 
-make_dir() {
-    local dir="$1"
-    if [ -d "$dir" ]; then
-        return 0
-    fi
-    if mkdir -p "$dir" 2>/dev/null; then
+make_run_dir() {
+    local -n run_dir="$1"
+    local base prefix
+    base="$(realpath -e -- "$2")" && [ -d "$base" ] || return 1
+    prefix="$3"
+    if run_dir="$(mktemp -d -- "$base/$prefix.XXXXXXXX")"; then
         return 0
     fi
     [ -n "$SUDO" ] || return 1
-    $SUDO mkdir -p "$dir" || return 1
-    if [ "$(id -u)" -ne 0 ]; then
-        $SUDO chown "$(id -u):$(id -g)" "$dir" || return 1
-    fi
+    run_dir="$($SUDO mktemp -d -- "$base/$prefix.XXXXXXXX")" || return 1
+    $SUDO chown "$(id -u):$(id -g)" "$run_dir"
 }
 
 remove_tree() {
-    local dir="$1"
+    local dir="$1" privileged="$2" mounts target
+    local -a as_user=()
     [ -n "$dir" ] || return 0
-    [ -e "$dir" ] || return 0
-    if [ -n "$BTRFS_BIN" ]; then
-        # Delete nested subvolumes deepest first. Pass the path as an argument because sudo can reset env.
-        $SUDO find "$dir" -depth -type d -exec sh -c \
-            'bin="$1"; target="$2"; [ -x "$bin" ] && "$bin" subvolume show "$target" >/dev/null 2>&1 && "$bin" subvolume delete "$target" >/dev/null 2>&1; true' \
-            sh "$BTRFS_BIN" {} \; >/dev/null 2>&1 || true
+    [ ! -L "$dir" ] || return 1
+    [ -d "$dir" ] || { [ ! -e "$dir" ]; return; }
+    if [ "$privileged" = yes ] && [ -n "$SUDO" ]; then
+        as_user=("$SUDO")
     fi
-    $SUDO rm -rf "$dir"
+    mounts="$(findmnt -rn -o TARGET)" || return 1
+    while IFS= read -r target; do
+        target="$(printf '%b' "$target")"
+        case "$target" in
+            "$dir"|"$dir"/*) echo "Refusing cleanup across mount $target" >&2; return 1 ;;
+        esac
+    done <<< "$mounts"
+    if [ "$privileged" = yes ] && [ -n "$BTRFS_BIN" ] && [ "$(stat -f -c %T "$dir")" = btrfs ]; then
+        # btrfs subvolumes can have a different st_dev without being mounts.
+        "${as_user[@]}" find "$dir" -depth -type d -exec sh -c '
+            bin=$1; shift
+            status=0
+            for path do
+                if "$bin" subvolume show "$path" >/dev/null 2>&1; then
+                    "$bin" subvolume delete -- "$path" || status=1
+                fi
+            done
+            exit "$status"
+        ' sh "$BTRFS_BIN" {} + || return 1
+    fi
+    "${as_user[@]}" rm -rf --one-file-system -- "$dir" && [ ! -e "$dir" ]
 }
 
 mount_lines() {
@@ -176,30 +190,31 @@ finish() {
             SUMMARY_FAIL=1
         fi
     done
-    if [ "$SUMMARY_FAIL" -eq 0 ]; then
-        if [ -n "$WORKSPACE" ] && ! remove_tree "$WORKSPACE"; then
-            echo "FAIL: workspace cleanup: $WORKSPACE"
-            SUMMARY_FAIL=1
-        fi
-        if [ -n "$STATE" ] && ! remove_tree "$STATE"; then
-            echo "FAIL: state cleanup: $STATE"
-            SUMMARY_FAIL=1
-        fi
+    if ! remove_tree "$WORKSPACE" "$PRIV_WRITES"; then
+        echo "FAIL: workspace cleanup: $WORKSPACE"
+        SUMMARY_FAIL=1
+    fi
+    if ! remove_tree "$STATE" "$PRIV_WRITES"; then
+        echo "FAIL: state cleanup: $STATE"
+        SUMMARY_FAIL=1
+    fi
+    if ! remove_tree "$LOG_DIR" no; then
+        echo "FAIL: diagnostics cleanup: $LOG_DIR"
+        SUMMARY_FAIL=1
     fi
     print_summary
     if [ "$SUMMARY_FAIL" -ne 0 ]; then
-        if [ -n "$WORKSPACE" ]; then
-            echo "retained workspace for inspection: $WORKSPACE"
-        fi
-        if [ -n "$STATE" ]; then
-            echo "retained state directory for inspection: $STATE"
-        fi
-        echo "SUMMARY: PRIVILEGED CHECKS FAILED (diagnostics: $LOG_DIR)"
+        echo "SUMMARY: PRIVILEGED CHECKS FAILED"
         exit 1
     fi
-    echo "SUMMARY: ALL PRIVILEGED CHECKS PASSED (diagnostics: $LOG_DIR)"
+    echo "SUMMARY: ALL PRIVILEGED CHECKS PASSED"
 }
 trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+LOG_DIR="$(mktemp -d /var/tmp/ascout-priv-check.XXXXXXXX)"
 
 print_covered_checks
 
@@ -235,7 +250,6 @@ STATE_MOUNT=""
 if [ -n "${ASCOUT_PRIV_STATE_DIR:-}" ]; then
     STATE_BASE="$ASCOUT_PRIV_STATE_DIR"
     echo "using ASCOUT_PRIV_STATE_DIR=$STATE_BASE"
-    make_dir "$STATE_BASE" || fail "cannot create ASCOUT_PRIV_STATE_DIR=$STATE_BASE"
 else
     STATE_BASE=""
     while read -r target fstype options; do
@@ -254,8 +268,10 @@ else
 fi
 
 if [ -n "$STATE_BASE" ]; then
-    STATE="$STATE_BASE/.ascout-priv-check-state-$$"
-    make_dir "$STATE" || fail "cannot create state run directory $STATE"
+    make_run_dir STATE "$STATE_BASE" .ascout-priv-check-state || {
+        [ -z "$STATE" ] || PRIV_WRITES=yes
+        fail "cannot prepare state run directory in $STATE_BASE"
+    }
 fi
 
 if [ -n "$STATE" ]; then
@@ -280,22 +296,30 @@ if [ -n "$STATE" ]; then
     fi
 fi
 
+WORKSPACE_BASE=""
 if [ -n "${ASCOUT_PRIV_WORKSPACE_DIR:-}" ]; then
     WORKSPACE_BASE="$ASCOUT_PRIV_WORKSPACE_DIR"
     echo "using ASCOUT_PRIV_WORKSPACE_DIR=$WORKSPACE_BASE"
-    make_dir "$WORKSPACE_BASE" || fail "cannot create ASCOUT_PRIV_WORKSPACE_DIR=$WORKSPACE_BASE"
+    make_run_dir WORKSPACE "$WORKSPACE_BASE" .ascout-priv-workspace || {
+        [ -z "$WORKSPACE" ] || PRIV_WRITES=yes
+        fail "cannot prepare workspace run directory in $WORKSPACE_BASE"
+    }
 elif [ -n "$STATE" ]; then
-    WORKSPACE_BASE=""
-    for candidate in /tmp /var/tmp /home /srv; do
+    for candidate in /var/tmp /tmp /home /srv; do
         [ -d "$candidate" ] || continue
         candidate_mount="$(mount_target_of "$candidate" || true)"
         [ -n "$candidate_mount" ] || continue
+        candidate_fstype="$(findmnt -n -o FSTYPE -T "$candidate" || true)"
+        candidate_options="$(findmnt -n -o OPTIONS -T "$candidate" || true)"
+        is_isolatable "$candidate_mount" "$candidate_fstype" "$candidate_options" || continue
         if [ -n "$STATE_MOUNT" ] && [ "$candidate_mount" = "$STATE_MOUNT" ]; then
             continue
         fi
-        trial="$candidate/.ascout-priv-workspace-$$"
-        if make_dir "$trial"; then
+        if make_run_dir WORKSPACE "$candidate" .ascout-priv-workspace; then
             WORKSPACE_BASE="$candidate"
+            break
+        elif [ -n "$WORKSPACE" ]; then
+            PRIV_WRITES=yes
             break
         fi
     done
@@ -304,11 +328,6 @@ elif [ -n "$STATE" ]; then
     else
         echo "auto-selected workspace base: $WORKSPACE_BASE"
     fi
-fi
-
-if [ -n "$WORKSPACE_BASE" ]; then
-    WORKSPACE="$WORKSPACE_BASE/.ascout-priv-workspace-$$"
-    make_dir "$WORKSPACE" || fail "cannot create workspace run directory $WORKSPACE"
 fi
 
 if [ -n "$WORKSPACE" ]; then
@@ -345,12 +364,9 @@ if [ "$LAYOUT_OK" -ne 1 ] || [ "$BTRFS_AVAILABLE" -ne 1 ]; then
 elif [ -z "$BTRFS_BIN" ]; then
     fail "btrfs tool not found"
 else
-    WORK="$STATE/raw-$$"
-    if $SUDO rm -rf "$WORK" && make_dir "$WORK"; then
-        :
-    else
-        fail "cannot prepare raw btrfs work directory $WORK"
-    fi
+    PRIV_WRITES=yes
+    WORK="$STATE/raw"
+    mkdir -- "$WORK"
 
     step "btrfs subvolume create"
     if $SUDO "$BTRFS_BIN" subvolume create "$WORK/sub"; then
@@ -396,13 +412,9 @@ else
         echo "--- send stderr ---"; cat "$WORK/send.err" || true
         echo "--- receive stderr ---"; cat "$WORK/receive.err" || true
     fi
-    cp "$WORK/send.err" "$WORK/receive.err" "$WORK/dump.txt" "$LOG_DIR/" 2>/dev/null || true
-
     step "btrfs subvolume delete"
     if $SUDO "$BTRFS_BIN" subvolume delete "$WORK/snap2" "$WORK/snap1" "$WORK/sub"; then
         pass "strict subvolume delete"
-        $SUDO rm -rf "$WORK"
-        WORK=""
     else
         fail "strict subvolume delete"
     fi
@@ -417,8 +429,8 @@ if [ "$LAYOUT_OK" -ne 1 ]; then
 elif [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; then
     fail "direct lower=/ needs root/initial userns (sudo unavailable)"
 else
-    OVER="$WORKSPACE/overlay-$$"
-    if ! make_dir "$OVER/upper" || ! make_dir "$OVER/work"; then
+    OVER="$WORKSPACE/overlay"
+    if ! mkdir -p -- "$OVER/upper" "$OVER/work"; then
         fail "cannot prepare overlay upper/work under $OVER"
     elif [ "$(id -u)" -ne 0 ]; then
         echo "NEEDS_ROOT: running direct lower=/ check through sudo"
@@ -440,10 +452,6 @@ else
             fail "direct lower=/ overlay"
         fi
     fi
-    if ! remove_tree "$OVER"; then
-        fail "overlay cleanup: $OVER"
-    fi
-    OVER=""
 fi
 CHECK_DETAIL[direct-root-overlay]="lower=/ in initial userns"
 complete_check

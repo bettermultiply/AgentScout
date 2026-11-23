@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { execFileSync } from 'node:child_process';
 import { runPath, spawnControl } from './control-plane-fixture.mjs';
 
 const coding = resolve('assets/policy/coding');
@@ -27,7 +28,7 @@ async function freePort() {
     return port;
 }
 
-async function fixture(t, respond, prepare, {checkUiNotice = false} = {}) {
+async function fixture(t, respond, prepare, {checkUiNotice = false, prompt, modelIds = ['agent']} = {}) {
     const root = fs.mkdtempSync(join(tmpdir(), 'ascout-coding-'));
     for (const dir of ['workspace', 'pi']) fs.mkdirSync(join(root, dir));
     const write = (name, content, executable = false) => fs.writeFileSync(join(root, 'workspace', name), content,
@@ -36,8 +37,8 @@ async function fixture(t, respond, prepare, {checkUiNotice = false} = {}) {
     const fake = http.createServer(async (req, res) => {
         try {
             const body = JSON.parse(Buffer.concat(await Array.fromAsync(req)).toString());
-            assert.equal(body.model, 'agent');
-            const delta = respond(body.messages);
+            assert.ok(modelIds.includes(body.model));
+            const delta = await respond(body.messages, body.model, root);
             const chunk = (value, finish_reason) => ({id: 'fixture', object: 'chat.completion.chunk',
                 created: 0, model: body.model, choices: [{index: 0, delta: value, finish_reason}]});
             res.writeHead(200, {'content-type': 'text/event-stream'});
@@ -52,7 +53,7 @@ async function fixture(t, respond, prepare, {checkUiNotice = false} = {}) {
     const models = join(root, 'models.json'), runtime = join(root, 'runtime.json');
     fs.writeFileSync(models, JSON.stringify({providers: {fixture: {
         baseUrl: `http://127.0.0.1:${modelPort}/v1`, api: 'openai-completions', apiKey: 'fake',
-        models: [{id: 'agent', reasoning: false, input: ['text'], contextWindow: 32768, maxTokens: 256}],
+        models: modelIds.map(id => ({id, reasoning: false, input: ['text'], contextWindow: 32768, maxTokens: 1024})),
     }}}));
     fs.writeFileSync(runtime, JSON.stringify({backend: 'filesystem', control_address: `127.0.0.1:${runtimePort}`,
         adapter_instance: 'coding-fixture', filesystem: {state_directory: join(root, 'fs'),
@@ -93,20 +94,137 @@ async function fixture(t, respond, prepare, {checkUiNotice = false} = {}) {
         if (t.passed) fs.rmSync(root, {recursive: true, force: true});
     });
     await wait(event => event.message === 'branch_ready', 'Pi startup');
-    assert.equal((await post('prompt', {prompt: 'Verify the software and report the outcome.'})).status, 202);
+    assert.equal((await post('prompt', {prompt: prompt ?? 'Verify the software and report the outcome.'})).status, 202);
     const done = await wait(event => event.message === 'task_completed', 'task completion');
     if (checkUiNotice) {
         const urlNotices = stderr.split('\n').filter(line => line.includes(`http://${address}`));
         assert.deepEqual(urlNotices, [`AScout browser UI: http://${address}`]);
     }
     assert.equal(done.status, 'succeeded', `${root}\n${logs}`);
-    return {done, rows, root, shutdown: async () => {
+    return {done, rows, root, followUp: async prompt => {
+        const previous = rows().filter(event => event.message === 'task_completed').length;
+        assert.equal((await post('prompt', {prompt})).status, 202);
+        await wait(() => rows().filter(event => event.message === 'task_completed').length > previous, 'follow-up completion');
+    }, shutdown: async () => {
         assert.equal((await post('shutdown')).status, 202);
         assert.equal((await exit)[0], 0, logs);
     }};
 }
 
 const lastTool = messages => messages.findLast(message => message.role === 'tool');
+
+test('branch_model guidance is request-local across promotion', {timeout: 45000}, async t => {
+    const prompt = 'Read the fixture.\n\nKeep this wording.\n';
+    const requests = [];
+    const followUpPrompt = 'Confirm the result.\n';
+    const {done, rows, followUp, shutdown} = await fixture(t, (messages, model) => {
+        requests.push({model, messages});
+        return lastTool(messages) ? {content: 'Finished.'} : tool('same-read', 'read', {path:'value.txt'});
+    }, (root, write) => {
+        write('value.txt', 'fixture\n');
+        fs.cpSync(coding, join(root, 'policy'), {recursive:true});
+        const manifest = join(root, 'policy/policy.yaml');
+        fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8')
+            .replaceAll('fast_model_speculation: false', 'fast_model_speculation: true')
+            .replace('candidate_model: deepseek/deepseek-flash', 'candidate_model: fixture/candidate')
+            .replace('candidate_thinking: high', 'candidate_thinking: off')
+            .replace('max_model_speculation_step: null', 'max_model_speculation_step: 0')
+            .replaceAll('max_candidate_model_steps: 1', 'max_candidate_model_steps: 6')
+            .replace('max_steps: 4', 'max_steps: 16'));
+        return manifest;
+    }, {prompt, modelIds:['agent', 'candidate']});
+    assert.ok(rows().some(row => row.operation === 'promote' && row.status === 'applied' && row.branch_id === done.branch_id));
+    assert.ok(requests.some(({model}) => model === 'candidate'));
+    assert.ok(requests.some(({model, messages}) => model === 'agent' && !lastTool(messages)));
+    await followUp(followUpPrompt);
+    const userText = message => typeof message.content === 'string' ? message.content
+        : message.content.map(part => part.text).join('');
+    assert.ok(requests.some(({model, messages}) => model === 'agent' && messages.some(message =>
+        message.role === 'user' && userText(message) === followUpPrompt)), 'promoted authority continued');
+    for (const {model, messages} of requests) {
+        const users = messages.filter(message => message.role === 'user').map(userText);
+        assert.deepEqual(users, users.includes(followUpPrompt) ? [prompt, followUpPrompt] : [prompt]);
+        const system = messages.filter(message => ['system', 'developer'].includes(message.role)).map(message => message.content).join('\n');
+        assert.equal(system.includes('Batch independent symbol, call-site, and test lookups'), model === 'candidate');
+    }
+    await shutdown();
+});
+
+test('semantic audit discards a rejected sibling and publishes the passing sibling without Authority inference', {timeout: 45000}, async t => {
+    const prompt = 'Set the fixture value to winner, including the edge case.';
+    const auditReplies = [];
+    let authorityCalls = 0, candidates = 0;
+    const {done, rows, root, shutdown} = await fixture(t, async (messages, model, root) => {
+        if (model === 'agent') {
+            authorityCalls++;
+            return {content: 'Unexpected Authority inference'};
+        }
+        if (model === 'audit') {
+            const text = messages.at(-1).content;
+            assert.ok(text.includes(prompt));
+            assert.match(text, /Passing test command:\n\.\/pytest\nTest output:\n1 passed/);
+            assert.match(text, /Captured git diff:/);
+            const reply = text.includes('+winner') ? 'PASS' : 'REJECT: missing edge case';
+            auditReplies.push(reply);
+            return {content: reply};
+        }
+        const last = lastTool(messages);
+        const id = last?.tool_call_id?.split('|')[0];
+        if (!id) {
+            const number = ++candidates;
+            if (number === 2) {
+                const deadline = Date.now() + 10000;
+                while (Date.now() < deadline) {
+                    const events = runPath(root, 'events.jsonl');
+                    if (fs.existsSync(events) && fs.readFileSync(events, 'utf8').includes('"disposition":"Discard"')) break;
+                    await delay(25);
+                }
+            }
+            return tool(`write-${number}`, 'write', {path: join(root, 'workspace/value.txt'),
+                content: number === 1 ? 'missing\n' : 'winner\n'});
+        }
+        if (id.startsWith('write-')) return tool('diff', 'bash', {command: 'git diff'});
+        if (id === 'diff') return tool('verify', 'bash', {command: './pytest'});
+        assert.equal(id, 'verify');
+        return {content: 'Candidate finished.'};
+    }, (root, write) => {
+        write('value.txt', 'original\n');
+        write('pytest', '#!/bin/sh\necho "1 passed"\n', true);
+        const cwd = join(root, 'workspace');
+        execFileSync('git', ['init', '-q'], {cwd});
+        execFileSync('git', ['add', '.'], {cwd});
+        execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture'], {cwd});
+        fs.cpSync(coding, join(root, 'policy'), {recursive: true});
+        const manifest = join(root, 'policy/policy.yaml');
+        fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8')
+            .replaceAll('openai/gpt-6.2-sol', 'fixture/audit')
+            .replaceAll('fast_model_speculation: false', 'fast_model_speculation: true')
+            .replaceAll('skip_authority_after_independent_verification: false', 'skip_authority_after_independent_verification: true')
+            .replace('candidate_model: deepseek/deepseek-flash', 'candidate_model: fixture/candidate')
+            .replace('candidate_count: 1', 'candidate_count: 2')
+            .replace('candidate_thinking: high', 'candidate_thinking: off')
+            .replace('max_model_speculation_step: null', 'max_model_speculation_step: 0')
+            .replaceAll('max_candidate_model_steps: 1', 'max_candidate_model_steps: 6')
+            .replace('max_steps: 4', 'max_steps: 16')
+            .replace('semantic_audit: false', 'semantic_audit: true')
+            .replace('partial_accept_salvage: false', 'partial_accept_salvage: true'));
+        return manifest;
+    }, {prompt, modelIds: ['agent', 'candidate', 'audit']});
+    assert.equal(authorityCalls, 0);
+    assert.equal(candidates, 2);
+    assert.deepEqual(auditReplies, ['REJECT: missing edge case', 'PASS']);
+    const events = rows();
+    const branches = events.filter(e => e.message === 'candidate_created');
+    assert.equal(branches.length, 2);
+    assert.equal(branches[0].chance_id, branches[1].chance_id);
+    const audits = events.filter(e => e.message === 'policy_audit');
+    assert.deepEqual(audits.map(e => e.audit.finding), auditReplies);
+    assert.deepEqual(events.filter(e => e.disposition).map(e => [e.branch_id, e.disposition]),
+        [[audits[0].branch_id, 'Discard'], [audits[1].branch_id, 'Promote']]);
+    assert.equal(done.branch_id, audits[1].branch_id);
+    await shutdown();
+    assert.equal(fs.readFileSync(join(root, 'workspace/value.txt'), 'utf8'), 'winner\n');
+});
 
 test('coding Policy promotes a reproduced failure, discards bad work, then promotes a successful verification', {timeout: 45000}, async t => {
     const {done, rows, root, shutdown} = await fixture(t, messages => {

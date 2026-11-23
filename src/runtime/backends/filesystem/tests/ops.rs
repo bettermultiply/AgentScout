@@ -392,7 +392,7 @@ fn backend_btrfs_fork_diff_accept_discard_round_trip() {
     round_trip(btrfs_temp(), true);
 }
 
-fn round_trip(root: tempfile::TempDir, expect_btrfs: bool) {
+fn round_trip(root: ScratchDir, expect_btrfs: bool) {
     let backend =
         FilesystemBackend::new(overlapping_state_config(root.path().join("state"))).unwrap();
     assert!(
@@ -612,11 +612,9 @@ fn btrfs_mount_copy_up_rename_stays_within_subvolume() {
     remove_path(&backend.config.btrfs_path, &probe, true).unwrap();
     // Exercise btrfs layout on hosts without privileged send.
     backend.mechanism = FilesystemMechanism::Btrfs;
-    // Use fixture lowers to avoid reading root-only entries on host mounts.
-    let lowers = tempfile::Builder::new()
-        .prefix("control-plane-refactor-lowers-")
-        .tempdir_in("/tmp/opencode")
-        .unwrap();
+    // Keep fixture lowers on /tmp, away from the btrfs work and upper dirs.
+    // The fixtures also avoid reading root-only entries on host mounts.
+    let lowers = ScratchDir::new("/tmp", "control-plane-refactor-lowers-").unwrap();
     let targets = vec![lowers.path().join("first"), lowers.path().join("second")];
     for target in &targets {
         fs::create_dir(target).unwrap();
@@ -853,13 +851,10 @@ fn extra_mount_fork_diff_accept_discard_round_trip() {
         "extra_mount_fork_diff_accept_discard_round_trip: using {}",
         target.display()
     );
-    let token = format!("ascout-f1-{}", std::process::id());
-    let parent_file = target.join(format!("{token}-a"));
-    let child_file = target.join(format!("{token}-b"));
-    let lower_file = target.join(format!("{token}-lower"));
-    let _ = fs::remove_file(&parent_file);
-    let _ = fs::remove_file(&child_file);
-    let _ = fs::remove_file(&lower_file);
+    let fixture = ScratchDir::new(&target, "ascout-f1-").unwrap();
+    let parent_file = fixture.path().join("a");
+    let child_file = fixture.path().join("b");
+    let lower_file = fixture.path().join("lower");
     fs::write(&lower_file, b"lower").unwrap();
 
     backend.establish("root").unwrap();
@@ -938,8 +933,7 @@ fn extra_mount_fork_diff_accept_discard_round_trip() {
     assert!(lower_file.exists(), "accept deleted the host lower file");
 
     let mark = backend.mark("child", "extra-mark", &[]).unwrap();
-    let mark_file = target.join(format!("{token}-mark"));
-    let _ = fs::remove_file(&mark_file);
+    let mark_file = fixture.path().join("mark");
     assert!(run_in_environment(
         &backend,
         "child",
@@ -975,7 +969,7 @@ fn extra_mount_fork_diff_accept_discard_round_trip() {
             .mount_by_target(&target)
             .expect("child mount unit")
             .clone();
-        mount.upper.join(format!("{token}-b"))
+        mount.upper.join(child_file.strip_prefix(&target).unwrap())
     };
     assert!(
         child_upper.exists(),
@@ -985,10 +979,6 @@ fn extra_mount_fork_diff_accept_discard_round_trip() {
     backend.discard("child", &[]).unwrap();
     wait_until(|| !child_upper.exists());
     assert!(!child_upper.exists(), "discard left extra-mount upper data");
-    let _ = fs::remove_file(&parent_file);
-    let _ = fs::remove_file(&child_file);
-    let _ = fs::remove_file(&lower_file);
-    let _ = fs::remove_file(&mark_file);
     backend.terminate("root").unwrap();
     backend.cleanup("root").unwrap();
 }

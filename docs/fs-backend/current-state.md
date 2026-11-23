@@ -204,7 +204,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
   - 支持时使用 `clone3(CLONE_INTO_CGROUP)` 直接把 holder 建在目标 cgroup 中。
     Linux 需提供 `mount_setattr`，用于递归设定宿主 bind mount 为只读。
 - **删除**
-  - discard 热路径 rename 到 trash，O(1)；后台删除。
+  - discard 热路径将目录 rename 到 trash，O(1)。操作返回时物理删除可能仍在后台进行。
   - 后台删除由常驻工作者执行：首次需要物理删除时发信号；工作者持续扫描 trash
     并删除，直到为空后静默阻塞等待下一次信号，多次信号合并。启动时若 trash
     非空，发一次信号回收崩溃或被杀进程遗留的目录。
@@ -213,7 +213,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
   - 工作者不持有 backend 强引用；backend 被 drop 后工作者退出，未删完的目录
     留在 trash 供下次启动回收。
   - 严格 btrfs 子卷删除可用时 `fast_delete=true`，否则 false 并走 O(文件数)
-    后台删除。能力字段如实上报。
+    后台删除。递归删除时，目录读取和遍历错误会向调用方报告，目录已不存在视为完成。
 - **持久化/幂等**
   - 环境、快照、operation 记录持久化并可重启读回。
   - operation id + generation 重放返回同一结果；更小 generation 为 stale。
@@ -435,21 +435,45 @@ control plane 必须等物化成功后才能宣告任务成功；具体报告与
 
 `accept` 的 O(增量) 已由本轮计数测试和最终基准验证；flatten 仍为 O(upper)。
 
+## 测试与基准复跑
+
+在仓库根目录运行下列命令。普通测试夹具随 `TMPDIR` 放在 `/var/tmp`，需要 btrfs 的
+普通测试夹具直接使用 `/var/tmp`。需要独立挂载的测试会在符合布局要求的挂载上创建临时目录。
+
+```bash
+TMPDIR=/var/tmp ASCOUT_PRIV_TESTS=0 cargo test --offline --lib \
+  runtime::backends::filesystem::tests:: -- --test-threads=1 --nocapture
+```
+
+并行测试曾在额外挂载及 btrfs 快照副本的 overlay 挂载时报 `Device or resource busy`，单线程或单项复跑通过，根因尚未确认。已有残留时，先核查挂载、权限、btrfs 子卷及后台回收状态。实际特权路径按 [特权预检](priv-check.md) 验证，普通测试的通过数可能包含按环境跳过的用例。
+
+复跑 `fs_bench` 时先选择单个 case 和 N。下面用小样本检查运行路径，可按测量需要替换 case、N 和轮数。
+
+```bash
+TMPDIR=/var/tmp ASCOUT_BENCH_CASES=reflink-lower \
+  ASCOUT_BENCH_ITERS=1 ASCOUT_BENCH_SIZES=100 \
+  cargo run --offline --release --example fs_bench
+```
+
+除 `tmpfs-flatten` 将状态和 workspace 都放在 `/tmp` 外，各用例的 workspace 都在
+`/var/tmp`。同挂载的 reflink 和 btrfs snapshot flatten 用例也将状态放在 `/var/tmp`。
+跨挂载的 lower 和 nonoverlap 用例可用已有的 `ASCOUT_PRIV_STATE_DIR` 指定状态基目录，
+该目录必须已存在、可写、位于源码树外，并与 `/var/tmp` 分属不同挂载。未指定时依次尝试
+`$XDG_CACHE_HOME` 和 `$HOME/.cache` 中符合条件的目录。btrfs snapshot 用例还需要 btrfs
+和快照能力。没有合用的默认目录或缺少所需能力时输出 `SKIP`。零轮数、路径解析错误、
+执行错误和清理错误均以非零状态退出。
+
 ## 性能实测
 
 环境：kernel `7.2.14-zen1-1-zen`，CPU `AMD Ryzen 7 5800H with Radeon Graphics`。
 `ASCOUT_BENCH_ITERS=20`；N=100/10_000/100_000，每文件 4KiB；child 只修改 10 个文件。
-命令：
-
-```bash
-ASCOUT_BENCH_CASES=<case> ASCOUT_BENCH_ITERS=20 ASCOUT_BENCH_SIZES=<N> \
-  target/release/examples/fs_bench
-```
 
 每个 N 单独起进程、使用独立状态目录。基准本身复用 `case.state`；在 btrfs 上
 后台回收尚未结束时直接跑下一个 N 会污染结果（甚至触发残留状态错误），因此
 最终表把 N 分开跑。btrfs 前台延迟也会随后台回收积压波动；下表取回收空闲时的
 一次运行，并在结论里给出另一轮的范围。
+
+下文的 `/home` 和 `/var/tmp` 布局记录历史测量所用的挂载。当前复跑使用上节的临时目录布局。
 
 `reflink-flatten`：状态目录与 workspace 都在 `/home`（btrfs），`/home` 重叠 →
 flatten。`reflink-lower`：状态目录在 `/var/tmp`（btrfs），workspace 在 `/home` →
@@ -540,15 +564,10 @@ Chain/Flatten，以免默认阈值改变后与旧数据不可比。
 
 ### 逐挂载布局阈值实测（2026-11-10，本机）
 
-同一非重叠布局下强制 Chain 与强制 Flatten 对比。状态目录在 `/var/tmp`（btrfs），
-workspace 在仓库 `target/`（`/home`，btrfs）；每个改动的 child 只写 10 个文件。
-命令：
-
-```bash
-ASCOUT_BENCH_CASES=nonoverlap ASCOUT_BENCH_ITERS=5 \
-ASCOUT_BENCH_SIZES=16,64,256,1024,4096 \
-  timeout 600 target/release/examples/fs_bench
-```
+历史测量在同一非重叠布局下对比强制 Chain 与强制 Flatten。状态目录在 `/var/tmp`（btrfs），
+workspace 在 `/home`（btrfs）挂载上的仓库构建目录，每个改动的 child 只写 10 个文件。
+复跑使用上节的基准命令，设置 `ASCOUT_BENCH_CASES=nonoverlap`、
+`ASCOUT_BENCH_ITERS=5` 和 `ASCOUT_BENCH_SIZES=16,64,256,1024,4096`。
 
 `reflink-chain-nonoverlap` 用 `fork_flatten_entry_limit=0` 强制 Chain，
 `reflink-flatten-nonoverlap` 用 `usize::MAX` 强制 Flatten。p50 毫秒：

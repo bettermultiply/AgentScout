@@ -3,14 +3,28 @@ use ascout::runtime::backend::{Backend, BackendContext, CancelHandle};
 use ascout::runtime::backends::filesystem::{FilesystemBackend, FilesystemConfig};
 use ascout::runtime::execution_wire::Message;
 use serde_json::json;
-use std::{collections::BTreeMap, fs, time::Instant};
+use std::{collections::BTreeMap, fs, path::Path, time::Instant};
+
+#[path = "../src/runtime/backends/filesystem/scratch_dir.rs"]
+mod scratch_dir;
+use scratch_dir::ScratchDir;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = tempfile::tempdir_in("/var/tmp")?;
-    let workspace = root.path().join("workspace");
+    let root = ScratchDir::new("/var/tmp", "ascout-fs-holder-bench-")?;
+    let run = benchmark(root.path());
+    let cleanup = root.close();
+    match (run, cleanup) {
+        (run, Ok(())) => run,
+        (Ok(()), Err(cleanup)) => Err(cleanup.into()),
+        (Err(run), Err(cleanup)) => Err(format!("{run}; {cleanup}").into()),
+    }
+}
+
+fn benchmark(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let workspace = root.join("workspace");
     fs::create_dir(&workspace)?;
     fs::write(workspace.join("first.txt"), "ready")?;
-    let mut config = FilesystemConfig::new(root.path().join("state"));
+    let mut config = FilesystemConfig::new(root.join("state"));
     config.force_overlay = true;
     config.isolated_paths = Some(vec![workspace.clone()]);
     let backend = FilesystemBackend::new(config)?;
@@ -18,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         command: "/bin/true".into(),
         args: Vec::new(),
         cwd: workspace,
-        log: root.path().join("holder.log"),
+        log: root.join("holder.log"),
         instance_id: None,
         env: BTreeMap::new(),
     };
@@ -65,7 +79,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 backend.cleanup(&id)?;
             }
         }
-        for (phase, mut values) in ["data", "returned", "first_read_ready"].into_iter().zip(samples) {
+        for (phase, mut values) in ["data", "returned", "first_read_ready"]
+            .into_iter()
+            .zip(samples)
+        {
             values.sort_by(f64::total_cmp);
             let percentile = |p: usize| values[(p * values.len()).div_ceil(100) - 1];
             println!(

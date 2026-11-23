@@ -9,23 +9,26 @@ cd /path/to/AgentScout-suit/AgentScout
 ./scripts/priv-check.sh
 ```
 
-脚本内部只对 btrfs 子卷操作、状态目录创建、初始 user namespace 的 `lower=/`
-检查和成功后的清理使用 `sudo`；`cargo` 编译和普通测试始终由调用用户执行，避免
-root 在 `target/` 下留下属主为 root 的文件。只有 4 个 `priv_` 测试以 root 运行。
+脚本用 `sudo` 执行 btrfs 子卷操作、必要的目录创建、初始 user namespace 的 `lower=/`
+检查、特权 Rust 测试以及状态和 workspace 的清理。`cargo` 编译和普通进程测试由调用用户执行，
+避免 root 在 `target/` 下留下属主为 root 的文件。共有 3 个 `priv_` 测试以 root 运行。
 
 ## 环境变量
 
 | 变量 | 含义 |
 |---|---|
-| `ASCOUT_PRIV_STATE_DIR` | btrfs 上的可写基目录。脚本在其中创建唯一运行子目录；测试的 `state` 位于该子目录下。 |
-| `ASCOUT_PRIV_WORKSPACE_DIR` | 另一个可写挂载上的基目录。脚本在其中创建唯一运行子目录，测试的 workspace 位于其下。 |
+| `ASCOUT_PRIV_STATE_DIR` | btrfs 上已存在的基目录。脚本在其中用 `mktemp -d` 创建 `.ascout-priv-check-state.XXXXXXXX`，测试的 `state` 位于该子目录下。 |
+| `ASCOUT_PRIV_WORKSPACE_DIR` | 另一个可写挂载上已存在的基目录。脚本在其中用 `mktemp -d` 创建 `.ascout-priv-workspace.XXXXXXXX`，测试的 workspace 位于该子目录下。 |
+
+脚本解析基目录的实际路径，再尝试以调用用户创建子目录。必要时通过 `sudo` 创建，
+并将子目录的属主和属组设为调用用户的 UID 和 GID。
 
 两个变量都可省略。省略时脚本按下述规则自动选择；不会为了“能跑”而降级成
 状态目录与 workspace 同挂载、或状态目录位于被隔离挂载内的布局。
 
 ```bash
 ASCOUT_PRIV_STATE_DIR=/path/on/btrfs \
-ASCOUT_PRIV_WORKSPACE_DIR=/tmp/ascout-workspace \
+ASCOUT_PRIV_WORKSPACE_DIR=/path/on/another-writable-mount \
   ./scripts/priv-check.sh
 ```
 
@@ -36,7 +39,7 @@ ASCOUT_PRIV_WORKSPACE_DIR=/tmp/ascout-workspace \
 1. 必须是可写的 btrfs 目录。
 2. 必须位于后端要隔离的挂载点之外。后端隔离的是 `real_writable_mounts()` 中
    能通过 overlay 探测的挂载；`/` 被排除，因此通常可以直接把状态目录放在
-   btrfs 文件系统的根挂载下（例如 `/.ascout-priv-check-state-<pid>`）。
+   btrfs 文件系统的根挂载下（例如 `/.ascout-priv-check-state.XXXXXXXX`）。
 3. 脚本用 `findmnt` 做近似判断：除 `/` 和伪文件系统外，可写挂载都视为会被
    隔离。找不到合法挂载时打印 `NO_VALID_STATE_LAYOUT` 并失败，不 SKIP。
 4. 特权测试会再次用后端的 `state_overlap_mounts()` 断言，并用默认配置
@@ -50,9 +53,9 @@ ASCOUT_PRIV_WORKSPACE_DIR=/tmp/ascout-workspace \
 
 1. 必须与状态目录位于不同的挂载。
 2. 必须是后端会隔离的可写挂载，这样 workspace 的 upper/lower 布局才有意义。
-3. 未设置 `ASCOUT_PRIV_WORKSPACE_DIR` 时依次尝试 `/tmp`、`/var/tmp`、
-   `/home`、`/srv` 下的唯一临时目录；都不可用时打印
-   `NO_VALID_WORKSPACE_MOUNT` 并失败。
+3. 未设置 `ASCOUT_PRIV_WORKSPACE_DIR` 时，按 `/var/tmp`、`/tmp`、`/home`、`/srv`
+   的顺序寻找符合条件的基目录，并在第一个可成功创建子目录的候选处创建临时目录。
+   有状态目录但所有候选均不可用时，打印 `NO_VALID_WORKSPACE_MOUNT` 并失败。
 
 ## 脚本覆盖的检查清单
 
@@ -64,9 +67,10 @@ ASCOUT_PRIV_WORKSPACE_DIR=/tmp/ascout-workspace \
 4. 初始 user namespace 的 `lower=/` overlay；
 5. 以调用用户构建 Rust 测试二进制；
 6. 进程组冻结测试：`runtime::process` 与 `filesystem::tests::process`；
-7. 4 个特权 Rust 测试。
+7. 3 个特权 Rust 测试。
 
-结尾打印覆盖汇总表，每一项 `PASS`/`FAIL`，并给出 Rust 测试实际执行数：
+结尾打印覆盖汇总表，列出各项的状态（`PASS`、`FAIL` 或 `UNRUN`）和 Rust 测试实际执行数。
+一次成功运行的示例如下。
 
 ```text
 ===== coverage summary =====
@@ -78,11 +82,11 @@ direct-root-overlay          PASS   lower=/ in initial userns
 rust-build                   PASS   lib tests
 process-freeze               PASS   4/4 executed; 4/4 passed; 0 ignored; mechanism=cgroup
 privileged-rust              PASS   3/3 executed; 3/3 passed; 0 ignored
-process tests executed       7      freeze mechanism: cgroup
-process tests passed         7      ignored: 0
-privileged tests executed    4      expected 4
-privileged tests passed      4      ignored: 0
-SUMMARY: ALL PRIVILEGED CHECKS PASSED (diagnostics: <log-dir>)
+process tests executed       4      freeze mechanism: cgroup
+process tests passed         4      ignored: 0
+privileged tests executed    3      expected 3
+privileged tests passed      3      ignored: 0
+SUMMARY: ALL PRIVILEGED CHECKS PASSED
 ```
 
 任何一项缺失、失败、输出 `SKIP`、或没有执行，都会让脚本返回非零，并且不会
@@ -92,7 +96,8 @@ SUMMARY: ALL PRIVILEGED CHECKS PASSED (diagnostics: <log-dir>)
 
 ### 1. btrfs 原始能力
 
-每步保留 stderr：
+原始 btrfs 检查在状态运行目录的 `raw/` 下执行。增量发送和接收的 stderr 分别写入
+`send.err` 和 `receive.err`，管道失败时两者都会打印到终端。
 
 - `btrfs subvolume create` → `PASS`
 - 两次只读快照 → `PASS`；只读快照创建后不再递归 `chown`
@@ -102,9 +107,9 @@ SUMMARY: ALL PRIVILEGED CHECKS PASSED (diagnostics: <log-dir>)
 
 ### 2. 初始 user namespace 的直接 `lower=/`
 
-root 下在 `unshare --mount --propagation private` 中运行 bwrap；非 root 时通过
-`sudo unshare ...`。预期 `PASS: direct lower=/ overlay`。没有 root/sudo 时明确
-失败，不伪装成成功。
+测试使用 workspace 运行目录下的 `overlay/upper` 和 `overlay/work`。root 下在
+`unshare --mount --propagation private` 中运行 bwrap，普通用户通过 `sudo unshare ...`
+执行。预期 `PASS: direct lower=/ overlay`。缺少 root 权限且无法使用 sudo 时明确失败。
 
 ### 3. 进程组冻结测试
 
@@ -124,14 +129,15 @@ runtime::backends::filesystem::tests::process::
 ASCOUT_FREEZE_MECHANISM=cgroup test=process_freeze_thaw_stops_and_resumes_writer
 ```
 
-`cgroup` 与 `process_group` 都算通过，但汇总表明确写出实际机制，让用户知道
-cgroup 路径有没有被真实走到。`none` 视为失败；没有标记也视为失败。
-`process_group_fallback_freezes_and_reports_mechanism` 强制进程组信号，脚本
-在判断“本次实际机制”时忽略这个强制 fallback 的标记。
+`cgroup` 与 `process_group` 都可通过，汇总表写出自动选择的机制。每个测试必须恰好
+打印一条带自身测试名的有效标记。`none`、缺少标记或自动选择结果不一致均失败。
+`process_group_fallback_freezes_and_reports_mechanism` 强制使用进程组信号，其标记
+不参与判断自动选择的机制。
 
 ### 4. 特权 Rust 测试
 
-先以 `--list` 精确比对固定列表，数量不对或缺任何一个都失败：
+先以 `--list` 精确比对以下三个测试，全部位于
+`runtime::backends::filesystem::tests::privileged` 模块下。数量或名称不符即失败。
 
 ```text
 priv_btrfs_chain_layout
@@ -158,18 +164,29 @@ priv_btrfs_mixed_generations
   - 同样的场景，但子 lower 与父相同，子 upper 含父文件；
   - 验证 Flatten 下 diff/accept 走 `btrfs_delta` 分支；精确预期也包含父目录变化。
 - `priv_btrfs_mixed_generations`
-  - 大 root upper 先 Chain，小 child upper 再 Flatten；
+  - 使用 `fork_flatten_entry_limit=32`，大 root upper 先 Chain，小 child upper 再 Flatten；
   - 真实启动 grandchild，精确 diff（含父目录）、accept 回 child1，父 root 视图不变。
 
 ## 诊断与清理
 
-完整诊断输出保存在 `${TMPDIR:-/tmp}/ascout-priv-check.*`，开始和结尾都会打印
-实际目录，包括 `check.log`、构建日志、测试列表/运行日志、btrfs 命令输出。
+脚本在 `/var/tmp/ascout-priv-check.XXXXXXXX` 中暂存构建日志和测试的列表及运行输出。
+终端会显示检查结果、测试输出、失败时的构建日志以及最终汇总。
 
-- 全部检查通过：删除脚本通过 sudo 创建的状态目录、workspace 目录及其中的
-  btrfs 子卷（先递归 `btrfs subvolume delete`，再 `rm -rf`）。
-- 任何检查失败：保留这两个目录并打印路径，方便事后检查；不会吞掉清理错误。
-- 清理本身失败也会让脚本返回非零。
+退出时，无论检查成功还是失败，脚本都会依次尝试清理 workspace 运行目录、状态运行目录和
+诊断目录。收到 `INT`、`TERM` 或 `HUP` 并进入退出流程时也会执行清理。前两个目录按需用
+`sudo` 清理，诊断目录由调用用户清理。清理只针对本次创建的目录，基目录和其中原有的文件
+不在清理范围内。
+
+清理会拒绝以符号链接作为清理目标，也会拒绝清理自身是挂载点或含有挂载点的目录。
+对需要提权清理的 btrfs 目录，先从最深处删除子卷，再用 `rm -rf --one-file-system`
+删除目录。某项清理失败时会打印对应路径，继续尝试清理其他目录，最终返回非零。
+
+需要留档或对比复跑结果时，在运行前将标准输出和标准错误一起写入自行指定的日志。
+`pipefail` 让管道保留脚本失败时的非零状态。每次复跑都会创建新的运行目录，可沿用相同的基目录设置。
+
+```bash
+(set -o pipefail; ./scripts/priv-check.sh 2>&1 | tee priv-check.log)
+```
 
 ## 无特权脚本回归
 
@@ -179,15 +196,22 @@ python3 scripts/test-priv-check.py
 
 该回归用本地假命令模拟 btrfs、提权、`findmnt` 和测试二进制，并用 `rustc --test`
 构建真实 libtest fixture，先证明 `--nocapture` 会打断结果行，再验证脚本通过。
-不要求实际 root/btrfs 环境。临时工作目录使用 Python `tempfile` 的默认位置（支持
-`TMPDIR`），诊断日志保留在 `priv-check-regression-*` 下；可用
-`ASCOUT_PRIV_CHECK_TEST_LOG_DIR` 指定日志目录。
+无需真实 root 或 btrfs 环境。每个场景的工作目录和脚本的临时日志目录都创建在 `/var/tmp`
+下，由 Python 在退出相应的临时目录上下文时清理。若回归抛出异常，清理前会打印已收集的场景日志。
 
-场景：
+用 `--reproduce` 复跑全部场景时，每个场景会打印退出码、是否出现成功摘要、测试二进制的
+调用记录和临时日志路径。此模式仍检查目录清理，但跳过常规的场景结果断言。要保留输出，
+可沿用上文的 `tee` 方式，并为本次复跑另选日志文件名。
+
+```bash
+python3 scripts/test-priv-check.py --reproduce
+```
+
+下表列出常规回归检查的场景。
 
 | 场景 | 断言 |
 |---|---|
-| `success` | 退出 0、出现 `ALL PASSED`、汇总表完整、3/3 特权测试、4/4 进程测试、`mechanism=cgroup` |
+| `success` | 退出 0、出现 `ALL PRIVILEGED CHECKS PASSED`、汇总表完整、3/3 特权测试、4/4 进程测试、`mechanism=cgroup` |
 | `nonroot` | 通过假 `sudo` 走提权分支，仍然成功 |
 | `freeze-pg` | 通过，汇总表明确写 `mechanism=process_group` |
 | `freeze-none` | 非零，汇总写 `none` |
@@ -195,10 +219,11 @@ python3 scripts/test-priv-check.py
 | `missing-test` | 缺少一个固定特权测试名，非零 |
 | `skip` | 特权测试输出 `SKIP`，非零 |
 | `build-fail` | 编译失败，非零且不运行任何测试 |
+| `raw-fail` | 第二次只读快照失败，非零，仍清理本次运行目录 |
 | `nonbtrfs` | 状态目录不是 btrfs，非零 |
 | `no-layout` | 找不到 btrfs 非重叠布局，打印 `NO_VALID_STATE_LAYOUT`，非零 |
 | `overlap-layout` | 状态目录在会被隔离的挂载内，非零 |
-| `cleanup-fail` | 清理失败，非零且不出现 `ALL PASSED` |
+| `cleanup-fail` | workspace 清理失败，报告路径并返回非零。状态和诊断目录仍清理 |
 | `interleaved` | 真实 libtest 的测试内输出交错；脚本捕获模式仍精确通过 |
 | `missing-process` / `extra-test` / `duplicate-test` | 缺进程测试、额外测试、重复测试均失败 |
 | `list-fail` / `process-fail` / `priv-exit-fail` | 即使输出貌似通过，命令非零也失败 |
@@ -206,26 +231,9 @@ python3 scripts/test-priv-check.py
 | `ignored` / `skip-inline` | ignored 不算执行；行内 SKIP 同样失败 |
 | `bad-summary` / `incomplete-run` | 摘要或逐项记录不完整、不一致均失败 |
 
-每个失败场景都断言不出现 `ALL PRIVILEGED CHECKS PASSED`。
-
-## 已验证结果（用户 2026-11-10 第四轮验证）
-
-- 当时的四项特权测试逐项 ok；4 passed、0 failed、0 ignored。
-  三项 btrfs 测试均选中真实 btrfs 数据面，`incremental_diff=true`、
-  `fast_delete=true`；状态目录位于根 btrfs 挂载，workspace 位于 `/tmp` tmpfs，
-  默认配置的非重叠布局检查通过。
-- Chain、Flatten 均完成上文的布局断言、真实进程修改/删除/新建、精确 diff、
-  accept 后真实视图检查和 discard 清理。mixed 使用阈值 32 验证 Chain → Flatten
-  两代视图、accept 回 child1 且 root 不变，以及环境/快照/trash 清空。
-- 原始 btrfs create、只读 snapshot、增量 send dump、严格子卷删除，以及脚本与
-  Rust 的初始 user namespace 直接 `lower=/` 检查均通过。
-- 7 项进程测试全部通过、0 failed、0 ignored；自动机制为 cgroup，
-  强制 `process_group` fallback 测试也通过。
-- 脚本退出 0，汇总全部 PASS，最终为
-  `ALL PRIVILEGED CHECKS PASSED`；不是只列出测试、SKIP 或仅编译成功。
-
-原始四份根目录日志已按用户要求删除；这里保留测试名、结果与验证边界，
-不再以已删除日志的行号作为当前引用。第四轮结果与修复分别记录于 `652f60c`、`8c54403`。
+常规回归中，每个失败场景都断言不出现 `ALL PRIVILEGED CHECKS PASSED`。除故意让
+workspace 清理失败的 `cleanup-fail` 外，各场景都检查脚本创建的临时目录已删除。
+使用显式基目录的场景还检查原有文件完好。
 
 ## 已知边界
 

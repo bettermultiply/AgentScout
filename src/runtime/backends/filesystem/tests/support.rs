@@ -1,34 +1,19 @@
 
+pub(in crate::runtime::backends::filesystem::tests) use super::super::scratch_dir::ScratchDir;
 use super::super::*;
 use crate::protocol::contract::AgentLaunch;
 use crate::runtime::backends::filesystem::mounts::real_writable_mounts;
 
-pub(super) fn temp() -> tempfile::TempDir {
-    tempfile::tempdir().expect("tempdir")
+pub(super) fn temp() -> ScratchDir {
+    ScratchDir::new(std::env::temp_dir(), "ascout-fs-test-").expect("tempdir")
 }
 
-pub(super) fn btrfs_temp() -> tempfile::TempDir {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/tmp");
-    fs::create_dir_all(&root).unwrap();
-    tempfile::Builder::new()
-        .prefix("fs-test-")
-        .tempdir_in(root)
-        .expect("tempdir under target/tmp")
+pub(super) fn btrfs_temp() -> ScratchDir {
+    ScratchDir::new("/var/tmp", "ascout-fs-test-").expect("tempdir under /var/tmp")
 }
 
-pub(super) fn separate_state_tempdir(workspace: &Path) -> Option<tempfile::TempDir> {
-    for target in real_writable_mounts() {
-        if workspace.starts_with(&target) {
-            continue;
-        }
-        if let Ok(directory) = tempfile::Builder::new()
-            .prefix("ascout-state-")
-            .tempdir_in(&target)
-        {
-            return Some(directory);
-        }
-    }
-    None
+pub(super) fn separate_state_tempdir(workspace: &Path) -> Option<ScratchDir> {
+    tempdir_outside_mounts(workspace, &[])
 }
 
 pub(super) fn overlapping_state_config(state: impl Into<PathBuf>) -> FilesystemConfig {
@@ -40,18 +25,12 @@ pub(super) fn overlapping_state_config(state: impl Into<PathBuf>) -> FilesystemC
 pub(super) fn tempdir_outside_mounts(
     workspace: &Path,
     isolated: &[PathBuf],
-) -> Option<tempfile::TempDir> {
+) -> Option<ScratchDir> {
     for target in real_writable_mounts() {
-        if workspace.starts_with(&target) {
+        if workspace.starts_with(&target) || isolated.iter().any(|mount| mount == &target) {
             continue;
         }
-        if isolated.iter().any(|mount| mount == &target) {
-            continue;
-        }
-        if let Ok(directory) = tempfile::Builder::new()
-            .prefix("ascout-state-")
-            .tempdir_in(&target)
-        {
+        if let Ok(directory) = ScratchDir::new(&target, "ascout-state-") {
             return Some(directory);
         }
     }
@@ -91,7 +70,7 @@ pub(super) fn new_overlay_backend(root: &Path) -> FilesystemBackend {
 pub(super) fn layout_backend(
     workspace: &Path,
     flatten_entry_limit: usize,
-) -> Option<(tempfile::TempDir, FilesystemBackend)> {
+) -> Option<(ScratchDir, FilesystemBackend)> {
     let state = separate_state_tempdir(workspace)?;
     let mut config = FilesystemConfig::new(state.path().join("state"));
     config.force_overlay = true;
@@ -593,25 +572,21 @@ pub(super) fn priv_enabled() -> bool {
 }
 
 pub(super) fn priv_state_root() -> PathBuf {
-    let root = std::env::var_os("ASCOUT_PRIV_STATE_DIR")
+    std::env::var_os("ASCOUT_PRIV_STATE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/tmp/ascout-priv-check"));
-    fs::create_dir_all(&root).unwrap();
-    root
+        .unwrap_or_else(|| PathBuf::from("/var/tmp"))
 }
 
 /// A separate workspace mount keeps privileged tests on Chain. Require an explicit path.
 pub(super) fn priv_workspace_root() -> PathBuf {
-    let root = std::env::var_os("ASCOUT_PRIV_WORKSPACE_DIR")
+    std::env::var_os("ASCOUT_PRIV_WORKSPACE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             panic!(
-                "ASCOUT_PRIV_TESTS=1 requires ASCOUT_PRIV_WORKSPACE_DIR to name a writable \
+                "ASCOUT_PRIV_TESTS=1 requires ASCOUT_PRIV_WORKSPACE_DIR to name an existing writable \
                      directory on a mount different from ASCOUT_PRIV_STATE_DIR"
             )
-        });
-    fs::create_dir_all(&root).unwrap();
-    root
+        })
 }
 
 pub(super) fn trash_is_empty(path: &Path) -> bool {
