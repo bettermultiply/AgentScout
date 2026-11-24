@@ -44,8 +44,8 @@ fn waiting() -> AgentMessage {
 }
 
 #[test]
-fn held_authority_prediction_failure_or_empty_releases_tool_and_model_once() {
-    use crate::control_plane::gateway::agent::protocol::ActionKind;
+fn held_authority_prediction_failure_or_abstention_releases_tool_and_model_once() {
+    use crate::control_plane::gateway::agent::protocol::{ActionKind, ActionStatus};
     for kind in [ActionKind::ToolExecution, ActionKind::ModelInference] {
         for failure in [false, true] {
             let (mut tree, _root) = task();
@@ -72,30 +72,31 @@ fn held_authority_prediction_failure_or_empty_releases_tool_and_model_once() {
                     },
                 )
                 .unwrap();
-            assert_eq!(actions.commands.iter().filter(|c| matches!(c, AgentCommand::ResolvePending { outcome: Some(value), .. } if value["phase"] == "execute")).count(), 1, "{kind:?}, failure={failure}");
-            assert_eq!(tree.chances["chance-1"].authority, AuthorityState::Fetching);
+            assert!(matches!(actions.commands.as_slice(), [AgentCommand::ResolvePending { operation_id, outcome: Some(value), .. }]
+                if operation_id == "op" && *value == json!({"phase":"execute", "speculation_skipped":true})));
+            assert!(matches!(tree.chances["chance-1"].stage, ChanceStage::Discarded(_)));
+            assert_eq!(tree.chances["chance-1"].authority, AuthorityState::NotRequested);
+            assert!(!tree.chance_waiting_live(&tree.chances["chance-1"]));
+
+            let status = if kind == ActionKind::ToolExecution { ActionStatus::Failed } else { ActionStatus::Succeeded };
+            let result = json!({"output":"action output"});
+            let commands = tree.handle_message(AgentMessage::ActionFinished {
+                task_id: String::new(),
+                branch_id: "authority".into(),
+                action_id: "op".into(),
+                action_kind: kind,
+                status,
+                result: result.clone(),
+                evidence: None,
+                timestamp_ms: 1,
+            }).unwrap();
+            assert!(commands.is_empty());
+            let fact = &tree.action_facts["authority"]["op"];
+            assert_eq!(fact.status, status);
+            assert_eq!(fact.result.as_ref(), Some(&result));
+            assert!(!tree.drain_records().iter().any(|record| record["message"] == "feedback_conflict"));
             assert!(tree.progress(&RuntimeCapabilities::default()).unwrap().commands.is_empty());
-            if kind == ActionKind::ModelInference {
-                tree.handle_message(AgentMessage::ActionFinished {
-                    task_id: String::new(),
-                    branch_id: "authority".into(),
-                    action_id: "op".into(),
-                    action_kind: kind,
-                    status: crate::control_plane::gateway::agent::protocol::ActionStatus::Succeeded,
-                    result: json!({"tool_calls":[]}),
-                    evidence: None,
-                    timestamp_ms: 1,
-                })
-                .unwrap();
-                assert_eq!(
-                    tree.chances["chance-1"].authority,
-                    AuthorityState::Arrived,
-                    "fallback result must remain paired after predict failure"
-                );
-                let actions = tree.progress(&RuntimeCapabilities::default()).unwrap();
-                assert!(actions.commands.iter().any(|c| matches!(c, AgentCommand::ResolvePending { outcome: Some(value), .. } if value["phase"] == "continue")));
-                assert!(!tree.progress(&RuntimeCapabilities::default()).unwrap().commands.iter().any(|c| matches!(c, AgentCommand::ResolvePending { .. })));
-            }
+            assert!(!tree.chances.contains_key("chance-1"));
         }
     }
 }

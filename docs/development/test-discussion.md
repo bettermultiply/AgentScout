@@ -21,6 +21,7 @@
 | 首次准入曾因缺失 `has_predictor` 失败。仓库 fixture 支持手工事件和本地 SSE 复跑，也覆盖 Promote 后在途模型等待点曾丢失的故障。 | `node --test tests/predictor-fact.mjs tests/predictor-fact-e2e.mjs` |
 | Django Run 3 中，PyYAML 将未加引号的 `off` 读成 `False`，而验证命令的启动错误被当作测试失败。保留 YAML 配置和布尔回退检查，以及启动错误拒绝和真实断言失败匹配检查。 | `python3 -m unittest tests/policy-info-match.py`，`node --test tests/coding-policy-e2e.mjs` |
 | `spx-p2-7` 中，工具结果候选重复执行了会修改工作区的测试命令，并消耗了额外推理。回归保留只读检查，阻止非只读工具和第二次推理。预测工具调用执行真实验证后停在推理前。端到端检查覆盖验证运行中和暂停后的 Promote，以及先空 Yield、再交付验证输出并在物化前清理的路径。 | `python3 -m unittest tests/policy-info-match.py`，`node --test tests/coding-policy-e2e.mjs` |
+| `dj-s3-3` 与 `spx-s3-4` 中，模型 Chance 弃权后等候 Yield 才放行，Pi 又等待不会到来的 `continue`。即时与延迟放行都在 Chance 已终止或不存在时发送 `speculation_skipped` 并结清投机等待，不影响实际动作结果。回归检查 Pi 收到后续写工具调用、写入物化且任务完成。 | `cargo test --offline --lib abstaining_model_chance_releases_authority_after_yield`，`cargo test --offline --lib held_authority_prediction_failure_or_abstention_releases_tool_and_model_once`，`node --test tests/coding-policy-e2e.mjs` |
 | 已结束的 run 曾在继承历史送完前报告 `ready`。回归扣住首条历史消息，检查输入保持关闭，并在首次就绪时核对完整历史。 | `node --test tests/resume-ended.mjs` |
 
 ## 待核实与覆盖缺口

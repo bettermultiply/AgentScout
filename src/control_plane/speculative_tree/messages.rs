@@ -643,15 +643,21 @@ impl SpeculativeTree {
             // Runtime operation. Its result/receipt is collected separately.
             return Ok(());
         }
-        self.complete_operation(
-            branch_id,
-            Some(operation_id),
-            if status == ActionStatus::Succeeded {
-                OperationStatus::Succeeded
-            } else {
-                OperationStatus::Failed
-            },
-        )?;
+        // The ActionFinished fact records the tool result independently of the
+        // speculation wait, which may already have been settled at execute.
+        if self.branch(branch_id)?.pending_operations.iter().any(|operation| {
+            operation.operation_id == operation_id && operation.status == OperationStatus::Requested
+        }) {
+            self.complete_operation(
+                branch_id,
+                Some(operation_id),
+                if status == ActionStatus::Succeeded {
+                    OperationStatus::Succeeded
+                } else {
+                    OperationStatus::Failed
+                },
+            )?;
+        }
         Ok(())
     }
 

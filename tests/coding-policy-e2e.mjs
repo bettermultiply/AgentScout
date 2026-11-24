@@ -337,7 +337,7 @@ for (const admit of [false, true]) test(`Yield batches results before ${admit ? 
     const first = 'YIELD_FIRST_COMPLETED';
     const second = 'YIELD_SECOND_COMPLETED';
     const log = root => fs.readFileSync(runPath(root, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).map(JSON.parse);
-    const {rows, done, shutdown} = await fixture(t, async (messages, model, root) => {
+    const {rows, done, root, shutdown} = await fixture(t, async (messages, model, root) => {
         const id = lastTool(messages)?.tool_call_id?.split('|')[0];
         if (model === 'candidate' && !id) return {tool_calls: [
             ...tool('yield-shared', 'read', {path: 'value.txt', limit: 2}).tool_calls,
@@ -372,6 +372,8 @@ for (const admit of [false, true]) test(`Yield batches results before ${admit ? 
         assert.equal(input.split(workspace).length - 1, 1, input);
         assert.equal(input.split(first).length - 1, 1, input);
         assert.equal(input.split(second).length - 1, 1, input);
+        if (id === 'yield-authority-work') return tool('yield-authority-edit', 'write', {path: 'value.txt', content: 'edited after Yield'});
+        assert.equal(id, 'yield-authority-edit');
         return {content: 'Authority finished.'};
     }, (root, write) => {
         execFileSync('mkfifo', [join(root, 'authority-read-fifo')]);
@@ -404,12 +406,27 @@ def extent_keep_running(data, *, policy_config, capabilities):
         ? event.message === 'speculative_admission_request' && event.branch_id === 'authority'
         : event.message === 'model_inference_boundary' && event.branch_id === 'authority');
     assert.ok(boundary, 'the next Authority boundary must settle Yield before inference');
-    if (admit) assert.ok(events.some(event => event.observation?.reason === 'active_explore_branch'));
+    if (admit) {
+        const chance = events.find(event => event.observation?.event === 'chance_created'
+            && event.observation.parent_branch_id === 'authority' && event.observation.operation_id === boundary.action_id);
+        assert.ok(chance, 'the batched Yield boundary admits a Chance');
+        const abstained = events.find(event => event.observation?.chance_id === chance.observation.chance_id
+            && event.observation.reason === 'active_explore_branch');
+        assert.deepEqual(abstained?.observation.stage, {discarded: 'not_selected'});
+        assert.ok(events.indexOf(chance) < events.indexOf(abstained) && events.indexOf(abstained) < events.indexOf(yields[1]));
+    }
     assert.equal(new Set(events.filter(event => event.message === 'candidate_created').map(event => event.branch_id)).size, 1);
     assert.ok(events.indexOf(yields[0]) < events.indexOf(completed[0]));
     assert.ok(events.indexOf(completed[1]) < events.indexOf(boundary));
     assert.ok(events.indexOf(boundary) < events.indexOf(yields[1]));
     assert.equal(yields[1].part.results.length, 2);
+    const edit = events.find(event => event.message === 'action_finished' && event.action_id === 'yield-authority-edit');
+    assert.equal(edit?.status, 'succeeded');
+    const inference = events.find(event => event.message === 'action_finished' && event.branch_id === 'authority'
+        && event.action_id === boundary.action_id);
+    assert.equal(inference?.result.tool_calls?.[0]?.id, 'yield-authority-edit');
+    assert.ok(events.indexOf(yields[1]) < events.indexOf(inference) && events.indexOf(inference) < events.indexOf(edit));
+    assert.equal(fs.readFileSync(runPath(root, 'workspace/value.txt'), 'utf8'), 'edited after Yield');
     const cleaned = events.findIndex(event => event.message === 'command_result' && event.branch_id === candidate
         && event.operation === 'cleanup' && event.status === 'applied');
     assert.ok(cleaned > events.indexOf(yields[1]) && cleaned < events.findIndex(event => event.message === 'materialization_started'));

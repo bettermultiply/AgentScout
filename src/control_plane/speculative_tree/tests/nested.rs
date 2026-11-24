@@ -457,7 +457,7 @@ fn check_stopped_yield_batch(finishing: bool) {
         if branch_id == &candidate)));
     let actions = tree.progress(&capabilities).unwrap();
     assert_eq!(actions.commands.iter().any(|op| matches!(op, AgentCommand::ResolvePending { operation_id, outcome: Some(outcome), .. }
-        if operation_id == "next-model" && outcome["phase"] == "execute")), !finishing);
+        if operation_id == "next-model" && *outcome == json!({"phase":"execute", "speculation_skipped":true}))), !finishing);
     assert!(!tree.candidate_due(&candidate));
 }
 
@@ -502,7 +502,25 @@ fn abstaining_model_chance_releases_authority_after_yield() {
         if outcome["notification"] == "new output"));
     let actions = tree.progress(&capabilities).unwrap();
     assert!(matches!(actions.commands.as_slice(), [AgentCommand::ResolvePending { operation_id, outcome: Some(outcome), .. }]
-        if operation_id == "next-model" && outcome["phase"] == "execute"));
+        if operation_id == "next-model" && *outcome == json!({"phase":"execute", "speculation_skipped":true})));
+    let operation = tree.branch_mut("authority").unwrap().pending_operations.iter_mut()
+        .find(|op| op.operation_id == "next-model").unwrap();
+    assert_eq!(operation.status, OperationStatus::Succeeded);
+    operation.deadline_at = Some(0);
+    tree.handle_message(AgentMessage::ActionStarted {
+        task_id: "task-1".into(), branch_id: "authority".into(), action_id: "next-model".into(),
+        action_kind: ActionKind::ModelInference, name: "model_inference".into(), arguments: json!({}),
+        parent_action_id: None, checkpoint: None, timestamp_ms: 13,
+    }).unwrap();
+    tree.handle_message(AgentMessage::ActionFinished {
+        task_id: "task-1".into(), branch_id: "authority".into(), action_id: "next-model".into(),
+        action_kind: ActionKind::ModelInference, status: ActionStatus::Succeeded,
+        result: json!("model output"), evidence: None, timestamp_ms: 14,
+    }).unwrap();
+    let actions = tree.progress(&capabilities).unwrap();
+    assert!(!tree.chances.contains_key("chance-3"));
+    assert!(!actions.commands.iter().any(|command| matches!(command,
+        AgentCommand::ResolvePending { operation_id, .. } if operation_id == "next-model")));
 }
 
 #[test]

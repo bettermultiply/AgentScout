@@ -195,13 +195,7 @@ impl SpeculativeTree {
         }
         if self.has_pending_yield(parent) { return Ok(()) }
         let (parent, operation, chance) = self.model_inference_boundary.take().unwrap();
-        if let Some(chance) = chance
-            && self.chances.get(&chance).is_some_and(|chance| !chance.stage.is_terminal())
-        {
-            self.change_authority_state(&chance, AuthorityState::Fetching)?;
-        }
-        actions.commands.push(self.resolve_pending(&parent, &operation, json!({"phase":"execute"}))?);
-        Ok(())
+        self.release_authority(&parent, &operation, chance.as_deref(), actions)
     }
 
     fn has_pending_yield(&self, parent: &str) -> bool {
@@ -712,21 +706,34 @@ impl SpeculativeTree {
             && self.authority_branch_id.as_deref() == Some(&chance.parent_branch_id)
             && self.has_pending_yield(&chance.parent_branch_id)
         {
-            let pending = (!chance.stage.is_terminal()).then(|| id.to_owned());
-            self.model_inference_boundary = Some((chance.parent_branch_id, chance.operation_id, pending));
+            self.model_inference_boundary = Some((chance.parent_branch_id, chance.operation_id, Some(id.to_owned())));
             return Ok(());
         }
-        self.change_authority_state(id, AuthorityState::Fetching)?;
         if self.model_inference_boundary.as_ref().is_some_and(|(parent, operation, _)| {
             parent == &chance.parent_branch_id && operation == &chance.operation_id
         }) {
             self.model_inference_boundary = None;
         }
-        actions.commands.push(self.resolve_pending(
-            &chance.parent_branch_id,
-            &chance.operation_id,
-            json!({"phase":"execute"}),
-        )?);
+        self.release_authority(&chance.parent_branch_id, &chance.operation_id, Some(id), actions)
+    }
+
+    fn release_authority(
+        &mut self,
+        parent: &str,
+        operation: &str,
+        chance: Option<&str>,
+        actions: &mut ControlActions,
+    ) -> io::Result<()> {
+        let outcome = if let Some(id) = chance.filter(|id| {
+            self.chances.get(*id).is_some_and(|chance| !chance.stage.is_terminal())
+        }) {
+            self.change_authority_state(id, AuthorityState::Fetching)?;
+            json!({"phase":"execute"})
+        } else {
+            self.complete_operation(parent, Some(operation), OperationStatus::Succeeded)?;
+            json!({"phase":"execute", "speculation_skipped":true})
+        };
+        actions.commands.push(self.resolve_pending(parent, operation, outcome)?);
         Ok(())
     }
 
