@@ -369,6 +369,42 @@ class CodingPolicyTests(unittest.TestCase):
         live = {'proposal_provenance': {'kind': 'active_post_edit_test'}}
         self.assertTrue(predict([baseline, edit], process={'active_branches': [live]})['abstain'])
 
+    def test_model_candidate_delivers_pre_mutation_verification_once(self):
+        def check(id, command, output, status='succeeded', started=60):
+            return {**self.action(id, 'bash', {'command': command}, output, status),
+                    'started_at_ms': started, 'timestamp_ms': 70}
+
+        edit = {**self.action('edit', 'edit', {'path': 'src.py'}), 'timestamp_ms': 50}
+        passed = check('pass', 'pytest tests', '4 passed')
+        failed = check('fail', 'pytest tests/unit', 'AssertionError: wrong value\n1 failed', 'failed')
+        repeated = check('repeat', 'python3 -m pytest tests/unit', 'AssertionError: wrong value\n2 failed', 'failed')
+        stale = check('stale', 'pytest tests/stale', '1 passed', started=40)
+        comparison = check('baseline', 'cd .task-tmp/baseline && pytest', '1 passed')
+        invocation = check('invocation', 'pytest tests/bad', 'pytest: command not found', 'failed')
+        branch = {'speculation_kind': 'model_inference'}
+        context = {'candidate': branch, 'candidate_proposal': {'model_options': {'model': 'fixture/fast'}},
+                   'authority_history': [edit], 'authority_outcome': {'tool_calls': []},
+                   'candidate_results': [stale, comparison, invocation, passed, failed, repeated, edit,
+                                         check('after', 'pytest tests/after', 'AssertionError: wrong value\n1 failed', 'failed')]}
+
+        def dispose(resolution):
+            return self.decisions['dispose']({'resolution': resolution, 'context': context},
+                                            policy_config={}, capabilities={})['actions']
+
+        for resolution, intent in [('rejected', 'Yield'), ('preempted', 'Salvage')]:
+            action = dispose(resolution)[0]
+            self.assertEqual(action['intent'], intent)
+            results = action['results']
+            self.assertEqual([result['id'] for result in results], ['pass', 'repeat'])
+            self.assertIn('4 passed', results[0]['notification'])
+            self.assertIn('2 failed', results[1]['notification'])
+            self.assertTrue(all(result['files'] == [] for result in results))
+
+        branch['yielded_action_ids'] = ['fail']
+        self.assertEqual([result['id'] for result in dispose('rejected')[0]['results']], ['pass'])
+        context['authority_history'].append(passed)
+        self.assertEqual(dispose('rejected'), [{'intent': 'Yield', 'results': []}])
+
     def test_verify_extent_allows_only_missing_post_edit_verification(self):
         state = {'steps_completed': 1, 'phase': 'tool_execution', 'semantic_facts': {
             'speculation_kind': 'tool_execution', 'next_action': bash('pytest')}}
@@ -407,10 +443,13 @@ class CodingPolicyTests(unittest.TestCase):
             return self.decisions['dispose']({'resolution': resolution, 'context': context}, policy_config={}, capabilities={})['actions']
 
         for entries in ([first], [first, passed, latest], [first, bad_invocation],
-                        [first, failed_edit, passed], [first, outside_test], [outside_edit, passed],
+                        [first, failed_edit, passed], [first, outside_test],
                         [first, {**passed, 'started_at_ms': 9, 'timestamp_ms': 11}]):
             with self.subTest(entries=entries):
                 self.assertEqual([r['id'] for r in dispose('accepted', entries)[0]['results']], ['read'])
+        outside_results = dispose('accepted', [outside_edit, passed])[0]['results']
+        self.assertEqual([r['id'] for r in outside_results], ['pass', 'read'])
+        self.assertTrue(all(r['files'] == [] for r in outside_results))
         for resolution in ('accepted', 'extent_reached'):
             actions = dispose(resolution, [first, latest, passed], {'yield_only': resolution != 'accepted'})
             self.assertEqual([item['intent'] for item in actions], ['Salvage'] + (['Discard'] if resolution != 'accepted' else []))

@@ -296,10 +296,11 @@ def launch(data, *, policy_config, capabilities):
 
 
 def _candidate_settings(config, prefix):
-    model = config.get(prefix + 'candidate_model', 'deepseek/deepseek-flash')
+    defaults = config if prefix == 'early_modify_' else {}
+    model = config.get(prefix + 'candidate_model', defaults.get('candidate_model', 'deepseek/deepseek-flash'))
     if not model:
         return {}
-    thinking = config.get(prefix + 'candidate_thinking', 'off')
+    thinking = config.get(prefix + 'candidate_thinking', defaults.get('candidate_thinking', 'off'))
     settings = {'model': model, 'thinking': 'off' if thinking is False else thinking}
     guidance = config.get(prefix + 'candidate_guidance')
     if guidance:
@@ -328,8 +329,10 @@ def predict(data, *, policy_config, capabilities):
         data.get('history', []), chance, policy_config.get('readonly_reset_steps', 2), process.get('workspace'))
     if stage == 'verify':
         command = chance['arguments']['command']
+        if not _workspace_verification(command):
+            return {'abstain': True, 'reason': 'non_workspace_verification'}
         phase, failures = 'baseline_check', [False]
-        if _workspace_verification(command) and not _narrow_verification(command):
+        if not _narrow_verification(command):
             if edits == {'test'}:
                 phase, failures = 'tdd_repro', [True]
             elif 'source' in edits:
@@ -355,14 +358,21 @@ def predict(data, *, policy_config, capabilities):
                 {'name': 'bash', 'arguments': {'command': main_command}}]},
             'provenance': {'kind': 'active_post_edit_test'},
         }]}
-    if stage == 'modify_early' and not policy_config.get('speculate_early_modify', False):
-        return {'abstain': True, 'reason': stage}
+    if stage == 'modify_early':
+        if not policy_config.get('speculate_early_modify', False):
+            return {'abstain': True, 'reason': stage}
+        if (any(map(_verification_entry, process.get('authority_active_tools', [])))
+                or any(not branch.get('yield_only') and (
+                    branch.get('speculation_kind') == 'model_inference'
+                    or (branch.get('proposal_provenance') or {}).get('kind') == 'active_post_edit_test')
+                       for branch in branches)):
+            return {'abstain': True, 'reason': 'verification_disabled_or_running'}
     if stage == 'explore' and any(
             not branch.get('yield_only') and branch.get('speculation_kind') == 'model_inference'
             and (branch.get('proposal_provenance') or {}).get('kind') != 'active_post_edit_test'
             for branch in branches):
         return {'abstain': True, 'reason': 'active_explore_branch'}
-    settings = _candidate_settings(policy_config, '')
+    settings = _candidate_settings(policy_config, 'early_modify_' if stage == 'modify_early' else '')
     if not settings:
         return {'abstain': True, 'reason': 'candidate_model_disabled'}
     result = {'predict': 'branch_model', **settings}
@@ -573,22 +583,21 @@ def _match_model(proposal, outcome, context, config):
 
     workspace = context.get('workspace')
     verification = []
-    if proactive:
-        current_checks, last_edit = [], None
-        for entry in reversed(context.get('authority_history') or []):
-            if _mutation(entry, workspace):
-                last_edit = entry.get('timestamp_ms')
-                break
-            current_checks.extend(_history_verifications(entry))
-        for entry in actions:
-            if _mutation(entry, workspace):
-                break
-            if _completed_verification(entry):
-                command = entry['arguments']['command']
-                if (_started_after(entry, last_edit)
-                        and not any(_started_after(check, last_edit) and _covers_verification(check, command)
-                                    for check in current_checks)):
-                    verification.append(entry)
+    current_checks, last_edit = [], None
+    for entry in reversed(context.get('authority_history') or []):
+        if _mutation(entry, workspace):
+            last_edit = entry.get('timestamp_ms')
+            break
+        current_checks.extend(_history_verifications(entry))
+    for entry in actions:
+        if _mutation(entry, workspace):
+            break
+        if _completed_verification(entry):
+            command = entry['arguments']['command']
+            if (_started_after(entry, last_edit)
+                    and not any(_started_after(check, last_edit) and _covers_verification(check, command)
+                                for check in current_checks)):
+                verification.append(entry)
     safe = _safe_results(verification + _readonly_results(actions, calls, workspace), config,
                          set(candidate.get('yielded_action_ids') or []))
     return {'verdict': 'incompatible', 'score': 0.0, 'details': {'safe_results': safe}}

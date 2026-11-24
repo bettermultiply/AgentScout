@@ -292,7 +292,9 @@ test('Explore yields novel reads before inference and retires after an Authority
         const id = lastTool(messages)?.tool_call_id?.split('|')[0];
         if (model === 'candidate') {
             if (!id) {
-                assert.match(JSON.stringify(messages), /Use read-only tools/);
+                assert.equal(messages.at(-2).role, 'user');
+                assert.deepEqual(messages.at(-1), {role: 'user', content:
+                    'Use read-only tools to locate relevant files, symbols, and call chains. Do not edit files or write a long summary.'});
                 return tool('candidate-read', 'read', {path: 'other.txt'});
             }
             if (id === 'candidate-read') return tool('candidate-write', 'write', {path: 'value.txt', content: 'candidate only'});
@@ -518,15 +520,22 @@ def first_two_rounds(data, *, policy_config, capabilities):
 });
 
 test('tool Proposal selects candidate inference settings and restores Authority on Promote', {timeout: 45000}, async t => {
+    let authorityPrefix;
     let sawCandidate = false;
     let sawRestored = false;
     const guide = 'Only the speculative model should receive this guidance.';
     const {done, rows, root, requests, shutdown} = await fixture(t, (messages, model, _, thinking) => {
         const last = lastTool(messages);
-        if (!last) return tool('verify', 'bash', {command: './pytest'});
+        if (!last) {
+            authorityPrefix = messages;
+            return tool('verify', 'bash', {command: './pytest'});
+        }
         if (model === 'candidate') {
             assert.equal(thinking, 'low');
-            assert.ok(JSON.stringify(messages).includes(guide));
+            assert.deepEqual(messages.slice(0, authorityPrefix.length), authorityPrefix);
+            assert.equal(messages.at(-2), last);
+            assert.equal(last.content, 'All tests passed.');
+            assert.deepEqual(messages.at(-1), {role: 'user', content: [{type: 'input_text', text: guide}]});
             sawCandidate = true;
             return tool('after-promotion', 'read', {path: 'result.txt'});
         }
@@ -559,6 +568,7 @@ def dispose_with_promotion(data, *, policy_config, capabilities):
         return manifest;
     }, {modelIds: ['agent', 'candidate'], reasoning: true, responses: true});
     assert.ok(sawCandidate && sawRestored);
+    assert.ok(!JSON.stringify(rows('session.jsonl')).includes(guide));
     assert.ok(rows().some(event => event.disposition === 'Promote' && event.branch_id === done.branch_id));
     assertSharedCacheKey(root, requests, ['authority', done.branch_id]);
     await shutdown();

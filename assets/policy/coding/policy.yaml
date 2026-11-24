@@ -34,7 +34,11 @@ decisions:
       candidate_thinking: "off"
       candidate_guidance: Use read-only tools to locate relevant files, symbols, and call chains. Do not edit files or write a long summary.
       candidate_count: 1
-      speculate_early_modify: false
+      speculate_early_modify: true
+      early_modify_candidate_guidance: >-
+        Authority has edited workspace files and has no known main verification command.
+        Immediately choose and run the most appropriate workspace verification command for the current changes.
+        Do not edit files before verifying.
       active_post_edit_test: true
       adaptive_dual_tool_speculation: true
       fail_candidate_model: deepseek/deepseek-flash

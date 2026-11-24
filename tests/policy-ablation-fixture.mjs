@@ -37,7 +37,23 @@ test('Explore → Modify-Early → Modify-Ready → Verify → Explore', () => {
     const guide = {candidate_model: 'fixture/fast', candidate_guidance: 'Find relevant code.'};
     assert.deepEqual(predict([], model, guide), {predict: 'branch_model', model: 'fixture/fast', thinking: 'off', candidate_guidance: 'Find relevant code.'});
     assert.deepEqual(predict([edit]), {abstain: true, reason: 'modify_early'});
-    assert.equal(predict([edit], model, {speculate_early_modify: true}).predict, 'branch_model');
+    const early = {...guide, speculate_early_modify: true, candidate_thinking: 'low',
+        early_modify_candidate_guidance: 'Verify the workspace before editing.'};
+    const expected = {predict: 'branch_model', model: 'fixture/fast', thinking: 'low',
+        candidate_guidance: early.early_modify_candidate_guidance};
+    assert.deepEqual(predict([edit], model, early), expected);
+    assert.deepEqual(predict([edit], model, {...early, early_modify_candidate_model: 'fixture/verify',
+        early_modify_candidate_thinking: false}), {...expected, model: 'fixture/verify', thinking: 'off'});
+    for (const branch of [{speculation_kind: 'model_inference'},
+        {proposal_provenance: {kind: 'active_post_edit_test'}}]) {
+        assert.ok(predict([edit], model, early, {active_branches: [branch]}).abstain);
+        const draining = {...branch, yield_only: true, active_tools: [main]};
+        assert.deepEqual(predict([edit], model, early, {active_branches: [draining]}), expected);
+        const shared = predict([edit], model, {...early, share_inflight_commands: true}, {active_branches: [draining]});
+        assert.ok(shared.candidate_guidance.startsWith(expected.candidate_guidance));
+        assert.ok(shared.candidate_guidance.includes(main.arguments.command));
+    }
+    assert.ok(predict([edit], model, early, {authority_active_tools: [main]}).abstain);
     const ready = predict([failure, edit]);
     assert.deepEqual(ready.proposals[0], {
         payload: {kind: 'predicted_tool_calls', tool_calls: [{name: 'bash', arguments: main.arguments}]},
@@ -54,6 +70,13 @@ test('Explore → Modify-Early → Modify-Ready → Verify → Explore', () => {
     assert.equal(predict([failure, edit], bash(main.arguments.command)).proposals.length, 2);
     assert.equal(predict([failure, edit, main]).predict, 'branch_model');
     assert.equal(predict([edit, failure, read('a'), {kind: 'model_inference'}, read('b')]).predict, 'branch_model');
+});
+
+test('comparison verification outside the workspace abstains', () => {
+    for (const command of ['cd .task-tmp/baseline && pytest tests', 'cd /tmp/work && pytest',
+        'cd ../baseline && pytest', 'cd src && cd ".test copies/baseline" && pytest']) {
+        assert.deepEqual(predict([edit], bash(command)), {abstain: true, reason: 'non_workspace_verification'}, command);
+    }
 });
 
 test('an active explorer only suppresses exploration predictions', () => {
@@ -125,7 +148,6 @@ test('verification bets use native output and independent model settings', () =>
     assert.deepEqual(bets([edit, verified('pytest tests', {status: 'failed', is_error: true})]), [false]);
     assert.deepEqual(bets([edit, verified('python3 -m pytest tests')]), [false]);
     assert.deepEqual(bets([edit], 'pytest tests', {adaptive_dual_tool_speculation: false}), [false]);
-    assert.deepEqual(bets([edit], 'cd .baseline && pytest tests'), [false]);
     for (const command of ['pytest -k test_foo', 'pytest -ktest_foo', 'pytest -k "test_one and not slow"',
         'pytest -k "not slow" tests/test_sample.py::test_one',
         'cd src && TMPDIR="$PWD/tmp" python -m pytest --basetemp="$PWD/tmp" tests/test_sample.py::TestClass::test_one']) {

@@ -544,9 +544,7 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     await report({message:'action_started',task_id:taskId,branch_id:branch,action_id:actionId,action_kind:'model_inference',name:'model',arguments:modelArguments,timestamp_ms:startedAt});
     // Scope the guidance to this request. Promotion can release a parked hook.
     if (candidateModelAction && branch !== authority && modelForks.get(branch) === fork && fork.candidateGuidance) {
-        const index = context.messages[0]?.role === 'system' ? 1 : 0;
-        context.messages = [...context.messages.slice(0, index),
-            {role:'system', content:fork.candidateGuidance, timestamp:0}, ...context.messages.slice(index)];
+        context.messages = [...context.messages, {role:'user', content:fork.candidateGuidance, timestamp:0}];
     }
     return async status=>{
         if(status==='succeeded')return;
