@@ -122,7 +122,7 @@ test('verification bets use native output and independent model settings', () =>
     assert.deepEqual(bets([]), [false]);
     assert.deepEqual(bets([testEdit]), [true]);
     assert.deepEqual(bets([edit]), [false, true]);
-    assert.deepEqual(bets([edit, verified('pytest tests', {is_error: true})]), [false, true]);
+    assert.deepEqual(bets([edit, verified('pytest tests', {status: 'failed', is_error: true})]), [false]);
     assert.deepEqual(bets([edit, verified('python3 -m pytest tests')]), [false]);
     assert.deepEqual(bets([edit], 'pytest tests', {adaptive_dual_tool_speculation: false}), [false]);
     assert.deepEqual(bets([edit], 'cd .baseline && pytest tests'), [false]);
@@ -236,14 +236,15 @@ test('safe results fit whole file or command output and deduplicate verification
     const entries = [report('old', 'pytest tests', 'old output'), report('full', 'python3 -m pytest -q tests', large),
         report('too-large', 'cargo test', 'z'.repeat(8_000)), result('small', 'a', 'small output')];
     const safe = match(proactive, {}, entries).details.safe_results;
-    assert.deepEqual(safe.map(r => r.id), ['full', 'small']);
+    assert.deepEqual(safe.map(r => r.id), ['full', 'too-large', 'small']);
     assert.ok(safe[0].notification.endsWith(large));
+    assert.ok(safe[1].notification.endsWith('z'.repeat(8_000)));
     const files = Array.from({length: 10}, (_, i) => result(`r${i}`, `p${i}`, 'data'));
-    assert.equal(match({}, null, files).details.safe_results.length, 4);
+    assert.equal(match({}, null, files).details.safe_results.length, 10);
     const manifest = readFileSync(resolve('assets/policy/coding/policy.yaml'), 'utf8');
-    assert.deepEqual([...manifest.matchAll(/safe_result_chars: (\d+)\s+safe_result_count: (\d+)/g)]
-        .map(([, chars, count]) => [Number(chars), Number(count)]), [[8000, 4], [8000, 4]]);
-    assert.deepEqual(match(proactive, {}, entries, {...candidate, yielded_action_ids: ['old']}).details.safe_results.map(r => r.id), ['small']);
+    assert.doesNotMatch(manifest, /safe_result_chars:/);
+    assert.deepEqual([...manifest.matchAll(/safe_result_count: (\d+)/g)].map(([, count]) => Number(count)), [4, 4]);
+    assert.deepEqual(match(proactive, {}, entries, {...candidate, yielded_action_ids: ['old']}).details.safe_results.map(r => r.id), ['too-large', 'small']);
 });
 
 test('rebalance retires stale explorers, failed branches, and oldest yield-only branch under pressure', () => {

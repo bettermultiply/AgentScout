@@ -232,7 +232,7 @@ for (const failure of [false, true]) test(`Verify ${failure ? 'Fail salvages ver
         if (id === 'test-edit') return tool('verify', 'bash', {command: './pytest'});
         if (id === 'verify' && last.content === expected) {
             assert.equal(model, failure ? 'candidate' : 'agent');
-            if (failure) assert.match(input, /Start with high-confidence checks/);
+            if (failure) assert.match(input, /Do not re-run the test suite right away; first inspect/);
             return tool('inspect', 'read', {path: 'app.py'});
         }
         if (id === 'inspect') return tool('candidate-edit', 'write', {path: 'app.py', content: 'value = 1\n'});
@@ -676,16 +676,17 @@ for (const scenario of ['running', 'finished', 'yield', 'salvage', 'recovery']) 
                 await waitEvent(root, event => event.branch_id === predictedExecution.branch_id && parked(event), 'park after verification');
                 return tool('authority-confirm', 'read', {path: 'value.txt'});
             }
-            assert.equal(id, yielding ? 'authority-confirm' : 'authority-read');
+            assert.ok((yielding ? ['authority-confirm'] : ['authority-read', 'authority-debug']).includes(id));
             assert.match(JSON.stringify(messages), /\[Speculative verification output.*POST_EDIT_RESULT/);
             assert.doesNotMatch(JSON.stringify(messages), /Candidate verification finished/);
+            if (salvage && id === 'authority-read') return tool('authority-debug', 'bash', {command: 'ls value.txt'});
             return {content: 'Authority finished'};
         }, (root, write) => {
             const policy = modelPolicy(root, write);
             fs.appendFileSync(join(root, 'policy', 'decisions.py'), `
 
 def after_source_edit_only(data, *, policy_config, capabilities):
-    return data['state']['steps_completed'] == 2
+    return data['state']['steps_completed'] ${salvage ? '>=' : '=='} 2
 `);
             fs.writeFileSync(policy, fs.readFileSync(policy, 'utf8')
                 .replace('function: feasibility_pass', 'function: after_source_edit_only'));
@@ -744,6 +745,10 @@ def after_source_edit_only(data, *, policy_config, capabilities):
             assert.equal(done.branch_id, 'authority');
             assert.ok(events.some(e => e.observation?.branch_id === candidate && e.observation.status === 'discarded'));
             assert.ok(disposition.part.results.every(result => result.files.length === 0));
+            assert.equal(events.filter(toolStarted).length, 1);
+            assert.equal(rows('session.jsonl').filter(e => e.customType === 'notification'
+                && e.content.includes('POST_EDIT_RESULT')).length, 1);
+            assert.ok(requests.some(request => request.model === 'candidate' && request.toolId === 'authority-debug'));
         }
         {
             const postTestRequests = requests.filter(request => request.toolId === execution.action_id

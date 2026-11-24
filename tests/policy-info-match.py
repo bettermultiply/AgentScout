@@ -298,6 +298,77 @@ class CodingPolicyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.decisions = runpy.run_path(str(CODING_POLICY / 'decisions.py'))
 
+    @staticmethod
+    def action(id, name, args, output='', status='succeeded'):
+        return {'action_id': id, 'tool_name': name, 'arguments': args, 'status': status,
+                'result': {'content': output}}
+
+    def test_scratch_writes_do_not_hide_later_reads(self):
+        action = self.action
+        after = action('read', 'read', {'path': 'sphinx/ext/autodoc.py'}, 'novel source')
+        for command in ('ls sphinx/ext/autodoc/ 2>/dev/null && python -V', 'cd var 2>/dev/null',
+                        'ls >/dev/null', 'ls 1> /dev/null', 'ls &>/dev/null', 'ls >> /dev/null',
+                        'mkdir -p .test-tmp /tmp/sphinx; rm -rf .baseline/old /tmp/sphinx/old',
+                        "cat > '.scratch/notes' <<'EOF'\n> this is data\nEOF",
+                        'cat <<EOF >/tmp/sphinx-notes\ntext\nEOF',
+                        'python -c \'from pathlib import Path; Path(".pytest-work/notes").write_text("ok")\''):
+            with self.subTest(command=command):
+                scratch = action('scratch', 'bash', {'command': command})
+                self.assertIsNone(self.decisions['_mutation'](scratch, None))
+                self.assertEqual(self.decisions['_readonly_results']([scratch, after], [], None), [after])
+        for path in ('./.test-tmp/file', '/tmp/sphinx/file'):
+            for tool_name in ('edit', 'write'):
+                self.assertIsNone(self.decisions['_mutation'](action('scratch', tool_name, {'path': path}), None))
+        for command in ('ls > output 2>/dev/null', 'mkdir -p .scratch src',
+                        'cat > .scratch/../src.py', 'rm /tmp/a src.py', 'cat > .scratch.txt'):
+            self.assertEqual(self.decisions['_mutation'](action('write', 'bash', {'command': command}), None), 'source')
+
+    def test_large_readonly_outputs_are_delivered_whole(self):
+        entries = [self.action(str(n), 'read', {'path': f'src/{n}.py'}, 'x' * n) for n in (9500, 15000)]
+        result = self.decisions['_safe_results']
+        for config in ({}, {'safe_result_chars': None, 'safe_result_count': None}):
+            self.assertEqual([item['notification'].partition('\n')[2] for item in result(entries, config, set())],
+                             [entry['result']['content'] for entry in entries])
+        self.assertEqual(result(entries, {'safe_result_chars': 8000}, set()), [])
+        self.assertEqual(len(result(entries, {'safe_result_count': 1}, set())), 1)
+
+    def test_failed_or_delivered_verification_covers_unchanged_files(self):
+        action = self.action
+        baseline = action('baseline', 'bash', {'command': 'pytest tests'}, '1 passed')
+        edit = {**action('edit', 'edit', {'path': 'src.py'}), 'timestamp_ms': 50}
+        failed = action('failed', 'bash', {'command': 'pytest tests'}, 'AssertionError: expected value\n1 failed', 'failed')
+        notice = {'role': 'custom', 'custom_type': 'notification', 'content':
+                  'Accepted result: [Speculative verification output collected on current files]: bash pytest tests\n1 failed'}
+        debug = action('rg', 'bash', {'command': 'rg broken src.py'})
+
+        def predict(history, chance=None, process=None):
+            return self.decisions['predict']({'history': history, 'chance_context': chance or {'kind': 'model_inference'},
+                                              'process_context': process or {}}, policy_config={}, capabilities={})
+
+        for verification in (failed, notice):
+            history = [baseline, edit, verification, debug]
+            self.assertEqual(predict(history).get('predict'), 'branch_model')
+            self.assertEqual(predict(history + [edit])['proposals'][0]['provenance']['kind'], 'active_post_edit_test')
+            self.assertEqual(predict(history + [edit], {'kind': 'bash', 'arguments': failed['arguments']})
+                             ['proposals'][0]['provenance']['phase'], 'post_source_edit')
+            context = {'candidate': {'speculation_kind': 'model_inference'}, 'candidate_results': [failed],
+                       'authority_history': history}
+            data = {'proposal': {'provenance': {'kind': 'active_post_edit_test'}},
+                    'outcome': {'tool_calls': [read('src.py')]}, 'match_context': context}
+            self.assertEqual(self.decisions['match_proposal'](data, policy_config={}, capabilities={})
+                             ['details']['safe_results'], [])
+            context['authority_history'] = history + [edit]
+            self.assertEqual(len(self.decisions['match_proposal'](data, policy_config={}, capabilities={})
+                                 ['details']['safe_results']), 1)
+        for invalid in ({**failed, 'result': {'content': 'pytest: command not found'}},
+                        {**failed, 'started_at_ms': 40, 'timestamp_ms': 60},
+                        {**failed, 'arguments': {'command': 'pytest -k smoke'}},
+                        {**notice, 'role': 'assistant'}):
+            self.assertEqual(predict([baseline, edit, invalid, debug])['proposals'][0]['provenance']['kind'],
+                             'active_post_edit_test')
+        live = {'proposal_provenance': {'kind': 'active_post_edit_test'}}
+        self.assertTrue(predict([baseline, edit], process={'active_branches': [live]})['abstain'])
+
     def test_verify_extent_allows_only_missing_post_edit_verification(self):
         state = {'steps_completed': 1, 'phase': 'tool_execution', 'semantic_facts': {
             'speculation_kind': 'tool_execution', 'next_action': bash('pytest')}}
@@ -367,6 +438,12 @@ class CodingPolicyTests(unittest.TestCase):
         config = policy['decisions']['predict']['policy_config']
         self.assertEqual(config['candidate_thinking'], 'off')
         self.assertIs(config['share_inflight_commands'], False)
+        guidance = config['fail_candidate_guidance']
+        self.assertIn('failure output has not arrived yet', guidance)
+        self.assertRegex(guidance, r'Do not re-run .*right away; first inspect .*call sites.*tests')
+        self.assertIn('Only run the workspace test command after editing files', guidance)
+        for decision in ('match', 'dispose'):
+            self.assertNotIn('safe_result_chars', policy['decisions'][decision]['policy_config'])
         self.assert_thinking_off(config)
 
     def test_predict_normalizes_yaml_boolean_false(self):

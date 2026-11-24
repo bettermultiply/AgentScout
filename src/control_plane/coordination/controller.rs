@@ -490,6 +490,7 @@ impl SpeculationCoordinator {
                         .map(|kind| format!("{kind:?}").to_lowercase()),
                 },
                 "process_context": {
+                    "workspace": tree.workspace(),
                     "observation": observation,
                     "active_branches": tree.pending_candidates().iter()
                         .map(|id| candidate_summary(tree, &tree.branches[id])).collect::<Vec<_>>(),
@@ -744,6 +745,13 @@ impl SpeculationCoordinator {
         let candidate_execution = &candidate_execution[inherited..];
         data["match_context"]["candidate_results"] =
             Value::Array(candidate_results(tree, candidate_id, candidate_execution));
+        data["match_context"]["workspace"] = json!(tree.workspace());
+        if declares_input(policy, Decision::Predict, "history") {
+            if let Some(parent) = parent {
+                data["match_context"]["authority_history"] =
+                    json!(branch_history(tree, parent, "", policy.history_max_entries()));
+            }
+        }
         if resolution.is_none() {
             result = self.evaluate(engine, policy, Decision::Match, &data)?;
         }
@@ -775,7 +783,8 @@ impl SpeculationCoordinator {
                     "candidate_proposal": proposal_view,
                     "candidate": data["match_context"]["candidate"],
                     "candidate_execution": candidate_execution,
-                    "candidate_results": data["match_context"]["candidate_results"]
+                    "candidate_results": data["match_context"]["candidate_results"],
+                    "authority_history": data["match_context"]["authority_history"]
                 }
             }),
         )?;
@@ -957,7 +966,8 @@ fn declares_input(policy: &CompiledPolicy, decision: Decision, input: &str) -> b
 fn branch_history(tree: &SpeculativeTree, branch: &str, operation: &str, max_entries: usize) -> Vec<Value> {
     let transcript = tree.transcripts.get(branch).into_iter().flatten().rev().take(max_entries).map(|entry| (
         entry["timestamp"].as_u64().unwrap_or(0),
-        json!({"role": entry["role"].as_str().map(summary), "content": content(&entry["content"])})
+        json!({"role": entry["role"].as_str().map(summary), "custom_type": entry["customType"].as_str().map(summary),
+            "content": content(&entry["content"])})
     ));
     let actions = recent_completed_actions(tree, branch, operation, max_entries);
     let mut history: Vec<_> = transcript.chain(actions.into_iter().rev().map(|entry| (entry["timestamp_ms"].as_u64().unwrap_or(0), entry))).collect();
@@ -995,7 +1005,7 @@ fn recent_completed_actions(tree: &SpeculativeTree, branch: &str, operation: &st
     facts.into_iter().rev().map(|fact| {
         let result = fact.result.as_ref().unwrap_or(&Value::Null);
         json!({"action_id": summary(&fact.action_id), "kind": fact.action_kind,
-            "timestamp_ms": fact.timestamp_ms, "status": fact.status,
+            "timestamp_ms": fact.timestamp_ms, "started_at_ms": fact.started_at_ms, "status": fact.status,
             "tool_name": result["tool_name"].as_str().map(summary),
             "arguments": result.get("arguments"), "is_error": result.get("is_error"),
             "content": content(result.get("content").unwrap_or(&result["payload"]))})

@@ -255,7 +255,7 @@ Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Pol
 
 调用方迁移：主入口、回放入口和五份本地 fixture 已切换到配置/session 路径，fixture 使用私有 HOME 配置、不写用户主目录。fixture 在启动 Runtime 前同步复制 workspace，消除 stderr 通知后的复制竞态。恢复中的 `launch evaluation: Broken pipe` 根因是缓存 worker 的 `--die-with-parent` 随创建线程退出杀死进程；由 Worker 的 Drop 负责清理后，新增线程退出回归测试通过（原实现先复现失败，日志 `/tmp/ascout-worker-before.log`）。最终 `cargo check --all-targets`、当时的 Rust 测试集 通过；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 6/6 通过，日志 `/tmp/ascout-recovery-final.log`。回放新 session 必须选 `--policy NAME`，不加载源 session artifact；下游外部脚本仍需按新接口核查。
 
-`predict.chance_context` 携带工具参数，`process_context` 携带 `observation`、`steps_completed`、`authority_active_tools` 和与 `select.scheduling_context.active_branches` 同构的 `active_branches`。策略可用 `history: {mode: transcript_tail, max_entries: 30}` 声明历史投影，或用 `match.outcome: tool_output` 声明真实输出。`rebalance` 的分支视图另提供 `started_at_ms`（毫秒整数）与 `speculation_kind`（`model_inference` 或 `tool_execution`）。`scheduling_context.authority_recent_actions` 复用有界的最近已完成动作摘要，包含 `timestamp_ms`、`tool_name`、`arguments` 和 `status`。`authority_active_tools` 仅列出正在运行的工具及其 `tool_name` 和 `arguments`。阶段识别和是否抢占由 Policy 决定。工具完成会刷新调度事实，即使分支状态没有变化。
+`predict.chance_context` 携带工具参数，`process_context` 携带工作区路径 `workspace`、`observation`、`steps_completed`、`authority_active_tools` 和与 `select.scheduling_context.active_branches` 同构的 `active_branches`。策略可用 `history: {mode: transcript_tail, max_entries: 30}` 声明历史投影，或用 `match.outcome: tool_output` 声明真实输出。历史保留自定义消息的 `custom_type`，供 Policy 区分已交付的通知与普通消息；声明历史后，`match` 和 `dispose` 也可读取同样有界的 `authority_history`。`rebalance` 的分支视图另提供 `started_at_ms`（毫秒整数）与 `speculation_kind`（`model_inference` 或 `tool_execution`）。`scheduling_context.authority_recent_actions` 复用有界的最近已完成动作摘要，包含 `timestamp_ms`、已知时的 `started_at_ms`、`tool_name`、`arguments` 和 `status`。`authority_active_tools` 仅列出正在运行的工具及其 `tool_name` 和 `arguments`。阶段识别和是否抢占由 Policy 决定。工具完成会刷新调度事实，即使分支状态没有变化。
 
 `match` 和 `dispose` 的 `candidate_results` 为已完成动作提供 `action_id`、`action_kind`、`status`、`timestamp_ms` 和 `result`，已知时也包含 `started_at_ms`。工具项另提供工具名称、参数和相关详情，模型推理项的 `result.content` 可包含文本和思考内容。Policy 可用 `Salvage` 或 `Yield` 选择交付工具结果和成功的模型推理输出。模型项必须显式传入 `files: []`，`Yield` 的所有项均使用空文件列表。文件级 `Salvage` 仅交付 Runtime 回执确认的结果，即使原 Chance 已结束也可向原 Authority 结算停止的 `yield_only` 候选，且无需改变 Chance 的赢家。
 
@@ -265,6 +265,10 @@ Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Pol
 
 `predict.policy_config.share_inflight_commands` 默认为 `false`。开启时，Policy 可将其他候选正在运行的命令附在新候选的 `candidate_guidance` 中。提示只进入候选的请求上下文。
 
-`modify_ready` 可用已知工作区主验证命令启动改后测试，工具批次完成后停在下一次模型推理前。`verify` 的候选可继续推理和修改。若从未修改文件，或最后一次修改之后已有成功的工作区验证，`extent` 会在新的验证命令前停止。修改后尚未通过验证的候选可以运行工作区测试。范围上限默认是 12 个完整轮次。
+`modify_ready` 可用已知工作区主验证命令启动改后测试，工具批次完成后停在下一次模型推理前。只有源代码或测试文件的修改才会重新触发改后测试。重定向到 `/dev/null`、写入工作区外的 `/tmp` 或工作区顶层隐藏目录下的临时文件，不算源代码修改，也不会阻止交付后续只读结果。
 
-使用 Authority 模型的候选在 `accepted` 裁决下仍可 `Promote`。快模型候选的 `Yield` 仅交付通知。终止的快模型候选只有在至少一次 `edit` 或 `write` 成功、没有失败的 `edit` 或 `write`，且最后一次修改后有成功并无调用错误的工作区验证时，才可通过 `Salvage` 移交文件。Policy 按路径选择最新的成功修改，附上改动摘要，以及通过的验证命令和输出，提醒 Authority 在定稿前审查逻辑与边界情况。Runtime 逐结果检查文件冲突并保留 Authority 的冲突改动。未满足验收标准时，只回收适用的只读或诊断通知。适用的修改前只读结果扣除 Authority 已请求部分后按完整输出交付，每批最多 4 项和 8,000 字符，重复验证按命令签名去重。
+最后一次修改后的工作区验证覆盖当前命令或主验证命令时，无论测试通过还是失败，Authority 接下来的只读排查都回到 `explore`。调用错误不算完成验证。已交付的推测验证通知也计入历史；已有改后测试候选在运行时不再启动同类候选，文件未变且已有覆盖该命令的结果时不重复交付。再次修改后可以启动新的验证。
+
+`verify` 的候选可继续推理和修改。失败候选在真实输出到达前先检查最近修改的代码、调用位置和相关测试，不立即重跑测试；修改文件后再运行工作区测试命令验证修复。若从未修改文件，或最后一次修改之后已有成功的工作区验证，`extent` 会在新的验证命令前停止。修改后尚未通过验证的候选可以运行工作区测试。范围上限默认是 12 个完整轮次。
+
+使用 Authority 模型的候选在 `accepted` 裁决下仍可 `Promote`。快模型候选的 `Yield` 仅交付通知。终止的快模型候选只有在至少一次 `edit` 或 `write` 成功、没有失败的 `edit` 或 `write`，且最后一次修改后有成功并无调用错误的工作区验证时，才可通过 `Salvage` 移交文件。Policy 按路径选择最新的成功修改，附上改动摘要，以及通过的验证命令和输出，提醒 Authority 在定稿前审查逻辑与边界情况。Runtime 逐结果检查文件冲突并保留 Authority 的冲突改动。未满足验收标准时，只回收适用的只读或诊断通知。适用的修改前只读结果扣除 Authority 已请求部分后按完整输出交付。Coding 策略每批最多 4 项，不设字符上限；其他配置可显式指定正整数 `safe_result_chars` 或 `safe_result_count`。
