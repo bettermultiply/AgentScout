@@ -68,7 +68,7 @@ extent(process_state) -> stop | continue
 
 `extent` 由一组停止条件集合和根据过程事实(`process_state`)动态计算的函数组成。用来表达一个已经开启的投机执行过程希望在内部推进到哪个前沿。`process_state` 由 AScout 提供，不包含任何主观条件。
 
-- 过程进度：至少包括已完成的 step 数和过程当前所处的语义阶段；
+- 过程进度：至少包括已完成的轮数和过程当前所处的语义阶段；
 - 已实现目标：已经产生的输出、已完成的目标项、已消耗的明确预算或资源计数；
 - 过程语义：由任务或 Policy 定义的状态，例如必要信息是否齐全、当前阶段是否完成。
 
@@ -76,7 +76,7 @@ extent(process_state) -> stop | continue
 
 | 字段 | 是否必需 | 含义 |
 |---|---:|---|
-| `steps_completed` | 是 | 当前投机过程已经完成的 step 数，从 0 开始计数 |
+| `steps_completed` | 是 | 当前投机过程已经完成的轮数，从 0 开始计数 |
 | `phase` | 是 | 当前过程所处的稳定语义阶段，例如 reasoning、input-wait、tool-call、result-processing |
 | `active_time` | 否 | 实际执行时间，不包含等待用户输入或外部结果的暂停时间 |
 | `resource_counters` | 否 | 已实际消耗的可计量资源，例如 token 数、工具调用次数、字节数；只记录事实，不计算成本 |
@@ -85,7 +85,7 @@ extent(process_state) -> stop | continue
 
 除 `steps_completed` 和 `phase` 外，字段可以按领域扩展，但必须保持为可观察事实；具体事件格式由下层接口文档定义。
 
-`extent` 与嵌套深度不同，`extent` 仅约束当前 Chance 对应的单个投机过程已经推进多少，每个嵌套 Chance 的子过程拥有独立的 step 计数，子过程的 step 默认不计入父过程。
+`extent` 与嵌套深度不同，`extent` 仅约束当前 Chance 对应的单个投机过程已经推进多少，每个嵌套 Chance 的子过程拥有独立的轮次计数。一次轮次包含一次模型推理和该推理发出的所有工具调用。纯文本推理单独完成一轮，`predicted_tool_calls` 注入的工具批次也单独计一轮。同一轮的工具之间计数保持不变，下一次模型推理执行 `extent` 前结清已完成的上一轮。
 
 `extent` 的停止条件收敛为三类 Policy 可动态评估的谓词：
 
@@ -252,8 +252,8 @@ dispose(branch, resolution, context) -> DispositionPlan
 `DispositionPlan` 可以包含一个或多个处置意图：
 
 - **Promote**：仅适用于 `accepted`。全量合入环境并采用候选分支的会话延续。
-- **Salvage**：移交所选部分成果，保留父会话并丢弃候选。`accepted` 要求成功工具结果（包括只交付通知的成功工具结果）或合法范围，完成后标记 Chance 为 `Accepted` 并清理同级候选，可附 `Discard`。其他裁决须与 `Discard` 组合，可用 `files: []` 附带失败验证通知，无赢家。祖先假设须已确认。
-- **Yield**：整体未接受时，可以单独返回 `{"intent": "Yield", "results": [...]}`。每项指定已完成工具的 `id`、空 `files` 和非空 `notification`。空 `results` 表示让仍在执行的候选继续，暂不交付通知。父分支继续执行，候选及其在途操作保持存活。父分支离开分叉点后，候选只能继续 `Yield`，不能 `Promote`。运行中的候选成果在 Authority 的下一轮模型推理开始前批量结算，即使该轮推理没有准入投机。停止的候选可立即结算并回收。此动作不组合 `Discard`。
+- **Salvage**：移交所选部分成果，保留父会话并丢弃候选。`accepted` 要求成功动作结果或合法范围，完成后标记 Chance 为 `Accepted` 并清理同级候选，可附 `Discard`。其他裁决须与 `Discard` 组合，可用 `files: []` 附带失败验证通知，无赢家。Policy 可选择工具成果或成功模型推理的输出，模型输出必须使用 `files: []`。已离开分叉点的 `yield_only` 候选可在停止后向原 Authority 移交选中的成果，文件仍须通过三方冲突检查且 Chance 无新赢家。祖先假设须已确认。
+- **Yield**：整体未接受时，可以单独返回 `{"intent": "Yield", "results": [...]}`。每项指定已完成工具或成功模型推理的 `id`、空 `files` 和非空 `notification`。空 `results` 表示让仍在执行的候选继续，暂不交付通知。父分支继续执行，候选及其在途操作保持存活。父分支离开分叉点后，继续执行的候选以 `yield_only` 身份交付中间结果，终止时可用 `Salvage + Discard` 结算。运行中的候选成果在 Authority 的下一轮模型推理开始前批量结算，即使该轮推理没有准入投机。停止的候选可立即结算并回收。此动作不组合 `Discard`。
 - **Re-execute**：使用权威结果重新执行必要工作；
 - **Discard**：丢弃候选工作及其未确认产物；
 - **Compensate**：对已发生且可补偿的效果执行反向处理；

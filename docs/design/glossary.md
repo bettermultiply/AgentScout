@@ -87,7 +87,7 @@
 - **accept**：对 candidate 作出的接受裁决（resolution = accepted）；`Promote` 让候选保留自身 Branch identity 并替换 parent 在树中的位置，`Salvage` 只把已验证结果和按声明移交的受管状态交给现有权威延续并清理候选。（`branch-semantics.md`；`decisions.md` D-009/D-023）
 - **discard**：丢弃整个 child subtree（= Disposition 的 Discard / Preempt）；不要求 candidate ready，不自动把 partial state 反馈给 parent。（`branch-semantics.md`；`decisions.md` D-023）
 - **resolve()**：权威值到达时进行匹配、选择处置并沿 Proposal 依赖传播的关键路径操作，由 Speculation Coordinator 协调。（`control-plane.md` §2.3；`policy-decisions.md`）
-- **Yield**（用户已确认）：候选向父分支／Authority 交付中间客观结果或信号，并继续在自己的隔离环境中执行。父分支／Authority 离开分叉点后，候选只能继续 `Yield`，不能 `Promote`。
+- **Yield**（用户已确认）：候选向父分支／Authority 交付中间客观结果或信号，并继续在自己的隔离环境中执行。父分支／Authority 离开分叉点后，候选可继续 `Yield`，并在停止时以 `Salvage + Discard` 结算剩余成果。
 - **Salvage**：保留父会话并移交选中的结果或文件，随后丢弃候选。接受裁决只选成功结果或合法范围，并占用该 Chance 的唯一赢家名额。整体未接受时可交付失败验证的通知，且须与 `Discard` 组合。（`spec-exec-abstraction.md` §2 轴 6）
 - **PublishOutcome**：真实 operation 完成后把 outcome 发布到 OutcomeSlot 的机制操作；由 Operation wrapper / Hook / effect broker 自动执行，不作为独立 Agent-facing 命令。（`branch-semantics.md`；`decisions.md` D-037）
 

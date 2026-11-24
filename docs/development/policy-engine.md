@@ -224,7 +224,7 @@ def extent(data, *, policy_config, capabilities):
 
 ## Chance id 的当前实现
 
-`select.scheduling_context` 提供只读调度事实。`active_candidate_count` 和 `active_branches` 包含仍参与投机的候选，`blocked_candidate_count` 是其中处于 `Blocked` 状态的数量。`pending_chance_count` 是处于 `Pending` 状态的 Chance 数量。`active_branches` 每项包含 `branch_id`、`chance_id`、`assumption_depth`、`status`、布尔值 `yield_only` 和可为空的 `speculation_kind`、`proposal_provenance`。`frontier_view` 每个机会也包含 `speculation_kind`，例如 `model_inference` 或 `tool_execution`。
+`select.scheduling_context` 提供只读调度事实。`active_candidate_count` 和 `active_branches` 包含仍参与投机的候选，`blocked_candidate_count` 是其中处于 `Blocked` 状态的数量。`pending_chance_count` 是处于 `Pending` 状态的 Chance 数量。`active_branches` 每项包含 `branch_id`、`chance_id`、`assumption_depth`、`status`、布尔值 `yield_only`、可为空的 `speculation_kind` 和 `proposal_provenance`，以及 `active_tools` 数组。每个在途工具项包含 `tool_name` 和 `arguments`，与 `authority_active_tools` 同构。`frontier_view` 每个机会也包含 `speculation_kind`，例如 `model_inference` 或 `tool_execution`。
 
 `launch.authority_state` 只包含 `branch_id`、`status`、`assumption_depth` 和 `turn_active`，父分支缺失时为 `{}`。`launch.candidate_view` 使用与 `select` 的 `active_branches` 相同的候选摘要。
 
@@ -232,9 +232,9 @@ def extent(data, *, policy_config, capabilities):
 
 `extent` 与 `effect` 由 Instrumentation 的通用层在真实执行边界按同一编译 Policy 求值，并通过 `branch_suspended` 的原因让 control plane 记录 Blocked；`rebalance` 由 control plane 在 Tree 版本变化后求值并下发 pause/resume/preempt。control plane 不重复求值 extent/effect，因此没有其它接入形式的实现时，这两类 Decision 不会在 control plane 侧单独生效。
 
-`extent` 仅在候选分支执行模型或工具前求值。`steps_completed` 从候选创建时的 0 开始，每次收到完成通知递增。`phase` 表示下一动作类型。只有声明了相应 `inputs` 才提供进入边界的次数 `hook_count`、自创建以来的秒数 `active_time`、分类完成计数 `resource_counters`、最近完成动作摘要 `result_facts` 和下一动作的类型、名称与参数 `semantic_facts`。已准入动作重连沿用原计数。全局晋升释放 `extent` 等待，权威分支跳过 `extent`。停止时分支报告 `extent_reached`，`resolve_pending` 或取消也可结束等待。
+`extent` 仅在候选分支执行模型或工具前求值。`steps_completed` 从候选创建时的 0 开始，按完成的轮次递增。一轮包含一次模型推理及其所有工具调用，纯文本推理和注入的 `predicted_tool_calls` 批次各自单独计一轮。下一次模型推理求值前结清上一轮，同一轮内的工具之间计数保持不变。`phase` 表示下一动作类型。只有声明了相应 `inputs` 才提供进入边界的次数 `hook_count`、自创建以来的秒数 `active_time`、分类完成计数 `resource_counters`、最近完成动作摘要 `result_facts` 和 `semantic_facts` 中的下一动作类型、名称、参数及布尔值 `yield_only`。已准入动作重连沿用原计数。全局晋升释放 `extent` 等待，权威分支跳过 `extent`。停止时分支报告 `extent_reached`，`resolve_pending` 或取消也可结束等待。
 
-`admit` 的 `op` 提供动作标识、参数、结果是否待定，以及预测和权威状态。`admit.feasibility_pass` 还接收 `is_candidate`、`assumption_depth`、`steps_completed`、按工具名统计的成功与失败次数 `tool_counts`、最近最多 16 条已完成动作 `recent_actions`。候选继承父分支的工具统计与最近动作，自己的步数从 0 开始。保存与恢复保留这些值。
+`admit` 的 `op` 提供动作标识、参数、结果是否待定，以及预测和权威状态。`admit.feasibility_pass` 还接收 `is_candidate`、`assumption_depth`、`steps_completed`、按工具名统计的成功与失败次数 `tool_counts`、最近最多 16 条已完成动作 `recent_actions`。候选继承父分支的工具统计与最近动作，自己的步数从 0 开始。保存与恢复保留这些值、未结清的轮次和 `yield_only` 状态。
 
 `predict` 只在声明 `history` 时接收有界历史摘要，条数由声明中的 `max_entries` 限制。`match` 只在声明 `outcome` 时接收顶层实际结果。`dispose` 的 `candidate_results` 保留已经报告的工具标识、参数和详情。`effect` 仅在候选工具边界求值，隔离能力与 Policy 同时允许时才执行工具。`block` 挂起至放行、丢弃或清理。`rebalance` 按 Policy 返回的分支标识执行 pause、resume、preempt。
 
@@ -257,12 +257,14 @@ Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Pol
 
 `predict.chance_context` 携带工具参数，`process_context` 携带 `observation`、`steps_completed`、`authority_active_tools` 和与 `select.scheduling_context.active_branches` 同构的 `active_branches`。策略可用 `history: {mode: transcript_tail, max_entries: 30}` 声明历史投影，或用 `match.outcome: tool_output` 声明真实输出。`rebalance` 的分支视图另提供 `started_at_ms`（毫秒整数）与 `speculation_kind`（`model_inference` 或 `tool_execution`）。`scheduling_context.authority_recent_actions` 复用有界的最近已完成动作摘要，包含 `timestamp_ms`、`tool_name`、`arguments` 和 `status`。`authority_active_tools` 仅列出正在运行的工具及其 `tool_name` 和 `arguments`。阶段识别和是否抢占由 Policy 决定。工具完成会刷新调度事实，即使分支状态没有变化。
 
-Coding Policy 在 `explore` 阶段发现活跃的模型探索分支时返回 `abstain`。`modify_ready` 的改后主动测试与 `verify` 的工具投机各自按自己的条件执行。已完成的 shell 操作需要有明确的写入或修改特征才影响修改阶段判断。只读 Python 检查可以使用 `-c` 或 heredoc。
-
-Coding Policy 每批最多交付 4 项结果，合计最多 8,000 字符，并保留完整的文件或命令输出。`yield_only` 候选停止后，已有的新产出在权威下一次模型推理边界或任务收尾时批量结算，随后回收候选。无新产出时可以直接回收。
+`match` 和 `dispose` 的 `candidate_results` 为已完成动作提供 `action_id`、`action_kind`、`status`、`timestamp_ms` 和 `result`，已知时也包含 `started_at_ms`。工具项另提供工具名称、参数和相关详情，模型推理项的 `result.content` 可包含文本和思考内容。Policy 可用 `Salvage` 或 `Yield` 选择交付工具结果和成功的模型推理输出。模型项必须显式传入 `files: []`，`Yield` 的所有项均使用空文件列表。文件级 `Salvage` 仅交付 Runtime 回执确认的结果，即使原 Chance 已结束也可向原 Authority 结算停止的 `yield_only` 候选，且无需改变 Chance 的赢家。
 
 ### Coding 策略的三阶段循环
 
-读取探索默认用快模型定位代码。只交付扣除权威已请求部分后的只读成果，运行中用 `Yield`，停止或抢占时用 `Salvage` 回收剩余通知。权威完成修改、候选工具失败达到阈值或新机会需要容量时，策略按调度事实回收旧分支。
+`explore` 默认用快模型定位代码。活跃的探索候选会使同类预测弃权。进入 `yield_only` 后，候选继续执行本轮剩余工具，在下一次模型推理前由 `extent` 停下。Authority 的下一轮可同时启动新的探索候选。停止候选在下一次 Authority 模型边界或任务收尾时用 `Salvage + Discard` 结算。工具失败阈值、工作区进展和容量仍由 `rebalance` 处理。
 
-权威修改后若还没有可用的工作区主验证命令，默认不启动候选。找到命令后，策略可直接启动工具并停在下一次模型推理之前。对验证边界的结果预测使用普通工具输出样式，候选可继续推理和修改，直到再次验证、触发退化止损或达到步数上限。命中的独立小模型失败分支只交付可用成果并保留权威会话。批量通知按完整文件或命令输出计入预算，重复验证命令按签名去重。
+`predict.policy_config.share_inflight_commands` 默认为 `false`。开启时，Policy 可将其他候选正在运行的命令附在新候选的 `candidate_guidance` 中。提示只进入候选的请求上下文。
+
+`modify_ready` 可用已知工作区主验证命令启动改后测试，工具批次完成后停在下一次模型推理前。`verify` 的候选可继续推理和修改。若从未修改文件，或最后一次修改之后已有成功的工作区验证，`extent` 会在新的验证命令前停止。修改后尚未通过验证的候选可以运行工作区测试。范围上限默认是 12 个完整轮次。
+
+使用 Authority 模型的候选在 `accepted` 裁决下仍可 `Promote`。快模型候选的 `Yield` 仅交付通知。终止的快模型候选只有在至少一次 `edit` 或 `write` 成功、没有失败的 `edit` 或 `write`，且最后一次修改后有成功并无调用错误的工作区验证时，才可通过 `Salvage` 移交文件。Policy 按路径选择最新的成功修改，附上改动摘要，以及通过的验证命令和输出，提醒 Authority 在定稿前审查逻辑与边界情况。Runtime 逐结果检查文件冲突并保留 Authority 的冲突改动。未满足验收标准时，只回收适用的只读或诊断通知。适用的修改前只读结果扣除 Authority 已请求部分后按完整输出交付，每批最多 4 项和 8,000 字符，重复验证按命令签名去重。

@@ -204,6 +204,7 @@ impl SpeculativeTree {
                 name,
                 parent_action_id,
                 arguments,
+                timestamp_ms,
                 ..
             } => self.handle_action_started(
                 &task_id,
@@ -213,6 +214,7 @@ impl SpeculativeTree {
                 name,
                 parent_action_id,
                 arguments,
+                timestamp_ms,
             ),
             AgentMessage::ModelInferenceBoundary { .. } | AgentMessage::SpeculativeAdmissionRequest { .. } => Err(invalid_input(
                 "speculative admission must be handled by the coordinator",
@@ -409,6 +411,9 @@ impl SpeculativeTree {
                 .and_then(|value| value.get("tool_calls"))
                 .cloned()
         });
+        let started_at_ms = self.active_actions.get(&branch_id)
+            .and_then(|actions| actions.get(&action_id))
+            .and_then(|action| action.started_at_ms);
         self.action_facts
             .entry(branch_id.clone())
             .or_default()
@@ -419,6 +424,7 @@ impl SpeculativeTree {
                     action_kind,
                     status,
                     timestamp_ms,
+                    started_at_ms,
                     result: Some(result.clone()),
                     evidence: evidence.clone(),
                     tool_calls,
@@ -670,12 +676,13 @@ impl SpeculativeTree {
         name: String,
         parent_action_id: Option<String>,
         arguments: Value,
+        timestamp_ms: u64,
     ) -> io::Result<Vec<AgentCommand>> {
         if task_id != self.execution_id {
             return Err(invalid_input("action task does not match tree"));
         }
         let commands = self.register_action(branch_id, action_id, ActionRecord {
-            action_kind, name, parent_action_id, arguments: Some(arguments),
+            action_kind, name, parent_action_id, arguments: Some(arguments), started_at_ms: Some(timestamp_ms),
         })?;
         if action_kind == ActionKind::ModelInference
             && let Some(chance_id) = self.branch(branch_id)?.chance_id.clone()
@@ -724,6 +731,9 @@ impl SpeculativeTree {
         actions.entry(action_id).and_modify(|registered| {
             if registered.arguments.is_none() {
                 registered.arguments.clone_from(&action.arguments);
+            }
+            if registered.started_at_ms.is_none() {
+                registered.started_at_ms = action.started_at_ms;
             }
         }).or_insert(action);
         Ok(vec![])
@@ -941,8 +951,7 @@ impl SpeculativeTree {
                     && self.pending_acceptance.as_ref().is_some_and(|(id, record)| {
                         id == branch_id && record["interrupted"] != true
                     })
-                    && self.acceptance_target(self.branch(branch_id)?).is_some()
-                    && self.acceptance_progress_compatible(self.branch(branch_id)?) =>
+                    && self.transfer_target(self.branch(branch_id)?, self.pending_partial_acceptance(branch_id)).is_some() =>
             {
                 if let Some((id, record)) = self.pending_acceptance.as_mut()
                     && id == branch_id
@@ -1215,7 +1224,7 @@ impl SpeculativeTree {
         notification: Option<String>,
     ) -> io::Result<Vec<AgentCommand>> {
         if success {
-            Ok(vec![self.make_promote_command(candidate, notification)?])
+            Ok(vec![self.make_promote_command(candidate, notification, false)?])
         } else {
             self.change_status(
                 candidate,

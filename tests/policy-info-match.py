@@ -298,6 +298,60 @@ class CodingPolicyTests(unittest.TestCase):
     def setUpClass(cls):
         cls.decisions = runpy.run_path(str(CODING_POLICY / 'decisions.py'))
 
+    def test_verify_extent_allows_only_missing_post_edit_verification(self):
+        state = {'steps_completed': 1, 'phase': 'tool_execution', 'semantic_facts': {
+            'speculation_kind': 'tool_execution', 'next_action': bash('pytest')}}
+        mutation = {'tool_name': 'edit', 'arguments': {'path': 'src.py'}, 'status': 'succeeded'}
+        passed = {'tool_name': 'bash', 'arguments': {'command': 'pytest'}, 'status': 'succeeded',
+                  'result': {'content': '1 passed'}}
+        for entries, expected in (([], 'stop'), ([mutation], 'continue'),
+                                  ([mutation, passed], 'stop'), ([passed, mutation], 'continue')):
+            state['result_facts'] = {'completed_tools': entries}
+            self.assertEqual(self.decisions['extent']({'process_state': state}, policy_config={}, capabilities={}), expected)
+        state['semantic_facts']['yield_only'] = True
+        self.assertEqual(self.decisions['extent']({'process_state': state}, policy_config={}, capabilities={}), 'continue')
+        state['phase'] = 'model_inference'
+        self.assertEqual(self.decisions['extent']({'process_state': state}, policy_config={}, capabilities={}), 'stop')
+
+    def test_fast_write_salvage_requires_verification_after_last_edit(self):
+        def action(id, name, args, output='', status='succeeded'):
+            return {'action_id': id, 'tool_name': name, 'arguments': args, 'status': status,
+                    'result': {'content': output}}
+
+        read_action = action('read', 'read', {'path': 'other.py'}, 'useful diagnostic')
+        first = {**action('write', 'write', {'path': 'src.py', 'content': 'before = 1'}), 'timestamp_ms': 10}
+        latest = action('edit', 'edit', {'path': './src.py', 'edits': [{'oldText': 'before', 'newText': 'after'}]})
+        passed = action('pass', 'bash', {'command': 'pytest'}, '3 passed')
+        bad_invocation = action('bad', 'bash', {'command': 'pytest'}, 'ImportError')
+        failed_edit = action('failed-edit', 'edit', {'path': 'src.py'}, status='failed')
+        outside_test = action('outside-test', 'bash', {'command': 'cd /tmp && pytest'}, '3 passed')
+        outside_edit = action('outside-edit', 'write', {'path': '/tmp/app.py', 'content': 'x'})
+        base = {'workspace': '/workspace', 'candidate_proposal': {'model_options': {'model': 'local/fast'}},
+                'candidate': {'speculation_kind': 'model_inference'}}
+
+        def dispose(resolution, entries, candidate=None):
+            context = {**base, 'candidate_results': [read_action, *entries]}
+            if candidate:
+                context['candidate'] = {**base['candidate'], **candidate}
+            return self.decisions['dispose']({'resolution': resolution, 'context': context}, policy_config={}, capabilities={})['actions']
+
+        for entries in ([first], [first, passed, latest], [first, bad_invocation],
+                        [first, failed_edit, passed], [first, outside_test], [outside_edit, passed],
+                        [first, {**passed, 'started_at_ms': 9, 'timestamp_ms': 11}]):
+            with self.subTest(entries=entries):
+                self.assertEqual([r['id'] for r in dispose('accepted', entries)[0]['results']], ['read'])
+        for resolution in ('accepted', 'extent_reached'):
+            actions = dispose(resolution, [first, latest, passed], {'yield_only': resolution != 'accepted'})
+            self.assertEqual([item['intent'] for item in actions], ['Salvage'] + (['Discard'] if resolution != 'accepted' else []))
+            file, verification, readonly = actions[0]['results']
+            self.assertEqual(file['id'], 'edit')
+            self.assertNotIn('files', file)
+            self.assertIn("'before' → 'after'", file['notification'])
+            self.assertEqual(verification['files'], [])
+            self.assertIn('3 passed', verification['notification'])
+            self.assertEqual(readonly['files'], [])
+        self.assertEqual(dispose('rejected', [first, latest, passed])[0]['results'][0]['id'], 'read')
+
     def assert_thinking_off(self, config):
         result = self.decisions['predict']({'chance_context': {'kind': 'model_inference'}},
                                            policy_config=config, capabilities={})
@@ -312,6 +366,7 @@ class CodingPolicyTests(unittest.TestCase):
         policy = yaml.safe_load((CODING_POLICY / 'policy.yaml').read_text(encoding='utf-8'))
         config = policy['decisions']['predict']['policy_config']
         self.assertEqual(config['candidate_thinking'], 'off')
+        self.assertIs(config['share_inflight_commands'], False)
         self.assert_thinking_off(config)
 
     def test_predict_normalizes_yaml_boolean_false(self):

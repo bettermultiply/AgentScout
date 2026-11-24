@@ -53,7 +53,7 @@ impl SpeculationCoordinator {
             ControlOperation::SuspendAcceptance(candidate) => {
                 let branch = tree.branch(candidate).map_err(|error| error.to_string())?;
                 let parent = tree
-                    .acceptance_target(branch)
+                    .transfer_target(branch, tree.pending_partial_acceptance(candidate))
                     .ok_or("acceptance target is no longer eligible")?;
                 call(parent, Operation::SuspendEnvironment)
             }
@@ -228,16 +228,14 @@ impl SpeculationCoordinator {
             .ok_or("missing acceptance parent")?;
         let target = Self::environment_for(tree, parent)?;
         let transfer = || {
-            if tree.acceptance_target(branch) != Some(parent)
-                || !tree.acceptance_progress_compatible(branch)
-            {
+            let full = record["full"] == true;
+            if tree.transfer_target(branch, !full) != Some(parent) {
                 return Ok(ControlResult::Acceptance(
                     None,
                     None,
                     Some("acceptance target is no longer eligible".into()),
                 ));
             }
-            let full = record["full"] == true;
             let part = if let Some(results) = record["part"]["results"].as_array() {
                 let results = results
                     .iter()
@@ -496,7 +494,7 @@ impl SpeculationCoordinator {
                     "active_branches": tree.pending_candidates().iter()
                         .map(|id| candidate_summary(tree, &tree.branches[id])).collect::<Vec<_>>(),
                     "authority_active_tools": active_tools(tree, tree.authority_branch_id.as_deref()),
-                    "steps_completed": tree.action_facts.get(&tool.branch_id).map_or(0, |facts| facts.len()),
+                    "steps_completed": completed_rounds(tree, &tool.branch_id),
                 },
                 "assumption_set": assumptions,
                 "capability_context": {
@@ -537,7 +535,7 @@ impl SpeculationCoordinator {
                 "status": branch.status,
                 "assumption_depth": branch.assumption_set.len(),
                 "turn_active": branch.execution_state.turn_active,
-                "steps_completed": tree.action_facts.get(&tool.branch_id).map_or(0, |facts| facts.len()),
+                "steps_completed": completed_rounds(tree, &tool.branch_id),
             })
         });
         let candidates: Vec<_> = tree
@@ -581,7 +579,7 @@ impl SpeculationCoordinator {
             json!({"branch_id": branch.branch_id, "chance_id": branch.chance_id,
                 "started_at_ms": started_at_ms,
                 "speculation_kind": speculation_kind,
-                "steps_completed": facts.map_or(0, |facts| facts.len()),
+                "steps_completed": completed_rounds(tree, &branch.branch_id),
                 "yield_only": branch.yield_only,
                 "tool_counts": {"succeeded": count(ActionStatus::Succeeded), "failed": count(ActionStatus::Failed)},
                 "tokens_used": tree.model_usage.get(&branch.branch_id).into_iter().flatten().map(|usage| usage.tokens_used).sum::<u64>(),
@@ -677,7 +675,7 @@ impl SpeculationCoordinator {
     > {
         let branch = tree.branch(candidate_id)?;
         let parent = tree.chance_parent(branch);
-        let proposal_view = json!({"id": proposal.proposal_id, "payload": proposal.payload, "provenance": proposal.provenance});
+        let proposal_view = json!({"id": proposal.proposal_id, "payload": proposal.payload, "provenance": proposal.provenance, "model_options": proposal.model_options});
         let mut data = json!({
                 "proposal": proposal_view, "evidence": evidence,
                 "match_context": {
@@ -772,6 +770,7 @@ impl SpeculationCoordinator {
                 "resolution": resolution,
                 "context": {
                     "match": result,
+                    "workspace": tree.workspace(),
                     "authority_outcome": outcome,
                     "candidate_proposal": proposal_view,
                     "candidate": data["match_context"]["candidate"],
@@ -811,26 +810,53 @@ impl SpeculationCoordinator {
     }
 }
 
+fn completed_rounds(tree: &SpeculativeTree, branch: &str) -> usize {
+    let Some(facts) = tree.action_facts.get(branch) else { return 0 };
+    let active = tree.active_actions.get(branch);
+    let active_tools = active.is_some_and(|actions| actions.values().any(|action| action.action_kind == ActionKind::ToolExecution));
+    let mut models: Vec<_> = facts.values().filter(|fact| fact.action_kind == ActionKind::ModelInference).collect();
+    models.sort_by_key(|fact| (fact.timestamp_ms, &fact.action_id));
+    let finished_tool = |id: &str| !active.is_some_and(|actions| actions.contains_key(id)) && facts.get(id)
+        .is_some_and(|fact| fact.action_kind == ActionKind::ToolExecution && fact.status != ActionStatus::Cancelled);
+    let leading_tools = facts.values().filter(|fact| fact.action_kind == ActionKind::ToolExecution
+        && fact.status != ActionStatus::Cancelled
+        && models.first().is_none_or(|model| fact.timestamp_ms <= model.timestamp_ms)).count();
+    let injected_round = tree.branch_proposal(branch).is_some_and(|proposal| {
+        proposal.payload["kind"] == "predicted_tool_calls"
+            && proposal.payload["tool_calls"].as_array().is_some_and(|calls| !calls.is_empty() && leading_tools >= calls.len())
+            && (!models.is_empty() || !active_tools)
+    });
+    usize::from(injected_round) + models.iter().enumerate().filter(|(index, model)| {
+        model.status != ActionStatus::Cancelled && match model.tool_calls.as_ref().and_then(Value::as_array) {
+            Some(calls) => calls.iter().all(|call| call["id"].as_str().is_some_and(finished_tool)),
+            None => *index + 1 < models.len() || !active_tools,
+        }
+    }).count()
+}
+
 fn candidate_results(
     tree: &SpeculativeTree,
     candidate_id: &str,
     candidate_execution: &[Value],
 ) -> Vec<Value> {
-    let mut tool_facts: Vec<_> = tree
+    let mut completed: Vec<_> = tree
         .action_facts
         .get(candidate_id)
         .into_iter()
         .flat_map(|facts| facts.values())
         .filter(|fact| {
             matches!(fact.status, ActionStatus::Succeeded | ActionStatus::Failed)
-                && fact.action_kind == ActionKind::ToolExecution
+                && matches!(fact.action_kind, ActionKind::ToolExecution | ActionKind::ModelInference)
         })
         .collect();
-    tool_facts.sort_by(|a, b| (a.timestamp_ms, &a.action_id).cmp(&(b.timestamp_ms, &b.action_id)));
-    let mut candidate_results: Vec<_> = tool_facts
+    completed.sort_by(|a, b| (a.timestamp_ms, &a.action_id).cmp(&(b.timestamp_ms, &b.action_id)));
+    let legacy_transcript = !completed.iter().any(|fact| fact.action_kind == ActionKind::ModelInference
+        && fact.result.as_ref().is_some_and(|result| result.get("content").is_some()));
+    let mut candidate_results: Vec<_> = completed
         .into_iter()
         .map(|fact| {
             let mut entry = json!({"action_id": fact.action_id, "timestamp_ms": fact.timestamp_ms,
+                "action_kind": fact.action_kind, "started_at_ms": fact.started_at_ms,
                 "status": fact.status, "result": fact.result, "evidence": fact.evidence});
             for key in ["tool_name", "arguments", "details"] {
                 if let Some(value) = fact.result.as_ref().and_then(|result| result.get(key)) {
@@ -840,12 +866,12 @@ fn candidate_results(
             entry
         })
         .collect();
-    candidate_results.extend(
-        candidate_execution
+    if legacy_transcript {
+        candidate_results.extend(candidate_execution
             .iter()
             .filter(|entry| entry["role"] == "assistant" && entry["stopReason"] == "stop")
-            .map(|entry| json!({"result": entry["content"]})),
-    );
+            .map(|entry| json!({"result": entry["content"]})));
+    }
     candidate_results
 }
 
@@ -867,16 +893,20 @@ fn resolve_partial_acceptance(
                 .get(candidate_id)
                 .and_then(|facts| facts.get(result["id"].as_str()?))
                 .filter(|fact| {
-                    fact.action_kind == ActionKind::ToolExecution
-                        && (fact.status == ActionStatus::Succeeded
-                            || !accepted && fact.status == ActionStatus::Failed
-                                && result["files"] == json!([]))
+                    let notification_only = result["files"] == json!([]);
+                    match fact.action_kind {
+                        ActionKind::ModelInference => notification_only && fact.status == ActionStatus::Succeeded,
+                        ActionKind::ToolExecution => fact.status == ActionStatus::Succeeded
+                            || !accepted && fact.status == ActionStatus::Failed && notification_only,
+                        _ => false,
+                    }
                 })
-                .and_then(|fact| fact.result.as_ref())
-                .ok_or("partial disposition references an ineligible tool result")?;
+                .ok_or("partial disposition references an ineligible action result")?;
+            if result["files"] == json!([]) {
+                continue;
+            }
+            let fact = fact.result.as_ref().ok_or("missing tool result")?;
             let files = match fact["tool_name"].as_str() {
-                // An explicit empty list salvages the notification without copying files.
-                _ if result["files"] == json!([]) => Vec::new(),
                 Some("edit" | "write" | "read") => {
                     let path = fact["arguments"]["path"]
                         .as_str()
@@ -913,6 +943,7 @@ fn candidate_summary(tree: &SpeculativeTree, branch: &crate::control_plane::spec
         "speculation_kind": chance.and_then(|chance| chance.speculation_kind),
         "proposal_provenance": tree.branch_proposal(&branch.branch_id).and_then(|proposal| proposal.provenance.as_ref()),
         "yield_only": branch.yield_only,
+        "active_tools": active_tools(tree, Some(&branch.branch_id)),
         "assumption_depth": branch.assumption_set.len(),
     })
 }
@@ -1030,4 +1061,56 @@ fn match_facts(
         "tool_calls": selected_tool_calls,
         "pairing": {"operation_id": operation_id, "action_id": selected_action_id, "branch_id": branch_id},
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control_plane::speculative_tree::{ActionFinishedFact, ActionRecord};
+
+    fn finish(tree: &mut SpeculativeTree, id: &str, kind: ActionKind, time: u64, result: Value) {
+        let tool_calls = result.get("tool_calls").cloned();
+        tree.action_facts.entry("child".into()).or_default().insert(id.into(), ActionFinishedFact {
+            action_id: id.into(), action_kind: kind, status: ActionStatus::Succeeded,
+            timestamp_ms: time, started_at_ms: None, result: Some(result), evidence: None, tool_calls,
+        });
+    }
+
+    #[test]
+    fn counts_complete_rounds_and_projects_inflight_tools() {
+        let mut tree = SpeculativeTree::new("fixture".into());
+        finish(&mut tree, "model-1", ActionKind::ModelInference, 1, json!({"tool_calls": [{"id":"one"},{"id":"two"}]}));
+        finish(&mut tree, "one", ActionKind::ToolExecution, 2, json!(null));
+        assert_eq!(completed_rounds(&tree, "child"), 0);
+        tree.active_actions.entry("child".into()).or_default().insert("two".into(), ActionRecord {
+            action_kind: ActionKind::ToolExecution, name: "bash".into(),
+            arguments: Some(json!({"command":"pytest"})), parent_action_id: None, started_at_ms: None,
+        });
+        assert_eq!(active_tools(&tree, Some("child")), vec![json!({"tool_name":"bash","arguments":{"command":"pytest"}})]);
+        assert_eq!(completed_rounds(&tree, "child"), 0);
+        tree.active_actions.get_mut("child").unwrap().remove("two");
+        finish(&mut tree, "two", ActionKind::ToolExecution, 3, json!(null));
+        assert_eq!(completed_rounds(&tree, "child"), 1);
+        finish(&mut tree, "model-2", ActionKind::ModelInference, 4, json!({"tool_calls": []}));
+        assert_eq!(completed_rounds(&tree, "child"), 2);
+    }
+
+    #[test]
+    fn model_outputs_can_be_selected_only_as_successful_notifications() {
+        let mut tree = SpeculativeTree::new("fixture".into());
+        let result = json!({"content":[{"type":"thinking","thinking":"reason"},{"type":"text","text":"answer"}]});
+        finish(&mut tree, "model", ActionKind::ModelInference, 1, result.clone());
+        let projected = candidate_results(&tree, "child", &[]);
+        assert_eq!(projected[0]["action_kind"], "model_inference");
+        assert_eq!(projected[0]["result"], result);
+        for intent in ["Salvage", "Yield"] {
+            let mut action = json!({"intent":intent,"results":[{"id":"model","notification":"answer","files":[]}]});
+            assert_eq!(resolve_partial_acceptance(&tree, "child", &action, None, false).unwrap(), Some(action.clone()));
+            action["results"][0]["files"] = json!(["edited.txt"]);
+            assert!(resolve_partial_acceptance(&tree, "child", &action, None, false).is_err());
+        }
+        tree.action_facts.get_mut("child").unwrap().get_mut("model").unwrap().status = ActionStatus::Failed;
+        let failed = json!({"intent":"Salvage","results":[{"id":"model","notification":"answer","files":[]}]});
+        assert!(resolve_partial_acceptance(&tree, "child", &failed, None, false).is_err());
+    }
 }

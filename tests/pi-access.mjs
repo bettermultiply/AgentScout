@@ -1,3 +1,4 @@
+import {createInterposer} from '../instrumentation/core/index.ts';
 import {writeExecution} from '../instrumentation/pi/execution-wire.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -374,4 +375,56 @@ export async function createAgentSession(options) {
     })]);
     assert.deepEqual(exit,{code:0,signal:null},stderr);
     assert.equal(stderr,'');
+});
+
+for (const injected of [false, true]) test(`round counting survives recovery (${injected ? 'injected tools' : 'model and tools'})`, async () => {
+    const inputs = [];
+    const options = {
+        taskId: 'rounds', report: async () => {},
+        evaluate: async (_, decision, {process_state}) => {
+            assert.equal(decision, 'extent');
+            inputs.push(process_state);
+            return process_state.semantic_facts.yield_only && process_state.phase === 'model_inference' ? 'stop' : 'continue';
+        },
+    };
+    let access = createInterposer(options);
+    access.setPolicy('authority', {digest: 'test', decisions: {}, decision_inputs: {
+        extent: ['process_state.semantic_facts', 'process_state.resource_counters'],
+    }});
+    await access.control({command: 'start_candidate', branch_id: 'child', parent_branch_id: 'authority',
+        prediction: injected ? {kind: 'predicted_tool_calls'} : {predict: 'branch_model'}});
+    const point = (id, kind, signal) => ({branch: 'child', actionId: id, actionKind: kind, name: 'read',
+        op: {}, admit: false, signal});
+    const completed = (id, kind, hasToolCalls) => access.afterAction({branch: 'child', actionId: id,
+        actionKind: kind, name: 'read', status: 'succeeded', isError: false, hasToolCalls});
+    if (!injected) {
+        await access.beforeAction(point('model-1', 'model_inference'));
+        completed('model-1', 'model_inference', true);
+    }
+    // Release the effect hold for the two simulated tool hooks while retaining candidate progress.
+    const state = access.snapshot();
+    state.effectHolds = [];
+    access = createInterposer(options);
+    access.restore(state);
+    await access.beforeAction(point('tool-1', 'tool_execution'));
+    completed('tool-1', 'tool_execution');
+    await access.control({command: 'resolve_pending', branch_id: 'authority', outcome: {yield_candidate: 'child'}});
+    const saved = access.snapshot();
+    access = createInterposer(options);
+    access.restore(saved);
+    await access.beforeAction(point('tool-2', 'tool_execution'));
+    completed('tool-2', 'tool_execution');
+    const abort = new AbortController();
+    const stopped = access.beforeAction(point('model-2', 'model_inference', abort.signal));
+    const rejected = assert.rejects(stopped, /Extent stop cancelled/);
+    await new Promise(resolve => setImmediate(resolve));
+    abort.abort();
+    await rejected;
+    assert.deepEqual(inputs.slice(-3).map(state => [state.steps_completed, state.semantic_facts.yield_only]),
+        [[0, false], [0, true], [1, true]]);
+    assert.deepEqual(inputs.at(-1).resource_counters, {model_inferences: Number(!injected), tool_executions: 2, failed_tools: 0});
+
+    completed('text', 'model_inference', false);
+    access.completeTurn('child');
+    assert.equal(access.snapshot().progress.find(([id]) => id === 'child')[1].state.steps_completed, 2);
 });

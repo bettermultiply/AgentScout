@@ -56,10 +56,20 @@ type ActionCompletion = {
     status: string;
     isError: boolean;
     arguments?: unknown;
+    hasToolCalls?: boolean;
+    startedAt?: number;
+    finishedAt?: number;
+    result?: unknown;
 };
 
 type ActionSummary = { kind: string; name: string; status: string; is_error: boolean };
-type CompletedTool = ActionSummary & { arguments?: unknown };
+type CompletedTool = ActionSummary & {
+    tool_name: string;
+    arguments?: unknown;
+    result?: unknown;
+    started_at_ms?: number;
+    timestamp_ms?: number;
+};
 type BranchState = {
     is_candidate: boolean;
     assumption_depth: number;
@@ -80,13 +90,21 @@ type BranchProgress = {
     lastAction?: ActionSummary;
     parentStepsCompleted?: number;
     completedTools?: CompletedTool[];
+    roundOpen: boolean;
+    yieldOnly?: boolean;
 };
+
+function closeRound(branch: BranchProgress) {
+    if (branch.roundOpen) branch.state.steps_completed++;
+    branch.roundOpen = false;
+}
 
 export type Interposer = {
     setPolicy(branch: string, artifact: PolicyArtifact): void;
     control(command: ControlCommand): Promise<void>;
     beforeAction(point: ExecutionPoint): Promise<Disposition>;
     afterAction(action: ActionCompletion): void;
+    completeTurn(branch: string): void;
     releaseAll(): void;
     snapshot(): unknown;
     restore(record: any): void;
@@ -192,7 +210,7 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             },
             startedAt: now(), hookCount: 0, modelInferences: 0, toolExecutions: 0,
             parentStepsCompleted: parent?.steps_completed ?? 0,
-            completedTools: [],
+            completedTools: [], roundOpen: false,
         };
     }
 
@@ -230,6 +248,7 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
                 case 'process_state.semantic_facts':
                     process_state.semantic_facts = {
                         speculation_kind: branch.speculationKind,
+                        yield_only: branch.yieldOnly === true,
                         prediction_kind: branch.predictionKind,
                         parent_steps_completed: branch.parentStepsCompleted,
                         next_action: {kind: point.actionKind, name: point.name, arguments: point.arguments ?? {}},
@@ -338,6 +357,11 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             for (const [branch, count] of record.hookCounts ?? []) branchProgress(branch).hookCount = count;
             for (const [branch, value] of record.progress ?? []) {
                 value.state.tool_counts = Object.assign(Object.create(null), value.state.tool_counts);
+                if (value.roundOpen === undefined) {
+                    // Legacy snapshots stored action counts and only a bounded action history.
+                    value.roundOpen = false;
+                    value.state.steps_completed = value.modelInferences || Number(value.toolExecutions > 0);
+                }
                 progress.set(branch, value);
             }
             for (const branch of record.extentHolds) {
@@ -383,6 +407,8 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
                     pauseHolds.delete(branch);
                     return;
                 case 'resolve_pending': {
+                    const candidate = (command.outcome as {yield_candidate?: string} | undefined)?.yield_candidate;
+                    if (candidate) branchProgress(candidate).yieldOnly = true;
                     const hold = extentHolds.get(branch);
                     if (!hold) return;
                     extentHolds.delete(branch);
@@ -427,7 +453,12 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             }
         },
 
-        afterAction({branch, actionId, actionKind, name, status, isError, arguments: args}) {
+        completeTurn(branch) {
+            const value = progress.get(branch);
+            if (value) closeRound(value);
+        },
+
+        afterAction({branch, actionId, actionKind, name, status, isError, arguments: args, hasToolCalls, startedAt, finishedAt, result}) {
             countedHooks.delete(`${branch}\u0000${actionId}`);
             const value = progress.get(branch);
             if (!value) return;
@@ -439,8 +470,9 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             if (actionKind === 'model_inference') value.modelInferences++;
             if (actionKind === 'tool_execution') {
                 value.toolExecutions++;
-                if (state.is_candidate && value.speculationKind === 'model_inference') {
-                    (value.completedTools ??= []).push({...summary, arguments: args});
+                if (state.is_candidate) {
+                    (value.completedTools ??= []).push({...summary, tool_name: name, arguments: args, result,
+                        started_at_ms: startedAt, timestamp_ms: finishedAt});
                 }
                 const counts = state.tool_counts[name] ??= {succeeded: 0, failed: 0};
                 if (status === 'succeeded' && !isError) counts.succeeded++;
@@ -449,13 +481,18 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
                     value.failedTools = (value.failedTools ?? 0) + 1;
                 }
             }
-            if (actionKind === 'model_inference' || actionKind === 'tool_execution') state.steps_completed++;
+            if (actionKind === 'model_inference' && status !== 'cancelled') {
+                value.roundOpen = true;
+                if (hasToolCalls === false) closeRound(value);
+            }
+            if (actionKind === 'tool_execution' && status !== 'cancelled') value.roundOpen = true;
         },
 
         async beforeAction(point) {
             const effectful = point.actionKind === 'tool_execution';
             const managed = effectful || point.actionKind === 'model_inference';
             const branch = branchProgress(point.branch);
+            if (point.actionKind === 'model_inference') closeRound(branch);
             await pauseGate(point.branch, point.signal);
             if (point.admitted) {
                 const hold = extentHolds.get(point.branch);

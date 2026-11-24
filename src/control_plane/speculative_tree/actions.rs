@@ -160,10 +160,11 @@ impl SpeculativeTree {
 
     pub(super) fn yield_snapshot(&self, candidate: &str) -> Value {
         let branch = &self.branches[candidate];
-        let tool_count = self.action_facts.get(candidate).into_iter().flat_map(|facts| facts.values())
-            .filter(|fact| fact.action_kind == ActionKind::ToolExecution
-                && matches!(fact.status, ActionStatus::Succeeded | ActionStatus::Failed)).count();
-        json!([branch.status, branch.execution_state.turn_active, tool_count])
+        let result_count = self.action_facts.get(candidate).into_iter().flat_map(|facts| facts.values())
+            .filter(|fact| matches!((fact.action_kind, fact.status),
+                (ActionKind::ToolExecution, ActionStatus::Succeeded | ActionStatus::Failed)
+                | (ActionKind::ModelInference, ActionStatus::Succeeded))).count();
+        json!([branch.status, branch.execution_state.turn_active, result_count])
     }
 
     pub(super) fn yield_candidate_stopped(&self, branch: &BranchRecord) -> bool {
@@ -173,8 +174,11 @@ impl SpeculativeTree {
 
     pub(super) fn yield_pending(&self, candidate: &str) -> bool {
         let current = self.yield_snapshot(candidate);
-        let previous = self.deferred_validations.get(candidate).and_then(|snapshot| snapshot[2].as_u64());
-        current[2].as_u64().unwrap_or(0) > previous.unwrap_or(0)
+        let previous = self.deferred_validations.get(candidate);
+        let count = current[2].as_u64().unwrap_or(0);
+        count > previous.and_then(|snapshot| snapshot[2].as_u64()).unwrap_or(0)
+            || (count > 0 && self.yield_candidate_stopped(&self.branches[candidate])
+                && previous.is_some_and(|snapshot| snapshot != &current))
     }
 
     pub(crate) fn model_inference_boundary(&mut self, task: &str, branch: &str, action: &str) -> io::Result<ControlActions> {
@@ -293,7 +297,7 @@ impl SpeculativeTree {
             ));
         }
         self.register_action(&branch_id, operation_id.clone(), ActionRecord {
-            action_kind, name: tool_name.clone(), parent_action_id, arguments: None,
+            action_kind, name: tool_name.clone(), parent_action_id, arguments: None, started_at_ms: None,
         })?;
         let mut actions = ControlActions::default();
         let branch = self.branch(&branch_id)?;
@@ -425,7 +429,7 @@ impl SpeculativeTree {
                         ));
                     };
                     if !self.stopping {
-                        if self.acceptance_target(self.branch(&candidate)?).is_some() {
+                        if self.transfer_target(self.branch(&candidate)?, part).is_some() {
                             actions
                                 .commands
                                 .push(self.make_prepare_acceptance(&candidate, true, part)?);
@@ -1009,6 +1013,7 @@ impl SpeculativeTree {
             .as_ref()
             .is_some_and(|part| part["intent"] == "Salvage");
         let yield_only = branch.yield_only;
+        let compatible = compatible && !yield_only;
         let stopped = self.yield_candidate_stopped(branch);
         let mut record = json!({"branch_id":candidate, "hypothesis":proposal.as_ref().map(|p|&p.payload), "verdict":verdict, "policy_error":error, "accepted":compatible});
         if let Some(part) = part.as_ref().filter(|part| part["intent"] == "Yield")
@@ -1016,9 +1021,11 @@ impl SpeculativeTree {
             && resolution != Some("preempted")
             && self.apply_yield(&candidate, &chance_id, part, actions)?
         {
-            record["disposition"] = json!("Yield");
-            record["part"] = part.clone();
-            actions.records.push(record);
+            if !yield_only || part["results"].as_array().is_some_and(|results| !results.is_empty()) {
+                record["disposition"] = json!("Yield");
+                record["part"] = part.clone();
+                actions.records.push(record);
+            }
             if stopped || self.task_finishing {
                 actions.commands.extend(self.discard_candidate(
                     &candidate,
@@ -1090,7 +1097,7 @@ impl SpeculativeTree {
             actions.records.push(record);
             return Ok(());
         };
-        if resolution.is_none() && error.is_none() {
+        if resolution.is_none() && error.is_none() && !yield_only {
             self.record_validation(
                 &chance_id,
                 &proposal.proposal_id,
@@ -1104,7 +1111,7 @@ impl SpeculativeTree {
         if self.can_accept(
             &candidate,
             compatible || (salvage && !ancestor_unresolved),
-            transfer.is_some(),
+            transfer,
         ) {
             if let Some(notification) = notification {
                 record["notification"] = json!(notification);
@@ -1112,7 +1119,7 @@ impl SpeculativeTree {
             return self.request_candidate_acceptance(
                 candidate,
                 &chance_id,
-                resolution.is_none().then_some(validation_id),
+                (resolution.is_none() && !yield_only).then_some(validation_id),
                 transfer,
                 part,
                 record,
@@ -1177,6 +1184,7 @@ impl SpeculativeTree {
             let mut command = self.make_promote_command(
                 &candidate,
                 record["notification"].as_str().map(str::to_owned),
+                false,
             )?;
             if let AgentCommand::Promote {
                 reuse_parent_environment,
@@ -1337,18 +1345,16 @@ impl SpeculativeTree {
                 if !part {
                     self.record_runtime_state(&candidate, RuntimeExecutionState::Promoted)?;
                 }
-                let mut command = self.make_promote_command(&candidate, notification)?;
+                let mut command = self.make_promote_command(&candidate, notification, part)?;
                 if let AgentCommand::Promote {
                     execution_access,
                     parent_branch_id,
-                    part: command_part,
                     ..
                 } = &mut command
                 {
                     let parent = self.chance_parent(self.branch(&candidate)?);
                     *parent_branch_id = parent.filter(|parent| Some(*parent) != self.authority_branch_id.as_deref()).map(str::to_owned);
                     *execution_access = access;
-                    *command_part = part;
                 }
                 record["disposition"] = if part {
                     json!("Salvage")

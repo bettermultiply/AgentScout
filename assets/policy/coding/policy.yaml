@@ -29,6 +29,7 @@ decisions:
     history: {mode: transcript_tail, max_entries: 30}
     policy_config:
       readonly_reset_steps: 2
+      share_inflight_commands: false
       candidate_model: deepseek/deepseek-flash
       candidate_thinking: "off"
       candidate_guidance: Use read-only tools to locate relevant files, symbols, and call chains. Do not edit files or write a long summary.
@@ -38,7 +39,7 @@ decisions:
       adaptive_dual_tool_speculation: true
       fail_candidate_model: deepseek/deepseek-flash
       fail_candidate_thinking: "off"
-      fail_candidate_guidance: Start with high-confidence checks of the implicated code and input boundaries. Read the relevant code before proposing a fix.
+      fail_candidate_guidance: Start with high-confidence checks of the implicated code and input boundaries. Read the relevant code before proposing a fix. Once the fix is ready, verify it with the workspace test command.
   extent:
     file: decisions.py
     function: extent

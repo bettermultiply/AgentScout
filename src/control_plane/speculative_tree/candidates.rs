@@ -337,10 +337,25 @@ impl SpeculativeTree {
     }
 
     pub fn can_promote(&self, candidate: &str, compatible: bool) -> bool {
-        self.can_accept(candidate, compatible, false)
+        self.can_accept(candidate, compatible, None)
     }
 
-    pub(super) fn can_accept(&self, candidate: &str, compatible: bool, transfer: bool) -> bool {
+    pub(crate) fn transfer_target(&self, candidate: &BranchRecord, partial: bool) -> Option<&str> {
+        if partial && candidate.yield_only {
+            let parent = self.chance_parent(candidate)?;
+            // A retired branch can salvage into its original Authority using conflict checks.
+            return (self.authority_branch_id.as_deref() == Some(parent)
+                && self.branches.get(parent)?.status.is_live_authority()
+                && !self.ancestor_assumptions_unresolved(candidate)).then_some(parent);
+        }
+        self.acceptance_target(candidate).filter(|_| self.acceptance_progress_compatible(candidate))
+    }
+
+    pub(crate) fn pending_partial_acceptance(&self, candidate: &str) -> bool {
+        self.pending_acceptance.as_ref().is_some_and(|(id, record)| id == candidate && record["full"] == false)
+    }
+
+    pub(super) fn can_accept(&self, candidate: &str, compatible: bool, transfer: Option<bool>) -> bool {
         compatible
             && self.pending_acceptance.is_none()
             && !self.pending_work.values().any(|work| matches!(work, ControlOperation::ResumeAcceptance(_)))
@@ -349,10 +364,11 @@ impl SpeculativeTree {
             && self.branches.get(candidate).is_some_and(|branch| {
                 branch.role == BranchRole::Candidate
                     && branch.status.is_decidable()
-                    && self.acceptance_target(branch).is_some_and(|parent| {
-                        transfer || Some(parent) == self.authority_branch_id.as_deref()
-                    })
-                    && !self.authority_advanced_past(branch)
+                    && match transfer {
+                        Some(full) => self.transfer_target(branch, !full).is_some(),
+                        None => !self.authority_advanced_past(branch)
+                            && self.acceptance_target(branch).is_some_and(|parent| Some(parent) == self.authority_branch_id.as_deref()),
+                    }
             })
             && !self
                 .branches
@@ -507,6 +523,6 @@ impl SpeculativeTree {
             BranchStatus::Promoting,
             "Candidate accepted; promotion requested",
         )?;
-        Ok(vec![self.make_promote_command(branch_id, None)?])
+        Ok(vec![self.make_promote_command(branch_id, None, false)?])
     }
 }

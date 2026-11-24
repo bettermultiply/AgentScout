@@ -401,6 +401,35 @@ fn yield_preserves_active_work_and_task_end_discards_candidate() {
 }
 
 #[test]
+fn model_output_triggers_yield_once_even_when_policy_has_no_notification() {
+    let (mut tree, candidate, _) = nested_tree();
+    tree.branches.get_mut(&candidate).unwrap().yield_only = true;
+    tree.handle_message(AgentMessage::ActionFinished {
+        task_id: "task-1".into(), branch_id: candidate.clone(), action_id: "model-output".into(),
+        action_kind: ActionKind::ModelInference, status: ActionStatus::Succeeded,
+        result: json!({"content": [{"type": "text", "text": "candidate answer"}]}),
+        evidence: None, timestamp_ms: 11,
+    }).unwrap();
+    tree.model_inference_boundary("task-1", "authority", "next-model").unwrap();
+    let capabilities = RuntimeCapabilities::default();
+    let actions = tree.progress(&capabilities).unwrap();
+    let validation = actions.operations.iter().find(|(_, operation)|
+        matches!(operation, ControlOperation::Validate(id) if id == &candidate)).unwrap().0;
+    let delivery = tree.complete_work(validation, Ok(ControlResult::AcceptanceDisposition(
+        false, "incompatible".into(), None, None, false,
+        Some(json!({"intent": "Yield", "results": []})), None,
+    ))).unwrap();
+    assert!(delivery.commands.is_empty());
+    assert!(delivery.records.is_empty());
+    assert!(!tree.yield_pending(&candidate));
+    let actions = tree.progress(&capabilities).unwrap();
+    assert!(!actions.operations.iter().any(|(_, operation)|
+        matches!(operation, ControlOperation::Validate(id) if id == &candidate)));
+    assert!(actions.commands.iter().any(|command|
+        matches!(command, AgentCommand::ResolvePending { operation_id, .. } if operation_id == "next-model")));
+}
+
+#[test]
 fn stopped_yield_candidate_batches_tools_at_the_authority_model_boundary() {
     check_stopped_yield_batch(false);
 }
@@ -562,15 +591,15 @@ fn nested_transfer_uses_its_parent_outcome_and_progress() {
     );
     assert!(tree.candidate_due(&child));
     assert!(tree.acceptance_progress_compatible(&tree.branches[&child]));
-    assert!(!tree.can_accept(&child, false, true));
-    assert!(tree.can_accept(&child, true, true));
+    assert!(!tree.can_accept(&child, false, Some(true)));
+    assert!(tree.can_accept(&child, true, Some(true)));
     tree.branch_mut(&child).unwrap().assumption_set[0].proposal_id = "different proposal".into();
-    assert!(!tree.can_accept(&child, true, true));
+    assert!(!tree.can_accept(&child, true, Some(true)));
     tree.branch_mut(&child).unwrap().assumption_set[0] =
         tree.branches[&parent].assumption_set[0].clone();
     admit(&mut tree, &parent, "later-tool");
     assert!(!tree.acceptance_progress_compatible(&tree.branches[&child]));
-    assert!(!tree.can_accept(&child, true, true));
+    assert!(!tree.can_accept(&child, true, Some(true)));
 }
 
 fn admit(tree: &mut SpeculativeTree, branch: &str, action: &str) -> String {

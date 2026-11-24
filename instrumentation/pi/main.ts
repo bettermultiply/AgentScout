@@ -340,8 +340,11 @@ const report = payload => {
         activeActions.delete(id);
         if(started)access.afterAction({branch:payload.branch_id,actionId:payload.action_id,
             actionKind:payload.action_kind,name:started.name,status:payload.status,arguments:started.arguments,
+            result:payload.result,startedAt:started.timestamp_ms,finishedAt:payload.timestamp_ms,
+            hasToolCalls:payload.result?.tool_calls?.length > 0,
             isError:payload.status==='failed'||payload.result?.is_error===true});
     }
+    if(payload.message==='turn_completed' && !saving)access.completeTurn(payload.branch_id);
     payload={source:'agent_adapter',...payload};
     return sendWire({kind:'message',payload,trace_context:telemetry.observe(payload)});
 };
@@ -700,7 +703,11 @@ function install(session,branch) {
                 const action=index>=0?pending.splice(index,1)[0]:undefined;
                 if(pending?.length===0)modelActions.delete(branch);
                 if(action&&checkpoints.get(key(branch,action.action_id))?.model&&!checkpoints.get(key(branch,action.action_id))?.speculationSkipped)modelResultHolds.set(branch,{operation:action.action_id,...Promise.withResolvers()});
-                if(action)void report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:'model_inference',status:event.message.stopReason==='aborted'?'cancelled':event.message.stopReason==='error'?'failed':'succeeded',result:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},evidence:{tool_calls:structuredClone(event.message.content.filter(part=>part.type==='toolCall'))},timestamp_ms:Date.now()});
+                if(action){
+                    const content=structuredClone(event.message.content);
+                    const tool_calls=content.filter(part=>part.type==='toolCall');
+                    void report({message:'action_finished',task_id:taskId,branch_id:branch,action_id:action.action_id,action_kind:'model_inference',status:event.message.stopReason==='aborted'?'cancelled':event.message.stopReason==='error'?'failed':'succeeded',result:{content,tool_calls,model:`${event.message.provider}/${event.message.model}`},evidence:{tool_calls},timestamp_ms:Date.now()});
+                }
                 const fork=modelForks.get(branch);
                 if(fork && action?.candidateModelAction) {
                     fork.steps += 1;
@@ -877,7 +884,10 @@ async function handle(command) {
                 for(const id of record.candidateBindings??[]) {
                     if(!ascProxy.has(id))candidateBindings.set(id,Promise.withResolvers());
                 }
-                for(const [candidate,parent] of record.yieldCandidates??[])yieldCandidates.set(candidate,parent);
+                for(const [candidate,parent] of record.yieldCandidates??[]){
+                    yieldCandidates.set(candidate,parent);
+                    await access.control({command:'resolve_pending',branch_id:parent,outcome:{yield_candidate:candidate}});
+                }
                 for(const [branch,fork] of record.modelForks??[])modelForks.set(branch,{...fork,maxSteps:fork.maxSteps??Infinity});
                 for(const [id,setup] of record.candidateSetups??[]){
                     const execution_access=command.execution_accesses?.[id];

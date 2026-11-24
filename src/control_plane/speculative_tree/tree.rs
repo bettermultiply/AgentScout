@@ -541,7 +541,7 @@ impl SpeculativeTree {
     ) -> io::Result<AgentCommand> {
         let generation = self.branch(branch_id)?.generation;
         let authority_branch_id = self
-            .acceptance_target(self.branch(branch_id)?)
+            .transfer_target(self.branch(branch_id)?, part)
             .ok_or_else(|| invalid_input("acceptance target is no longer eligible"))?
             .to_owned();
         let command_id = self.register(
@@ -564,9 +564,10 @@ impl SpeculativeTree {
         &mut self,
         branch_id: &str,
         notification: Option<String>,
+        part: bool,
     ) -> io::Result<AgentCommand> {
         let branch = self.branch(branch_id)?;
-        if branch.yield_only {
+        if branch.yield_only && !part {
             return Err(invalid_input("Yield-only branch cannot be promoted"));
         }
         let generation = branch.generation;
@@ -577,7 +578,7 @@ impl SpeculativeTree {
             notification,
             parent_branch_id: None,
             execution_access: None,
-            part: false,
+            part,
             command_id,
             generation,
         })

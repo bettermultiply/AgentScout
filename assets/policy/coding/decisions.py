@@ -230,8 +230,22 @@ def _candidate_settings(config, prefix):
     return settings
 
 
+def _share_commands(prediction, branches, config):
+    if config.get('share_inflight_commands', False):
+        commands = dict.fromkeys(
+            command for branch in branches for tool in branch.get('active_tools', [])
+            if isinstance(command := (tool.get('arguments') or {}).get('command'), str) and command.strip())
+        if commands:
+            listing = '\n'.join(f'- {command[:240]}' for command in list(commands)[:8])
+            guidance = prediction.get('candidate_guidance', '')
+            prediction['candidate_guidance'] = (
+                f'{guidance}\n\nAvoid duplicating commands already running in other candidates:\n{listing}').strip()
+    return prediction
+
+
 def predict(data, *, policy_config, capabilities):
     chance = data['chance_context']
+    branches = (data.get('process_context') or {}).get('active_branches', [])
     stage, main_command, edits = _detect_stage(
         data.get('history', []), chance, policy_config.get('readonly_reset_steps', 2))
     if stage == 'verify':
@@ -244,8 +258,11 @@ def predict(data, *, policy_config, capabilities):
                 phase = 'post_source_edit'
                 if policy_config.get('adaptive_dual_tool_speculation', True):
                     failures.append(True)
-        return {'generation': 'batch', 'proposals': [
-            _verification_proposal(failure, phase, policy_config) for failure in failures]}
+        proposals = [_verification_proposal(failure, phase, policy_config) for failure in failures]
+        for proposal in proposals:
+            if proposal.get('candidate_guidance'):
+                _share_commands(proposal, branches, policy_config)
+        return {'generation': 'batch', 'proposals': proposals}
 
     if chance.get('kind') not in ('model_inference', 'modelinference'):
         return {'abstain': True, 'reason': 'unrecognized_command'}
@@ -261,9 +278,9 @@ def predict(data, *, policy_config, capabilities):
     if stage == 'modify_early' and not policy_config.get('speculate_early_modify', False):
         return {'abstain': True, 'reason': stage}
     if stage == 'explore' and any(
-            branch.get('speculation_kind') == 'model_inference'
+            not branch.get('yield_only') and branch.get('speculation_kind') == 'model_inference'
             and (branch.get('proposal_provenance') or {}).get('kind') != 'active_post_edit_test'
-            for branch in (data.get('process_context') or {}).get('active_branches', [])):
+            for branch in branches):
         return {'abstain': True, 'reason': 'active_explore_branch'}
     settings = _candidate_settings(policy_config, '')
     if not settings:
@@ -271,7 +288,7 @@ def predict(data, *, policy_config, capabilities):
     result = {'predict': 'branch_model', **settings}
     if policy_config.get('candidate_count', 1) > 1:
         result['candidates'] = policy_config['candidate_count']
-    return result
+    return _share_commands(result, branches, policy_config)
 
 
 def _verification_proposal(failure, phase, config):
@@ -290,17 +307,24 @@ def extent(data, *, policy_config, capabilities):
 
     state = data['process_state']
     facts = state.get('semantic_facts', {})
+    next_action = facts.get('next_action') or {}
+    kind = next_action.get('kind') or state.get('phase')
+    model_boundary = state.get('phase') == 'model_inference' or kind == 'model_inference'
+    if facts.get('yield_only') is True:
+        return 'stop' if model_boundary else 'continue'
     if state['steps_completed'] >= policy_config.get('max_steps', 12):
         return 'stop'
-    next_action = facts.get('next_action') or {}
-    kind = next_action.get('kind')
-    if facts.get('prediction_kind') == 'predicted_tool_calls':
-        if kind == 'model_inference' or state.get('phase') == 'model_inference':
-            return 'stop'
-    elif facts.get('speculation_kind') == 'tool_execution' and kind == 'tool_execution':
-        if _verification_entry({'tool_name': next_action.get('name'), 'arguments': next_action.get('arguments')}):
-            return 'stop'
     completed = state.get('result_facts', {}).get('completed_tools', [])
+    if facts.get('prediction_kind') == 'predicted_tool_calls' and model_boundary:
+        return 'stop'
+    if facts.get('speculation_kind') == 'tool_execution' and kind == 'tool_execution':
+        if _verification_entry({'tool_name': next_action.get('name'), 'arguments': next_action.get('arguments')}):
+            for index in range(len(completed) - 1, -1, -1):
+                mutation = completed[index]
+                if _mutation(mutation):
+                    verified = any(_passing_verification(entry, mutation) for entry in completed[index + 1:])
+                    return 'stop' if verified else 'continue'
+            return 'stop'
     if completed and should_stop_degraded(completed, next_action)[0]:
         return 'stop'
     return 'continue'
@@ -451,7 +475,7 @@ def _readonly_results(actions, authority_calls):
 def _match_model(proposal, outcome, context, config):
     from ascout_policy.info_match import match_verification_calls
 
-    candidate = context['candidate']
+    candidate = context.get('candidate') or {}
     calls = outcome.get('tool_calls') if isinstance(outcome, dict) else None
     actions = [entry for entry in context.get('candidate_results', []) if entry.get('tool_name')]
     predicted = (proposal.get('payload') or {}).get('tool_calls') or []
@@ -486,19 +510,75 @@ def match_proposal(data, *, policy_config, capabilities):
         kind = (proposal.get('provenance') or {}).get('kind')
         status = outcome.get('status') or context.get('authority', {}).get('status')
         if kind in ('verification_pass', 'expected_test_failure'):
-            invocation_errors = (
-                "can't open file", 'no such file or directory', 'command not found', 'permission denied',
-                'error collecting', 'unrecognized arguments', 'no module named', 'syntaxerror',
-                'importerror', 'usage:',
-            )
-            output = _output(outcome).lower()
-            if any(marker in output for marker in invocation_errors):
+            if _invocation_error(outcome):
                 return {'verdict': 'incompatible', 'score': 0.0}
         if kind == 'verification_pass' and status == 'succeeded' and outcome.get('is_error') is False:
             return {'verdict': 'compatible', 'score': 1.0}
         if kind == 'expected_test_failure' and outcome.get('is_error') is True:
             return {'verdict': 'compatible', 'score': 0.9}
     return {'verdict': 'incompatible', 'score': 0.0}
+
+
+def _invocation_error(result):
+    return any(marker in _output(result).lower() for marker in (
+        "can't open file", 'no such file or directory', 'command not found', 'permission denied',
+        'error collecting', 'unrecognized arguments', 'no module named', 'syntaxerror',
+        'importerror', 'usage:',
+    ))
+
+
+def _passing_verification(entry, mutation):
+    started, edited = entry.get('started_at_ms'), mutation.get('timestamp_ms')
+    return ((started is None or edited is None or started >= edited)
+            and _verification_entry(entry) and _succeeded(entry)
+            and _workspace_verification(entry['arguments']['command'])
+            and not _invocation_error(entry.get('result') or entry))
+
+
+def _verified_files(actions, workspace, config):
+    from posixpath import isabs, normpath, relpath
+    from textwrap import shorten
+
+    latest, mutation, verification = {}, None, None
+    for entry in actions:
+        name, args = entry['tool_name'], entry.get('arguments') or {}
+        if name in ('edit', 'write') and not _succeeded(entry):
+            return []
+        if _mutation(entry):
+            mutation, verification = entry, None
+            if name in ('edit', 'write'):
+                path = normpath(args['path'])
+                if isabs(path):
+                    if not workspace:
+                        continue
+                    path = relpath(path, workspace)
+                if path != '..' and not path.startswith('../'):
+                    latest[path] = entry
+        elif mutation and _passing_verification(entry, mutation):
+            verification = entry
+    if not latest or verification is None:
+        return []
+
+    def preview(value):
+        return shorten(str(value or ''), width=160, placeholder='…')
+
+    results = []
+    for path, entry in latest.items():
+        args = entry['arguments']
+        if entry['tool_name'] == 'edit':
+            edits = args.get('edits') or [args]
+            change = '; '.join(f'{preview(edit.get("oldText"))!r} → {preview(edit.get("newText"))!r}'
+                               for edit in edits[:3])
+        else:
+            change = f'wrote {preview(args.get("content"))!r}'
+        results.append({'id': entry['action_id'], 'notification': f'{path}: {change}'})
+    command = verification['arguments']['command']
+    output = _verification_notification(verification.get('result') or verification,
+                                        config.get('verification_output_chars', 20_000))
+    results.append({'id': verification['action_id'], 'files': [], 'notification':
+                    'Changes produced by a fast speculative candidate passed local workspace verification. '
+                    'Review logic and edge cases before finalizing.\n' + command + '\n' + output})
+    return results
 
 
 def _verification_notification(outcome, limit):
@@ -519,35 +599,35 @@ def dispose(data, *, policy_config, capabilities):
     provenance = proposal.get('provenance') or {}
     details = (context.get('match') or {}).get('details') or {}
     discard = {'intent': 'Discard'}
-    if resolution == 'accepted':
-        explore = (candidate.get('speculation_kind') == 'model_inference'
-                   and provenance.get('kind') != 'active_post_edit_test')
-        if explore or provenance.get('uses_candidate_model'):
-            actions = [entry for entry in context.get('candidate_results', []) if entry.get('tool_name')]
-            safe = _safe_results(_readonly_results(actions, None), policy_config, ())
-            return {'actions': [{'intent': 'Salvage', 'results': safe}] if safe else [discard]}
+    model = (proposal.get('model_options') or {}).get('model') or (proposal.get('payload') or {}).get('model') or proposal.get('model')
+    authority_model = (outcome or {}).get('model') if isinstance(outcome, dict) else None
+    fast = model != authority_model if model else bool(provenance.get('uses_candidate_model'))
+    accepted = resolution == 'accepted'
+    if accepted and not fast:
         action = {'intent': 'Promote'}
         if isinstance(outcome, dict) and not details.get('matched_tool_calls'):
             action['notification'] = _verification_notification(
                 outcome, policy_config.get('verification_output_chars', 20_000))
         return {'actions': [action]}
 
-    if resolution in ('extent_reached', 'indeterminate') and outcome is None:
+    if resolution in ('extent_reached', 'indeterminate') and outcome is None and not candidate.get('yield_only'):
         return {'actions': []}
 
-    if candidate.get('speculation_kind') == 'model_inference':
-        safe = details.get('safe_results')
-        if safe is None:
-            safe = _match_model(proposal, outcome, context, policy_config).get('details', {}).get('safe_results', [])
-        branch = candidate.get('branch') or {}
-        status = branch.get('status')
-        stopped = (resolution in ('preempted', 'extent_reached')
-                   or status == {'blocked': 'extent_reached'}
-                   or (branch.get('execution_state') or {}).get('turn_active') is False)
+    actions = [entry for entry in context.get('candidate_results', []) if entry.get('tool_name')]
+    safe = details.get('safe_results')
+    if safe is None:
+        safe = _match_model(proposal, outcome, context, policy_config).get('details', {}).get('safe_results', [])
+    branch = candidate.get('branch') or {}
+    stopped = (resolution in ('preempted', 'extent_reached')
+               or branch.get('status') == {'blocked': 'extent_reached'}
+               or (branch.get('execution_state') or {}).get('turn_active') is False)
+    if not accepted and not stopped and candidate.get('speculation_kind') == 'model_inference':
         explore = provenance.get('kind') != 'active_post_edit_test'
         active_test = any(map(_verification_entry, candidate.get('active_tools') or []))
-        if not stopped and (explore or candidate.get('yield_only') or active_test):
+        if explore or candidate.get('yield_only') or active_test:
             return {'actions': [{'intent': 'Yield', 'results': safe}]}
-        if safe:
-            return {'actions': [{'intent': 'Salvage', 'results': safe}, discard]}
-    return {'actions': [discard]}
+    files = _verified_files(actions, context.get('workspace'), policy_config) if fast else []
+    results = files + safe
+    if not results:
+        return {'actions': [discard]}
+    return {'actions': [{'intent': 'Salvage', 'results': results}] + ([] if accepted else [discard])}

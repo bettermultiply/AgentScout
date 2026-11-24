@@ -57,11 +57,19 @@ test('Explore → Modify-Early → Modify-Ready → Verify → Explore', () => {
 });
 
 test('an active explorer only suppresses exploration predictions', () => {
-    const explore = {branch_id: 'explorer', speculation_kind: 'model_inference', yield_only: true};
+    const explore = {branch_id: 'explorer', speculation_kind: 'model_inference', yield_only: false};
     const context = {active_branches: [explore]};
     assert.deepEqual(predict([], model, {}, context), {abstain: true, reason: 'active_explore_branch'});
     assert.equal(predict([], model, {}, {active_branches: [{...explore, speculation_kind: 'tool_execution'}]}).predict, 'branch_model');
     assert.equal(predict([], model, {}, {active_branches: [{...explore, proposal_provenance: {kind: 'active_post_edit_test'}}]}).predict, 'branch_model');
+    const draining = {...explore, yield_only: true, active_tools: [{tool_name: 'bash', arguments: {command: 'pytest running'}}]};
+    const process = {active_branches: [draining], authority_active_tools: [{tool_name: 'bash', arguments: {command: 'pytest authority'}}]};
+    const defaultPrediction = predict([], model, {}, process);
+    assert.equal(defaultPrediction.predict, 'branch_model');
+    assert.equal(defaultPrediction.candidate_guidance, undefined);
+    const shared = predict([], model, {share_inflight_commands: true}, process);
+    assert.match(shared.candidate_guidance, /pytest running/);
+    assert.doesNotMatch(shared.candidate_guidance, /pytest authority/);
     const previous = verified('pytest tests', {status: 'failed'});
     assert.equal(predict([previous, edit], model, {}, context).proposals[0].provenance.kind, 'active_post_edit_test');
     assert.equal(predict([edit], bash('pytest'), {}, context).proposals[0].provenance.phase, 'post_source_edit');

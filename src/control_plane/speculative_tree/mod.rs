@@ -106,6 +106,8 @@ pub struct ActionRecord {
     #[serde(default)]
     pub arguments: Option<Value>,
     pub parent_action_id: Option<String>,
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,6 +116,8 @@ pub(crate) struct ActionFinishedFact {
     pub action_kind: ActionKind,
     pub status: ActionStatus,
     pub timestamp_ms: u64,
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
     pub result: Option<Value>,
     pub evidence: Option<Value>,
     pub tool_calls: Option<Value>,

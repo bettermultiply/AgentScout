@@ -219,7 +219,7 @@ async function waitFor(predicate, label) {
     assert.fail(label);
 }
 
-for (const failure of [false, true]) test(`Verify ${failure ? 'Fail salvages diagnostics' : 'Pass promotes with complete output'}`, {timeout: 45000}, async t => {
+for (const failure of [false, true]) test(`Verify ${failure ? 'Fail salvages verified edits' : 'Pass promotes with complete output'}`, {timeout: 45000}, async t => {
     const realOutput = `START_OF_TEST\n${'test output line\n'.repeat(420)}END_OF_TEST`;
     const expected = failure ? 'Command exited with non-zero status.' : 'All tests passed.';
     const {done, rows, root, shutdown} = await fixture(t, (messages, model, root) => {
@@ -240,22 +240,24 @@ for (const failure of [false, true]) test(`Verify ${failure ? 'Fail salvages dia
             fs.writeFileSync(join(root, 'candidate-ready'), '');
             return tool('candidate-retest', 'bash', {command: './pytest second'});
         }
+        if (id === 'candidate-retest') {
+            assert.match(last.content, /CANDIDATE_VERIFIED/);
+            return {content: 'Candidate verified the fix'};
+        }
         if (failure) {
             assert.equal(id, 'verify');
             assert.equal(model, 'agent');
             assert.match(input, /read app\.py/);
             assert.match(input, /END_OF_TEST/);
-            assert.doesNotMatch(input, /Start with high-confidence checks|candidate-edit/);
-        } else if (id === 'candidate-retest') {
-            // The previously blocked verification is allowed after Promote.
-            assert.match(last.content, /END_OF_TEST/);
+            assert.doesNotMatch(input, /Start with high-confidence checks/);
+            assert.match(input, /CANDIDATE_VERIFIED/);
         } else {
             assert.fail(`unexpected continuation after ${id}`);
         }
         return {content: 'Done'};
     }, (root, write) => {
         write('app.py', 'value = 0\n');
-        write('pytest', `#!/bin/sh\nfor i in $(seq 1 100); do [ -f '${join(root, 'candidate-ready')}' ] && break; sleep .05; done\nsleep .4\nprintf '%s\\n' '${realOutput}'\nexit ${Number(failure)}\n`, true);
+        write('pytest', `#!/bin/sh\nif [ "$1" = second ]; then echo CANDIDATE_VERIFIED; touch '${join(root, 'candidate-verified')}'; exit 0; fi\nfor i in $(seq 1 100); do [ -f '${join(root, 'candidate-verified')}' ] && break; sleep .05; done\nsleep .4\nprintf '%s\\n' '${realOutput}'\nexit ${Number(failure)}\n`, true);
         const manifest = modelPolicy(root, write, {fast: false, tools: true});
         fs.appendFileSync(join(root, 'policy', 'decisions.py'), `
 
@@ -272,13 +274,10 @@ def initial_verification_only(data, *, policy_config, capabilities):
     assert.equal(settlement.disposition, failure ? 'Salvage' : 'Promote');
     assert.equal(settlement.hit, true);
     assert.equal(done.branch_id, failure ? 'authority' : settlement.branch_id);
-    const stopped = events.findIndex(e => e.branch_id === settlement.branch_id && e.message === 'branch_suspended'
-        && e.reason === 'extent_reached');
     const edited = events.findIndex(e => e.action_id?.startsWith('candidate-edit') && e.message === 'action_finished');
-    const retest = events.findIndex(e => e.action_id?.startsWith('candidate-retest') && e.message === 'action_started');
-    assert.ok(edited >= 0 && stopped > edited);
-    assert.ok(failure ? retest === -1 : retest > stopped);
-    assert.equal(fs.readFileSync(runPath(root, 'workspace/app.py'), 'utf8'), `value = ${Number(!failure)}\n`);
+    const retest = events.findIndex(e => e.action_id?.startsWith('candidate-retest') && e.message === 'action_finished');
+    assert.ok(edited >= 0 && retest > edited);
+    assert.equal(fs.readFileSync(runPath(root, 'workspace/app.py'), 'utf8'), 'value = 1\n');
     if (!failure) {
         const notices = rows('session.jsonl').filter(e => e.customType === 'notification');
         assert.ok(notices.some(e => e.content.includes(realOutput)));
@@ -330,7 +329,7 @@ test('Explore yields novel reads before inference and retires after an Authority
     await shutdown();
 });
 
-for (const admit of [false, true]) test(`Yield batches results before ${admit ? 'an abstaining' : 'a locally denied'} model opportunity`, {timeout: 45000}, async t => {
+for (const admit of [false, true]) test(`Yield batches results before ${admit ? 'a fresh' : 'a locally denied'} model opportunity`, {timeout: 45000}, async t => {
     let candidateWaiting = false;
     let authorityAdvanced = false;
     const workspace = '[Speculative workspace output collected on current files]: read other.txt';
@@ -343,6 +342,7 @@ for (const admit of [false, true]) test(`Yield batches results before ${admit ? 
             ...tool('yield-shared', 'read', {path: 'value.txt', limit: 2}).tool_calls,
             {...tool('yield-novel', 'read', {path: 'other.txt'}).tool_calls[0], index: 1},
         ]};
+        if (model === 'candidate' && id === 'yield-authority-work') return {content: 'Fresh exploration'};
         if (model === 'candidate' && !id.startsWith('yield-late')) {
             candidateWaiting = true;
             await waitFor(() => authorityAdvanced, 'Authority should continue after the initial Yield');
@@ -386,19 +386,22 @@ for (const admit of [false, true]) test(`Yield batches results before ${admit ? 
 def feasibility_initial_only(data, *, policy_config, capabilities):
     return data['state']['steps_completed'] == 0
 
+def feasibility_next_explore(data, *, policy_config, capabilities):
+    return data['state']['steps_completed'] < 3
+
 def extent_keep_running(data, *, policy_config, capabilities):
     return 'continue'
 `);
         const config = fs.readFileSync(manifest, 'utf8').replace('function: extent', 'function: extent_keep_running');
-        fs.writeFileSync(manifest, admit ? config : config.replace('function: feasibility_pass', 'function: feasibility_initial_only'));
+        fs.writeFileSync(manifest, config.replace('function: feasibility_pass', admit ? 'function: feasibility_next_explore' : 'function: feasibility_initial_only'));
         return manifest;
     }, {modelIds: ['agent', 'candidate']});
     assert.ok(authorityAdvanced);
     assert.equal(done.status, 'succeeded');
     const events = rows();
-    const yields = events.filter(event => event.disposition === 'Yield');
+    const candidate = events.find(event => event.disposition === 'Yield').branch_id;
+    const yields = events.filter(event => event.disposition === 'Yield' && event.branch_id === candidate);
     assert.equal(yields.length, 2);
-    const candidate = yields[0].branch_id;
     assert.equal(yields[1].branch_id, candidate);
     const completed = events.filter(event => event.message === 'action_finished' && event.action_id.startsWith('yield-late'));
     assert.deepEqual(completed.map(event => event.status), ['succeeded', 'succeeded']);
@@ -410,12 +413,10 @@ def extent_keep_running(data, *, policy_config, capabilities):
         const chance = events.find(event => event.observation?.event === 'chance_created'
             && event.observation.parent_branch_id === 'authority' && event.observation.operation_id === boundary.action_id);
         assert.ok(chance, 'the batched Yield boundary admits a Chance');
-        const abstained = events.find(event => event.observation?.chance_id === chance.observation.chance_id
-            && event.observation.reason === 'active_explore_branch');
-        assert.deepEqual(abstained?.observation.stage, {discarded: 'not_selected'});
-        assert.ok(events.indexOf(chance) < events.indexOf(abstained) && events.indexOf(abstained) < events.indexOf(yields[1]));
+        assert.ok(events.some(event => event.message === 'candidate_created'
+            && event.chance_id === chance.observation.chance_id && event.branch_id !== candidate));
     }
-    assert.equal(new Set(events.filter(event => event.message === 'candidate_created').map(event => event.branch_id)).size, 1);
+    if (!admit) assert.equal(events.filter(event => event.message === 'candidate_created').length, 1);
     assert.ok(events.indexOf(yields[0]) < events.indexOf(completed[0]));
     assert.ok(events.indexOf(completed[1]) < events.indexOf(boundary));
     assert.ok(events.indexOf(boundary) < events.indexOf(yields[1]));
@@ -431,6 +432,88 @@ def extent_keep_running(data, *, policy_config, capabilities):
         && event.operation === 'cleanup' && event.status === 'applied');
     assert.ok(cleaned > events.indexOf(yields[1]) && cleaned < events.findIndex(event => event.message === 'materialization_started'));
     assert.ok(!events.some(event => event.policy_error));
+    await shutdown();
+});
+
+for (const conflict of [false, true]) test(`draining Yield salvages verified files (${conflict ? 'conflict' : 'clean transfer'})`, {timeout: 45000}, async t => {
+    const command = './pytest drain';
+    const waitForEvent = (root, predicate, label) => waitFor(() => fs.readFileSync(runPath(root, 'events.jsonl'), 'utf8')
+        .split('\n').slice(0, -1).map(JSON.parse).some(predicate), label);
+    let fresh = false, parked;
+    const {done, rows, root, requests, shutdown} = await fixture(t, async (messages, model, root) => {
+        const id = lastTool(messages)?.tool_call_id?.split('|')[0];
+        const input = JSON.stringify(messages);
+        if (model === 'candidate') {
+            if (!id) return tool('drain-read', 'read', {path: 'other.txt'});
+            if (id === 'drain-read') return tool('drain-edit', 'write', {path: 'value.txt', content: 'candidate fix'});
+            if (id === 'drain-edit') return {tool_calls: [
+                ...tool('drain-verify', 'bash', {command}).tool_calls,
+                {...tool('drain-last-tool', 'read', {path: 'last.txt'}).tool_calls[0], index: 1},
+            ]};
+            assert.equal(id, 'drain-authority-read', 'draining candidate must park before another inference');
+            assert.match(input, /Avoid duplicating commands already running in other candidates/);
+            assert.match(input, /pytest drain/);
+            fresh = true;
+            return {content: 'Fresh exploration finished'};
+        }
+        assert.doesNotMatch(input, /Avoid duplicating commands already running in other candidates/);
+        if (!id) {
+            await waitForEvent(root, event => event.message === 'action_started' && event.action_id === 'drain-verify',
+                'first candidate verification in flight');
+            return tool('drain-authority-read', 'read', {path: 'value.txt'});
+        }
+        if (id === 'drain-authority-read') {
+            await waitFor(() => fresh, 'fresh exploration while the old candidate drains');
+            assert.doesNotMatch(input, /candidate fix|VERIFIED_DRAIN/);
+            parked = waitForEvent(root, event => event.message === 'branch_suspended' && event.reason === 'extent_reached',
+                'draining candidate parks after both tools').then(() => fs.writeFileSync(join(root, 'parked'), ''));
+            void parked.catch(() => {});
+            return tool('drain-authority-work', 'bash', {command: './settle'});
+        }
+        assert.equal(id, 'drain-authority-work');
+        assert.match(input, /fast speculative candidate.*VERIFIED_DRAIN/);
+        if (conflict) assert.doesNotMatch(input, /Accepted result: value.txt/);
+        else assert.match(input, /Accepted result: value.txt.*candidate fix/);
+        return {content: 'Authority finished'};
+    }, (root, write) => {
+        write('last.txt', 'last tool output');
+        write('pytest', `#!/bin/sh\nwhile [ ! -f '${join(root, 'release')}' ]; do sleep .025; done\n`
+            + 'grep -qx "candidate fix" value.txt || exit 1\necho VERIFIED_DRAIN\n', true);
+        write('settle', '#!/bin/sh\n' + (conflict ? "printf 'authority update' > value.txt\n" : '')
+            + `touch '${join(root, 'release')}'\nwhile [ ! -f '${join(root, 'parked')}' ]; do sleep .025; done\n`, true);
+        const manifest = modelPolicy(root, write);
+        fs.appendFileSync(join(root, 'policy', 'decisions.py'), `
+
+def first_two_rounds(data, *, policy_config, capabilities):
+    return data['state']['steps_completed'] < 2
+`);
+        fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8')
+            .replace('function: feasibility_pass', 'function: first_two_rounds')
+            .replace('share_inflight_commands: false', 'share_inflight_commands: true'));
+        return manifest;
+    }, {modelIds: ['agent', 'candidate']});
+    await parked;
+    assert.equal(done.branch_id, 'authority');
+    const events = rows();
+    const yielded = events.find(e => e.disposition === 'Yield' && e.part.results.some(result => result.id === 'drain-read'));
+    assert.ok(yielded);
+    const branch = yielded.branch_id;
+    const freshBranch = events.find(e => e.message === 'candidate_created' && e.branch_id !== branch);
+    const blocked = events.find(e => e.branch_id === branch && e.message === 'branch_suspended' && e.reason === 'extent_reached');
+    const salvaged = events.find(e => e.branch_id === branch && e.disposition === 'Salvage');
+    assert.ok(freshBranch && blocked && salvaged);
+    assert.ok(events.indexOf(yielded) < events.indexOf(freshBranch) && events.indexOf(freshBranch) < events.indexOf(blocked));
+    for (const id of ['drain-verify', 'drain-last-tool']) {
+        const finished = events.find(e => e.action_id === id && e.message === 'action_finished');
+        assert.equal(finished?.status, 'succeeded');
+        assert.ok(events.indexOf(finished) < events.indexOf(blocked));
+    }
+    assert.ok(events.indexOf(blocked) < events.indexOf(salvaged));
+    assert.equal(salvaged.accepted, false);
+    assert.ok(!events.some(e => e.branch_id === branch && e.disposition === 'Promote'));
+    assert.ok(events.some(e => e.branch_id === branch && e.operation === 'cleanup' && e.status === 'applied'));
+    assert.ok(!requests.some(request => request.model === 'candidate' && request.toolId === 'drain-verify'));
+    assert.equal(fs.readFileSync(runPath(root, 'workspace/value.txt'), 'utf8'), conflict ? 'authority update' : 'candidate fix');
     await shutdown();
 });
 
@@ -464,9 +547,14 @@ def predict_with_settings(data, *, policy_config, capabilities):
     for proposal in prediction.get('proposals', []):
         proposal.update(model='fixture/candidate', thinking='low', candidate_guidance=${JSON.stringify(guide)})
     return prediction
+
+def dispose_with_promotion(data, *, policy_config, capabilities):
+    # Exercise model restoration under a policy that explicitly allows this promotion.
+    return {'actions': [{'intent': 'Promote'}]} if data['resolution'] == 'accepted' else dispose(data, policy_config=policy_config, capabilities=capabilities)
 `);
         const config = fs.readFileSync(manifest, 'utf8').replace(/function: predict\b/, 'function: predict_with_settings')
-            .replace('max_steps: 12', 'max_steps: 2');
+            .replace('function: dispose', 'function: dispose_with_promotion')
+            .replace('max_steps: 12', 'max_steps: 1');
         fs.writeFileSync(manifest, config);
         return manifest;
     }, {modelIds: ['agent', 'candidate'], reasoning: true, responses: true});
@@ -597,7 +685,7 @@ for (const scenario of ['running', 'finished', 'yield', 'salvage', 'recovery']) 
             fs.appendFileSync(join(root, 'policy', 'decisions.py'), `
 
 def after_source_edit_only(data, *, policy_config, capabilities):
-    return data['state']['steps_completed'] == 4
+    return data['state']['steps_completed'] == 2
 `);
             fs.writeFileSync(policy, fs.readFileSync(policy, 'utf8')
                 .replace('function: feasibility_pass', 'function: after_source_edit_only'));

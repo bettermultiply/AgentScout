@@ -58,13 +58,13 @@ Backend 接口同时提供不带上下文的旧方法和带 `BackendContext` 的
 
 ## Full 与 part 接受
 
-`Promote` 请求全量接受。`Salvage` 请求按结果 ID 或受管路径移交部分状态。接受裁决中的结果 ID 引用候选已成功完成的工具动作，由控制面解析文件依赖。也可按 `workspace` 或 `tmp` 挂载范围选择，或传入规范化绝对路径。Policy 可通过 `context.candidate_execution`、`context.candidate_results` 和 `context.candidate_proposal` 判断交付内容。
+`Promote` 请求全量接受。`Salvage` 请求按结果 ID 或受管路径移交部分状态。结果 ID 可引用候选已成功完成的工具动作或模型推理。控制面解析工具结果的文件依赖，模型输出使用 `files: []`。也可按 `workspace` 或 `tmp` 挂载范围选择，或传入规范化绝对路径。Policy 可通过 `context.candidate_execution`、`context.candidate_results` 和 `context.candidate_proposal` 判断交付内容。
 
 Pi 先阻止 parent 和 candidate 启动新调用，回报已在执行边界暂停。control plane 随即要求 Runtime 暂停目标环境。暂停确认后，Pi 等待 candidate 自己已经发出的模型调用收敛。Runtime 再关闭移交期间双方的写入准入，等待来源自己的受管写者，并将获准状态三方合并到目标。Full 成功要覆盖全部受管挂载。文件级 part 按结果检查依赖，仅交付 Runtime 回执 `part_results.results` 列出的结果。每个入选结果的全部文件必须可移交，冲突结果的通知不会送入目标 session。共享状态的 Backend 不重复写入。Runtime 完成移交并恢复目标环境后，Pi 仍在执行边界等待，直到回执应用且 control plane 确认才继续。
 
 A → B → C 中，内层验证采用 B 的 Chance、真实结果（或 Policy 明确允许的尚未执行等待点）及执行进展。C 只能向 B 的隔离环境移交，且继承未决 Proposal 必须与 B 一致。Full 保留 C 的 session 和后代，将 C 的后续调用绑定到 B 的环境，并由 C 承接 B 的外层 Chance。Part 保留 B 的 session 和路由，向它交付实际接受的结果，随后抛弃 C 和后代。A 的权威 session 和环境不受内层接受影响。外层拒绝丢弃仍依赖 B 的延续，外层接受则再次验证并移交到 A。原来源环境保留到使用它的延续和后代释放为止。
 
-原型对已经开始不同调用的 parent 保守拒绝接受。Firecracker 和独立可执行 Backend 尚无隔离状态合并实现，多个独立隔离 Backend 也无联合提交。本实现只覆盖受管调用和挂载。内存、外部服务以及未受管写入不在移交范围内。文件系统重放可报告回滚失败，回执丢失和进程崩溃仍可能留下待清理或待核查状态。主动保存不跨未确认的移交。长期写者可能超过现有 Runtime 请求超时。
+全量接受要求 parent 仍位于原等待点。已停止的 `yield_only` 候选可向仍作为 Authority 的原 parent 发起三方冲突检查的部分移交。Firecracker 和独立可执行 Backend 尚无隔离状态合并实现，多个独立隔离 Backend 也无联合提交。本实现只覆盖受管调用和挂载。内存、外部服务以及未受管写入不在移交范围内。文件系统重放可报告回滚失败，回执丢失和进程崩溃仍可能留下待清理或待核查状态。主动保存不跨未确认的移交。长期写者可能超过现有 Runtime 请求超时。Runtime 尚未为 `bash` 修改文件的调用提供逐动作变更路径发现，Policy 无法据此选择对应的文件依赖。
 
 ## 4. 顺序与中断
 
