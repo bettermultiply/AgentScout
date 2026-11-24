@@ -3,6 +3,32 @@ use super::super::*;
 use super::support::*;
 
 #[test]
+fn failed_event_cancels_only_unpublished_resolves_and_work() {
+    let mut tree = tree();
+    tree.create_authority("authority", "").unwrap();
+    let sent = tree.resolve_pending("authority", "sent", serde_json::json!({"phase":"execute"})).unwrap();
+    let mut actions = ControlActions::default();
+    tree.schedule(ControlOperation::Rebalance, &mut actions);
+    let checkpoint = tree.dispatch_checkpoint();
+
+    let unsent = tree.resolve_pending("authority", "unsent", serde_json::json!({"phase":"execute"})).unwrap();
+    tree.schedule(ControlOperation::Rebalance, &mut actions);
+    assert!(tree.discard_undispatched(checkpoint).is_empty());
+    let AgentCommand::ResolvePending { command_id, .. } = unsent else { unreachable!() };
+    assert!(!tree.pending_commands.contains_key(&command_id));
+    assert!(tree.branches["authority"].pending_operations.iter().any(|op|
+        op.operation_id == command_id && op.status == OperationStatus::Failed));
+    assert_eq!(tree.pending_work.keys().copied().collect::<Vec<_>>(), [actions.operations[0].0]);
+    let AgentCommand::ResolvePending { command_id, operation_id, generation, .. } = sent else { unreachable!() };
+    tree.handle_message(AgentMessage::CommandResult {
+        command_id, branch_id: "authority".into(), operation_id: Some(operation_id),
+        operation: CommandOperation::ResolvePending, status: CommandStatus::Applied,
+        generation, reason: None,
+    }).unwrap();
+    assert!(!tree.recovery_pending_commands());
+}
+
+#[test]
 fn command_results_require_exact_pending_identity_and_are_consumed() {
     let mut tree = tree();
     tree.branches.insert(

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import { resolve } from 'node:path';
@@ -53,6 +54,31 @@ test('Explore → Modify-Early → Modify-Ready → Verify → Explore', () => {
     assert.equal(predict([failure, edit], bash(main.arguments.command)).proposals.length, 2);
     assert.equal(predict([failure, edit, main]).predict, 'branch_model');
     assert.equal(predict([edit, failure, read('a'), {kind: 'model_inference'}, read('b')]).predict, 'branch_model');
+});
+
+test('an active explorer only suppresses exploration predictions', () => {
+    const explore = {branch_id: 'explorer', speculation_kind: 'model_inference', yield_only: true};
+    const context = {active_branches: [explore]};
+    assert.deepEqual(predict([], model, {}, context), {abstain: true, reason: 'active_explore_branch'});
+    assert.equal(predict([], model, {}, {active_branches: [{...explore, speculation_kind: 'tool_execution'}]}).predict, 'branch_model');
+    assert.equal(predict([], model, {}, {active_branches: [{...explore, proposal_provenance: {kind: 'active_post_edit_test'}}]}).predict, 'branch_model');
+    const previous = verified('pytest tests', {status: 'failed'});
+    assert.equal(predict([previous, edit], model, {}, context).proposals[0].provenance.kind, 'active_post_edit_test');
+    assert.equal(predict([edit], bash('pytest'), {}, context).proposals[0].provenance.phase, 'post_source_edit');
+});
+
+test('shell history distinguishes Python inspection from explicit writes', () => {
+    for (const command of ["python - <<'PY'\nimport inspect\nprint(inspect.getsource(print))\nPY",
+        `python -c 'print("x > y")'`, `python -c 'open("src.py", "r").read()'`,
+        'inspect-tool src.py', 'echo "x > y"', 'inspect-tool src.py 2>&1']) {
+        assert.equal(predict([verified(command)]).predict, 'branch_model', command);
+    }
+    for (const command of ['echo hi > a.py', 'echo hi >> a.py', 'sed -i s/x/y/ a.py',
+        'perl -pi -e s/x/y/ a.py', 'git apply changes.diff', 'cat a.py | tee b.py',
+        `python -c 'open("src.py", mode="r+")'`,
+        "python - <<'PY'\nfrom pathlib import Path\nPath('a.py').write_text('updated')\nPY"]) {
+        assert.deepEqual(predict([verified(command)]), {abstain: true, reason: 'modify_early'}, command);
+    }
 });
 
 test('workspace verification accepts absolute interpreters and hidden paths in pytest arguments', () => {
@@ -200,12 +226,15 @@ test('safe results fit whole file or command output and deduplicate verification
     const report = (id, command, content) => verified(command, {action_id: id, result: {content}});
     const large = 'x'.repeat(6_000) + '\nend of test';
     const entries = [report('old', 'pytest tests', 'old output'), report('full', 'python3 -m pytest -q tests', large),
-        report('too-large', 'cargo test', 'z'.repeat(16_000)), result('small', 'a', 'small output')];
+        report('too-large', 'cargo test', 'z'.repeat(8_000)), result('small', 'a', 'small output')];
     const safe = match(proactive, {}, entries).details.safe_results;
     assert.deepEqual(safe.map(r => r.id), ['full', 'small']);
     assert.ok(safe[0].notification.endsWith(large));
     const files = Array.from({length: 10}, (_, i) => result(`r${i}`, `p${i}`, 'data'));
-    assert.equal(match({}, null, files).details.safe_results.length, 8);
+    assert.equal(match({}, null, files).details.safe_results.length, 4);
+    const manifest = readFileSync(resolve('assets/policy/coding/policy.yaml'), 'utf8');
+    assert.deepEqual([...manifest.matchAll(/safe_result_chars: (\d+)\s+safe_result_count: (\d+)/g)]
+        .map(([, chars, count]) => [Number(chars), Number(count)]), [[8000, 4], [8000, 4]]);
     assert.deepEqual(match(proactive, {}, entries, {...candidate, yielded_action_ids: ['old']}).details.safe_results.map(r => r.id), ['small']);
 });
 

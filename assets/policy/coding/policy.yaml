@@ -59,12 +59,12 @@ decisions:
     function: match_proposal
     outcome: tool_output
     policy_config:
-      safe_result_chars: 16000
-      safe_result_count: 8
+      safe_result_chars: 8000
+      safe_result_count: 4
   dispose:
     file: decisions.py
     function: dispose
     policy_config:
-      safe_result_chars: 16000
-      safe_result_count: 8
+      safe_result_chars: 8000
+      safe_result_count: 4
       verification_output_chars: 20000

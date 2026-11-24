@@ -330,7 +330,7 @@ test('Explore yields novel reads before inference and retires after an Authority
     await shutdown();
 });
 
-test('Yield batches newly completed read-only results before inference while the candidate keeps running', {timeout: 45000}, async t => {
+for (const admit of [false, true]) test(`Yield batches results before ${admit ? 'an abstaining' : 'a locally denied'} model opportunity`, {timeout: 45000}, async t => {
     let candidateWaiting = false;
     let authorityAdvanced = false;
     const workspace = '[Speculative workspace output collected on current files]: read other.txt';
@@ -387,9 +387,8 @@ def feasibility_initial_only(data, *, policy_config, capabilities):
 def extent_keep_running(data, *, policy_config, capabilities):
     return 'continue'
 `);
-        fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8')
-            .replace('function: feasibility_pass', 'function: feasibility_initial_only')
-            .replace('function: extent', 'function: extent_keep_running'));
+        const config = fs.readFileSync(manifest, 'utf8').replace('function: extent', 'function: extent_keep_running');
+        fs.writeFileSync(manifest, admit ? config : config.replace('function: feasibility_pass', 'function: feasibility_initial_only'));
         return manifest;
     }, {modelIds: ['agent', 'candidate']});
     assert.ok(authorityAdvanced);
@@ -401,9 +400,12 @@ def extent_keep_running(data, *, policy_config, capabilities):
     assert.equal(yields[1].branch_id, candidate);
     const completed = events.filter(event => event.message === 'action_finished' && event.action_id.startsWith('yield-late'));
     assert.deepEqual(completed.map(event => event.status), ['succeeded', 'succeeded']);
-    const boundary = events.slice(events.indexOf(completed[1]) + 1)
-        .find(event => event.message === 'model_inference_boundary' && event.branch_id === 'authority');
-    assert.ok(boundary, 'locally denied speculation must still settle Yield before inference');
+    const boundary = events.slice(events.indexOf(completed[1]) + 1).find(event => admit
+        ? event.message === 'speculative_admission_request' && event.branch_id === 'authority'
+        : event.message === 'model_inference_boundary' && event.branch_id === 'authority');
+    assert.ok(boundary, 'the next Authority boundary must settle Yield before inference');
+    if (admit) assert.ok(events.some(event => event.observation?.reason === 'active_explore_branch'));
+    assert.equal(new Set(events.filter(event => event.message === 'candidate_created').map(event => event.branch_id)).size, 1);
     assert.ok(events.indexOf(yields[0]) < events.indexOf(completed[0]));
     assert.ok(events.indexOf(completed[1]) < events.indexOf(boundary));
     assert.ok(events.indexOf(boundary) < events.indexOf(yields[1]));

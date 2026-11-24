@@ -94,6 +94,53 @@ impl SpeculativeTree {
         }
         Ok(None)
     }
+    pub(crate) fn dispatch_checkpoint(&self) -> (u64, u64) {
+        (self.next_command_id, self.next_work)
+    }
+
+    pub(crate) fn discard_undispatched(&mut self, (first_command, first_work): (u64, u64)) -> Vec<AgentCommand> {
+        self.pending_work.split_off(&first_work);
+        self.policy_work_context.split_off(&first_work);
+        self.policy_dependencies.split_off(&first_work);
+
+        // A failed event cannot publish its actions. Keep only cleanup commands
+        // whose Branches have already entered the corresponding lifecycle state.
+        let mut cleanup = Vec::new();
+        let workspace = self.workspace();
+        self.pending_commands.retain(|id, pending| {
+            let sequence = id.strip_prefix("command-")
+                .and_then(|suffix| suffix.split_once('-'))
+                .and_then(|(sequence, _)| sequence.parse::<u64>().ok());
+            if sequence.is_none_or(|sequence| sequence < first_command) {
+                return true;
+            }
+            let branch_id = &pending.branch_id;
+            let generation = pending.generation;
+            let command_id = id.clone();
+            let command = match pending.operation {
+                CommandOperation::Discard => Some(AgentCommand::Discard {
+                    branch_id: branch_id.clone(), command_id, generation,
+                }),
+                CommandOperation::Cleanup => Some(AgentCommand::Cleanup {
+                    branch_id: branch_id.clone(), workspace: workspace.clone(), command_id, generation,
+                }),
+                _ => None,
+            };
+            if let Some(command) = command {
+                cleanup.push(command);
+                return true;
+            }
+            if let Some(operation) = self.branches.get_mut(branch_id).into_iter()
+                .flat_map(|branch| &mut branch.pending_operations)
+                .find(|operation| &operation.operation_id == id && operation.status == OperationStatus::Requested)
+            {
+                operation.status = OperationStatus::Failed;
+            }
+            false
+        });
+        cleanup
+    }
+
     pub fn recovery_pending_commands(&self) -> bool {
         !self.pending_commands.is_empty()
     }

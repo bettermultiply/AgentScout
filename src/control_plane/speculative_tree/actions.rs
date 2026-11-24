@@ -172,12 +172,9 @@ impl SpeculativeTree {
     }
 
     pub(super) fn yield_pending(&self, candidate: &str) -> bool {
-        let branch = &self.branches[candidate];
-        self.yield_candidate_stopped(branch) || {
-            let current = self.yield_snapshot(candidate);
-            let previous = self.deferred_validations.get(candidate).and_then(|snapshot| snapshot[2].as_u64());
-            current[2].as_u64().unwrap_or(0) > previous.unwrap_or(0)
-        }
+        let current = self.yield_snapshot(candidate);
+        let previous = self.deferred_validations.get(candidate).and_then(|snapshot| snapshot[2].as_u64());
+        current[2].as_u64().unwrap_or(0) > previous.unwrap_or(0)
     }
 
     pub(crate) fn model_inference_boundary(&mut self, task: &str, branch: &str, action: &str) -> io::Result<ControlActions> {
@@ -198,7 +195,9 @@ impl SpeculativeTree {
         }
         if self.has_pending_yield(parent) { return Ok(()) }
         let (parent, operation, chance) = self.model_inference_boundary.take().unwrap();
-        if let Some(chance) = chance {
+        if let Some(chance) = chance
+            && self.chances.get(&chance).is_some_and(|chance| !chance.stage.is_terminal())
+        {
             self.change_authority_state(&chance, AuthorityState::Fetching)?;
         }
         actions.commands.push(self.resolve_pending(&parent, &operation, json!({"phase":"execute"}))?);
@@ -713,11 +712,14 @@ impl SpeculativeTree {
             && self.authority_branch_id.as_deref() == Some(&chance.parent_branch_id)
             && self.has_pending_yield(&chance.parent_branch_id)
         {
-            self.model_inference_boundary = Some((chance.parent_branch_id, chance.operation_id, Some(id.into())));
+            let pending = (!chance.stage.is_terminal()).then(|| id.to_owned());
+            self.model_inference_boundary = Some((chance.parent_branch_id, chance.operation_id, pending));
             return Ok(());
         }
         self.change_authority_state(id, AuthorityState::Fetching)?;
-        if self.model_inference_boundary.as_ref().is_some_and(|(_, _, pending)| pending.as_deref() == Some(id)) {
+        if self.model_inference_boundary.as_ref().is_some_and(|(parent, operation, _)| {
+            parent == &chance.parent_branch_id && operation == &chance.operation_id
+        }) {
             self.model_inference_boundary = None;
         }
         actions.commands.push(self.resolve_pending(
@@ -940,10 +942,16 @@ impl SpeculativeTree {
                 .push(json!({"message": "policy_audit", "branch_id": candidate, "audit": audit}));
         }
         if self.stopping
-            || self.task_finishing && self.branch(&candidate)?.yield_only
             || match resolution {
                 None => !self.candidate_due(&candidate),
-                Some(_) => !self.branch(&candidate)?.status.is_live_candidate(),
+                Some(_) => {
+                    let branch = self.branch(&candidate)?;
+                    !branch.status.is_live_candidate()
+                        || branch.yield_only
+                            && self.yield_candidate_stopped(branch)
+                            && self.yield_pending(&candidate)
+                            && !self.candidate_due(&candidate)
+                }
             }
         {
             return Ok(());
@@ -997,14 +1005,14 @@ impl SpeculativeTree {
         let stopped = self.yield_candidate_stopped(branch);
         let mut record = json!({"branch_id":candidate, "hypothesis":proposal.as_ref().map(|p|&p.payload), "verdict":verdict, "policy_error":error, "accepted":compatible});
         if let Some(part) = part.as_ref().filter(|part| part["intent"] == "Yield")
-            && !self.task_finishing
+            && (!self.task_finishing || yield_only)
             && resolution != Some("preempted")
             && self.apply_yield(&candidate, &chance_id, part, actions)?
         {
             record["disposition"] = json!("Yield");
             record["part"] = part.clone();
             actions.records.push(record);
-            if stopped {
+            if stopped || self.task_finishing {
                 actions.commands.extend(self.discard_candidate(
                     &candidate,
                     DiscardedReason::MatchRejected,
@@ -1435,7 +1443,9 @@ impl SpeculativeTree {
             }
             let chance = self.chance(&id)?;
             if !self.chance_waiting_live(chance)
-                || self.model_inference_boundary.as_ref().is_some_and(|(_, _, pending)| pending.as_deref() == Some(&id))
+                || self.model_inference_boundary.as_ref().is_some_and(|(parent, operation, _)| {
+                    parent == &chance.parent_branch_id && operation == &chance.operation_id
+                })
                 || self
                     .pending_work
                     .values()
@@ -1504,14 +1514,17 @@ impl SpeculativeTree {
         if !self.stopping {
             self.progress_chances(&mut actions)?;
             for candidate in self.pending_candidates() {
-                if self.task_finishing && self.branches[&candidate].yield_only {
-                    actions.commands.extend(self.discard_candidate(&candidate, DiscardedReason::MatchRejected, "Authority turn completed")?);
-                    continue;
-                }
                 if self.pending_work.values().any(|work| work.branch() == Some(candidate.as_str())) {
                     continue;
                 }
                 let branch = &self.branches[&candidate];
+                if branch.yield_only
+                    && (self.task_finishing || self.yield_candidate_stopped(branch))
+                    && !self.yield_pending(&candidate)
+                {
+                    actions.commands.extend(self.discard_candidate(&candidate, DiscardedReason::MatchRejected, "Candidate has no remaining results")?);
+                    continue;
+                }
                 if branch.deferred_environment
                     && branch.environment_id.is_none()
                     && branch.execution_state.runtime == RuntimeExecutionState::EnvironmentRequested

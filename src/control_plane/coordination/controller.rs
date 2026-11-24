@@ -429,6 +429,7 @@ impl SpeculationCoordinator {
                     "tool_name": chance.tool_name,
                     "arguments": chance.arguments,
                     "assumption_depth": tree.branches[&chance.parent_branch_id].assumption_set.len(),
+                    "speculation_kind": chance.speculation_kind,
                 })
             })
             .collect();
@@ -439,7 +440,7 @@ impl SpeculationCoordinator {
         let pending = tree.chances.values().filter(|chance| {
             chance.stage == crate::control_plane::speculative_tree::ChanceStage::Pending
         }).count();
-        let branches: Vec<_> = active.iter().map(|id| candidate_summary(&tree.branches[id])).collect();
+        let branches: Vec<_> = active.iter().map(|id| candidate_summary(tree, &tree.branches[id])).collect();
         let selected = self.evaluate(
             engine,
             policy,
@@ -492,6 +493,8 @@ impl SpeculationCoordinator {
                 },
                 "process_context": {
                     "observation": observation,
+                    "active_branches": tree.pending_candidates().iter()
+                        .map(|id| candidate_summary(tree, &tree.branches[id])).collect::<Vec<_>>(),
                     "authority_active_tools": active_tools(tree, tree.authority_branch_id.as_deref()),
                     "steps_completed": tree.action_facts.get(&tool.branch_id).map_or(0, |facts| facts.len()),
                 },
@@ -540,7 +543,7 @@ impl SpeculationCoordinator {
         let candidates: Vec<_> = tree
             .pending_candidates()
             .iter()
-            .map(|id| candidate_summary(&tree.branches[id]))
+            .map(|id| candidate_summary(tree, &tree.branches[id]))
             .collect();
         let allowed = self.evaluate(
             engine,
@@ -901,11 +904,14 @@ fn resolve_partial_acceptance(
     Ok(Some(part))
 }
 
-fn candidate_summary(branch: &crate::control_plane::speculative_tree::BranchRecord) -> Value {
+fn candidate_summary(tree: &SpeculativeTree, branch: &crate::control_plane::speculative_tree::BranchRecord) -> Value {
+    let chance = branch.chance_id.as_ref().and_then(|id| tree.chances.get(id));
     json!({
         "branch_id": branch.branch_id,
         "chance_id": branch.chance_id,
         "status": branch.status,
+        "speculation_kind": chance.and_then(|chance| chance.speculation_kind),
+        "proposal_provenance": tree.branch_proposal(&branch.branch_id).and_then(|proposal| proposal.provenance.as_ref()),
         "yield_only": branch.yield_only,
         "assumption_depth": branch.assumption_set.len(),
     })

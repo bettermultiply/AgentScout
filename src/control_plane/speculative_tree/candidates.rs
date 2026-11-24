@@ -191,8 +191,7 @@ impl SpeculativeTree {
         }
         if branch.yield_only {
             return (branch.status.is_decidable() || branch.status == BranchStatus::Blocked(BlockedReason::Rebalanced))
-                && (self.yield_candidate_stopped(branch)
-                    || self.chance_parent(branch).is_some_and(|parent| {
+                && (self.task_finishing || self.chance_parent(branch).is_some_and(|parent| {
                         self.model_inference_boundary.as_ref().is_some_and(|(owner, _, _)| owner == parent)
                             || self.authority_branch_id.as_deref() == Some(parent)
                                 && self.chances.values().any(|chance| {

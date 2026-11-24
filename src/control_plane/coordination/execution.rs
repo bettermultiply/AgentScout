@@ -942,6 +942,7 @@ impl Execution<'_> {
                         }
                         _ => None,
                     };
+                    let checkpoint = task.tree.dispatch_checkpoint();
                     let handled = if let Some(context) =
                         incoming.as_ref().filter(|cx| cx.has_active_span())
                     {
@@ -952,7 +953,12 @@ impl Execution<'_> {
                     } else {
                         task.handle(event)
                     };
-                    let actions = match handled {
+                    let mut cleanup = if handled.is_err() {
+                        task.tree.discard_undispatched(checkpoint)
+                    } else {
+                        Vec::new()
+                    };
+                    let mut actions = match handled {
                         Ok(Some(actions)) => actions,
                         Ok(None) => break,
                         Err(error) if task.delivery_failed && !task.tree.is_stopping() => {
@@ -974,6 +980,10 @@ impl Execution<'_> {
                             return Err(error);
                         }
                     };
+                    if !cleanup.is_empty() {
+                        cleanup.append(&mut actions.commands);
+                        actions.commands = cleanup;
+                    }
                     task.record_runtime_updates(runtime)?;
                     task.publish()?;
                     task.trace_prompts(&actions.commands)?;

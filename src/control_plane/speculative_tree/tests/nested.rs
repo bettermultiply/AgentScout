@@ -401,7 +401,16 @@ fn yield_preserves_active_work_and_task_end_discards_candidate() {
 }
 
 #[test]
-fn running_yield_candidates_batch_two_tools_at_the_authority_model_boundary() {
+fn stopped_yield_candidate_batches_tools_at_the_authority_model_boundary() {
+    check_stopped_yield_batch(false);
+}
+
+#[test]
+fn stopped_yield_candidate_batches_tools_during_task_finish() {
+    check_stopped_yield_batch(true);
+}
+
+fn check_stopped_yield_batch(finishing: bool) {
     let (mut tree, candidate, _) = nested_tree();
     tree.branches.get_mut(&candidate).unwrap().yield_only = true;
     for id in ["first", "second"] {
@@ -417,24 +426,83 @@ fn running_yield_candidates_batch_two_tools_at_the_authority_model_boundary() {
         }).unwrap();
         assert!(!tree.candidate_due(&candidate));
     }
-    tree.model_inference_boundary("task-1", "authority", "next-model").unwrap();
+    tree.branches.get_mut(&candidate).unwrap().execution_state.turn_active = false;
+    assert!(!tree.candidate_due(&candidate));
+    let mut actions = ControlActions::default();
+    tree.schedule(ControlOperation::Dispose(candidate.clone(), "preempted".into()), &mut actions);
+    let delivery = tree.complete_work(actions.operations[0].0, Ok(ControlResult::AcceptanceDisposition(
+        false, "incompatible".into(), None, None, false,
+        Some(json!({"intent":"Salvage", "results":[{"id":"first", "files":[], "notification":"first output"}]})), None,
+    ))).unwrap();
+    assert!(delivery.commands.is_empty());
+    if finishing {
+        tree.finish_task();
+    } else {
+        tree.model_inference_boundary("task-1", "authority", "next-model").unwrap();
+    }
     let capabilities = RuntimeCapabilities::default();
     let actions = tree.progress(&capabilities).unwrap();
     let validation = actions.operations.iter().find(|(_, op)| matches!(op, ControlOperation::Validate(id) if id == &candidate)).unwrap().0;
     assert!(!actions.commands.iter().any(|op| matches!(op, AgentCommand::ResolvePending { operation_id, .. } if operation_id == "next-model")));
     let delivery = tree.complete_work(validation, Ok(ControlResult::AcceptanceDisposition(
         false, "incompatible".into(), None, None, false,
-        Some(json!({"intent":"Yield", "results":[
+        Some(json!({"intent":"Salvage", "results":[
             {"id":"first", "files":[], "notification":"first output"},
             {"id":"second", "files":[], "notification":"second output"}
         ]})), None,
     ))).unwrap();
-    assert!(matches!(delivery.commands.as_slice(), [AgentCommand::ResolvePending { outcome: Some(outcome), .. }]
+    assert!(matches!(delivery.commands.first(), Some(AgentCommand::ResolvePending { outcome: Some(outcome), .. })
         if outcome["notification"] == "first output\nsecond output"));
+    assert!(delivery.commands.iter().any(|command| matches!(command, AgentCommand::Discard { branch_id, .. }
+        if branch_id == &candidate)));
     let actions = tree.progress(&capabilities).unwrap();
-    assert!(actions.commands.iter().any(|op| matches!(op, AgentCommand::ResolvePending { operation_id, outcome: Some(outcome), .. }
-        if operation_id == "next-model" && outcome["phase"] == "execute")));
+    assert_eq!(actions.commands.iter().any(|op| matches!(op, AgentCommand::ResolvePending { operation_id, outcome: Some(outcome), .. }
+        if operation_id == "next-model" && outcome["phase"] == "execute")), !finishing);
     assert!(!tree.candidate_due(&candidate));
+}
+
+#[test]
+fn abstaining_model_chance_releases_authority_after_yield() {
+    let (mut tree, candidate, _) = nested_tree();
+    tree.branches.get_mut(&candidate).unwrap().yield_only = true;
+    tree.handle_message(AgentMessage::ActionStarted {
+        task_id: "task-1".into(), branch_id: candidate.clone(), action_id: "read".into(),
+        action_kind: ActionKind::ToolExecution, name: "read".into(), arguments: json!({}),
+        parent_action_id: None, checkpoint: None, timestamp_ms: 10,
+    }).unwrap();
+    tree.handle_message(AgentMessage::ActionFinished {
+        task_id: "task-1".into(), branch_id: candidate.clone(), action_id: "read".into(),
+        action_kind: ActionKind::ToolExecution, status: ActionStatus::Succeeded,
+        result: json!("new output"), evidence: None, timestamp_ms: 11,
+    }).unwrap();
+    tree.speculative_admission(AgentMessage::SpeculativeAdmissionRequest {
+        task_id: "task-1".into(), policy_digest: "test-policy".into(),
+        branch_id: "authority".into(), action_id: "next-model".into(),
+        action_kind: ActionKind::ModelInference, parent_action_id: None,
+        name: "model_inference".into(), arguments: json!({}), checkpoint: None,
+        fast_start: None, timestamp_ms: 12,
+    }).unwrap();
+    let capabilities = RuntimeCapabilities::default();
+    let mut actions = ControlActions::default();
+    tree.schedule(ControlOperation::Select(vec!["chance-3".into()]), &mut actions);
+    let selection = actions.operations[0].0;
+    let actions = tree.complete_work(selection, Ok(ControlResult::Selected(vec!["chance-3".into()]))).unwrap();
+    let prediction = actions.operations.iter().find(|(_, op)| matches!(op, ControlOperation::Predict(_))).unwrap().0;
+    let actions = tree.complete_work(prediction, Ok(ControlResult::Abstain(None))).unwrap();
+    assert!(actions.commands.is_empty());
+    let actions = tree.progress(&capabilities).unwrap();
+    assert!(!tree.chances.contains_key("chance-3"));
+    assert!(actions.commands.is_empty());
+    let validation = actions.operations.iter().find(|(_, op)| matches!(op, ControlOperation::Validate(id) if id == &candidate)).unwrap().0;
+    let delivery = tree.complete_work(validation, Ok(ControlResult::AcceptanceDisposition(
+        false, "incompatible".into(), None, None, false,
+        Some(json!({"intent":"Yield", "results":[{"id":"read", "files":[], "notification":"new output"}]})), None,
+    ))).unwrap();
+    assert!(matches!(delivery.commands.as_slice(), [AgentCommand::ResolvePending { outcome: Some(outcome), .. }]
+        if outcome["notification"] == "new output"));
+    let actions = tree.progress(&capabilities).unwrap();
+    assert!(matches!(actions.commands.as_slice(), [AgentCommand::ResolvePending { operation_id, outcome: Some(outcome), .. }]
+        if operation_id == "next-model" && outcome["phase"] == "execute"));
 }
 
 #[test]

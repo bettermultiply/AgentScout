@@ -224,7 +224,7 @@ def extent(data, *, policy_config, capabilities):
 
 ## Chance id 的当前实现
 
-`select.scheduling_context` 提供只读调度事实。`active_candidate_count` 和 `active_branches` 包含仍参与投机的候选，`blocked_candidate_count` 是其中处于 `Blocked` 状态的数量。`pending_chance_count` 是处于 `Pending` 状态的 Chance 数量。每个 `active_branches` 条目只有 `branch_id`、`chance_id`、`assumption_depth` 和 `status`。
+`select.scheduling_context` 提供只读调度事实。`active_candidate_count` 和 `active_branches` 包含仍参与投机的候选，`blocked_candidate_count` 是其中处于 `Blocked` 状态的数量。`pending_chance_count` 是处于 `Pending` 状态的 Chance 数量。`active_branches` 每项包含 `branch_id`、`chance_id`、`assumption_depth`、`status`、布尔值 `yield_only` 和可为空的 `speculation_kind`、`proposal_provenance`。`frontier_view` 每个机会也包含 `speculation_kind`，例如 `model_inference` 或 `tool_execution`。
 
 `launch.authority_state` 只包含 `branch_id`、`status`、`assumption_depth` 和 `turn_active`，父分支缺失时为 `{}`。`launch.candidate_view` 使用与 `select` 的 `active_branches` 相同的候选摘要。
 
@@ -255,7 +255,11 @@ Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Pol
 
 调用方迁移：主入口、回放入口和五份本地 fixture 已切换到配置/session 路径，fixture 使用私有 HOME 配置、不写用户主目录。fixture 在启动 Runtime 前同步复制 workspace，消除 stderr 通知后的复制竞态。恢复中的 `launch evaluation: Broken pipe` 根因是缓存 worker 的 `--die-with-parent` 随创建线程退出杀死进程；由 Worker 的 Drop 负责清理后，新增线程退出回归测试通过（原实现先复现失败，日志 `/tmp/ascout-worker-before.log`）。最终 `cargo check --all-targets`、当时的 Rust 测试集 通过；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 6/6 通过，日志 `/tmp/ascout-recovery-final.log`。回放新 session 必须选 `--policy NAME`，不加载源 session artifact；下游外部脚本仍需按新接口核查。
 
-`predict.chance_context` 携带工具参数，`process_context` 携带 `observation`、`steps_completed` 和 `authority_active_tools`。策略可用 `history: {mode: transcript_tail, max_entries: 30}` 声明历史投影，或用 `match.outcome: tool_output` 声明真实输出。`rebalance` 的分支视图另提供 `started_at_ms`（毫秒整数）与 `speculation_kind`（`model_inference` 或 `tool_execution`）。`scheduling_context.authority_recent_actions` 复用有界的最近已完成动作摘要，包含 `timestamp_ms`、`tool_name`、`arguments` 和 `status`。`authority_active_tools` 仅列出正在运行的工具及其 `tool_name` 和 `arguments`。阶段识别和是否抢占由 Policy 决定。工具完成会刷新调度事实，即使分支状态没有变化。
+`predict.chance_context` 携带工具参数，`process_context` 携带 `observation`、`steps_completed`、`authority_active_tools` 和与 `select.scheduling_context.active_branches` 同构的 `active_branches`。策略可用 `history: {mode: transcript_tail, max_entries: 30}` 声明历史投影，或用 `match.outcome: tool_output` 声明真实输出。`rebalance` 的分支视图另提供 `started_at_ms`（毫秒整数）与 `speculation_kind`（`model_inference` 或 `tool_execution`）。`scheduling_context.authority_recent_actions` 复用有界的最近已完成动作摘要，包含 `timestamp_ms`、`tool_name`、`arguments` 和 `status`。`authority_active_tools` 仅列出正在运行的工具及其 `tool_name` 和 `arguments`。阶段识别和是否抢占由 Policy 决定。工具完成会刷新调度事实，即使分支状态没有变化。
+
+Coding Policy 在 `explore` 阶段发现活跃的模型探索分支时返回 `abstain`。`modify_ready` 的改后主动测试与 `verify` 的工具投机各自按自己的条件执行。已完成的 shell 操作需要有明确的写入或修改特征才影响修改阶段判断。只读 Python 检查可以使用 `-c` 或 heredoc。
+
+Coding Policy 每批最多交付 4 项结果，合计最多 8,000 字符，并保留完整的文件或命令输出。`yield_only` 候选停止后，已有的新产出在权威下一次模型推理边界或任务收尾时批量结算，随后回收候选。无新产出时可以直接回收。
 
 ### Coding 策略的三阶段循环
 

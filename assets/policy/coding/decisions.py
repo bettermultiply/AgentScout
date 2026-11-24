@@ -59,6 +59,84 @@ def _succeeded(entry):
             and (entry.get('result') or {}).get('is_error') is not True)
 
 
+def _python_writes(script):
+    import ast
+
+    try:
+        syntax = ast.parse(script)
+    except SyntaxError:
+        return False
+    for call in ast.walk(syntax):
+        if not isinstance(call, ast.Call):
+            continue
+        if isinstance(call.func, ast.Name):
+            name = call.func.id
+            path_method = False
+        elif isinstance(call.func, ast.Attribute):
+            name = call.func.attr
+            path_method = not (isinstance(call.func.value, ast.Name) and call.func.value.id in ('io', 'builtins'))
+            if name in {'write_text', 'write_bytes', 'unlink', 'mkdir', 'rmdir', 'touch', 'chmod'}:
+                return True
+            if name in {'remove', 'rename', 'replace'} and (
+                    isinstance(call.func.value, ast.Name) and call.func.value.id == 'os'
+                    or isinstance(call.func.value, ast.Call) and isinstance(call.func.value.func, ast.Name)
+                    and call.func.value.func.id == 'Path'):
+                return True
+            if (isinstance(call.func.value, ast.Name) and call.func.value.id == 'shutil'
+                    and name in {'copy', 'copy2', 'copyfile', 'copyfileobj', 'copymode', 'copystat',
+                                 'copytree', 'move', 'rmtree', 'make_archive', 'unpack_archive', 'chown'}):
+                return True
+        else:
+            continue
+        if name == 'open':
+            mode_index = 0 if path_method else 1
+            mode = next((kw.value for kw in call.keywords if kw.arg == 'mode'),
+                        call.args[mode_index] if len(call.args) > mode_index else None)
+            if isinstance(mode, ast.Constant) and isinstance(mode.value, str) and any(
+                    flag in mode.value for flag in 'wax+'):
+                return True
+    return False
+
+
+def _shell_writes(command):
+    import re
+
+    if not isinstance(command, str):
+        return False
+    # Separate heredoc data from shell syntax and inspect Python bodies as code.
+    heredoc = re.compile(r'''(?m)^(?P<head>[^\n]*?)<<(?P<tabs>-?)[ \t]*
+        (?P<quote>['"]?)(?P<marker>\w+)(?P=quote)(?P<tail>[^\n]*)\n
+        (?P<body>[\s\S]*?)^\t*(?P=marker)[ \t]*(?=\n|$)''', re.X)
+    python = re.compile(r'python(?:[23](?:\.\d+)?)?$')
+    for match in heredoc.finditer(command):
+        commands = list(_bash_commands(match['head']))
+        if commands and commands[-1] and python.fullmatch(commands[-1][0].rsplit('/', 1)[-1]):
+            body = match['body']
+            if match['tabs']:
+                body = re.sub(r'(?m)^\t+', '', body)
+            if _python_writes(body):
+                return True
+    command = heredoc.sub(lambda match: match['head'] + ' ' + match['tail'], command)
+    shell_tokens = re.finditer(r'''\\.|'[^']*'|"(?:\\.|[^"\\])*"|(?<!\S)\#.*|>&[\d-]+|(?P<write>[>]{1,2})''', command)
+    if any(token['write'] for token in shell_tokens):
+        return True
+    for words in _bash_commands(command):
+        if not words:
+            continue
+        name, *args = words
+        name = name.rsplit('/', 1)[-1]
+        if (name in {'apply_patch', 'patch', 'tee', 'rm', 'mv', 'cp', 'mkdir', 'touch', 'chmod'}
+                or name == 'git' and args[:1] == ['apply']
+                or name in {'sed', 'perl'} and any(
+                    re.match(r'^-[a-zA-Z]*i|^--in-place(?:=|$)', arg) for arg in args)):
+            return True
+        if python.fullmatch(name) and '-c' in args:
+            index = args.index('-c') + 1
+            if index < len(args) and _python_writes(args[index]):
+                return True
+    return False
+
+
 def _mutation(entry):
     import re
     from ascout_policy.info_match import is_readonly_action
@@ -72,7 +150,7 @@ def _mutation(entry):
                 or re.search(r'^test[_\.]|(?:_test|_spec|\.test|\.spec)\.', name)):
             return 'test'
         return 'source'
-    if tool == 'bash' and not is_readonly_action(tool, args):
+    if tool == 'bash' and not is_readonly_action(tool, args) and _shell_writes(args.get('command')):
         return 'source'
     return None
 
@@ -182,6 +260,11 @@ def predict(data, *, policy_config, capabilities):
         }]}
     if stage == 'modify_early' and not policy_config.get('speculate_early_modify', False):
         return {'abstain': True, 'reason': stage}
+    if stage == 'explore' and any(
+            branch.get('speculation_kind') == 'model_inference'
+            and (branch.get('proposal_provenance') or {}).get('kind') != 'active_post_edit_test'
+            for branch in (data.get('process_context') or {}).get('active_branches', [])):
+        return {'abstain': True, 'reason': 'active_explore_branch'}
     settings = _candidate_settings(policy_config, '')
     if not settings:
         return {'abstain': True, 'reason': 'candidate_model_disabled'}
@@ -327,9 +410,9 @@ def _safe_results(entries, config, yielded):
         latest.pop(key, None)
         latest[key] = entry
 
-    results, remaining = [], config.get('safe_result_chars', 16_000)
+    results, remaining = [], config.get('safe_result_chars', 8_000)
     for key, entry in latest.items():
-        if len(results) >= config.get('safe_result_count', 8):
+        if len(results) >= config.get('safe_result_count', 4):
             break
         if entry['action_id'] in yielded or (key[0] == 'verification' and key in seen):
             continue
