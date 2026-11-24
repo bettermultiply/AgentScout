@@ -875,7 +875,7 @@ def _verification_words(command, *, allow_setup=True, directories=None):
     if not isinstance(command, str):
         return []
     command = command.strip()
-    if '`' in command or '$' in re.sub(r'\$\{PWD\}|\$PWD(?!\w)', '', command):
+    if '`' in command:
         return []
     parts, start, redirect = [], 0, None
     for match in _shell_tokens(command):
@@ -911,6 +911,19 @@ def _verification_words(command, *, allow_setup=True, directories=None):
         parts.append(command[start:match.start()])
         start = end
     parts.append(command[start:redirect])
+    unchecked = re.sub(r'\$\{PWD\}|\$PWD(?!\w)', lambda match: ' ' * len(match[0]), command)
+    if '$' in unchecked:
+        # Allow a simple TMPDIR reference only in a leading temp-directory assignment.
+        position = start
+        while token := _TOKEN.match(command, position):
+            raw = token.group()
+            if re.fullmatch(r'(?:TMPDIR|SPHINX_TEST_TEMPDIR)="\$(?:\{TMPDIR\}|TMPDIR)(?:/[\w./-]+)?"', raw):
+                unchecked = unchecked[:position] + ' ' * len(raw) + unchecked[token.end():]
+            elif not (raw.isspace() or raw in ('env', 'command', '--') or re.match(r'[A-Za-z_]\w*=', raw)):
+                break
+            position = token.end()
+        if '$' in unchecked:
+            return []
     try:
         *preambles, words = [shlex.split(part, comments=True) for part in parts]
     except ValueError:

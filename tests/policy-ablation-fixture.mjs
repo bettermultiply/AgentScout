@@ -34,13 +34,11 @@ test('shared information matcher', () => {
 test('Explore → Modify-Early → Modify-Ready → Verify → Explore', () => {
     const main = verified('cd ./src && pytest tests');
     const failure = {...main, status: 'failed'};
-    const guide = {candidate_model: 'fixture/fast', candidate_guidance: 'Find relevant code.'};
-    assert.deepEqual(predict([], model, guide), {predict: 'branch_model', model: 'fixture/fast', thinking: 'off', candidate_guidance: 'Find relevant code.'});
+    const config = {candidate_model: 'fixture/fast'};
+    assert.deepEqual(predict([], model, config), {predict: 'branch_model', model: 'fixture/fast', thinking: 'off'});
     assert.deepEqual(predict([edit]), {abstain: true, reason: 'modify_early'});
-    const early = {...guide, speculate_early_modify: true, candidate_thinking: 'low',
-        early_modify_candidate_guidance: 'Verify the workspace before editing.'};
-    const expected = {predict: 'branch_model', model: 'fixture/fast', thinking: 'low',
-        candidate_guidance: early.early_modify_candidate_guidance};
+    const early = {...config, speculate_early_modify: true, candidate_thinking: 'low'};
+    const expected = {predict: 'branch_model', model: 'fixture/fast', thinking: 'low'};
     assert.deepEqual(predict([edit], model, early), expected);
     assert.deepEqual(predict([edit], model, {...early, early_modify_candidate_model: 'fixture/verify',
         early_modify_candidate_thinking: false}), {...expected, model: 'fixture/verify', thinking: 'off'});
@@ -50,8 +48,8 @@ test('Explore → Modify-Early → Modify-Ready → Verify → Explore', () => {
         const draining = {...branch, yield_only: true, active_tools: [main]};
         assert.deepEqual(predict([edit], model, early, {active_branches: [draining]}), expected);
         const shared = predict([edit], model, {...early, share_inflight_commands: true}, {active_branches: [draining]});
-        assert.ok(shared.candidate_guidance.startsWith(expected.candidate_guidance));
-        assert.ok(shared.candidate_guidance.includes(main.arguments.command));
+        assert.equal(shared.candidate_guidance,
+            `Avoid duplicating commands already running in other candidates:\n- ${main.arguments.command}`);
     }
     assert.ok(predict([edit], model, early, {authority_active_tools: [main]}).abstain);
     const ready = predict([failure, edit]);
@@ -114,6 +112,7 @@ test('shell history distinguishes Python inspection from explicit writes', () =>
 
 test('workspace verification accepts absolute interpreters and hidden paths in pytest arguments', () => {
     for (const command of ['TMPDIR="$PWD/.test-tmp" python -m pytest --basetemp "$PWD/.pytest-work" tests/test_a.py',
+        'TMPDIR="$PWD/.test-tmp" SPHINX_TEST_TEMPDIR="${TMPDIR}/sphinx" python -m pytest tests/test_a.py',
         'pytest -o cache_dir=.test-tmp/cache tests/test_a.py', '/usr/bin/python3 -m pytest tests/test_a.py',
         'pytest .baseline/tests']) {
         const proposals = predict([edit], bash(command)).proposals;

@@ -232,7 +232,9 @@ for (const failure of [false, true]) test(`Verify ${failure ? 'Fail salvages ver
         if (id === 'test-edit') return tool('verify', 'bash', {command: './pytest'});
         if (id === 'verify' && last.content === expected) {
             assert.equal(model, failure ? 'candidate' : 'agent');
-            if (failure) assert.match(input, /Do not re-run the test suite right away; first inspect/);
+            if (failure) assert.deepEqual(messages.at(-1), {role: 'user', content:
+                'The verification command failed, though its failure output has not arrived yet. '
+                + 'Treat this failure as real and do not re-run the test command before inspecting or editing code.'});
             return tool('inspect', 'read', {path: 'app.py'});
         }
         if (id === 'inspect') return tool('candidate-edit', 'write', {path: 'app.py', content: 'value = 1\n'});
@@ -292,9 +294,9 @@ test('Explore yields novel reads before inference and retires after an Authority
         const id = lastTool(messages)?.tool_call_id?.split('|')[0];
         if (model === 'candidate') {
             if (!id) {
-                assert.equal(messages.at(-2).role, 'user');
-                assert.deepEqual(messages.at(-1), {role: 'user', content:
-                    'Use read-only tools to locate relevant files, symbols, and call chains. Do not edit files or write a long summary.'});
+                assert.deepEqual(messages.at(-1), {role: 'user', content: [
+                    {type: 'text', text: 'Verify the software and report the outcome.'},
+                ]});
                 return tool('candidate-read', 'read', {path: 'other.txt'});
             }
             if (id === 'candidate-read') return tool('candidate-write', 'write', {path: 'value.txt', content: 'candidate only'});

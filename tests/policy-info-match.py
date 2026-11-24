@@ -207,6 +207,17 @@ class InfoMatchTests(unittest.TestCase):
         self.assertFalse(matches('mkdir -p temp && ' + plain, plain))
         self.assertFalse(match_verification_calls([bash(plain)], [bash(plain), bash('git diff --check')])['matched'])
 
+    def test_workspace_temp_environment_verification(self):
+        from ascout_policy.info_match import is_verification_command
+
+        runner = 'PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_ext_autodoc.py'
+        for tempdir in ('$PWD/.sphinx-work-tmp/sphinx', '${TMPDIR}/sphinx'):
+            command = f'TMPDIR="$PWD/.sphinx-work-tmp" SPHINX_TEST_TEMPDIR="{tempdir}" {runner}'
+            self.assertTrue(is_verification_command(command), command)
+        self.assertFalse(is_verification_command('SPHINX_TEST_TEMPDIR="$(pwd)" ' + runner))
+        self.assertFalse(is_verification_command('pytest "$TMPDIR/tests"'))
+        self.assertFalse(is_readonly_action('bash', {'command': 'SPHINX_TEST_TEMPDIR=./.tmp cat f'}))
+
     def test_stage_3b_wrapped_verification_and_capability_checks(self):
         from ascout_policy.info_match import is_verification_command, match_verification_calls
 
@@ -477,10 +488,12 @@ class CodingPolicyTests(unittest.TestCase):
         config = policy['decisions']['predict']['policy_config']
         self.assertEqual(config['candidate_thinking'], 'off')
         self.assertIs(config['share_inflight_commands'], False)
-        guidance = config['fail_candidate_guidance']
-        self.assertIn('failure output has not arrived yet', guidance)
-        self.assertRegex(guidance, r'Do not re-run .*right away; first inspect .*call sites.*tests')
-        self.assertIn('Only run the workspace test command after editing files', guidance)
+        self.assertIs(config['speculate_early_modify'], True)
+        self.assertNotIn('candidate_guidance', config)
+        self.assertNotIn('early_modify_candidate_guidance', config)
+        self.assertEqual(config['fail_candidate_guidance'],
+                         'The verification command failed, though its failure output has not arrived yet. '
+                         'Treat this failure as real and do not re-run the test command before inspecting or editing code.')
         for decision in ('match', 'dispose'):
             self.assertNotIn('safe_result_chars', policy['decisions'][decision]['policy_config'])
         self.assert_thinking_off(config)

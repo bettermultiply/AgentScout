@@ -32,22 +32,15 @@ decisions:
       share_inflight_commands: false
       candidate_model: deepseek/deepseek-flash
       candidate_thinking: "off"
-      candidate_guidance: Use read-only tools to locate relevant files, symbols, and call chains. Do not edit files or write a long summary.
       candidate_count: 1
       speculate_early_modify: true
-      early_modify_candidate_guidance: >-
-        Authority has edited workspace files and has no known main verification command.
-        Immediately choose and run the most appropriate workspace verification command for the current changes.
-        Do not edit files before verifying.
       active_post_edit_test: true
       adaptive_dual_tool_speculation: true
       fail_candidate_model: deepseek/deepseek-flash
       fail_candidate_thinking: "off"
       fail_candidate_guidance: >-
-        The verification command failed, but its failure output has not arrived yet.
-        Do not re-run the test suite right away; first inspect the recently modified code,
-        its call sites, and relevant tests to identify likely causes and prepare a fix.
-        Only run the workspace test command after editing files to verify the fix.
+        The verification command failed, though its failure output has not arrived yet.
+        Treat this failure as real and do not re-run the test command before inspecting or editing code.
   extent:
     file: decisions.py
     function: extent

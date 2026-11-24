@@ -261,11 +261,11 @@ Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Pol
 
 ### Coding 策略的三阶段循环
 
-`explore` 默认用快模型定位代码。活跃的探索候选会使同类预测弃权。进入 `yield_only` 后，候选继续执行本轮剩余工具，在下一次模型推理前由 `extent` 停下。Authority 的下一轮可同时启动新的探索候选。停止候选在下一次 Authority 模型边界或任务收尾时用 `Salvage + Discard` 结算。工具失败阈值、工作区进展和容量仍由 `rebalance` 处理。
+`explore` 默认启动快模型候选，直接沿用 Authority 的 session 历史进行推理，不注入任务引导。活跃的探索候选会使同类预测弃权。进入 `yield_only` 后，候选继续执行本轮剩余工具，在下一次模型推理前由 `extent` 停下。Authority 的下一轮可同时启动新的探索候选。停止候选在下一次 Authority 模型边界或任务收尾时用 `Salvage + Discard` 结算。工具失败阈值、工作区进展和容量仍由 `rebalance` 处理。
 
 `predict.policy_config.share_inflight_commands` 默认为 `false`。开启时，Policy 可将其他候选正在运行的命令附在新候选的 `candidate_guidance` 中。Pi 在候选推理请求的消息数组末尾追加一条 `user` 消息，让提示紧邻 Proposal 或最新消息，并保留与 Authority 共享的提示缓存前缀。提示不会写入 session 或 transcript，`Promote` 后的请求也不会携带提示。
 
-`modify_early` 在已修改工作区且尚未识别主验证命令时，默认启动快模型候选，直接选择并执行适合当前修改的工作区验证，先验证再编辑。可通过 `early_modify_candidate_model` 和 `early_modify_candidate_thinking` 覆盖默认候选设置。Authority 已在运行验证，或有未进入 `yield_only` 的模型推理候选或主动改后测试候选时，策略弃权。
+`modify_early` 在已修改工作区且尚未识别主验证命令时，默认启动快模型候选，直接沿用 Authority 的 session 历史进行推理，不注入任务引导。可通过 `early_modify_candidate_model` 和 `early_modify_candidate_thinking` 覆盖默认候选设置。Authority 已在运行验证，或有未进入 `yield_only` 的模型推理候选或主动改后测试候选时，策略弃权。
 
 `modify_ready` 可用已知工作区主验证命令启动改后测试，工具批次完成后停在下一次模型推理前。只有源代码或测试文件的修改才会重新触发改后测试。重定向到 `/dev/null`、写入工作区外的 `/tmp` 或工作区顶层隐藏目录下的临时文件，不算源代码修改，也不会阻止交付后续只读结果。
 
@@ -273,6 +273,6 @@ Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Pol
 
 任何 `model_inference` 候选在自身首次修改工作区之前取得的有效工作区验证输出，无论通过还是失败，都可通过 `Yield` 或 `Salvage` 交付。验证须在 Authority 最近一次修改之后开始。Authority 已有覆盖该命令的结果、该结果已交付，或同批中有更新的相同命令结果时，策略去重。候选修改后的验证仅作为终止时移交已验证文件的依据。
 
-`verify` 对隐藏目录基线快照等非工作区比较验证弃权，原命令继续由 Authority 执行。工作区验证的候选可继续推理和修改。失败候选在真实输出到达前先检查最近修改的代码、调用位置和相关测试，不立即重跑测试；修改文件后再运行工作区测试命令验证修复。若从未修改文件，或最后一次修改之后已有成功的工作区验证，`extent` 会在新的验证命令前停止。修改后尚未通过验证的候选可以运行工作区测试。范围上限默认是 12 个完整轮次。
+`verify` 识别带有 `TMPDIR`、`SPHINX_TEST_TEMPDIR` 等环境变量前缀的验证命令，临时目录赋值也可使用加双引号的 `$TMPDIR` 路径。只读工具识别沿用原有规则。策略对隐藏目录基线快照等非工作区比较验证弃权，原命令继续由 Authority 执行。工作区验证的候选可继续推理和修改。`fail_candidate_guidance` 仅用于 `Fail` 预测占位，告知候选验证已失败、真实输出尚未到达，并要求候选将失败视为真实，在检查或编辑代码之前不重跑验证命令。若从未修改文件，或最后一次修改之后已有成功的工作区验证，`extent` 会在新的验证命令前停止。修改后尚未通过验证的候选可以运行工作区测试。范围上限默认是 12 个完整轮次。
 
 使用 Authority 模型的候选在 `accepted` 裁决下仍可 `Promote`。快模型候选的 `Yield` 仅交付通知。终止的快模型候选只有在至少一次 `edit` 或 `write` 成功、没有失败的 `edit` 或 `write`，且最后一次修改后有成功并无调用错误的工作区验证时，才可通过 `Salvage` 移交文件。Policy 按路径选择最新的成功修改，附上改动摘要，以及通过的验证命令和输出，提醒 Authority 在定稿前审查逻辑与边界情况。Runtime 逐结果检查文件冲突并保留 Authority 的冲突改动。未满足验收标准时，只回收适用的只读或诊断通知。适用的修改前只读结果扣除 Authority 已请求部分后按完整输出交付。Coding 策略每批最多 4 项，不设字符上限；其他配置可显式指定正整数 `safe_result_chars` 或 `safe_result_count`。
