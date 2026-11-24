@@ -116,7 +116,13 @@ impl FilesystemBackend {
             mount.lower.clear();
             let volume = next.root.join(&mount.layer_key);
             if self.uses_btrfs_storage() {
-                fs::create_dir_all(volume.parent().unwrap()).map_err(error)?;
+                let parent = volume.parent().ok_or_else(|| {
+                    BackendError::new(format!(
+                        "materialized volume has no parent: {}",
+                        volume.display()
+                    ))
+                })?;
+                fs::create_dir_all(parent).map_err(error)?;
                 self.btrfs_create(&volume)?;
             }
             mount.upper = volume.join("upper");

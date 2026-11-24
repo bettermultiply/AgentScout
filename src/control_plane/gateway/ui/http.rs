@@ -192,68 +192,7 @@ fn serve<P: Presentation>(
             &serde_json::to_vec(&interface.input_status())?,
         ),
         ["GET", path, _] if path.starts_with("/api/observation/events") => {
-            let (path, query) = path.split_once('?').unwrap_or((path, ""));
-            if path != "/api/observation/events" {
-                return reply(stream, "404 Not Found", "text/plain", b"Not found");
-            }
-            let after = query.strip_prefix("after=");
-            if !query.is_empty() && after.is_none() {
-                return reply(
-                    stream,
-                    "400 Bad Request",
-                    "text/plain",
-                    b"Expected after sequence",
-                );
-            }
-            // On reconnect, EventSource's Last-Event-ID is newer than the initial query.
-            let sequence = get("last-event-id").or(after).unwrap_or("0").parse::<u64>();
-            let Ok(mut sequence) = sequence else {
-                return reply(stream, "400 Bad Request", "text/plain", b"Invalid sequence");
-            };
-            if sequence > reader.sequence() {
-                return reply(
-                    stream,
-                    "409 Conflict",
-                    "text/plain",
-                    b"Sequence ahead of this run; reload state event set",
-                );
-            }
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
-            )?;
-            let reader = reader.clone();
-            let mut warning_count = 0;
-            loop {
-                for warning in reader.warnings().into_iter().skip(warning_count) {
-                    writeln!(
-                        stream,
-                        "event: system-warning\ndata: {}\n",
-                        serde_json::to_string(&warning)?
-                    )?;
-                    warning_count += 1;
-                }
-                stream.flush()?;
-                let events = reader
-                    .events_after_until(sequence, stopped)
-                    .map_err(io::Error::other)?;
-                if stopped.load(Ordering::Acquire) && reader.connected() {
-                    return Ok(());
-                }
-                for event in events {
-                    sequence = event.sequence;
-                    writeln!(
-                        stream,
-                        "id: {sequence}\ndata: {}\n",
-                        serde_json::to_string(&event)?
-                    )?;
-                }
-                stream.write_all(b": keep-alive\n\n")?;
-                stream.flush()?;
-                if !reader.connected() && sequence == reader.sequence() {
-                    return Ok(());
-                }
-            }
+            serve_observation_events(stream, reader, stopped, path, get("last-event-id"))
         }
         ["GET", path, _]
             if path.starts_with("/api/branches/") && path.ends_with("/conversation") =>
@@ -278,76 +217,157 @@ fn serve<P: Presentation>(
             }
         }
         ["POST", "/api/request", _] => {
-            let origin = format!("http://{host}");
-            if get("origin") != Some(origin.as_str())
-                || get("content-type") != Some("application/json")
-                || get("transfer-encoding").is_some()
-            {
-                return reply(
+            serve_api_request(stream, connection, host, get, bytes, header_end)
+        }
+        _ => reply(stream, "404 Not Found", "text/plain", b"Not found"),
+    }
+}
+
+fn serve_observation_events(
+    stream: &mut TcpStream,
+    reader: &UiProjection,
+    stopped: &AtomicBool,
+    path: &str,
+    last_event_id: Option<&str>,
+) -> io::Result<()> {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    if path != "/api/observation/events" {
+        return reply(stream, "404 Not Found", "text/plain", b"Not found");
+    }
+    let after = query.strip_prefix("after=");
+    if !query.is_empty() && after.is_none() {
+        return reply(
+            stream,
+            "400 Bad Request",
+            "text/plain",
+            b"Expected after sequence",
+        );
+    }
+    // On reconnect, EventSource's Last-Event-ID is newer than the initial query.
+    let sequence = last_event_id.or(after).unwrap_or("0").parse::<u64>();
+    let Ok(mut sequence) = sequence else {
+        return reply(stream, "400 Bad Request", "text/plain", b"Invalid sequence");
+    };
+    if sequence > reader.sequence() {
+        return reply(
+            stream,
+            "409 Conflict",
+            "text/plain",
+            b"Sequence ahead of this run; reload state event set",
+        );
+    }
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n"
+    )?;
+    let reader = reader.clone();
+    let mut warning_count = 0;
+    loop {
+        for warning in reader.warnings().into_iter().skip(warning_count) {
+            writeln!(
+                stream,
+                "event: system-warning\ndata: {}\n",
+                serde_json::to_string(&warning)?
+            )?;
+            warning_count += 1;
+        }
+        stream.flush()?;
+        let events = reader
+            .events_after_until(sequence, stopped)
+            .map_err(io::Error::other)?;
+        if stopped.load(Ordering::Acquire) && reader.connected() {
+            return Ok(());
+        }
+        for event in events {
+            sequence = event.sequence;
+            writeln!(
+                stream,
+                "id: {sequence}\ndata: {}\n",
+                serde_json::to_string(&event)?
+            )?;
+        }
+        stream.write_all(b": keep-alive\n\n")?;
+        stream.flush()?;
+        if !reader.connected() && sequence == reader.sequence() {
+            return Ok(());
+        }
+    }
+}
+
+fn serve_api_request<'a>(
+    stream: &mut TcpStream,
+    connection: &Connection,
+    host: &str,
+    get: impl Fn(&str) -> Option<&'a str>,
+    mut bytes: Vec<u8>,
+    header_end: usize,
+) -> io::Result<()> {
+    let origin = format!("http://{host}");
+    if get("origin") != Some(origin.as_str())
+        || get("content-type") != Some("application/json")
+        || get("transfer-encoding").is_some()
+    {
+        return reply(
+            stream,
+            "403 Forbidden",
+            "text/plain",
+            b"Same-origin JSON requests only",
+        );
+    }
+    let Some(length) = get("content-length")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n <= 65536)
+    else {
+        return reply(
+            stream,
+            "413 Payload Too Large",
+            "text/plain",
+            b"Invalid body size",
+        );
+    };
+    while bytes.len() < header_end + length {
+        let mut buffer = [0; 4096];
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(());
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    let request = serde_json::from_slice::<Request>(&bytes[header_end..header_end + length]);
+    match request {
+        Ok(Request::Prompt { ref prompt }) if prompt.trim().is_empty() => {
+            reply(stream, "400 Bad Request", "text/plain", b"Prompt is empty")
+        }
+        Ok(request) => {
+            let interaction = matches!(
+                request,
+                Request::UiPromptAnswer { .. } | Request::GetCommands { .. }
+            );
+            match connection.request(request) {
+                Ok(()) => reply(
                     stream,
-                    "403 Forbidden",
-                    "text/plain",
-                    b"Same-origin JSON requests only",
-                );
-            }
-            let Some(length) = get("content-length")
-                .and_then(|s| s.parse::<usize>().ok())
-                .filter(|n| *n <= 65536)
-            else {
-                return reply(
-                    stream,
-                    "413 Payload Too Large",
-                    "text/plain",
-                    b"Invalid body size",
-                );
-            };
-            while bytes.len() < header_end + length {
-                let mut buffer = [0; 4096];
-                let count = stream.read(&mut buffer)?;
-                if count == 0 {
-                    return Ok(());
-                }
-                bytes.extend_from_slice(&buffer[..count]);
-            }
-            let request =
-                serde_json::from_slice::<Request>(&bytes[header_end..header_end + length]);
-            match request {
-                Ok(Request::Prompt { ref prompt }) if prompt.trim().is_empty() => {
-                    reply(stream, "400 Bad Request", "text/plain", b"Prompt is empty")
-                }
-                Ok(request) => {
-                    let interaction = matches!(
-                        request,
-                        Request::UiPromptAnswer { .. } | Request::GetCommands { .. }
-                    );
-                    match connection.request(request) {
-                        Ok(()) => reply(
-                            stream,
-                            "202 Accepted",
-                            "application/json",
-                            b"{\"queued\":true}",
-                        ),
-                        Err(error) => reply(
-                            stream,
-                            if interaction {
-                                "409 Conflict"
-                            } else {
-                                "503 Service Unavailable"
-                            },
-                            "text/plain",
-                            error.as_bytes(),
-                        ),
-                    }
-                }
+                    "202 Accepted",
+                    "application/json",
+                    b"{\"queued\":true}",
+                ),
                 Err(error) => reply(
                     stream,
-                    "400 Bad Request",
+                    if interaction {
+                        "409 Conflict"
+                    } else {
+                        "503 Service Unavailable"
+                    },
                     "text/plain",
-                    error.to_string().as_bytes(),
+                    error.as_bytes(),
                 ),
             }
         }
-        _ => reply(stream, "404 Not Found", "text/plain", b"Not found"),
+        Err(error) => reply(
+            stream,
+            "400 Bad Request",
+            "text/plain",
+            error.to_string().as_bytes(),
+        ),
     }
 }
 

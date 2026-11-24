@@ -49,6 +49,7 @@ AScout 文档组织成树：[心智模型](mental-model.md) 是提供全局视�
 7. [control plane WebUI](development/web-ui.md)：React + React Flow 界面的行为、开发代理、构建产物嵌入与当前缺口。
 8. [Instrumentation 通用层](development/agent-access.md)：通用接入层的接口、覆盖范围与限制。
 9. [模型输出记录与回放](development/replay.md)：control plane 观察与记录的下层开发说明，涵盖外部回放边界、消息引用和匹配限制。
+10. [编码哲学](development/coding-philosophy.md)：新增与修改代码的通用准绳和审查清单。
 
 ## 状态术语
 

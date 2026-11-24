@@ -1,8 +1,8 @@
 use super::{
-    ui::{Interface, Request},
+    ui::{AScoutRunView, Interface, Request},
     view,
 };
-use ascout::control_plane::gateway::agent::protocol::BranchRole;
+use ascout::control_plane::gateway::agent::protocol::{BranchRole, UiPrompt};
 use ascout::control_plane::gateway::ui::Connection;
 use ascout::control_plane::ui_projection::UiProjection;
 use std::io::{self, Read, Write};
@@ -67,15 +67,7 @@ fn run_input(
     reader: &UiProjection,
     rx: mpsc::Receiver<io::Result<u8>>,
 ) -> io::Result<()> {
-    let (mut input, mut escape) = (Vec::new(), Vec::new());
-    let (mut observing, mut events, mut facts) = (false, false, false);
-    let mut selected: Option<String> = None;
-    let (mut scroll, mut previous) = (0usize, String::new());
-    let mut hint = String::new();
-    let mut prompt_id = None;
-    let mut prompt_error = String::new();
-    let mut answer = Vec::new();
-    let mut choice = 0usize;
+    let mut tui = TuiState::default();
     loop {
         let mut state = super::ui::run_view(reader.state_event_set());
         let warnings = reader.warnings();
@@ -88,28 +80,71 @@ fn run_input(
         let prompt = state
             .prompts
             .iter()
-            .find(|(_, (owner, _))| Some(owner) == state.tree.authority_branch_id.as_ref());
+            .find(|(_, (owner, _))| Some(owner) == state.tree.authority_branch_id.as_ref())
+            .map(|(id, (_, prompt))| (id, prompt));
+        tui.sync_prompt(prompt);
+        tui.render_content(interface, &state, prompt)?;
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(byte)) => tui.handle_byte(byte, connection, &state, prompt),
+            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = connection.request(Request::Shutdown);
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => tui.handle_escape_timeout(connection, prompt),
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct TuiState {
+    input: Vec<u8>,
+    escape: Vec<u8>,
+    observing: bool,
+    events: bool,
+    facts: bool,
+    selected: Option<String>,
+    scroll: usize,
+    previous: String,
+    hint: String,
+    prompt_id: Option<String>,
+    prompt_error: String,
+    answer: Vec<u8>,
+    choice: usize,
+}
+
+impl TuiState {
+    fn sync_prompt(&mut self, prompt: Option<(&String, &UiPrompt)>) {
         let next_id = prompt.map(|(id, _)| id.clone());
-        if prompt_id != next_id {
-            prompt_id = next_id;
-            prompt_error.clear();
-            answer = prompt
-                .and_then(|(_, (_, p))| p.prefill.as_ref())
+        if self.prompt_id != next_id {
+            self.prompt_id = next_id;
+            self.prompt_error.clear();
+            self.answer = prompt
+                .and_then(|(_, p)| p.prefill.as_ref())
                 .map(|s| s.as_bytes().to_vec())
                 .unwrap_or_default();
-            choice = 0;
-            escape.clear();
-            scroll = 0;
+            self.choice = 0;
+            self.escape.clear();
+            self.scroll = 0;
         }
-        let id = selected
+    }
+
+    fn render_content(
+        &mut self,
+        interface: &Interface,
+        state: &AScoutRunView,
+        prompt: Option<(&String, &UiPrompt)>,
+    ) -> io::Result<()> {
+        let id = self
+            .selected
             .as_ref()
             .or(state.tree.authority_branch_id.as_ref());
         let mut content = String::new();
-        if events {
+        if self.events {
             for event in &state.events {
                 content.push_str(&format!("{}\n", serde_json::to_string(event)?));
             }
-        } else if observing && selected.is_none() {
+        } else if self.observing && self.selected.is_none() {
             content.push_str("Tree — 只读观察\n");
             for (index, branch) in state.tree.branches.values().enumerate() {
                 content.push_str(&format!(
@@ -130,14 +165,14 @@ fn run_input(
         } else if let Some(id) = id
             && let Some(branch) = state.tree.branches.get(id)
         {
-            if observing {
+            if self.observing {
                 content.push_str(&view::branch_details(
                     branch,
                     &state.tree,
                     "运行事实见 Tab 事件视图；候选身份见角色与状态",
                 ));
             }
-            if facts {
+            if self.facts {
                 for event in state.events.iter().filter(|e| e["branch_id"] == *id) {
                     content.push_str(&view::structured(event));
                 }
@@ -158,7 +193,7 @@ fn run_input(
                 content.push_str(&conversation.streaming);
             }
         }
-        if let Some((_, (_, prompt))) = prompt {
+        if let Some((_, prompt)) = prompt {
             content = format!(
                 "{}\n{}\n",
                 prompt.title,
@@ -173,20 +208,20 @@ fn run_input(
                 for (index, option) in options.iter().enumerate() {
                     content.push_str(&format!(
                         "{} {}\n",
-                        if index == choice { "❯" } else { " " },
+                        if index == self.choice { "❯" } else { " " },
                         option
                     ));
                 }
             } else {
                 content.push_str(prompt.placeholder.as_deref().unwrap_or(""));
                 content.push('\n');
-                content.push_str(&String::from_utf8_lossy(&answer));
+                content.push_str(&String::from_utf8_lossy(&self.answer));
             }
-            if !prompt_error.is_empty() {
-                content.push_str(&format!("\n{prompt_error}\n"));
+            if !self.prompt_error.is_empty() {
+                content.push_str(&format!("\n{}\n", self.prompt_error));
             }
-        } else if !observing && !events && input.starts_with(b"/") {
-            let prefix = String::from_utf8_lossy(&input);
+        } else if !self.observing && !self.events && self.input.starts_with(b"/") {
+            let prefix = String::from_utf8_lossy(&self.input);
             content.push_str("\n命令（Tab 补全第一项，Enter 执行）\n");
             for command in &state.commands {
                 let name = format!("/{}", command["name"].as_str().unwrap_or(""));
@@ -201,188 +236,194 @@ fn run_input(
         }
         draw(
             &content,
-            &String::from_utf8_lossy(if prompt.is_some() { &answer } else { &input }),
-            if let Some((_, (_, p))) = prompt {
+            &String::from_utf8_lossy(if prompt.is_some() {
+                &self.answer
+            } else {
+                &self.input
+            }),
+            if let Some((_, p)) = prompt {
                 if p.kind == "editor" {
                     "Enter 换行；Ctrl-S 提交；Esc 取消；Ctrl-C 中断；Ctrl-D 退出"
                 } else {
                     "↑/↓ 选择；Enter 提交；Esc 取消；Ctrl-C 中断；Ctrl-D 退出"
                 }
-            } else if observing || events {
-                &hint
+            } else if self.observing || self.events {
+                &self.hint
             } else {
                 &state.notice
             },
-            scroll,
-            &mut previous,
-        )?;
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(byte)) => {
-                if !escape.is_empty() {
-                    escape.push(byte);
-                    if escape == b"\x1b[A" {
-                        if prompt.is_some() {
-                            choice = choice.saturating_sub(1);
-                        } else {
-                            scroll = scroll.saturating_add(3);
-                        }
-                        escape.clear();
-                    } else if escape == b"\x1b[B" {
-                        if let Some((_, (_, p))) = prompt {
-                            choice = (choice + 1).min(if p.kind == "confirm" {
-                                1
-                            } else {
-                                p.options.len().saturating_sub(1)
-                            });
-                        } else {
-                            scroll = scroll.saturating_sub(3);
-                        }
-                        escape.clear();
-                    } else if escape.len() > 3 || (escape.len() == 2 && byte != b'[') {
-                        escape.clear();
-                    }
-                    continue;
+            self.scroll,
+            &mut self.previous,
+        )
+    }
+
+    fn handle_byte(
+        &mut self,
+        byte: u8,
+        connection: &Connection,
+        state: &AScoutRunView,
+        prompt: Option<(&String, &UiPrompt)>,
+    ) {
+        if !self.escape.is_empty() {
+            self.escape.push(byte);
+            if self.escape == b"\x1b[A" {
+                if prompt.is_some() {
+                    self.choice = self.choice.saturating_sub(1);
+                } else {
+                    self.scroll = self.scroll.saturating_add(3);
                 }
-                if let Some((id, (_, p))) = prompt {
-                    match byte {
-                        4 => {
-                            let _ = connection.request(Request::Shutdown);
-                        }
-                        3 => {
-                            let _ = connection.request(Request::Interrupt);
-                        }
-                        27 => {
-                            escape.push(27);
-                        }
-                        127 | 8 => {
-                            answer.pop();
-                            while !answer.is_empty() && std::str::from_utf8(&answer).is_err() {
-                                answer.pop();
-                            }
-                        }
-                        b'\r' | b'\n' if p.kind == "editor" => answer.push(b'\n'),
-                        b'\r' | b'\n' | 19 => {
-                            let value = match p.kind.as_str() {
-                                "confirm" => serde_json::json!(choice == 0),
-                                "select" => p
-                                    .options
-                                    .get(choice)
-                                    .map(|s| serde_json::json!(s))
-                                    .unwrap_or(serde_json::Value::Null),
-                                _ => serde_json::json!(String::from_utf8_lossy(&answer)),
-                            };
-                            if let Err(error) = connection.request(Request::UiPromptAnswer {
-                                prompt_id: id.clone(),
-                                answer: value,
-                                cancelled: false,
-                            }) {
-                                prompt_error = error;
-                            }
-                        }
-                        byte if byte >= 32 && (p.kind == "input" || p.kind == "editor") => {
-                            answer.push(byte)
-                        }
-                        _ => {}
-                    }
-                    continue;
+                self.escape.clear();
+            } else if self.escape == b"\x1b[B" {
+                if let Some((_, p)) = prompt {
+                    self.choice = (self.choice + 1).min(if p.kind == "confirm" {
+                        1
+                    } else {
+                        p.options.len().saturating_sub(1)
+                    });
+                } else {
+                    self.scroll = self.scroll.saturating_sub(3);
                 }
-                match byte {
-                    4 => {
-                        let _ = connection.request(Request::Shutdown);
-                    }
-                    3 => {
-                        input.clear();
-                        let _ = connection.request(Request::Interrupt);
-                    }
-                    27 => {
-                        if observing || events {
-                            observing = false;
-                            events = false;
-                            selected = None;
-                            facts = false;
-                            input.clear();
-                            scroll = 0;
-                        } else {
-                            escape.push(27);
-                        }
-                    }
-                    b'\t' if selected.is_some() => {
-                        facts = !facts;
-                        scroll = 0;
-                    }
-                    b'\t' if !observing && !events && input.starts_with(b"/") => {
-                        let prefix = String::from_utf8_lossy(&input);
-                        if let Some(name) = state
-                            .commands
-                            .iter()
-                            .filter_map(|c| c["name"].as_str())
-                            .map(|n| format!("/{n}"))
-                            .find(|n| n.starts_with(prefix.as_ref()))
-                        {
-                            input = name.into_bytes();
-                        }
-                    }
-                    127 | 8 => {
-                        input.pop();
-                        while !input.is_empty() && std::str::from_utf8(&input).is_err() {
-                            input.pop();
-                        }
-                    }
-                    b'\r' | b'\n' => {
-                        let line = String::from_utf8_lossy(&input).to_string();
-                        input.clear();
-                        scroll = 0;
-                        if line == "/pause" {
-                            let _ = connection.request(Request::Pause);
-                        } else if line == "/continue" {
-                            let _ = connection.request(Request::Continue);
-                        } else if line == "/ascout" {
-                            observing = true;
-                            events = false;
-                            selected = None;
-                            hint = "输入编号；Tab 切换运行事实；Esc 返回".into();
-                        } else if line == "/events" {
-                            events = true;
-                            observing = false;
-                            hint = "事件（只读）；Esc 返回".into();
-                        } else if observing {
-                            match view::select_branch(&state.tree, &line) {
-                                Ok(id) => {
-                                    selected = Some(id);
-                                    facts = false;
-                                    hint = "只读观察；Tab 切换运行事实；Esc 返回".into();
-                                }
-                                Err(error) => hint = error,
-                            }
-                        } else if !events && !line.trim().is_empty() {
-                            let _ = connection.request(Request::Prompt { prompt: line });
-                        }
-                    }
-                    byte if byte >= 32 => input.push(byte),
-                    _ => {}
-                }
+                self.escape.clear();
+            } else if self.escape.len() > 3 || (self.escape.len() == 2 && byte != b'[') {
+                self.escape.clear();
             }
-            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = connection.request(Request::Shutdown);
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if escape == b"\x1b"
-                    && let Some((id, _)) = prompt
-                {
+            return;
+        }
+        if let Some((id, p)) = prompt {
+            match byte {
+                4 => {
+                    let _ = connection.request(Request::Shutdown);
+                }
+                3 => {
+                    let _ = connection.request(Request::Interrupt);
+                }
+                27 => {
+                    self.escape.push(27);
+                }
+                127 | 8 => pop_utf8_char(&mut self.answer),
+                b'\r' | b'\n' if p.kind == "editor" => self.answer.push(b'\n'),
+                b'\r' | b'\n' | 19 => {
+                    let value = match p.kind.as_str() {
+                        "confirm" => serde_json::json!(self.choice == 0),
+                        "select" => p
+                            .options
+                            .get(self.choice)
+                            .map(|s| serde_json::json!(s))
+                            .unwrap_or(serde_json::Value::Null),
+                        _ => serde_json::json!(String::from_utf8_lossy(&self.answer)),
+                    };
                     if let Err(error) = connection.request(Request::UiPromptAnswer {
                         prompt_id: id.clone(),
-                        answer: serde_json::Value::Null,
-                        cancelled: true,
+                        answer: value,
+                        cancelled: false,
                     }) {
-                        prompt_error = error;
+                        self.prompt_error = error;
                     }
                 }
-                escape.clear();
+                byte if byte >= 32 && (p.kind == "input" || p.kind == "editor") => {
+                    self.answer.push(byte)
+                }
+                _ => {}
             }
+            return;
+        }
+        match byte {
+            4 => {
+                let _ = connection.request(Request::Shutdown);
+            }
+            3 => {
+                self.input.clear();
+                let _ = connection.request(Request::Interrupt);
+            }
+            27 => {
+                if self.observing || self.events {
+                    self.observing = false;
+                    self.events = false;
+                    self.selected = None;
+                    self.facts = false;
+                    self.input.clear();
+                    self.scroll = 0;
+                } else {
+                    self.escape.push(27);
+                }
+            }
+            b'\t' if self.selected.is_some() => {
+                self.facts = !self.facts;
+                self.scroll = 0;
+            }
+            b'\t' if !self.observing && !self.events && self.input.starts_with(b"/") => {
+                let prefix = String::from_utf8_lossy(&self.input);
+                if let Some(name) = state
+                    .commands
+                    .iter()
+                    .filter_map(|c| c["name"].as_str())
+                    .map(|n| format!("/{n}"))
+                    .find(|n| n.starts_with(prefix.as_ref()))
+                {
+                    self.input = name.into_bytes();
+                }
+            }
+            127 | 8 => pop_utf8_char(&mut self.input),
+            b'\r' | b'\n' => {
+                let line = String::from_utf8_lossy(&self.input).to_string();
+                self.input.clear();
+                self.scroll = 0;
+                if line == "/pause" {
+                    let _ = connection.request(Request::Pause);
+                } else if line == "/continue" {
+                    let _ = connection.request(Request::Continue);
+                } else if line == "/ascout" {
+                    self.observing = true;
+                    self.events = false;
+                    self.selected = None;
+                    self.hint = "输入编号；Tab 切换运行事实；Esc 返回".into();
+                } else if line == "/events" {
+                    self.events = true;
+                    self.observing = false;
+                    self.hint = "事件（只读）；Esc 返回".into();
+                } else if self.observing {
+                    match view::select_branch(&state.tree, &line) {
+                        Ok(id) => {
+                            self.selected = Some(id);
+                            self.facts = false;
+                            self.hint = "只读观察；Tab 切换运行事实；Esc 返回".into();
+                        }
+                        Err(error) => self.hint = error,
+                    }
+                } else if !self.events && !line.trim().is_empty() {
+                    let _ = connection.request(Request::Prompt { prompt: line });
+                }
+            }
+            byte if byte >= 32 => self.input.push(byte),
+            _ => {}
         }
     }
-    Ok(())
+
+    fn handle_escape_timeout(
+        &mut self,
+        connection: &Connection,
+        prompt: Option<(&String, &UiPrompt)>,
+    ) {
+        if self.escape == b"\x1b"
+            && let Some((id, _)) = prompt
+        {
+            if let Err(error) = connection.request(Request::UiPromptAnswer {
+                prompt_id: id.clone(),
+                answer: serde_json::Value::Null,
+                cancelled: true,
+            }) {
+                self.prompt_error = error;
+            }
+        }
+        self.escape.clear();
+    }
+}
+
+fn pop_utf8_char(buffer: &mut Vec<u8>) {
+    buffer.pop();
+    while !buffer.is_empty() && std::str::from_utf8(buffer).is_err() {
+        buffer.pop();
+    }
 }
 
 fn message_text(entry: &serde_json::Value) -> String {

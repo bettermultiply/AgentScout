@@ -442,7 +442,10 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
         Decision::Predict => {
             result.get("predict") == Some(&Value::String("branch_model".into()))
                 && result.get("model").is_some_and(Value::is_string)
-                && result.as_object().is_some_and(|object| object.keys().all(|key| ["predict", "model", "thinking", "candidates", "candidate_guidance"].contains(&key.as_str())))
+                && result.as_object().is_some_and(|object| object.keys().all(|key| ["predict", "model", "thinking", "candidates", "candidate_guidance", "max_candidate_model_steps"].contains(&key.as_str())))
+                && result.get("max_candidate_model_steps").is_none_or(|steps| {
+                    steps.as_u64().is_some_and(|steps| steps >= 1)
+                })
                 && result.get("candidate_guidance").is_none_or(nonblank)
                 && result.get("candidates").is_none_or(|count| {
                     count.as_u64().is_some_and(|count| (1..=4).contains(&count))
@@ -505,6 +508,12 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                             && (actions.len() == 1 || actions[1..] == [discard]),
                         Some("Salvage") => resolution != "accepted" && valid_partial(first)
                             && actions[1..] == [discard],
+                        Some("Yield") => resolution != "accepted" && actions.len() == 1
+                            && first.as_object().is_some_and(|fields| fields.len() == 2)
+                            && first["results"].as_array().is_some_and(|results| {
+                                results.iter().all(|result| result["files"] == serde_json::json!([]))
+                                    && (results.is_empty() || valid_partial(first))
+                            }),
                         Some("Discard") => actions == &[discard],
                         _ => false,
                     }
@@ -520,6 +529,27 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
     )
 }
 
+#[cfg(test)]
+#[test]
+fn yield_is_a_notification_only_nonterminal_disposition() {
+    use serde_json::json;
+    let good = json!({"intent":"Yield", "results":[{"id":"tool-1", "files":[], "notification":"test result"}]});
+    let validate = |resolution: &str, actions: Value| {
+        validate_result(Decision::Dispose, &json!({"resolution":resolution}), &json!({"actions":actions}))
+    };
+    for resolution in ["rejected", "indeterminate", "extent_reached"] {
+        assert!(validate(resolution, json!([good])).is_ok());
+    }
+    assert!(validate("rejected", json!([{"intent":"Yield", "results":[]}])).is_ok());
+    assert!(validate("accepted", json!([good])).is_err());
+    assert!(validate("rejected", json!([good, {"intent":"Discard"}])).is_err());
+    for result in [json!({"id":"t", "notification":"x"}),
+        json!({"id":"t", "files":["file"], "notification":"x"}),
+        json!({"id":"t", "files":[], "notification":" "})] {
+        assert!(validate("rejected", json!([{"intent":"Yield", "results":[result]}])).is_err());
+    }
+}
+
 fn json_discard() -> Value {
     serde_json::json!({"intent": "Discard"})
 }
@@ -533,7 +563,8 @@ fn valid_partial(action: &Value) -> bool {
     let mut seen = BTreeSet::new();
     if let Some(results) = action["results"].as_array() {
         return fields.len() == 2 && !results.is_empty() && results.iter().all(|result| {
-            result.as_object().is_some_and(|fields| fields.len() == 2)
+            result.as_object().is_some_and(|fields| fields.len() == 2
+                || (fields.len() == 3 && matches!(action["intent"].as_str(), Some("Salvage" | "Yield")) && result["files"] == serde_json::json!([])))
                 && result["id"].as_str().is_some_and(|id| !id.trim().is_empty() && seen.insert(id))
                 && nonblank(&result["notification"])
         });
@@ -566,4 +597,24 @@ pub(super) fn ids(value: &Value, key: &str) -> io::Result<BTreeSet<String>> {
         require(ids.insert(id.to_owned()), "duplicate ID in input view")?;
     }
     Ok(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn branch_model_step_limit_is_optional_and_positive() {
+        let mut prediction = json!({"predict": "branch_model", "model": "fixture/candidate"});
+        assert!(validate_result(Decision::Predict, &Value::Null, &prediction).is_ok());
+        for limit in [json!(1), json!(4), json!(i64::MAX)] {
+            prediction["max_candidate_model_steps"] = limit;
+            assert!(validate_result(Decision::Predict, &Value::Null, &prediction).is_ok());
+        }
+        for limit in [json!(0), json!(-1), json!(1.5), json!("1"), json!(true), Value::Null] {
+            prediction["max_candidate_model_steps"] = limit;
+            assert!(validate_result(Decision::Predict, &Value::Null, &prediction).is_err());
+        }
+    }
 }

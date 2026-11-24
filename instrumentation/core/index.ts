@@ -55,9 +55,11 @@ type ActionCompletion = {
     name: string;
     status: string;
     isError: boolean;
+    arguments?: unknown;
 };
 
 type ActionSummary = { kind: string; name: string; status: string; is_error: boolean };
+type CompletedTool = ActionSummary & { arguments?: unknown };
 type BranchState = {
     is_candidate: boolean;
     assumption_depth: number;
@@ -72,7 +74,12 @@ type BranchProgress = {
     hookCount: number;
     modelInferences: number;
     toolExecutions: number;
+    failedTools?: number;
+    speculationKind?: 'model_inference' | 'tool_execution';
+    predictionKind?: 'predicted_tool_calls' | 'branch_model' | 'tool_result';
     lastAction?: ActionSummary;
+    parentStepsCompleted?: number;
+    completedTools?: CompletedTool[];
 };
 
 export type Interposer = {
@@ -181,6 +188,8 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
                 recent_actions: structuredClone(parent?.recent_actions ?? []),
             },
             startedAt: now(), hookCount: 0, modelInferences: 0, toolExecutions: 0,
+            parentStepsCompleted: parent?.steps_completed ?? 0,
+            completedTools: [],
         };
     }
 
@@ -207,13 +216,19 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
                 case 'process_state.hook_count': process_state.hook_count = branch.hookCount; break;
                 case 'process_state.active_time': process_state.active_time = Math.max(0, now() - branch.startedAt) / 1000; break;
                 case 'process_state.resource_counters':
-                    process_state.resource_counters = {model_inferences: branch.modelInferences, tool_executions: branch.toolExecutions};
+                    process_state.resource_counters = {model_inferences: branch.modelInferences,
+                        tool_executions: branch.toolExecutions, failed_tools: branch.failedTools ?? 0};
                     break;
                 case 'process_state.result_facts':
-                    process_state.result_facts = branch.lastAction ? {last_action: branch.lastAction} : {};
+                    process_state.result_facts = {
+                        last_action: branch.lastAction ?? {}, completed_tools: branch.completedTools ?? [],
+                    };
                     break;
                 case 'process_state.semantic_facts':
                     process_state.semantic_facts = {
+                        speculation_kind: branch.speculationKind,
+                        prediction_kind: branch.predictionKind,
+                        parent_steps_completed: branch.parentStepsCompleted,
                         next_action: {kind: point.actionKind, name: point.name, arguments: point.arguments ?? {}},
                         next_action_kind: point.actionKind, next_action_name: point.name, arguments: point.arguments ?? {},
                     };
@@ -346,7 +361,14 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
                     const parent = command.parent_branch_id as string;
                     const parentPolicy = policies.get(parent);
                     if (parentPolicy) policies.set(branch, parentPolicy);
-                    if (!progress.has(branch)) progress.set(branch, newProgress(progress.get(parent)?.state, true));
+                    if (!progress.has(branch)) {
+                        const candidate = newProgress(progress.get(parent)?.state, true);
+                        const prediction = command.prediction as {predict?: string; kind?: string} | undefined;
+                        candidate.predictionKind = prediction?.predict === 'branch_model' ? 'branch_model'
+                            : prediction?.kind === 'predicted_tool_calls' ? 'predicted_tool_calls' : 'tool_result';
+                        candidate.speculationKind = candidate.predictionKind === 'tool_result' ? 'tool_execution' : 'model_inference';
+                        progress.set(branch, candidate);
+                    }
                     if (!effectHolds.has(branch)) effectHolds.set(branch, makeHold());
                     return;
                 }
@@ -402,7 +424,7 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             }
         },
 
-        afterAction({branch, actionId, actionKind, name, status, isError}) {
+        afterAction({branch, actionId, actionKind, name, status, isError, arguments: args}) {
             countedHooks.delete(`${branch}\u0000${actionId}`);
             const value = progress.get(branch);
             if (!value) return;
@@ -414,9 +436,15 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             if (actionKind === 'model_inference') value.modelInferences++;
             if (actionKind === 'tool_execution') {
                 value.toolExecutions++;
+                if (state.is_candidate && value.speculationKind === 'model_inference') {
+                    (value.completedTools ??= []).push({...summary, arguments: args});
+                }
                 const counts = state.tool_counts[name] ??= {succeeded: 0, failed: 0};
                 if (status === 'succeeded' && !isError) counts.succeeded++;
-                else if (status === 'failed' || isError) counts.failed++;
+                else if (status === 'failed' || isError) {
+                    counts.failed++;
+                    value.failedTools = (value.failedTools ?? 0) + 1;
+                }
             }
             if (actionKind === 'model_inference' || actionKind === 'tool_execution') state.steps_completed++;
         },

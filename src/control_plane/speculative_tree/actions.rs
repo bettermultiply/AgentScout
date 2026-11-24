@@ -38,12 +38,7 @@ impl ControlOperation {
         match self {
             Self::Select(_) | Self::Rebalance => None,
             Self::Predict(tool) | Self::Launch(tool) => Some(&tool.branch_id),
-            Self::Establish(command) => {
-                let AgentCommand::StartCandidate { branch_id, .. } = command else {
-                    unreachable!()
-                };
-                Some(branch_id)
-            }
+            Self::Establish(command) => Some(command.branch_id()),
             Self::Validate(id) | Self::Dispose(id, _) | Self::SuspendAcceptance(id) | Self::ResumeAcceptance(id)
             | Self::Promote(id, _) | Self::Terminate(id) | Self::Cleanup(id) => {
                 Some(id)
@@ -152,7 +147,7 @@ impl SpeculativeTree {
             && self
                 .branches
                 .get(candidate)
-                .is_some_and(|branch| self.authority_advanced_past(branch))
+                .is_some_and(|branch| !branch.yield_only && self.authority_advanced_past(branch))
         {
             actions.commands.extend(self.discard_candidate(
                 candidate,
@@ -161,6 +156,13 @@ impl SpeculativeTree {
             )?);
         }
         Ok(())
+    }
+
+    pub(super) fn yield_snapshot(&self, candidate: &str) -> Value {
+        let branch = &self.branches[candidate];
+        let tool_count = self.action_facts.get(candidate).into_iter().flat_map(|facts| facts.values())
+            .filter(|fact| fact.action_kind == ActionKind::ToolExecution).count();
+        json!([branch.status, branch.execution_state.turn_active, tool_count])
     }
 
     pub(crate) fn validation_snapshot(&self, candidate: &str) -> Value {
@@ -207,11 +209,13 @@ impl SpeculativeTree {
             "chance_revisions": self.chances.values().filter(|chance| branch.chance_id.as_ref() == Some(&chance.chance_id)).map(|chance| self.policy_chance_revisions.get(&chance.chance_id).map(|revisions| revisions.1)).collect::<Vec<_>>(),
             "branch": branch,
             "chances": self.chances.values().filter(|chance| chance.parent_branch_id == id || branch.chance_id.as_ref() == Some(&chance.chance_id)).map(|chance| {
-                let mut chance = chance.clone();
-                chance.launch_epoch = None;
-                chance
+                let mut context = json!(chance);
+                if let Value::Object(fields) = &mut context {
+                    fields.remove("launch_epoch");
+                }
+                context
             }).collect::<Vec<_>>(),
-            "usage": self.model_usage.get(id), "facts": self.action_facts.get(id),
+            "usage": self.model_usage.get(id), "facts": self.action_facts.get(id), "active": self.active_actions.get(id),
             "generation": branch.generation, "status": branch.status,
             "position": branch.execution_position, "assumptions": branch.assumption_set,
             "proposal": self.branch_proposal(id)})
@@ -249,17 +253,14 @@ impl SpeculativeTree {
                 "speculative admission does not use the delivered local Policy",
             ));
         }
-        self.register_action(
-            &branch_id,
-            operation_id.clone(),
-            action_kind,
-            tool_name.clone(),
-            parent_action_id,
-        )?;
+        self.register_action(&branch_id, operation_id.clone(), ActionRecord {
+            action_kind, name: tool_name.clone(), parent_action_id, arguments: None,
+        })?;
         let mut actions = ControlActions::default();
-        if self.branches[&branch_id].status == BranchStatus::Promoting {
-            // Admission can cross the acceptance pause in transit. The Agent
-            // still waits for acceptance before executing this action.
+        let branch = self.branch(&branch_id)?;
+        // Admission can cross the acceptance pause in transit. The Agent
+        // still waits for acceptance before executing this action.
+        if branch.yield_only || branch.status == BranchStatus::Promoting {
             actions.commands.push(self.resolve_pending(
                 &branch_id, &operation_id, json!({"phase":"execute", "speculation_skipped":true}),
             )?);
@@ -338,88 +339,14 @@ impl SpeculativeTree {
         while self.completed_work.len() > 256 {
             self.completed_work.pop_first();
         }
-        let evaluated_work = work.clone();
         let context = self.policy_work_context.remove(&id);
-        if self
-            .policy_dependencies
-            .remove(&id)
-            .is_some_and(|original| original != self.policy_dependencies_for(&work))
-        {
+        if self.work_context_expired(id, &work, context.as_ref()) {
             self.discard_expired_validation(&work, &mut actions)?;
             return Ok(actions);
         }
-        if matches!(
-            work,
-            ControlOperation::Launch(_) | ControlOperation::Validate(_) | ControlOperation::Dispose(_, _)
-        ) && context.as_ref().is_some_and(|context| {
-            context.iter().any(|(branch, original)| {
-                !self.branches.contains_key(branch)
-                    || *original != self.policy_branch_context(branch, &evaluated_work)
-            })
-        }) {
-            self.discard_expired_validation(&work, &mut actions)?;
-            return Ok(actions);
-        }
-        if let Some(branch) = work.branch()
-            && context.as_ref().is_some_and(|context| {
-                context.get(branch).is_none_or(|original| {
-                    !self.branches.contains_key(branch)
-                        || *original != self.policy_branch_context(branch, &evaluated_work)
-                })
-            })
-        {
-            self.discard_expired_validation(&work, &mut actions)?;
-            return Ok(actions);
-        }
-        let result = match (result, context.as_ref()) {
-            (Ok(ControlResult::Rebalance(entries)), Some(context)) => Ok(ControlResult::Rebalance(
-                entries
-                    .into_iter()
-                    .filter(|(branch, _)| {
-                        self.branches.contains_key(branch)
-                            && context.get(branch).is_some_and(|original| {
-                                *original == self.policy_branch_context(branch, &evaluated_work)
-                            })
-                    })
-                    .collect(),
-            )),
-            (Ok(ControlResult::Selected(ids)), Some(context)) => Ok(ControlResult::Selected(
-                ids.into_iter()
-                    .filter(|id| {
-                        self.chances.get(id).is_some_and(|chance| {
-                            context
-                                .get(&chance.parent_branch_id)
-                                .is_some_and(|original| {
-                                    *original
-                                        == self.policy_branch_context(
-                                            &chance.parent_branch_id,
-                                            &evaluated_work,
-                                        )
-                                })
-                        })
-                    })
-                    .collect(),
-            )),
-            (result, _) => result,
-        };
-        let branch = work.branch().map(str::to_string);
+        let (work, result) = self.filter_work_results(work, result, context.as_ref());
         match work {
-            ControlOperation::Select(mut ids) => {
-                if let Some(context) = &context {
-                    ids.retain(|id| {
-                        self.chances.get(id).is_some_and(|chance| {
-                            context
-                                .get(&chance.parent_branch_id)
-                                .is_some_and(|original| {
-                                    *original
-                                        == self.policy_branch_context(
-                                            &chance.parent_branch_id,
-                                            &evaluated_work,
-                                        )
-                                })
-                        })
-                    });
-                }
+            ControlOperation::Select(ids) => {
                 self.complete_select(ids, result, &mut actions)?;
             }
             ControlOperation::Predict(tool) => {
@@ -432,7 +359,13 @@ impl SpeculativeTree {
                 self.complete_rebalance(result, &mut actions)?;
             }
             ControlOperation::Establish(command) => {
-                self.complete_establish(command, result, &mut actions, &branch.unwrap())?;
+                let AgentCommand::StartCandidate { branch_id, .. } = &command else {
+                    return Err(io::Error::other(
+                        "establishment work is missing a StartCandidate command",
+                    ));
+                };
+                let branch = branch_id.clone();
+                self.complete_establish(command, result, &mut actions, &branch)?;
             }
             ControlOperation::Validate(candidate) => {
                 self.complete_validate(id, candidate, None, result, &mut actions)?;
@@ -442,22 +375,32 @@ impl SpeculativeTree {
             }
             ControlOperation::SuspendAcceptance(candidate) => {
                 if result.is_ok() {
-                    if let Some((id, record)) = self.pending_acceptance.as_mut()
+                    let part = if let Some((id, record)) = self.pending_acceptance.as_mut()
                         && *id == candidate
                     {
                         record["suspended"] = json!(true);
-                        if !self.stopping {
-                            if self.acceptance_target(self.branch(&candidate)?).is_some() {
-                                actions.commands.push(self.make_prepare_acceptance(&candidate, true)?);
-                            } else {
-                                actions.commands.extend(self.cancel_acceptance(&candidate, "Acceptance target is no longer eligible")?);
-                            }
-                        }
+                        record["full"] == false
                     } else {
-                        return Err(io::Error::other("acceptance target paused without a pending acceptance"));
+                        return Err(io::Error::other(
+                            "acceptance target paused without a pending acceptance",
+                        ));
+                    };
+                    if !self.stopping {
+                        if self.acceptance_target(self.branch(&candidate)?).is_some() {
+                            actions
+                                .commands
+                                .push(self.make_prepare_acceptance(&candidate, true, part)?);
+                        } else {
+                            actions.commands.extend(self.cancel_acceptance(
+                                &candidate,
+                                "Acceptance target is no longer eligible",
+                            )?);
+                        }
                     }
                 } else if let Err(reason) = result {
-                    actions.commands.extend(self.cancel_acceptance(&candidate, &reason)?);
+                    actions
+                        .commands
+                        .extend(self.cancel_acceptance(&candidate, &reason)?);
                 }
             }
             ControlOperation::ResumeAcceptance(parent) => {
@@ -469,11 +412,101 @@ impl SpeculativeTree {
             ControlOperation::Promote(candidate, record) => {
                 self.complete_promote(candidate, record, result, &mut actions)?;
             }
-            work @ (ControlOperation::Terminate(_) | ControlOperation::Cleanup(_)) => {
-                self.complete_terminate_or_cleanup(work, result, &mut actions, &branch.unwrap())?;
+            ControlOperation::Terminate(branch) => {
+                self.complete_terminate_or_cleanup(
+                    &branch,
+                    RuntimeExecutionState::Terminated,
+                    result,
+                    &mut actions,
+                )?;
+            }
+            ControlOperation::Cleanup(branch) => {
+                self.complete_terminate_or_cleanup(
+                    &branch,
+                    RuntimeExecutionState::Cleaned,
+                    result,
+                    &mut actions,
+                )?;
             }
         }
         Ok(actions)
+    }
+
+    fn work_context_expired(
+        &mut self,
+        id: u64,
+        work: &ControlOperation,
+        context: Option<&BTreeMap<String, Value>>,
+    ) -> bool {
+        if self
+            .policy_dependencies
+            .remove(&id)
+            .is_some_and(|original| original != self.policy_dependencies_for(work))
+        {
+            return true;
+        }
+        let Some(context) = context else {
+            return false;
+        };
+        let changed = |branch: &str, original: &Value| {
+            !self.branches.contains_key(branch)
+                || *original != self.policy_branch_context(branch, work)
+        };
+        if matches!(
+            work,
+            ControlOperation::Launch(_)
+                | ControlOperation::Validate(_)
+                | ControlOperation::Dispose(_, _)
+        ) && context
+            .iter()
+            .any(|(branch, original)| changed(branch, original))
+        {
+            return true;
+        }
+        work.branch().is_some_and(|branch| {
+            context
+                .get(branch)
+                .is_none_or(|original| changed(branch, original))
+        })
+    }
+
+    fn filter_work_results(
+        &self,
+        work: ControlOperation,
+        mut result: Result<ControlResult, String>,
+        context: Option<&BTreeMap<String, Value>>,
+    ) -> (ControlOperation, Result<ControlResult, String>) {
+        let Some(context) = context else {
+            return (work, result);
+        };
+        let branch_unchanged = |branch: &str| {
+            self.branches.contains_key(branch)
+                && context
+                    .get(branch)
+                    .is_some_and(|original| *original == self.policy_branch_context(branch, &work))
+        };
+        let chance_unchanged = |id: &String| {
+            self.chances
+                .get(id)
+                .is_some_and(|chance| branch_unchanged(&chance.parent_branch_id))
+        };
+        match &mut result {
+            Ok(ControlResult::Rebalance(entries)) => {
+                entries.retain(|(branch, _)| branch_unchanged(branch))
+            }
+            Ok(ControlResult::Selected(ids)) => ids.retain(chance_unchanged),
+            _ => {}
+        }
+        let work = match &work {
+            ControlOperation::Select(ids) => ControlOperation::Select(
+                ids.iter()
+                    .filter(|id| chance_unchanged(id))
+                    .cloned()
+                    .collect(),
+            ),
+            _ => work,
+        };
+        (work, result)
     }
 
     fn tool_pending(&self, chance_id: &str) -> io::Result<ToolPending> {
@@ -579,7 +612,7 @@ impl SpeculativeTree {
                         "chance_id": chance_id,
                         "fork_at": self.branches[&child].execution_position.transcript_index
                     }));
-                    if !chance_id.starts_with("chance-local-") {
+                    if !self.chance(&chance_id)?.deferred_environment {
                         self.schedule(ControlOperation::Establish(command), actions);
                     }
                 }
@@ -701,8 +734,8 @@ impl SpeculativeTree {
                     *execution_access = access;
                 }
                 self.record_runtime_state(branch, RuntimeExecutionState::Ready)?;
-                if !self.stopping && branch.starts_with("candidate-chance-local-")
-                    && self.branches[branch].status.is_live_candidate()
+                let candidate = self.branch(branch)?;
+                if !self.stopping && candidate.deferred_environment && candidate.status.is_live_candidate()
                 {
                     if let AgentCommand::StartCandidate { operation_id, execution_access, .. } = command {
                         actions.commands.push(self.resolve_pending(branch, &operation_id,
@@ -840,12 +873,17 @@ impl SpeculativeTree {
         actions: &mut ControlActions,
     ) -> io::Result<()> {
         if let Ok(ControlResult::AcceptanceDisposition(.., Some(audit))) = &result {
-            actions.records.push(json!({"message": "policy_audit", "branch_id": candidate, "audit": audit}));
+            actions
+                .records
+                .push(json!({"message": "policy_audit", "branch_id": candidate, "audit": audit}));
         }
-        if self.stopping || match resolution {
-            None => !self.candidate_due(&candidate),
-            Some(_) => !self.branch(&candidate)?.status.is_live_candidate(),
-        } {
+        if self.stopping
+            || self.task_finishing && self.branch(&candidate)?.yield_only
+            || match resolution {
+                None => !self.candidate_due(&candidate),
+                Some(_) => !self.branch(&candidate)?.status.is_live_candidate(),
+            }
+        {
             return Ok(());
         }
         let (compatible, verdict, notification, validated_at_ms, transfer, part, error) =
@@ -882,23 +920,63 @@ impl SpeculativeTree {
                     None,
                 ),
                 Err(error) => (false, "error".into(), None, None, None, None, Some(error)),
-                _ => unreachable!(),
+                _ => return Err(io::Error::other("unexpected validation result")),
             };
+        let branch = self.branch(&candidate)?;
         let proposal = self.branch_proposal(&candidate).cloned();
-        let chance_id = self
-            .branch(&candidate)?
+        let chance_id = branch
             .chance_id
             .clone()
             .ok_or_else(|| io::Error::other("candidate Chance is missing"))?;
-        let unbound_local = candidate.starts_with("candidate-chance-local-") && self.branch(&candidate)?.environment_id.is_none();
-        let salvage = part.as_ref().is_some_and(|part| part["intent"] == "Salvage");
-        if verdict == "wait" || (verdict == "indeterminate" && !salvage) {
+        let salvage = part
+            .as_ref()
+            .is_some_and(|part| part["intent"] == "Salvage");
+        let yield_only = branch.yield_only;
+        let stopped = branch.status == BranchStatus::Blocked(BlockedReason::ExtentReached)
+            || !branch.execution_state.turn_active;
+        let mut record = json!({"branch_id":candidate, "hypothesis":proposal.as_ref().map(|p|&p.payload), "verdict":verdict, "policy_error":error});
+        if let Some(part) = part.as_ref().filter(|part| part["intent"] == "Yield")
+            && !self.task_finishing
+            && resolution != Some("preempted")
+            && self.apply_yield(&candidate, &chance_id, part, actions)?
+        {
+            record["disposition"] = json!("Yield");
+            record["part"] = part.clone();
+            actions.records.push(record);
+            if stopped {
+                actions.commands.extend(self.discard_candidate(
+                    &candidate,
+                    DiscardedReason::MatchRejected,
+                    "Candidate stopped after Yield",
+                )?);
+            } else {
+                let snapshot = if self.branch(&candidate)?.yield_only {
+                    self.yield_snapshot(&candidate)
+                } else {
+                    self.validation_snapshot(&candidate)
+                };
+                self.deferred_validations
+                    .insert(candidate.clone(), snapshot);
+            }
+            return Ok(());
+        }
+        if yield_only
+            && !stopped
+            && transfer != Some(true)
+            && error.is_none()
+            && resolution != Some("preempted")
+        {
+            self.deferred_validations
+                .insert(candidate.clone(), self.yield_snapshot(&candidate));
+            return Ok(());
+        }
+        if !yield_only && (verdict == "wait" || (verdict == "indeterminate" && !salvage)) {
             let snapshot = self.validation_snapshot(&candidate);
             self.deferred_validations.insert(candidate, snapshot);
             return Ok(());
         }
         self.deferred_validations.remove(&candidate);
-        if proposal.is_none() {
+        let Some(proposal) = proposal else {
             let record = json!({
                 "branch_id": candidate,
                 "hypothesis": Value::Null,
@@ -913,10 +991,8 @@ impl SpeculativeTree {
             )?);
             actions.records.push(record);
             return Ok(());
-        }
-        if resolution.is_none() && error.is_none()
-            && let Some(proposal) = &proposal
-        {
+        };
+        if resolution.is_none() && error.is_none() {
             self.record_validation(
                 &chance_id,
                 &proposal.proposal_id,
@@ -924,79 +1000,187 @@ impl SpeculativeTree {
                 validated_at_ms,
             );
         }
-        let record = json!({"branch_id":candidate, "hypothesis":proposal.as_ref().map(|p|&p.payload), "verdict":verdict, "policy_error":error});
-        if self.can_accept(&candidate, compatible || (salvage
-            && !self.ancestor_assumptions_unresolved(self.branch(&candidate)?)), transfer.is_some()) {
-            if unbound_local && transfer == Some(false) {
-                self.establish_local_candidate(&candidate, actions)?;
-                return Ok(());
-            }
-            let previous_status = self.branch(&candidate)?.status;
-            if resolution.is_none() {
-                self.chance_mut(&chance_id)?.validation_id = Some(validation_id);
-            }
-            self.record_runtime_state(&candidate, RuntimeExecutionState::PromotionRequested)?;
-            self.change_status(
-                &candidate,
-                BranchStatus::Promoting,
-                if salvage { "Runtime salvage requested" } else { "Runtime acceptance requested" },
-            )?;
-            let mut record = record;
+        let branch = self.branch(&candidate)?;
+        let ancestor_unresolved = (salvage || (compatible && transfer.is_none()))
+            && self.ancestor_assumptions_unresolved(branch);
+        if self.can_accept(
+            &candidate,
+            compatible || (salvage && !ancestor_unresolved),
+            transfer.is_some(),
+        ) {
             if let Some(notification) = notification {
                 record["notification"] = json!(notification);
             }
-            if unbound_local {
-                let mut command = self.make_promote_command(&candidate, record["notification"].as_str().map(str::to_owned))?;
-                if let AgentCommand::Promote { reuse_parent_environment, .. } = &mut command {
-                    *reuse_parent_environment = true;
-                }
-                self.record_runtime_state(&candidate, RuntimeExecutionState::Promoted)?;
-                record["disposition"] = json!("Promote");
-                record["outcome"] = json!("full");
-                self.pending_acceptance = Some((candidate, record.clone()));
-                actions.records.push(record);
-                actions.commands.push(command);
-            } else if let Some(full) = transfer {
-                record["previous_status"] = json!(previous_status);
-                record["full"] = json!(full);
-                record["part"] = part.unwrap_or(Value::Null);
-                self.pending_acceptance = Some((candidate.clone(), record));
-                actions
-                    .commands
-                    .push(self.make_prepare_acceptance(&candidate, false)?);
-            } else {
-                self.schedule(ControlOperation::Promote(candidate, record), actions);
-            }
-        } else if compatible && transfer.is_none() && self.ancestor_assumptions_unresolved(self.branch(&candidate)?) {
+            return self.request_candidate_acceptance(
+                candidate,
+                &chance_id,
+                resolution.is_none().then_some(validation_id),
+                transfer,
+                part,
+                record,
+                actions,
+            );
+        }
+        if compatible && transfer.is_none() && ancestor_unresolved {
             // A matching nested Proposal waits for ancestor validation before it can commit.
             actions.records.push(json!({
                 "branch_id": candidate,
-                "hypothesis": self.branch_proposal(&candidate).map(|proposal| &proposal.payload),
+                "hypothesis": proposal.payload,
                 "verdict": verdict,
                 "disposition": "Wait",
                 "reason": "ancestor Proposal is not confirmed"
             }));
-        } else {
-            let why = if error.is_some() {
-                DiscardedReason::Failed
-            } else if resolution == Some("preempted") {
-                DiscardedReason::BudgetExhausted
+            return Ok(());
+        }
+        self.discard_after_validation(
+            &candidate,
+            resolution,
+            &verdict,
+            error.as_deref(),
+            record,
+            actions,
+        )
+    }
+
+    fn request_candidate_acceptance(
+        &mut self,
+        candidate: String,
+        chance_id: &str,
+        validation_id: Option<u64>,
+        transfer: Option<bool>,
+        part: Option<Value>,
+        mut record: Value,
+        actions: &mut ControlActions,
+    ) -> io::Result<()> {
+        let branch = self.branch(&candidate)?;
+        let previous_status = branch.status;
+        let unbound_local = branch.deferred_environment && branch.environment_id.is_none();
+        let salvage = part
+            .as_ref()
+            .is_some_and(|part| part["intent"] == "Salvage");
+        if unbound_local && transfer == Some(false) {
+            self.establish_local_candidate(&candidate, actions)?;
+            return Ok(());
+        }
+        if let Some(validation_id) = validation_id {
+            self.chance_mut(chance_id)?.validation_id = Some(validation_id);
+        }
+        self.record_runtime_state(&candidate, RuntimeExecutionState::PromotionRequested)?;
+        self.change_status(
+            &candidate,
+            BranchStatus::Promoting,
+            if salvage {
+                "Runtime salvage requested"
             } else {
-                DiscardedReason::MatchRejected
-            };
-            actions.commands.extend(self.discard_candidate(
+                "Runtime acceptance requested"
+            },
+        )?;
+        if unbound_local {
+            let mut command = self.make_promote_command(
                 &candidate,
-                why,
-                &format!(
-                    "Validation disposition: {verdict}; {}",
-                    error.as_deref().unwrap_or("no policy error")
-                ),
-            )?);
-            let mut record = record;
-            record["disposition"] = json!("Discard");
+                record["notification"].as_str().map(str::to_owned),
+            )?;
+            if let AgentCommand::Promote {
+                reuse_parent_environment,
+                ..
+            } = &mut command
+            {
+                *reuse_parent_environment = true;
+            }
+            self.record_runtime_state(&candidate, RuntimeExecutionState::Promoted)?;
+            record["disposition"] = json!("Promote");
+            record["outcome"] = json!("full");
+            self.pending_acceptance = Some((candidate, record.clone()));
             actions.records.push(record);
+            actions.commands.push(command);
+        } else if let Some(full) = transfer {
+            record["previous_status"] = json!(previous_status);
+            record["full"] = json!(full);
+            record["part"] = part.unwrap_or(Value::Null);
+            let partial = record["full"] == false;
+            self.pending_acceptance = Some((candidate.clone(), record));
+            actions
+                .commands
+                .push(self.make_prepare_acceptance(&candidate, false, partial)?);
+        } else {
+            self.schedule(ControlOperation::Promote(candidate, record), actions);
         }
         Ok(())
+    }
+
+    fn discard_after_validation(
+        &mut self,
+        candidate: &str,
+        resolution: Option<&str>,
+        verdict: &str,
+        error: Option<&str>,
+        mut record: Value,
+        actions: &mut ControlActions,
+    ) -> io::Result<()> {
+        let why = if error.is_some() {
+            DiscardedReason::Failed
+        } else if resolution == Some("preempted") {
+            DiscardedReason::BudgetExhausted
+        } else {
+            DiscardedReason::MatchRejected
+        };
+        actions.commands.extend(self.discard_candidate(
+            candidate,
+            why,
+            &format!(
+                "Validation disposition: {verdict}; {}",
+                error.unwrap_or("no policy error")
+            ),
+        )?);
+        record["disposition"] = json!("Discard");
+        actions.records.push(record);
+        Ok(())
+    }
+
+    fn apply_yield(
+        &mut self, candidate: &str, chance_id: &str, part: &Value, actions: &mut ControlActions,
+    ) -> io::Result<bool> {
+        let branch = self.branch(candidate)?;
+        let chance = self.chance(chance_id)?;
+        let parent = chance.parent_branch_id.clone();
+        let target = self.branch(&parent)?;
+        if !(target.status.is_live_authority() || target.status.is_decidable())
+            || self.ancestor_assumptions_unresolved(branch)
+        {
+            return Ok(false);
+        }
+        let operation = chance.operation_id.clone();
+        let arrived = chance.authority == AuthorityState::Arrived;
+        let release_model = arrived && chance.speculation_kind == Some(ActionKind::ModelInference)
+            && self.chance_waiting_live(chance);
+        let release_tool = chance.tool_continuation_pending;
+        let yield_only = arrived || self.authority_advanced_past(branch);
+        let mut ids = BTreeSet::new();
+        let notifications: Vec<_> = part["results"].as_array().into_iter().flatten().filter_map(|result| {
+            let id = result["id"].as_str()?;
+            let notification = result["notification"].as_str()?;
+            (result["files"] == json!([]) && !branch.yielded_action_ids.contains(id)
+                && ids.insert(id.to_owned())).then_some(notification)
+        }).collect();
+        if !notifications.is_empty() || release_model || release_tool {
+            actions.commands.push(self.resolve_pending(&parent, &operation,
+                json!({"phase":"continue", "notification": notifications.join("\n")}))?);
+        }
+        if release_model {
+            self.complete_operation(&parent, Some(&operation), OperationStatus::Succeeded)?;
+        }
+        if release_model || release_tool {
+            let chance = self.chance_mut(chance_id)?;
+            chance.tool_continuation_pending = false;
+            chance.continuation_released_by_yield = true;
+        }
+        let branch = self.branch_mut(candidate)?;
+        branch.yield_only |= yield_only;
+        branch.yielded_action_ids.extend(ids);
+        if branch.status == BranchStatus::Finished && branch.execution_state.turn_active {
+            self.change_status(candidate, BranchStatus::Running, "Candidate turn continues after Yield")?;
+        }
+        Ok(true)
     }
 
     fn complete_promote(
@@ -1017,11 +1201,21 @@ impl SpeculativeTree {
                 let part = !matches!(outcome, Acceptance::Full);
                 let notification = match &outcome {
                     Acceptance::Full => record["notification"].as_str().map(str::to_owned),
-                    Acceptance::PartResults { results } => Some(results.iter().map(|id| {
-                        let descriptions = record["part"]["results"].as_array().unwrap();
-                        let result = descriptions.iter().find(|result| result["id"] == *id).unwrap();
-                        format!("Accepted result: {}", result["notification"].as_str().unwrap())
-                    }).collect::<Vec<_>>().join("\n")),
+                    Acceptance::PartResults { results } => {
+                        let mut notifications = Vec::with_capacity(results.len());
+                        for id in results {
+                            let descriptions = record["part"]["results"].as_array().ok_or_else(|| {
+                                io::Error::other("partial acceptance is missing result descriptions")
+                            })?;
+                            let description = descriptions.iter().find(|result| result["id"] == *id)
+                                .ok_or_else(|| io::Error::other(format!("partial acceptance returned unknown result {id}")))?;
+                            let notification = description["notification"].as_str().ok_or_else(|| {
+                                io::Error::other(format!("accepted result {id} is missing a notification"))
+                            })?;
+                            notifications.push(format!("Accepted result: {notification}"));
+                        }
+                        Some(notifications.join("\n"))
+                    }
                     Acceptance::Part { scopes } => {
                         let selected = &record["part"]["scopes"];
                         let result = record["part"]["notification"]
@@ -1104,20 +1298,15 @@ impl SpeculativeTree {
 
     fn complete_terminate_or_cleanup(
         &mut self,
-        work: ControlOperation,
+        branch: &str,
+        state: RuntimeExecutionState,
         result: Result<ControlResult, String>,
         actions: &mut ControlActions,
-        branch: &str,
     ) -> io::Result<()> {
         if let Err(error) = result {
             self.record_runtime_state(branch, RuntimeExecutionState::Failed)?;
             return Err(io::Error::other(error));
         }
-        let state = if matches!(work, ControlOperation::Terminate(_)) {
-            RuntimeExecutionState::Terminated
-        } else {
-            RuntimeExecutionState::Cleaned
-        };
         self.record_runtime_state(branch, state)?;
         if state == RuntimeExecutionState::Terminated {
             self.schedule(ControlOperation::Cleanup(branch.to_string()), actions);
@@ -1216,7 +1405,9 @@ impl SpeculativeTree {
                 let candidate = candidate.clone();
                 actions.commands.extend(self.cancel_acceptance(&candidate, "Execution interrupted before acceptance")?);
             } else if record["prepared"] == true && record.get("outcome").is_none() {
-                let (candidate, record) = self.pending_acceptance.take().unwrap();
+                let (candidate, record) = self.pending_acceptance.take().ok_or_else(|| {
+                    io::Error::other("prepared acceptance is missing its pending record")
+                })?;
                 self.schedule(ControlOperation::Promote(candidate, record), &mut actions);
             } else if record["parked"] == true && record.get("suspend_requested").is_none() {
                 record["suspend_requested"] = json!(true);
@@ -1228,11 +1419,15 @@ impl SpeculativeTree {
         if !self.stopping {
             self.progress_chances(&mut actions)?;
             for candidate in self.pending_candidates() {
+                if self.task_finishing && self.branches[&candidate].yield_only {
+                    actions.commands.extend(self.discard_candidate(&candidate, DiscardedReason::MatchRejected, "Authority turn completed")?);
+                    continue;
+                }
                 if self.pending_work.values().any(|work| work.branch() == Some(candidate.as_str())) {
                     continue;
                 }
                 let branch = &self.branches[&candidate];
-                if candidate.starts_with("candidate-chance-local-")
+                if branch.deferred_environment
                     && branch.environment_id.is_none()
                     && branch.execution_state.runtime == RuntimeExecutionState::EnvironmentRequested
                 {
@@ -1244,7 +1439,7 @@ impl SpeculativeTree {
                         ControlOperation::Validate(id) if &self.branches[id].chance_id == chance)) {
                         self.schedule(ControlOperation::Validate(candidate), &mut actions);
                     }
-                } else if branch.status == BranchStatus::Blocked(BlockedReason::ExtentReached)
+                } else if !branch.yield_only && branch.status == BranchStatus::Blocked(BlockedReason::ExtentReached)
                     && self.branch_proposal(&candidate).is_some()
                     && self.extent_disposals.insert(candidate.clone())
                 {

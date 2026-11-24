@@ -19,10 +19,15 @@ pub fn prepare(run_dir: &Path, resume: bool, workspace: Option<&Path>) -> io::Re
         if run_dir.join("recovery.json").exists() {
             return Err(io::Error::other("Saved execution exists; use --resume"));
         }
-        Ok((match workspace {
-            Some(workspace) => SpeculativeTree::with_workspace_path("agent", run_dir, workspace.to_path_buf())?,
-            None => SpeculativeTree::with_workspace("agent", run_dir)?,
-        }, None))
+        let tree = match workspace {
+            Some(workspace) => SpeculativeTree::with_workspace_path("agent", run_dir, workspace)?,
+            None => {
+                let tree = SpeculativeTree::with_workspace("agent", run_dir)?;
+                fs::create_dir_all(tree.workspace())?;
+                tree
+            }
+        };
+        Ok((tree, None))
     }
 }
 
@@ -332,7 +337,7 @@ pub fn start(
             branch.branch_id != authority
                 && (branch.status.is_live_candidate() || branch.status.is_live_authority())
         }) {
-            if branch.environment_id.is_none() && branch.branch_id.starts_with("candidate-chance-local-") {
+            if branch.environment_id.is_none() && branch.deferred_environment {
                 continue;
             }
             let started = runtime_call(

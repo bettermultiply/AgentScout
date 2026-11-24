@@ -24,33 +24,40 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     console.log('evidence', root);
     for (const dir of ['home/.config/ascout', 'pi', 'policy/policy', 'tmp', 'workspace']) fs.mkdirSync(`${root}/${dir}`, {recursive:true});
     fs.writeFileSync(`${root}/home/.config/ascout/config.toml`, `runs_dir = "${root}/runs"\npolicy_dir = "${root}/policy"\nlog_path = "${root}/system.log"\n`);
-    for (const name of ['policy.yaml', 'decisions.py']) fs.copyFileSync(`assets/policy/policy/${name}`, `${root}/policy/policy/${name}`);
-    const requests = [];
+    fs.copyFileSync('assets/policy/coding/decisions.py', `${root}/policy/policy/decisions.py`);
+    const policy = fs.readFileSync('assets/policy/coding/policy.yaml', 'utf8')
+        .replaceAll('tool_speculation: true', 'tool_speculation: false');
+    fs.writeFileSync(`${root}/policy/policy/policy.yaml`, policy);
+    const requests = [], sessionIds = [];
     let finish;
     const fake = http.createServer(async (req, res) => {
         let body = '';
         for await (const chunk of req) body += chunk;
         requests.push(JSON.parse(body));
+        sessionIds.push(req.headers.session_id);
         fs.appendFileSync(`${root}/requests.jsonl`, `${body}\n`);
         res.writeHead(200, {'content-type':'text/event-stream'});
-        const send = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({id:'fake',object:'chat.completion.chunk',model:'fake',choices:[{index:0,delta,finish_reason}]})}\n\n`);
-        if (requests.length === 1) {
-            send({tool_calls:[{index:0,id:'original-tool',type:'function',function:{name:'bash',arguments:JSON.stringify({command:'printf old-tool-output'})}}]});
-            send({}, 'tool_calls');
-        } else if (requests.length === 3) {
-            send({content:'second answer'});
-            finish = () => {send({}, 'stop'); res.end('data: [DONE]\n\n');};
-            return;
-        } else {
-            send({content:'saved answer'});
-            send({}, 'stop');
-        }
-        res.end('data: [DONE]\n\n');
+        const send = event => res.write(`data: ${JSON.stringify(event)}\n\n`);
+        const id = `resp_${requests.length}`;
+        const item = requests.length === 1
+            ? {type:'function_call', id:'fc_original', call_id:'original-tool', name:'bash',
+                arguments:JSON.stringify({command:'printf old-tool-output'}), status:'completed'}
+            : {type:'message', id:`msg_${id}`, role:'assistant', status:'completed',
+                content:[{type:'output_text', text:requests.length === 3 ? 'second answer' : 'saved answer', annotations:[]}]};
+        send({type:'response.created', response:{id}});
+        send({type:'response.output_item.added', output_index:0, item});
+        const complete = () => {
+            send({type:'response.output_item.done', output_index:0, item});
+            send({type:'response.completed', response:{id, status:'completed'}});
+            res.end();
+        };
+        if (requests.length === 3) finish = complete;
+        else complete();
     });
     const fakePort = await listen(fake);
     t.after(() => {fake.closeAllConnections(); fake.close();});
     const modelFile = `${root}/additional.json`;
-    fs.writeFileSync(modelFile, JSON.stringify({providers:{local:{baseUrl:`http://127.0.0.1:${fakePort}/v1`,api:'openai-completions',apiKey:'fake',models:[{id:'fake',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256}]}}}));
+    fs.writeFileSync(modelFile, JSON.stringify({providers:{local:{baseUrl:`http://127.0.0.1:${fakePort}/v1`,api:'openai-responses',apiKey:'fake',compat:{sessionAffinityFormat:'openai'},models:[{id:'fake',reasoning:false,input:['text'],contextWindow:32768,maxTokens:256,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}}}));
     fs.writeFileSync(`${root}/runtime.json`, JSON.stringify({backend:'nle',control_address:`127.0.0.1:${await freePort()}`,adapter_instance:'fixture',python:resolve('../.venv-nle/bin/python'),bridge:resolve('examples/nle-runtime-bridge.py'),guidebook:resolve('examples/nle/Guidebook.txt'),seed:7,filesystem:{state_directory:`${root}/fs`,isolated_paths:[`${root}/runs`, `${root}/workspace`],passthrough_rw:[root]}}));
     const web = `http://127.0.0.1:${await freePort()}`;
     const children = [];
@@ -79,7 +86,7 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     function start(runId, holdHistory = false) {
         const entry = holdHistory ? {ASCOUT_AGENT_ENTRY:gatedEntry} : {};
         const child = spawn('target/debug/ascout-control-plane', [resolve('../pi'), '--web', web.slice(7), ...(runId ? ['--resume', runId] : ['--cwd', `${root}/workspace`, '--policy', 'policy', '--model', 'local/fake', '--models', modelFile])], {
-            env:{...process.env, ...entry, HOME:`${root}/home`, TMPDIR:`${root}/tmp`, PI_CODING_AGENT_DIR:`${root}/pi`, ASCOUT_RUNTIME_CONFIG:`${root}/runtime.json`}, stdio:['ignore','ignore','pipe'],
+            env:{...process.env, ...entry, PI_OFFLINE:'1', HOME:`${root}/home`, TMPDIR:`${root}/tmp`, PI_CODING_AGENT_DIR:`${root}/pi`, ASCOUT_RUNTIME_CONFIG:`${root}/runtime.json`}, stdio:['ignore','ignore','pipe'],
         });
         child.log = '';
         child.stderr.on('data', chunk => {child.log += chunk; fs.appendFileSync(`${root}/cli.log`, chunk);});
@@ -128,6 +135,7 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     assert.equal(count('recovery_complete'), 0);
     const original = history();
     const originalFile = fs.realpathSync(`${run}/session.jsonl`);
+    const rootSessionId = JSON.parse(original.split('\n')[0]).id;
     assert.match(original, /old-tool-output/);
     // Simulate legacy records with only final-tree bindings and a native session link.
     const ledgerPath = `${run}/events.jsonl`;
@@ -167,7 +175,7 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     assert.equal(requests.length, 2);
     await post('prompt', 'second prompt');
     await wait(child, () => finish, 'second prompt reaches provider');
-    assert.match(JSON.stringify(requests[2].messages), /first prompt.*old-tool-output.*saved answer.*second prompt/s);
+    assert.match(JSON.stringify(requests[2].input), /first prompt.*old-tool-output.*saved answer.*second prompt/s);
     await post('pause');
     finish();
     await wait(child, () => count('recovery_complete') === 1, 'next task saved');
@@ -185,7 +193,11 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     assert.equal(requests.length, 3);
     await post('continue');
     await wait(child, () => count('task_completed') >= 2 && requests.length === 4, 'continue runs queued prompt');
-    assert.match(JSON.stringify(requests[3].messages), /second prompt.*second answer.*queued prompt/s);
+    assert.match(JSON.stringify(requests[3].input), /second prompt.*second answer.*queued prompt/s);
+    assert.deepEqual(requests.map(request => request.prompt_cache_key), Array(4).fill(rootSessionId));
+    assert.deepEqual(sessionIds, Array(4).fill(rootSessionId));
+    assert.notEqual(JSON.parse(history().split('\n')[0]).id, rootSessionId,
+        'recovery gives the assembled session a new native ID');
     await shutdown(child);
     const loads = count('recovery_loaded');
     child = start(runId);
@@ -193,7 +205,7 @@ test('normal CLI opens finished Pi history and can save and resume its next task
     assert.equal(count('recovery_loaded'), loads, 'old checkpoint no longer restores the ended task');
     assert.equal(requests.length, 4);
     assert.match(history(), /queued prompt/);
-    assert.equal(events().filter(e => e.message === 'action_started' && e.action_id === 'original-tool').length, 1);
+    assert.equal(events().filter(e => e.message === 'action_started' && e.action_id?.split('|')[0] === 'original-tool').length, 1);
     assert.deepEqual(fs.readdirSync(`${root}/runs`), [runId]);
     await shutdown(child);
     const last = events().filter(event => event.message === 'task_completed').at(-1);

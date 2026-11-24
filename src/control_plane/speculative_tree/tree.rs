@@ -282,7 +282,6 @@ impl SpeculativeTree {
     ) -> io::Result<Self> {
         let mut tree = Self::new(agent_id.into());
         tree.workspace_root = root.into();
-        fs::create_dir_all(tree.workspace())?;
         Ok(tree)
     }
 
@@ -301,7 +300,6 @@ impl SpeculativeTree {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| run_dir.join("workspace")),
         )?;
-        fs::create_dir_all(tree.workspace())?;
         tree.run_id = Some(run_id.into());
         tree.set_execution_id(format!("{run_id}:{sequence}"))?;
         tree.policy_binding = bindings.get("policy_binding").cloned();
@@ -400,6 +398,9 @@ impl SpeculativeTree {
                 execution_position: Default::default(),
                 chance_id: chance_id.clone(),
                 assumption_set: Vec::new(),
+                yield_only: false,
+                deferred_environment: false,
+                yielded_action_ids: BTreeSet::new(),
                 pending_operations: Vec::new(),
                 execution_state: Default::default(),
             },
@@ -536,6 +537,7 @@ impl SpeculativeTree {
         &mut self,
         branch_id: &str,
         target_suspended: bool,
+        part: bool,
     ) -> io::Result<AgentCommand> {
         let generation = self.branch(branch_id)?.generation;
         let authority_branch_id = self
@@ -552,6 +554,7 @@ impl SpeculativeTree {
             branch_id: branch_id.into(),
             authority_branch_id,
             target_suspended,
+            part,
             command_id,
             generation,
         })
@@ -562,7 +565,11 @@ impl SpeculativeTree {
         branch_id: &str,
         notification: Option<String>,
     ) -> io::Result<AgentCommand> {
-        let generation = self.branch(branch_id)?.generation;
+        let branch = self.branch(branch_id)?;
+        if branch.yield_only {
+            return Err(invalid_input("Yield-only branch cannot be promoted"));
+        }
+        let generation = branch.generation;
         let command_id = self.register(branch_id, CommandOperation::Promote, None, generation)?;
         Ok(AgentCommand::Promote {
             branch_id: branch_id.to_string(),

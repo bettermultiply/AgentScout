@@ -42,7 +42,7 @@ impl SpeculativeTree {
         let chance = self.chance(chance_id)?.clone();
         let parent = chance.parent_branch_id.as_str();
         let sequence = self.next_generation;
-        let branch_id = if chance_id.starts_with("chance-local-") {
+        let branch_id = if chance.deferred_environment {
             format!("candidate-{chance_id}")
         } else if let Some(scope) = self.reopened_execution_scope() {
             format!("candidate-{scope}-{sequence}")
@@ -86,6 +86,7 @@ impl SpeculativeTree {
             );
         }
         let branch = self.branch_mut(&branch_id)?;
+        branch.deferred_environment = chance.deferred_environment;
         branch.execution_position = ExecutionPosition {
             sequence,
             operation_id: Some(chance.operation_id.clone()),
@@ -113,7 +114,7 @@ impl SpeculativeTree {
             OperationKind::StartCandidate,
         )?;
         self.branch_mut(&branch_id)?.execution_state.turn_active = true;
-        if !chance_id.starts_with("chance-local-") {
+        if !chance.deferred_environment {
             self.record_runtime_state(&branch_id, RuntimeExecutionState::EnvironmentRequested)?;
         }
         self.candidate_start_command(&branch_id, prediction)
@@ -184,10 +185,13 @@ impl SpeculativeTree {
         {
             return false;
         }
-        let chance = branch
-            .chance_id
-            .as_ref()
-            .and_then(|id| self.chances.get(id));
+        if branch.yield_only {
+            return branch.status.is_decidable()
+                && self.deferred_validations.get(candidate) != Some(&self.yield_snapshot(candidate));
+        }
+        let chance = self
+            .chances
+            .get(branch.chance_id.as_ref().unwrap());
         let held_proposal = chance.is_some_and(|chance| {
             chance.authority == AuthorityState::NotRequested
                 && chance.launch_epoch.is_some()
@@ -278,8 +282,11 @@ impl SpeculativeTree {
     }
 
     pub(crate) fn acceptance_target(&self, candidate: &BranchRecord) -> Option<&str> {
+        if candidate.yield_only {
+            return None;
+        }
         let chance = self.chances.get(candidate.chance_id.as_ref()?)?;
-        if chance.stage.is_terminal() {
+        if chance.stage.is_terminal() || chance.continuation_released_by_yield {
             return None;
         }
         let parent = self.branches.get(&chance.parent_branch_id)?;
@@ -454,7 +461,7 @@ impl SpeculativeTree {
             .get(branch_id)
             .ok_or_else(|| invalid_input("candidate branch does not exist"))?
             .clone();
-        if candidate.role != BranchRole::Candidate || !candidate.status.is_decidable() {
+        if candidate.yield_only || candidate.role != BranchRole::Candidate || !candidate.status.is_decidable() {
             return Err(invalid_input("branch is not a decidable candidate"));
         }
         if self.ancestor_assumptions_unresolved(&candidate) {

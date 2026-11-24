@@ -11,11 +11,11 @@ use ascout::runtime::backends::filesystem::{FilesystemBackend, FilesystemConfig}
 fn filesystem_hello_confirms_policy_runtime_backend_identity() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::copy(
-        "assets/policy/policy/decisions.py",
+        "assets/policy/coding/decisions.py",
         directory.path().join("decisions.py"),
     )
     .unwrap();
-    let yaml = std::fs::read_to_string("assets/policy/policy/policy.yaml").unwrap();
+    let yaml = std::fs::read_to_string("assets/policy/coding/policy.yaml").unwrap();
     std::fs::write(
         directory.path().join("policy.yaml"),
         format!(

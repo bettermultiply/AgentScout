@@ -9,14 +9,18 @@ use std::{
 #[test]
 fn compiled_policy_fake_provider_schema_and_revocation() {
     let directory = tempfile::tempdir().unwrap();
-    std::fs::copy(
-        "assets/policy/policy/policy.yaml",
-        directory.path().join("policy.yaml"),
-    )
-    .unwrap();
-    let source = std::fs::read_to_string("assets/policy/policy/decisions.py").unwrap().replace(
-        "if (data[\"context\"].get(\"capabilities\") or {}).get(\"isolated\"):\n        return {\"mode\": \"allow\"}\n    return {\"mode\": \"block\"}",
-        "return {\"mode\":capabilities.model_complete({\"provider\":\"fake\",\"model\":\"small\",\"prompt\":\"allow\",\"max_tokens\":4})[\"text\"]}");
+    let yaml = include_str!("../assets/policy/coding/policy.yaml")
+        .replacen("    function: effect\n", "    function: provider_test_effect\n", 1);
+    std::fs::write(directory.path().join("policy.yaml"), yaml).unwrap();
+    let source = concat!(
+        include_str!("../assets/policy/coding/decisions.py"),
+        r#"
+
+def provider_test_effect(data, *, policy_config, capabilities):
+    reply = capabilities.model_complete({"provider": "fake", "model": "small", "prompt": "allow", "max_tokens": 4})
+    return {"mode": reply["text"]}
+"#,
+    );
     std::fs::write(directory.path().join("decisions.py"), source).unwrap();
     let engine = PolicyEngine::new(
         Path::new("/usr/bin/python3").into(),

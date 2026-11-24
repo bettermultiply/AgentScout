@@ -164,6 +164,7 @@ impl PolicyEngine {
         let mut total = 0;
         for name in definition.files {
             source_path(&name)?;
+            super::compile::reserve_builtin_path(&name)?;
             let source = open_source(&root, &name)
                 .and_then(|file| read_limited(file, MAX_BYTES - total))
                 .map_err(|e| {
@@ -227,6 +228,7 @@ impl PolicyEngine {
             version: 1,
             python: String::new(),
             files,
+            builtin_files: super::compile::builtin_sources(),
             runtime: definition.runtime,
             decisions,
             digest: String::new(),

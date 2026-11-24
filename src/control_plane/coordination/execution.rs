@@ -531,7 +531,172 @@ struct Task<'a, 'b> {
     control: Session,
 }
 
-impl Task<'_, '_> {
+impl<'a> Task<'a, '_> {
+    fn next_event(&self, receiver: &mpsc::Receiver<Event>) -> io::Result<Event> {
+        let disconnected = || io::Error::other("Control event channel disconnected");
+        let deadline = if self.tree.recovering() {
+            None
+        } else {
+            self.tree.next_deadline()
+        };
+        match deadline {
+            Some(deadline) => match receiver
+                .recv_timeout(Duration::from_millis(deadline.saturating_sub(now_ms())))
+            {
+                Ok(event) => Ok(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => Ok(Event::Timer),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(disconnected()),
+            },
+            None => receiver.recv().map_err(|_| disconnected()),
+        }
+    }
+
+    fn record_runtime_updates(&mut self, runtime: &dyn Runtime) -> io::Result<()> {
+        for error in runtime.drain_delivery_errors() {
+            self.execution.system_log.write(
+                "ERROR",
+                "runtime",
+                Some(self.tree.run_id()),
+                &error,
+            )?;
+        }
+        for event in runtime.drain_events() {
+            self.record(json!({"source":"runtime","message":"runtime_event","event":event}))?;
+        }
+        Ok(())
+    }
+
+    fn trace_prompts(&mut self, commands: &[AgentCommand]) -> io::Result<()> {
+        for command in commands {
+            if let AgentCommand::Prompt { branch_id, .. } = command {
+                self.execution.start_trace(false, Context::new());
+                let mut row = json!({"message":"task_started","task_id":self.tree.execution_id(),"branch_id":branch_id});
+                let span = self.execution.trace_context.span();
+                if span.span_context().is_valid() {
+                    row["trace_id"] = json!(span.span_context().trace_id().to_string());
+                }
+                self.execution.ledger.record_durable(row)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn spawn_operations<'scope>(
+        &self,
+        scope: &'scope thread::Scope<'scope, '_>,
+        events: &mpsc::Sender<Event>,
+        coordinator: &SpeculationCoordinator,
+        policy: &'scope CompiledPolicy,
+        engine: &'scope PolicyEngine,
+        runtime: &'scope dyn Runtime,
+        incoming: Option<&Context>,
+        operations: Vec<(u64, super::ControlOperation)>,
+    ) where
+        'a: 'scope,
+    {
+        let capabilities = self.capabilities;
+        for (id, operation) in operations {
+            let tree_state = self.tree.clone();
+            let coordinator = coordinator.clone();
+            let sender = events.clone();
+            let context = incoming
+                .filter(|context| context.has_active_span())
+                .cloned()
+                .unwrap_or_else(telemetry::current);
+            scope.spawn(move || {
+                let _context = context.attach();
+                let span = tracing::info_span!(target: "ascout_otel", "ascout.control.operation");
+                telemetry::parent(&span, telemetry::current());
+                let _entered = span.enter();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    coordinator.perform(
+                        &tree_state,
+                        policy,
+                        engine,
+                        runtime,
+                        capabilities,
+                        &operation,
+                    )
+                }))
+                .unwrap_or_else(|_| Err("Control operation panicked".into()));
+                telemetry::finish(&span, &result);
+                let _ = sender.send(Event::Completed(id, result));
+            });
+        }
+    }
+
+    fn settle<'scope>(
+        &mut self,
+        scope: &'scope thread::Scope<'scope, '_>,
+        events: &mpsc::Sender<Event>,
+        runtime: &'scope dyn Runtime,
+        run_dir: &Path,
+    ) -> io::Result<(Vec<AgentCommand>, bool, bool)> {
+        let started = self.started;
+        let ledger = &mut self.execution.ledger;
+        let system_log = self.execution.system_log;
+        let run_id = self.tree.run_id().to_string();
+        let task_id = self.tree.execution_id().to_string();
+        let mut completed = None;
+        let (commands, wake, finish) = self.control.settle(
+            self.tree,
+            runtime,
+            self.capabilities,
+            run_dir,
+            self.draining,
+            |mut value| {
+                value["t_ms"] = json!(started.elapsed().as_millis() as u64);
+                value["task_id"] = json!(task_id);
+                if value["message"] == "task_completed" {
+                    completed = value["status"].as_str().map(str::to_owned);
+                }
+                if let Err(error) = ledger.record(value) {
+                    system_log.history_failure(&run_id, &format!("record append failed: {error}"));
+                }
+                Ok(())
+            },
+            |environment| {
+                let sender = events.clone();
+                let context = telemetry::current();
+                scope.spawn(move || {
+                    let _context = context.attach();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        runtime_call(runtime, &environment, Operation::MaterializeAuthority)
+                            .map_err(|error| error.to_string())
+                    }))
+                    .unwrap_or_else(|_| Err("Materialization panicked".into()));
+                    let _ = sender.send(Event::Materialized(result));
+                });
+            },
+        )?;
+        if let Some(status) = completed {
+            if let Some(span) = self.execution.trace.take() {
+                span.record("result", status.as_str());
+                if status == "failed" {
+                    telemetry::finish(&span, &Err::<(), _>(()));
+                }
+            }
+        }
+        Ok((commands, wake, finish))
+    }
+
+    fn archive_branches(&mut self) -> io::Result<()> {
+        loop {
+            let ids = self.tree.evictable_branches();
+            if ids.is_empty() {
+                break;
+            }
+            for id in ids {
+                let _ = self.execution.ledger.archive_branch(
+                    self.tree.take_archivable_branch(&id)?,
+                    self.tree.run_id(),
+                    self.execution.system_log,
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn record(&mut self, mut value: Value) -> io::Result<()> {
         value["t_ms"] = json!(self.started.elapsed().as_millis() as u64);
         if value.get("task_id").is_none() {
@@ -543,9 +708,10 @@ impl Task<'_, '_> {
                 &format!("record append failed: {error}"),
             );
         }
-        if value["message"] == "candidate_created" {
-            let parent = value["parent"].as_str().unwrap();
-            let child = value["branch_id"].as_str().unwrap();
+        if value["message"] == "candidate_created"
+            && let (Some(parent), Some(child)) =
+                (value["parent"].as_str(), value["branch_id"].as_str())
+        {
             self.execution
                 .presentation
                 .update(PresentationUpdate::Fork { parent, child });
@@ -631,9 +797,11 @@ impl Task<'_, '_> {
                 ) {
                     let mut fact = serde_json::to_value(&message)?;
                     if let AgentMessage::Transcript { entry, .. } = &message {
-                        fact.as_object_mut().unwrap().remove("entry");
-                        if let Some(role) = entry.get("role").and_then(Value::as_str) {
-                            fact["role"] = json!(role);
+                        if let Value::Object(fields) = &mut fact {
+                            fields.remove("entry");
+                            if let Some(role) = entry.get("role").and_then(Value::as_str) {
+                                fields.insert("role".into(), json!(role));
+                            }
                         }
                     }
                     fact["source"] = json!("agent_adapter");
@@ -707,10 +875,10 @@ impl Execution<'_> {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (events, receiver) = channel;
         let sender = events.clone();
-        connection.receive(move |message, carrier| sender.send(Event::Agent(message, carrier)).is_ok())?;
+        connection
+            .receive(move |message, carrier| sender.send(Event::Agent(message, carrier)).is_ok())?;
         let mut writer = connection.delivery_writer()?;
-        let (deliveries, delivery_queue) =
-            mpsc::channel::<Delivery>();
+        let (deliveries, delivery_queue) = mpsc::channel::<Delivery>();
         let mut pending_deliveries: Vec<(String, std::sync::Arc<AtomicBool>)> = Vec::new();
         let mut task = Task {
             tree,
@@ -742,24 +910,7 @@ impl Execution<'_> {
                     queue_deliveries(&deliveries, &mut pending_deliveries, initial_commands)?;
                 }
                 loop {
-                    let event = match if task.tree.recovering() {
-                        None
-                    } else {
-                        task.tree.next_deadline()
-                    } {
-                        Some(deadline) => match receiver
-                            .recv_timeout(Duration::from_millis(deadline.saturating_sub(now_ms())))
-                        {
-                            Ok(event) => event,
-                            Err(mpsc::RecvTimeoutError::Timeout) => Event::Timer,
-                            Err(_) => {
-                                return Err(io::Error::other("Control event channel disconnected"));
-                            }
-                        },
-                        None => receiver
-                            .recv()
-                            .map_err(|_| io::Error::other("Control event channel disconnected"))?,
-                    };
+                    let event = task.next_event(&receiver)?;
                     if matches!(&event, Event::Delivered(..)) {
                         outstanding = outstanding.saturating_sub(1);
                     }
@@ -785,16 +936,22 @@ impl Execution<'_> {
                             let expected = task.execution.trace_context.span();
                             let actual = context.span();
                             (actual.span_context().is_valid()
-                                && actual.span_context().trace_id() == expected.span_context().trace_id())
-                                .then_some(context)
+                                && actual.span_context().trace_id()
+                                    == expected.span_context().trace_id())
+                            .then_some(context)
                         }
                         _ => None,
                     };
-                    let handled = if let Some(context) = incoming.as_ref().filter(|cx| cx.has_active_span()) {
-                        let span = tracing::info_span!(target: "ascout_otel", "ascout.agent.receive");
+                    let handled = if let Some(context) =
+                        incoming.as_ref().filter(|cx| cx.has_active_span())
+                    {
+                        let span =
+                            tracing::info_span!(target: "ascout_otel", "ascout.agent.receive");
                         telemetry::parent(&span, context.clone());
                         span.in_scope(|| task.handle(event))
-                    } else { task.handle(event) };
+                    } else {
+                        task.handle(event)
+                    };
                     let actions = match handled {
                         Ok(Some(actions)) => actions,
                         Ok(None) => break,
@@ -817,132 +974,32 @@ impl Execution<'_> {
                             return Err(error);
                         }
                     };
-                    for error in runtime.drain_delivery_errors() {
-                        task.execution.system_log.write(
-                            "ERROR",
-                            "runtime",
-                            Some(task.tree.run_id()),
-                            &error,
-                        )?;
-                    }
-                    for event in runtime.drain_events() {
-                        task.record(
-                            json!({"source":"runtime","message":"runtime_event","event":event}),
-                        )?;
-                    }
+                    task.record_runtime_updates(runtime)?;
                     task.publish()?;
-                    for command in &actions.commands {
-                        if let AgentCommand::Prompt { branch_id, .. } = command {
-                            task.execution.start_trace(false, Context::new());
-                            let mut row = json!({"message":"task_started","task_id":task.tree.execution_id(),"branch_id":branch_id});
-                            let span = task.execution.trace_context.span();
-                            if span.span_context().is_valid() {
-                                row["trace_id"] = json!(span.span_context().trace_id().to_string());
-                            }
-                            task.execution.ledger.record_durable(row)?;
-                        }
-                    }
+                    task.trace_prompts(&actions.commands)?;
                     let _context = task.execution.trace_context.clone().attach();
                     outstanding += actions.commands.len();
                     queue_deliveries(&deliveries, &mut pending_deliveries, actions.commands)?;
                     for record in actions.records {
                         task.record(record)?;
                     }
-                    for (id, operation) in actions.operations {
-                        let tree_state = task.tree.clone();
-                        let coordinator = coordinator.clone();
-                        let sender = events.clone();
-                        let context = incoming.clone().filter(Context::has_active_span).unwrap_or_else(telemetry::current);
-                        scope.spawn(move || {
-                            let _context = context.attach();
-                            let span = tracing::info_span!(target: "ascout_otel", "ascout.control.operation");
-                            telemetry::parent(&span, telemetry::current());
-                            let _entered = span.enter();
-                            let result =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    coordinator.perform(
-                                        &tree_state,
-                                        policy,
-                                        engine,
-                                        runtime,
-                                        capabilities,
-                                        &operation,
-                                    )
-                                }))
-                                .unwrap_or_else(|_| Err("Control operation panicked".into()));
-                            telemetry::finish(&span, &result);
-                            let _ = sender.send(Event::Completed(id, result));
-                        });
-                    }
-                    let started = task.started;
-                    let ledger = &mut task.execution.ledger;
-                    let system_log = task.execution.system_log;
-                    let run_id = task.tree.run_id().to_string();
-                    let task_id = task.tree.execution_id().to_string();
-                    let mut completed = None;
-                    let (commands, wake, finish) = task.control.settle(
-                        task.tree,
+                    task.spawn_operations(
+                        scope,
+                        &events,
+                        &coordinator,
+                        policy,
+                        engine,
                         runtime,
-                        capabilities,
-                        run_dir,
-                        task.draining,
-                        |mut value| {
-                            value["t_ms"] = json!(started.elapsed().as_millis() as u64);
-                            value["task_id"] = json!(task_id);
-                            if value["message"] == "task_completed" {
-                                completed = value["status"].as_str().map(str::to_owned);
-                            }
-                            if let Err(error) = ledger.record(value) {
-                                system_log.history_failure(
-                                    &run_id,
-                                    &format!("record append failed: {error}"),
-                                );
-                            }
-                            Ok(())
-                        },
-                        |environment| {
-                            let sender = events.clone();
-                            let context = telemetry::current();
-                            scope.spawn(move || {
-                                let _context = context.attach();
-                                let result =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        runtime_call(
-                                            runtime,
-                                            &environment,
-                                            Operation::MaterializeAuthority,
-                                        )
-                                        .map_err(|error| error.to_string())
-                                    }))
-                                    .unwrap_or_else(|_| Err("Materialization panicked".into()));
-                                let _ = sender.send(Event::Materialized(result));
-                            });
-                        },
-                    )?;
-                    if let Some(status) = completed {
-                        if let Some(span) = task.execution.trace.take() {
-                            span.record("result", status.as_str());
-                            if status == "failed" { telemetry::finish(&span, &Err::<(), _>(())); }
-                        }
-                    }
+                        incoming.as_ref(),
+                        actions.operations,
+                    );
+                    let (commands, wake, finish) = task.settle(scope, &events, runtime, run_dir)?;
                     outstanding += commands.len();
                     queue_deliveries(&deliveries, &mut pending_deliveries, commands)?;
                     if wake {
                         let _ = events.send(Event::Timer);
                     }
-                    loop {
-                        let ids = task.tree.evictable_branches();
-                        if ids.is_empty() {
-                            break;
-                        }
-                        for id in ids {
-                            let _ = task.execution.ledger.archive_branch(
-                                task.tree.take_archivable_branch(&id)?,
-                                task.tree.run_id(),
-                                task.execution.system_log,
-                            );
-                        }
-                    }
+                    task.archive_branches()?;
                     if finish && outstanding == 0 {
                         task.connection.finish()?;
                         task.draining = true;
@@ -976,10 +1033,7 @@ fn queue_deliveries(
 ) -> io::Result<()> {
     pending.retain(|(_, token)| std::sync::Arc::strong_count(token) > 1);
     for command in commands {
-        let branch = serde_json::to_value(&command)?["branch_id"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+        let branch = command.branch_id();
         if matches!(
             &command,
             AgentCommand::Abort { .. }
@@ -987,7 +1041,7 @@ fn queue_deliveries(
                 | AgentCommand::Cleanup { .. }
         ) {
             for (id, token) in pending.iter() {
-                if id == &branch {
+                if id == branch {
                     token.store(true, Ordering::Release);
                 }
             }
@@ -1001,7 +1055,7 @@ fn queue_deliveries(
                 | AgentCommand::ResolvePending { .. }
                 | AgentCommand::Continue { .. }
         ) {
-            pending.push((branch, token.clone()));
+            pending.push((branch.to_owned(), token.clone()));
         }
         sender
             .send((command, token, telemetry::current()))

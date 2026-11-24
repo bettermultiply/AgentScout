@@ -249,6 +249,7 @@ fn open_ended(
         &legacy
     };
     let tree = SpeculativeTree::reopen_ended(run_dir, run_id, records.len(), bindings)?;
+    fs::create_dir_all(tree.workspace())?;
     Ok((tree, Resume::Ended(reference)))
 }
 
@@ -275,7 +276,10 @@ fn load_record(
         {
             return Err(io::Error::other("Recovery component mismatch"));
         }
-        let parent = path.parent().unwrap().to_path_buf();
+        let parent = path
+            .parent()
+            .ok_or_else(|| io::Error::other("Recovery component directory missing"))?
+            .to_path_buf();
         if generation
             .as_ref()
             .is_some_and(|previous| previous != &parent)
@@ -284,7 +288,7 @@ fn load_record(
         }
         generation = Some(parent);
     }
-    let generation = generation.unwrap();
+    let generation = generation.ok_or_else(|| io::Error::other("Recovery generation missing"))?;
     let mut tree: SpeculativeTree = serde_json::from_value(control.clone())?;
     validate(&tree, &generation)?;
     let run_id = run_dir.file_name().and_then(|name| name.to_str());
@@ -297,9 +301,12 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
     let fail =
         |message: &str| io::Error::other(format!("Recovery association mismatch: {message}"));
     let agent: Value = serde_json::from_slice(&fs::read(generation.join("agent.json"))?)?;
-    if agent["taskId"] != tree.execution_id()
-        || agent["authority"] != serde_json::to_value(&tree.authority_branch_id)?
-    {
+    let authority_mismatch = if let Some(id) = tree.authority_branch_id.as_deref() {
+        agent["authority"].as_str() != Some(id)
+    } else {
+        !agent["authority"].is_null()
+    };
+    if agent["taskId"] != tree.execution_id() || authority_mismatch {
         return Err(fail("task/authority"));
     }
     for source in agent["tree"]["sources"]
@@ -412,10 +419,16 @@ fn validate(tree: &SpeculativeTree, generation: &Path) -> io::Result<()> {
         } else if let Some(envs) = record["environments"].as_object() {
             let worlds = record["worlds"]
                 .as_array()
-                .ok_or_else(|| io::Error::other("Missing NLE worlds"))?;
+                .ok_or_else(|| io::Error::other("Missing runtime recovery worlds"))?;
             for index in envs.values() {
-                if !index.as_u64().is_some_and(|i| (i as usize) < worlds.len()) {
-                    return Err(io::Error::other("Recovery NLE environment world missing"));
+                if !index
+                    .as_u64()
+                    .and_then(|i| usize::try_from(i).ok())
+                    .is_some_and(|i| i < worlds.len())
+                {
+                    return Err(io::Error::other(
+                        "Recovery environment references a missing world",
+                    ));
                 }
             }
             sets.push(envs.keys().cloned().collect());

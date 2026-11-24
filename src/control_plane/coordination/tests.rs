@@ -15,6 +15,7 @@ use std::net::TcpStream;
 fn task() -> (SpeculativeTree, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
     let mut tree = SpeculativeTree::with_workspace("agent", root.path()).unwrap();
+    std::fs::create_dir_all(tree.workspace()).unwrap();
     tree.set_execution_id(String::new()).unwrap();
     tree.bind_local_policy("test-policy");
     tree.create_authority("authority", "").unwrap();

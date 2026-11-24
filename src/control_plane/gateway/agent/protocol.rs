@@ -84,6 +84,34 @@ pub struct AdapterCapabilities {
     pub tool_result_injection: bool,
 }
 
+impl AgentCommand {
+    pub fn branch_id(&self) -> &str {
+        match self {
+            Self::UiPromptAnswer { branch_id, .. }
+            | Self::GetCommands { branch_id, .. }
+            | Self::Model { branch_id, .. }
+            | Self::SuspendRecovery { branch_id }
+            | Self::CancelSave { branch_id }
+            | Self::Continue { branch_id }
+            | Self::Save { branch_id, .. }
+            | Self::Load { branch_id, .. }
+            | Self::LocalPolicy { branch_id, .. }
+            | Self::Prompt { branch_id, .. }
+            | Self::Abort { branch_id, .. }
+            | Self::Pause { branch_id }
+            | Self::Resume { branch_id }
+            | Self::StartCandidate { branch_id, .. }
+            | Self::ResolvePending { branch_id, .. }
+            | Self::StartBranch { branch_id, .. }
+            | Self::PrepareAcceptance { branch_id, .. }
+            | Self::CancelAcceptance { branch_id, .. }
+            | Self::Promote { branch_id, .. }
+            | Self::Discard { branch_id, .. }
+            | Self::Cleanup { branch_id, .. } => branch_id,
+        }
+    }
+}
+
 fn deserialize_notification<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
@@ -203,6 +231,8 @@ pub enum AgentCommand {
         authority_branch_id: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         target_suspended: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        part: bool,
         command_id: String,
         generation: u64,
     },

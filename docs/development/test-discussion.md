@@ -19,6 +19,8 @@
 | 大文件写入曾因命令参数过长报 `E2BIG`。保留大内容读写、隔离视图和有序编辑检查。常驻 holder 允许命令并发，直接 shell 退出后可返回，后台工作归环境管理。 | `node --test tests/pi-filesystem-tools.mjs`，`cargo test --offline --lib namespace_holder_runs_concurrent_commands_in_each_branch_mount_namespace` |
 | 物化曾误用工作区 `PATH` 中的 Python。回归检查污染 `PATH` 时仍能发布文件。 | `cargo test --offline --lib materialization_ignores_workspace_python` |
 | 首次准入曾因缺失 `has_predictor` 失败。仓库 fixture 支持手工事件和本地 SSE 复跑，也覆盖 Promote 后在途模型等待点曾丢失的故障。 | `node --test tests/predictor-fact.mjs tests/predictor-fact-e2e.mjs` |
+| Django Run 3 中，PyYAML 将未加引号的 `off` 读成 `False`，而验证命令的启动错误被当作测试失败。保留 YAML 配置和布尔回退检查，以及启动错误拒绝和真实断言失败匹配检查。 | `python3 -m unittest tests/policy-info-match.py`，`node --test tests/coding-policy-e2e.mjs` |
+| `spx-p2-7` 中，工具结果候选重复执行了会修改工作区的测试命令，并消耗了额外推理。回归保留只读检查，阻止非只读工具和第二次推理。预测工具调用执行真实验证后停在推理前。端到端检查覆盖验证运行中和暂停后的 Promote，以及先空 Yield、再交付验证输出并在物化前清理的路径。 | `python3 -m unittest tests/policy-info-match.py`，`node --test tests/coding-policy-e2e.mjs` |
 | 已结束的 run 曾在继承历史送完前报告 `ready`。回归扣住首条历史消息，检查输入保持关闭，并在首次就绪时核对完整历史。 | `node --test tests/resume-ended.mjs` |
 
 ## 待核实与覆盖缺口

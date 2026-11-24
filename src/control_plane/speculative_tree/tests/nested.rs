@@ -241,7 +241,7 @@ fn accept_transfer(
         )
         .unwrap();
     assert!(
-        matches!(actions.commands.as_slice(), [AgentCommand::PrepareAcceptance { authority_branch_id, target_suspended: false, .. }] if authority_branch_id == parent),
+        matches!(actions.commands.as_slice(), [AgentCommand::PrepareAcceptance { authority_branch_id, target_suspended: false, part, .. }] if authority_branch_id == parent && *part != full),
         "{candidate} -> {parent}: {:?} {:?}",
         actions.commands,
         actions.records
@@ -255,7 +255,7 @@ fn accept_transfer(
         .complete_work(suspend, Ok(ControlResult::Completed))
         .unwrap();
     assert!(
-        matches!(actions.commands.as_slice(), [AgentCommand::PrepareAcceptance { authority_branch_id, target_suspended: true, .. }] if authority_branch_id == parent)
+        matches!(actions.commands.as_slice(), [AgentCommand::PrepareAcceptance { authority_branch_id, target_suspended: true, part, .. }] if authority_branch_id == parent && *part != full)
     );
     applied(tree, &actions.commands[0]);
     let transfer = work_matching(
@@ -365,6 +365,39 @@ fn nested_transfer_preserves_outer_choice_and_descendants() {
             assert_eq!(tree.branches[&descendant].status, BranchStatus::Discarding);
         }
     }
+}
+
+#[test]
+fn yield_preserves_active_work_and_task_end_discards_candidate() {
+    let (mut tree, candidate, _) = nested_tree();
+    tree.record_authority_outcome("chance-1", json!("different result"), None).unwrap();
+    tree.chance_mut("chance-1").unwrap().tool_continuation_pending = true;
+    tree.handle_message(AgentMessage::ActionStarted {
+        task_id: "task-1".into(), branch_id: candidate.clone(), action_id: "verify".into(),
+        action_kind: ActionKind::ToolExecution, name: "bash".into(), arguments: json!({"command":"pytest"}),
+        parent_action_id: None, checkpoint: None, timestamp_ms: 10,
+    }).unwrap();
+    let mut actions = ControlActions::default();
+    tree.schedule(ControlOperation::Validate(candidate.clone()), &mut actions);
+    let id = actions.operations[0].0;
+    let delivery = tree.complete_work(id, Ok(ControlResult::AcceptanceDisposition(
+        false, "incompatible".into(), None, None, false,
+        Some(json!({"intent":"Yield", "results":[]})), None,
+    ))).unwrap();
+    assert!(matches!(delivery.commands.as_slice(), [AgentCommand::ResolvePending { branch_id, outcome: Some(outcome), .. }]
+        if branch_id == "authority" && outcome["phase"] == "continue"));
+    assert!(tree.branches[&candidate].yield_only);
+    assert_eq!(tree.branches[&candidate].status, BranchStatus::Running);
+    assert!(tree.active_actions[&candidate].contains_key("verify"));
+    assert!(!tree.can_promote(&candidate, true));
+    assert!(tree.accept_candidate(&candidate).is_err());
+    assert!(!tree.candidate_due(&candidate));
+
+    tree.finish_task();
+    let actions = tree.progress(&RuntimeCapabilities::default()).unwrap();
+    assert!(actions.commands.iter().any(|command| matches!(command, AgentCommand::Discard { branch_id, .. } if branch_id == &candidate)));
+    assert_eq!(tree.branches[&candidate].status, BranchStatus::Discarding);
+    assert!(!tree.task_writers_drained());
 }
 
 #[test]

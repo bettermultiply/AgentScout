@@ -8,7 +8,6 @@ mod settlement;
 mod tree;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs;
 use std::io;
 use std::path::PathBuf;
 
@@ -104,6 +103,8 @@ pub enum AuthorityState {
 pub struct ActionRecord {
     pub action_kind: ActionKind,
     pub name: String,
+    #[serde(default)]
+    pub arguments: Option<Value>,
     pub parent_action_id: Option<String>,
 }
 
@@ -189,6 +190,12 @@ pub struct BranchRecord {
     #[serde(default)]
     pub(crate) assumption_set: Vec<Assumption>,
     #[serde(default)]
+    pub(crate) yield_only: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) deferred_environment: bool,
+    #[serde(default)]
+    pub(crate) yielded_action_ids: BTreeSet<String>,
+    #[serde(default)]
     pub(crate) pending_operations: Vec<PendingOperation>,
     #[serde(default)]
     pub(crate) execution_state: BranchExecutionState,
@@ -244,6 +251,10 @@ pub struct ChanceRecord {
     pub speculation_kind: Option<ActionKind>,
     #[serde(default)]
     pub(crate) tool_continuation_pending: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) deferred_environment: bool,
+    #[serde(default)]
+    pub(crate) continuation_released_by_yield: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_epoch: Option<u64>,
 }

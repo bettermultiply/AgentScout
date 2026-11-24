@@ -249,6 +249,7 @@ dispose(branch, resolution, context) -> DispositionPlan
 - **Reuse**：仅适用于 `accepted`。采用部分已验证结果，保留原父分支会话并回收候选。可附 `Discard`。
 - **Promote**：仅适用于 `accepted`。全量合入环境并采用候选分支的会话延续。
 - **Salvage**：适用于整体未接受的处置。祖先假设须已确认，且须与 `Discard` 组合。独立成果移交后原父分支继续执行。
+- **Yield**：整体未接受时，可以单独返回 `{"intent": "Yield", "results": [...]}`。每项指定已完成工具的 `id`、空 `files` 和非空 `notification`。空 `results` 表示让仍在执行的候选继续，暂不交付通知。父分支继续执行，候选及其在途操作保持存活。父分支离开分叉点后，候选只能继续 `Yield`，不能 `Promote`。此动作不组合 `Discard`。
 - **Re-execute**：使用权威结果重新执行必要工作；
 - **Discard**：丢弃候选工作及其未确认产物；
 - **Compensate**：对已发生且可补偿的效果执行反向处理；

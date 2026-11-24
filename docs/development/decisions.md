@@ -1,5 +1,11 @@
 # 开发决策
 
+## 2026-11-23：确立 AScout 编码哲学
+
+经评估，完整 TigerStyle 将安全置于性能之上，并依赖高密度断言，与 AScout 的目标不合。DOD 与 Plan 9 也不作为项目的通用编码准绳。
+
+AScout 确立自身的编码哲学，优先考虑性能并避免过早优化，保持通用性与可扩展性，通过深模块收拢职责，消除无意义特例，让同类操作同构、成对操作对称。纯内存推进限于控制面核心，以清晰的数据结构和不可逆边界的校验替代高密度断言。相关原则独立成文，并由 `AGENTS.md` 和文档导航引用，用于后续代码实现与审查。详见 [AScout 编码哲学](coding-philosophy.md)。
+
 ## OpenTelemetry 与执行记录
 
 追踪由 control plane、Pi Adapter 和 Runtime Adapter 批量发送。Ledger 继续负责执行事实、恢复和 SSE 重放，仅在已有的 `task_started` 增加可选 `trace_id`。Trace Context 作为内部传输元数据，不参与命令、工具请求或 Runtime 请求的去重。暂停目录独立保存可选上下文，缺失时仍可恢复。追踪分别记录 Policy 决策和 Agent 实际应用的晋升。接收失败不改变执行结果，用户可见警告仍走原有渠道。部署与验证见 [OpenTelemetry 追踪](../usage/tracing.md)。
@@ -43,6 +49,14 @@ Pi 候选在内存中建立独立的会话索引，与源会话共享已完成�
 Policy 通过 `Promote` 请求全量移交，采用候选会话与后代。`Reuse` 和 `Salvage` 保留父会话，交付 Runtime 回执确认的结果并回收候选。`Reuse` 计入命中，`Salvage` 保留整体未命中的结算。结算均记录处置名称。
 
 `predict` 用 `abstain` 显式放弃预测，批量预测必须至少提供一个 Proposal。控制面保留 Proposal 来源，并向 `dispose` 透传 `match` 对象供处置参考。
+
+`dispose` 可单独返回 `{"intent": "Yield", "results": [...]}`。控制面按候选的工具 `action_id` 去重，仅把通知送入父分支的会话，并先交付通知再放行等待点。候选继续在隔离环境中执行，不暂停或中止在途操作。父分支越过分叉点后，候选只能继续 `Yield`，不能晋升。候选完成工具或停止时可再次交付。停止后、任务结束时或因资源压力被抢占时回收。编码 Policy 默认启用 `yield_in_flight_verification`，允许在尚无结果时以空列表保留在途验证。
+
+目标会话暂停后，Pi 会中止 `Reuse` 和 `Salvage` 候选正在运行的推理，并立即确认准备完成。`Promote` 仍等待候选推理结束。Authority 给出当前步骤的工具调用后，编码 Policy 仅交付已完成的文件读取或搜索结果。若 Authority 当前的只读调用已覆盖该结果的 60% 或以上，则跳过该结果。候选模型初始与后续步数上限默认均为 4，默认关闭只读步骤中的 Authority 推理流水线，两项均可配置。每条通知最多 4,500 字符，总计最多 14,000 字符。通知注明内容来自当前工作区文件，并显式标记被截断的输出。
+
+只读信息比较在双方路径能够确定唯一工作区前缀时对齐绝对路径和相对路径。由 `head` 或 `tail` 限制的搜索和列表可以用于累计信息比较，首步匹配仍保留输出限制。验证识别允许受限的 `cd`、`mkdir -p` 前置命令、标识符形式的环境变量赋值、末尾 `2>&1` 和单个 `head`／`tail` 管道。比较 Python 脚本验证时，将脚本路径按 `cd` 归一化。`type`、`command -v` 和 `which` 可以作为只读查询。源码修改后的广泛验证仍可预测通过和失败两种结果，使用 `pytest -k` 或仅指定测试节点时只预测一种结果，有过验证失败则预测失败。
+
+启用快速模型投机时，编码 Policy 在 Authority 首步最多执行四次快速模型推理。后续候选先执行一次快速模型推理，只有该步至少完成一个工具调用且所有工具调用均成功、只读时，才可再并行执行一次 Authority 模型推理。`extent` 使用候选启动时的父分支进度和候选自己的工具执行记录。
 
 ## Agent 协议与 Speculative Tree 分离
 
@@ -1282,3 +1296,9 @@ Branch 只在 control plane 与 Instrumentation 中用于查找 Environment。Ru
 用户入口采用 `make install`、`make uninstall` 和 `make purge`。安装生成默认配置并同步内置 Policy、Agent 接入脚本和三个可执行文件。卸载保留配置与运行记录，清理命令才删除全部用户数据。两个清理入口通过 `run.lock` 拒绝影响活跃运行。
 
 普通 filesystem 运行以用户启动目录作为 Agent workspace。控制面在 run 目录中生成带随机控制端口的 Runtime 配置和独立 `fs-state`，并将 workspace 写入 Tree 持久化数据。恢复和旧存档继续使用旧的 run-local workspace 兼容路径。单 run 内动态切换 Policy 或 Backend，以及上游超时重试控制仍待讨论，见根目录 `Discussion.md`。
+
+## Coding Policy Unit 2A
+
+启用 `fast_model_speculation` 后，`active_post_edit_test` 默认允许在修改文件后直接重复本任务最近的验证命令。候选在模型 checkpoint 上记录预测的工具调用，并在隔离环境中执行。开始验证无需模型推理，验证完成后可以使用 Authority 的模型继续。匹配且覆盖 Authority 工具调用的候选可晋级。已完成的测试输出（含失败输出）和去除已覆盖行的只读结果可以通过 `Salvage` 或 `Yield` 交付，不复制文件。
+
+快模型探索默认关闭 thinking。候选范围由连续失败、重复操作、只读探索没有新增信息，以及 `max_steps: 12` 约束。源代码修改后的宽范围验证只有在等效或更广的验证已通过时才只预测成功。通用 Python Policy 模块自动加入编译产物及其摘要。

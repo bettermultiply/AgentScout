@@ -24,6 +24,7 @@
 | OutcomeSlot | 同名同义 | 共享语义 |
 | Predictor | 无直接对应 | 底座独有 |
 | Salvage | 无直接对应 | 底座独有 |
+| Yield | 无直接对应 | 非终止地向父分支／Authority 交付中间客观结果或信号 |
 
 
 ## 系统级
@@ -65,7 +66,7 @@
 - **Predictor** `S_u`：`u` 的廉价实现，产出 Proposal；由 `predict` decision 表达。（`policy-decisions.md` §2.3）
 - **Reconciliation**：权威值到达时判定 `î ≈ i` 并选择处置的过程；对应 Resolution barrier 的验证部分。（`policy-decisions.md` §2.6–§2.7；术语收敛）
 - **OutcomeSlot**：真实 outcome / 权威值的投递槽位；两边同名同义。（`branch-semantics.md`；`spec-exec-abstraction.md`）
-- **Disposition**：处置结果枚举：Reuse / Promote / Discard / Preempt / Re-execute / Compensate / Overwrite / Salvage。（`spec-exec-abstraction.md` §2 轴 6）
+- **Disposition**：处置结果枚举：Reuse / Promote / Discard / Preempt / Re-execute / Compensate / Overwrite / Salvage / Yield。（`spec-exec-abstraction.md` §2 轴 6）
 - **Equivalence** `≈`：判定"猜中"的可插拔同余关系，四层：L0 语法相等 / L1 语义等价 / L2 效果同余 / L3 结果可接受（唯一不需要权威值、可支撑 Bypass 的层次）。（`spec-exec-abstraction.md` §2 轴 4）
 - **EffectClass**：效果的投机纪律分类：PURE / IDEMPOTENT / STAGEABLE / TRANSFORMABLE / COMPENSABLE / OVERWRITABLE / IRREVERSIBLE。（`effect-management.md` §3）
 - **StateDomain**：状态域：filesystem / process / memory / GUI / network / database / email / payment。EffectClass × StateDomain 交叉决定具体隔离机制。（`effect-management.md` §3）
@@ -87,6 +88,7 @@
 - **accept**：对 candidate 作出的接受裁决（resolution = accepted）；`Promote` 让候选保留自身 Branch identity 并替换 parent 在树中的位置，`Reuse` 只把已验证结果和按声明移交的受管状态交给现有权威延续并清理候选。（`branch-semantics.md`；`decisions.md` D-009/D-023）
 - **discard**：丢弃整个 child subtree（= Disposition 的 Discard / Preempt）；不要求 candidate ready，不自动把 partial state 反馈给 parent。（`branch-semantics.md`；`decisions.md` D-023）
 - **resolve()**：权威值到达时进行匹配、选择处置并沿 Proposal 依赖传播的关键路径操作，由 Speculation Coordinator 协调。（`control-plane.md` §2.3；`policy-decisions.md`）
+- **Yield**（用户已确认）：候选向父分支／Authority 交付中间客观结果或信号，并继续在自己的隔离环境中执行。父分支／Authority 离开分叉点后，候选只能继续 `Yield`，不能 `Promote`。
 - **Salvage**：失败后回收部分进展（`progress() / handoff()` 一等抽象）；warm-start、partial-token accept、promote 的共性。（`spec-exec-abstraction.md` §2 轴 6）
 - **PublishOutcome**：真实 operation 完成后把 outcome 发布到 OutcomeSlot 的机制操作；由 Operation wrapper / Hook / effect broker 自动执行，不作为独立 Agent-facing 命令。（`branch-semantics.md`；`decisions.md` D-037）
 

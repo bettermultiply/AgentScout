@@ -19,8 +19,11 @@ fn same_file(left: Option<&Node>, right: &Node) -> Result<bool, BackendError> {
     if left.kind != right.kind || left.mode != right.mode || left.size != right.size {
         return Ok(false);
     }
-    let mut left = BufReader::new(fs::File::open(left.source.as_ref().unwrap()).map_err(error)?);
-    let mut right = BufReader::new(fs::File::open(right.source.as_ref().unwrap()).map_err(error)?);
+    let (Some(left_source), Some(right_source)) = (&left.source, &right.source) else {
+        return Ok(false);
+    };
+    let mut left = BufReader::new(fs::File::open(left_source).map_err(error)?);
+    let mut right = BufReader::new(fs::File::open(right_source).map_err(error)?);
     loop {
         let a = left.fill_buf().map_err(error)?;
         let b = right.fill_buf().map_err(error)?;
@@ -293,13 +296,41 @@ impl FilesystemBackend {
                 let mount = source_mount.filter(|source| {
                     target_mount.is_some_and(|target| target.target == source.target)
                 }).ok_or_else(|| BackendError::new(format!("unmatched managed mount for {file}")))?;
-                let relative = path.strip_prefix(&mount.target).unwrap().to_str().unwrap();
+                let relative = path
+                    .strip_prefix(&mount.target)
+                    .map_err(|_| {
+                        BackendError::new(format!(
+                            "selected file is outside its managed mount: {file}"
+                        ))
+                    })?
+                    .to_str()
+                    .ok_or_else(|| {
+                        BackendError::new(format!("selected file path is not UTF-8: {file}"))
+                    })?;
                 if relative.is_empty() {
-                    return Err(BackendError::new(format!("cannot accept a mount point as a file: {file}")));
+                    return Err(BackendError::new(format!(
+                        "cannot accept a mount point as a file: {file}"
+                    )));
                 }
-                selected_paths.entry(mount.target.clone()).or_default().push(relative.into());
+                selected_paths
+                    .entry(mount.target.clone())
+                    .or_default()
+                    .push(relative.into());
             }
-            selected_paths.keys().map(|path| source_environment.mount_by_target(path).unwrap().clone()).collect()
+            selected_paths
+                .keys()
+                .map(|path| {
+                    source_environment
+                        .mount_by_target(path)
+                        .cloned()
+                        .ok_or_else(|| {
+                            BackendError::new(format!(
+                                "source environment does not manage mount {}",
+                                path.display()
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
         } else {
             source_environment.selected_mounts(&scopes)?
         };

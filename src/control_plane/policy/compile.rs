@@ -10,6 +10,15 @@ use super::decision::Decision;
 use super::validation::{invalid, require, source_path, validate_binding, validate_model_grant};
 use super::{MAX_BYTES, MAX_FILES, RUNNER};
 
+pub(super) fn builtin_sources() -> BTreeMap<String, String> {
+    include!(concat!(env!("OUT_DIR"), "/policy_sources.rs"))
+}
+
+pub(super) fn reserve_builtin_path(path: &str) -> io::Result<()> {
+    let root = path.split('/').next().unwrap_or_default();
+    require(!matches!(root, "ascout_policy" | "ascout_policy.py"), "source shadows the built-in ascout_policy package")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Binding {
@@ -66,6 +75,9 @@ pub struct CompiledPolicy {
     pub(super) version: u32,
     pub(super) python: String,
     pub(super) files: BTreeMap<String, String>,
+    // Snapshot the built-ins so recovery uses the same source after an upgrade.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) builtin_files: BTreeMap<String, String>,
     #[serde(default)]
     pub(super) runtime: Option<String>,
     pub(super) decisions: BTreeMap<Decision, Binding>,
@@ -141,8 +153,10 @@ impl CompiledPolicy {
 
     pub fn script(&self, decision: Decision) -> io::Result<String> {
         self.validate()?;
+        let mut sources = self.files.clone();
+        sources.extend(self.builtin_files.clone());
         let manifest = json!({
-            "version": self.version, "python": self.python, "files": self.files,
+            "version": self.version, "python": self.python, "files": sources,
             "binding": self.decisions.get(&decision).ok_or_else(|| invalid("missing Decision"))?,
             "decision": decision.as_str(), "digest": self.digest,
         });
@@ -203,9 +217,10 @@ impl CompiledPolicy {
             &self.decisions,
             RUNNER,
         );
-        let bytes = match &self.policy_model_grant {
-            Some(grant) => serde_json::to_vec(&(content, grant))?,
-            None => serde_json::to_vec(&content)?,
+        let bytes = match (&self.policy_model_grant, self.builtin_files.is_empty()) {
+            (Some(grant), true) => serde_json::to_vec(&(content, grant))?,
+            (None, true) => serde_json::to_vec(&content)?,
+            (grant, false) => serde_json::to_vec(&(content, grant, &self.builtin_files))?,
         };
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
@@ -233,6 +248,16 @@ impl CompiledPolicy {
         )?;
         for path in self.files.keys() {
             source_path(path)?;
+            if !self.builtin_files.is_empty() {
+                reserve_builtin_path(path)?;
+            }
+        }
+        for path in self.builtin_files.keys() {
+            source_path(path)?;
+            require(path.starts_with("ascout_policy/"), "invalid built-in source path")?;
+        }
+        if !self.builtin_files.is_empty() {
+            require(self.builtin_files.contains_key("ascout_policy/__init__.py"), "missing built-in package initializer")?;
         }
         for (&decision, binding) in &self.decisions {
             validate_binding(decision, binding, &self.files)?;

@@ -2,11 +2,6 @@ version: 1
 language: python
 files: [decisions.py]
 fidelity: Best-effort
-policy_model_grant:
-  decisions: [match]
-  models: [openai/gpt-6.2-sol]
-  max_requests: 1
-  timeout_ms: 25000
 decisions:
   admit:
     opportunity_pass:
@@ -14,12 +9,12 @@ decisions:
       function: opportunity_pass
       policy_config:
         fast_model_speculation: false
+        tool_speculation: true
     feasibility_pass:
       file: decisions.py
       function: feasibility_pass
       policy_config:
         max_assumption_depth: 1
-        max_model_speculation_step: null
   select:
     file: decisions.py
     function: select
@@ -29,26 +24,24 @@ decisions:
     file: decisions.py
     function: launch
     policy_config:
-      skip_authority_after_independent_verification: false
-      eager_authority_verification: false
+      prior_readonly_exploration: false
   predict:
     file: decisions.py
-    function: predict_for_control_plane
+    function: predict
     history: {mode: transcript_tail, max_entries: 30}
     policy_config:
-      fast_model_speculation: false
       candidate_model: deepseek/deepseek-flash
-      candidate_thinking: high
+      candidate_thinking: "off"
+      active_post_edit_test: true
       candidate_count: 1
-      max_candidate_model_steps: 1
+      adaptive_dual_tool_speculation: true
   extent:
     file: decisions.py
     function: extent
     inputs: [process_state.result_facts, process_state.semantic_facts, process_state.resource_counters]
     policy_config:
-      max_steps: 4
-      fast_model_speculation: false
-      max_candidate_model_steps: 1
+      max_steps: 12
+      stop_before_mutation: true
   effect:
     file: decisions.py
     function: effect
@@ -62,18 +55,10 @@ decisions:
     function: match_proposal
     outcome: tool_output
     policy_config:
-      skip_authority_after_independent_verification: false
-      require_authority_review: false
-      partial_accept_unverified_workspace: false
-      semantic_audit: false
-      audit_model: openai/gpt-6.2-sol
+      prior_readonly_exploration: false
+      readonly_salvage: true
+      yield_in_flight_verification: true
+      min_partial_coverage: 0.25
   dispose:
     file: decisions.py
     function: dispose
-    policy_config:
-      salvage_independent_results: false
-      require_authority_review: false
-      partial_accept_reuse: false
-      partial_accept_salvage: false
-      partial_accept_unverified_workspace: false
-      partial_accept_discard: true

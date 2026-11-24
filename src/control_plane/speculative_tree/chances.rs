@@ -45,6 +45,7 @@ impl SpeculativeTree {
             .get(parent)
             .and_then(|actions| actions.get(operation_id))
             .map(|action| action.action_kind);
+        let deferred_environment = local_id.is_some();
         let chance_id = if let Some(id) = local_id {
             id
         } else if let Some(scope) = self.reopened_execution_scope() {
@@ -76,6 +77,8 @@ impl SpeculativeTree {
                 validation_id: None,
                 speculation_kind,
                 tool_continuation_pending: false,
+                deferred_environment,
+                continuation_released_by_yield: false,
                 launch_epoch: None,
             },
         );
