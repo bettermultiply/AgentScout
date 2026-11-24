@@ -19,8 +19,7 @@ Agent 进程树
 - 挂载命名空间负责让同一进程树共享同一个文件系统视图。
 - OverlayFS 或文件系统快照负责提供基础状态和独立写入位置。
 - Filesystem Backend 负责 Branch 的创建、生命周期、接受、丢弃和清理。
-- 当前实现已提供差异生成、accept 冲突检测与重放、Authority 受影响路径物化；部分接受仍未实现，
-  具体状态见 [当前实现状态](current-state.md)。
+- 当前实现按分叉基线生成增量。Full `Promote` 回放整个候选增量，Part `Salvage` 检查所选路径的冲突后移交。Authority 物化写回受影响路径。具体状态见 [当前实现状态](current-state.md)。
 
 ## 优势
 

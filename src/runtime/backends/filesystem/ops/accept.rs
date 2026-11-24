@@ -334,10 +334,10 @@ impl FilesystemBackend {
         } else {
             source_environment.selected_mounts(&scopes)?
         };
+        let overwrite = files.is_none() && scopes.is_empty();
         let mut conflicts = Vec::new();
         let mut prepared = Vec::new();
         for mount in &mounts {
-            let key = mount.target.display().to_string();
             let target_mount = target_environment
                 .mount_by_target(&mount.target)
                 .ok_or_else(|| {
@@ -355,7 +355,7 @@ impl FilesystemBackend {
             }
             let base_layer = mount.layer_upper(&base_record.path);
             let in_lower = mount.lower.iter().any(|layer| layer == &base_record.path);
-            let (delta, redirects) = if in_lower {
+            let (mut delta, redirects) = if in_lower {
                 self.delta_since(&source_environment, mount, &base_record.path)?
             } else if self.mechanism == FilesystemMechanism::Btrfs && path_exists(&base_layer) {
                 let (delta, redirects, _) =
@@ -365,17 +365,34 @@ impl FilesystemBackend {
                 // Marks and empty fork bases can be absent from the lower chain.
                 self.upper_delta_from_base(mount, &base_record.path)?
             };
-            conflicts.extend(
-                merge_delta_layers(
-                    &delta,
-                    &redirects,
-                    &base_layers,
-                    target_mount,
-                    &target_mount.upper,
-                )?
-                .into_iter()
-                .map(|conflict| prefix_conflict(&mount.target, conflict)),
-            );
+            let replaced: BTreeSet<_> = delta.iter()
+                .filter(|(_, node)| node.kind != NodeKind::Dir)
+                .map(|(path, _)| path.clone()).collect();
+            delta.retain(|path, _| !ancestors(path).iter().any(|parent| replaced.contains(parent)));
+            if overwrite {
+                // A candidate change below a directory deleted or replaced by Authority
+                // must be able to recreate its path without copying unrelated children.
+                let mut parents = View::new();
+                for path in delta.keys() {
+                    for parent in ancestors(path) {
+                        if !delta.contains_key(&parent) && !parents.contains_key(&parent)
+                            && !resolve_path_in_environment(target_mount, &parent)?.is_some_and(|node| node.kind == NodeKind::Dir)
+                            && let Some(mut node) = resolve_path_in_environment(mount, &parent)?
+                            && node.kind == NodeKind::Dir
+                        {
+                            node.opaque = false;
+                            parents.insert(parent, node);
+                        }
+                    }
+                }
+                delta.append(&mut parents);
+            } else {
+                conflicts.extend(
+                    merge_delta_layers(&delta, &redirects, &base_layers, target_mount, &target_mount.upper)?
+                        .into_iter()
+                        .map(|conflict| prefix_conflict(&mount.target, conflict)),
+                );
+            }
             let needs_source_maps =
                 !redirects.is_empty() || delta.values().any(|node| node.metacopy);
             let source_maps = if needs_source_maps {
@@ -389,7 +406,6 @@ impl FilesystemBackend {
             } else {
                 Vec::new()
             };
-            let _ = key;
             prepared.push((
                 mount.clone(),
                 target_mount.clone(),
@@ -425,28 +441,15 @@ impl FilesystemBackend {
         #[cfg(not(test))]
         let fail_after = None;
         for (mount, target_mount, delta, redirects, source_maps) in prepared {
-            let replay_root = match &safe_root {
-                Some(root) => {
-                    let prefix = mount
-                        .target
-                        .strip_prefix("/")
-                        .unwrap_or(&mount.target)
-                        .to_string_lossy()
-                        .into_owned();
-                    ReplayRoot::Mount { root, prefix }
-                }
-                None => ReplayRoot::Upper(&target_mount.upper),
-            };
             // Replay supports rollback, but concurrent readers can see intermediate writes.
-            if let Err(mut error) = replay_delta(
-                &replay_root,
-                &delta,
-                &redirects,
-                &source_maps,
-                &mut journal,
-                &target_mount.upper,
-                fail_after,
-            ) {
+            let applied = (|| {
+                let mount_root = safe_root.as_ref().map(|root| {
+                    root.mount(&mount.target.to_string_lossy())
+                }).transpose()?;
+                let replay_root = mount_root.as_ref().map_or(ReplayRoot::Upper(&target_mount.upper), ReplayRoot::Mount);
+                replay_delta(&replay_root, &delta, &redirects, &source_maps, &mut journal, &target_mount.upper, fail_after)
+            })();
+            if let Err(mut error) = applied {
                 let (failures, warnings) = journal.rollback();
                 if failures.is_empty() {
                     error

@@ -122,20 +122,20 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 
 基准是 mental-model → design-model → Policy、Branch、效果、Instrumentation 和 Contract 的当前目标设计，而非 Rust 原型完成度。未执行外部实现、未编写或运行测试，也未复现论文的延迟或正确性结果；正文核对不能替代运行验证。
 
-审查区分四种情况：现有语义基本能够表达；已有意图但生命周期、事实供给或落实规则未闭合；正式条款相互冲突；能力明确处于当前范围之外。“可以在 match 中写一个函数”不证明机制能够提供该函数需要的事实或安全落实其结果；“有 Reuse/Salvage 意图”也不证明任意状态能够跨 Branch 移交。
+审查区分四种情况：现有语义基本能够表达；已有意图但生命周期、事实供给或落实规则未闭合；正式条款相互冲突；能力明确处于当前范围之外。“可以在 match 中写一个函数”不证明机制能够提供该函数需要的事实或安全落实其结果；“有 Salvage 意图”也不证明任意状态能够跨 Branch 移交。
 
-总体判断：Edge／Proposal／验证／处置框架能承载这些算法的大部分局部决策，但不能据此声称完整覆盖。最普遍的问题是结果 Reuse 与整 Branch Accept 被混为一谈，术语表的映射和 Instrumentation 的结果返回路径之间已有明确冲突；多步算法另有带未决前缀的验证、前缀接受和后缀清理缺口。DynBranch 跨 task 复用、引擎内部优化和投机 UI 是需要明确范围的能力，不能冒充现有覆盖。没有证据要求立即推翻树形结构、single-winner 或效果屏障。
+Edge、Proposal、验证和处置已能表达这些算法的多数局部决策。多步算法还需要未决前缀的验证、前缀接受与后缀清理。跨任务复用、模型引擎内部优化和投机 UI 各有独立的能力边界。
 
 ### 8.2 新增七算法逐项核对
 
 | 算法 | 论文所需执行过程 | 当前模型的对应表达 | 判断 |
 |---|---|---|---|
-| [Speculate with Memory](https://arxiv.org/abs/2607.12236) | action 预测提前跑只读工具；observation 预测提前启动 actor；连续预测组合两者；每个已完成任务更新记忆 | `predict` 允许历史、模型、外部来源及 action/observation；`effect` 限制只读；`match` 精确匹配；嵌套表达连续依赖 | observation 路线基本覆盖；action 路线已有 Reuse 入口，但 Reuse／accept 映射需统一（§8.9 第 1 项）。跨任务记忆可留在外部预测器，不必进底座；其保存、反馈与版本契约仍未闭合 |
-| [Speculate While You Reason](https://arxiv.org/abs/2607.25816) | 同模型双模式预测下一调用，主模式独立产出真实调用，名称和参数匹配后复用；训练交替优化两模式 | 自预测可作为 `predict` 实现，真实调用来自 `launch` 路径，精确 `match` 和结果 `Reuse` 有对应意图 | 自预测与结果复用已有入口，但 Reuse／accept 映射需统一（§8.9 第 1 项）；共享 KV 的性能能力及联合 RL 不是现有底座自动提供的能力 |
+| [Speculate with Memory](https://arxiv.org/abs/2607.12236) | action 预测提前跑只读工具；observation 预测提前启动 actor；连续预测组合两者；每个已完成任务更新记忆 | `predict` 允许历史、模型、外部来源及 action/observation；`effect` 限制只读；`match` 精确匹配；嵌套表达连续依赖 | observation 路线基本覆盖；action 路线通过接受裁决与 `Salvage` 移交已完成结果。跨任务记忆可留在外部预测器，不必进底座；其保存、反馈与版本契约仍未闭合 |
+| [Speculate While You Reason](https://arxiv.org/abs/2607.25816) | 同模型双模式预测下一调用，主模式独立产出真实调用，名称和参数匹配后复用；训练交替优化两模式 | 自预测可作为 `predict` 实现，真实调用来自 `launch` 路径，精确 `match` 和结果 `Salvage` 有对应意图 | 已完成的自预测工具结果可经接受裁决与 `Salvage` 移交；共享 KV 的性能能力及联合 RL 不是现有底座自动提供的能力 |
 | [AOSpec](https://arxiv.org/abs/2608.00881) | 隔离运行当前或远期动作；真实动作到来后同时核对动作和执行前环境版本；真实 observation 精确匹配后保留 actor 生成 | 当前动作可对应 action Edge，observation 对应下一 Edge；`match_context` 原则上可带环境事实，`effect` 可隔离写入 | 单步组合和 observation 路线可表达；动作加执行前版本需 Contract 提供事实（§8.9 第 3 项）；远期 fork 跨中间裁决存活与 §4.5 的 sibling 失效规则冲突（§8.9 第 2 项） |
 | [DynBranch](https://arxiv.org/abs/2609.31047) | 路由未定时运行候选子图；选择和精确、新鲜需求共同授权消费；确认结果可跨请求复用；独立 offer 可继续保留 | `predict/select/effect/match/dispose` 可表达单 task 内的互斥分支提前执行；原调用跳过与受控结果交付有接入点 | 单 task 内互斥候选可表达；跨 task 缓存和 dormant offer 不在现有 Tree 生命周期（§8.9 第 6 项）；独立 offer 与 §4.5 的 sibling 失效冲突（§8.9 第 2 项）；读集合新鲜度缺 Contract（§8.9 第 3 项） |
 | [LEAP](https://arxiv.org/abs/2610.02670) | 小模型在环境副本上生成多步；target 在各假设前缀上并发生成；按前缀顺序接受，并采用首个纠正动作或 bonus；接受环境不重跑工具 | 每步 action 可为 Proposal；嵌套 AssumptionSet 可表示前缀；每条 Edge 的 `launch` 在所属候选上下文取得 target 结果；`match` 精确比较 | 逐步 Edge 加嵌套可表达前缀；target 作为 Authority 提供每步真值；接受环境不重跑工具可由 candidate 状态采用表达。剩余是批量验证拆分（§8.9 第 4 项）、每步状态保留和并发 target 调用能力；不需要另一套轨迹树 |
-| [ObsSpec](https://arxiv.org/abs/2610.15246) | 真实动作执行中预测 observation；提前生成后续动作；匹配前不执行下一真实动作；错误则丢弃相关生成 | 工具返回值为 Proposal，真实工具为权威来源，`extent/effect` 限制在生成边界，精确 `match` 后 Reuse/Promote，错误依赖级联清理 | 预测、匹配和剪枝最贴合；真实工具是 Authority，预测 observation 是 Proposal，后续生成是 candidate；采用生成进展时必须保留真实工具完成后的环境。只需明确依赖和清理；RL 训练、token mask 和模型更新由外部训练系统提供 |
+| [ObsSpec](https://arxiv.org/abs/2610.15246) | 真实动作执行中预测 observation；提前生成后续动作；匹配前不执行下一真实动作；错误则丢弃相关生成 | 工具返回值为 Proposal，真实工具为权威来源，`extent/effect` 限制在生成边界，精确 `match` 后 Salvage/Promote，错误依赖级联清理 | 预测、匹配和剪枝最贴合；真实工具是 Authority，预测 observation 是 Proposal，后续生成是 candidate；采用生成进展时必须保留真实工具完成后的环境。只需明确依赖和清理；RL 训练、token mask 和模型更新由外部训练系统提供 |
 | [SpecAgent](https://arxiv.org/abs/2610.21463) | weak 执行真实读、停在首个写；strong 一次审核返回最长可接受前缀及修正；纯读 K 步无需审核即提交 | 结构化 Proposal、`extent`、写前 `effect=block`、`launch=false` 与 validator 可表达大部分决策；Fidelity 允许弱于逐步轨迹等价 | 真实读可作 PURE 共享环境执行，首个写用 `effect=block` 停住；validator 可做前缀审核；纯读免审是明确的接受规则。剩余是批量证据拆分（§8.9 第 4 项）、修正动作归属和 weak／strong 执行配置（§8.9 第 5 项），不是任意写后回滚问题 |
 
 补充论文事实，避免兼容性判断建立在过强假设上：
@@ -198,7 +198,7 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 以下只列证据与候选方向，讨论顺序由用户决定：
 
 - **预测器记忆与在线更新**：`predict.history` 和外部来源允许读取历史，但没有明确完成任务／命中／未命中反馈如何送达、由谁保存经验、何时切换模型或记忆版本。Memory、DSP、LEAP 的在线更新都需要此边界。候选方向是将学习系统保留在外部，提供有来源和版本的事实与更新边界，而不是让 Policy Engine 持有任意 mutable state。未决候选数据不能未经筛选写成权威经验；可保留“预测错误”作为有明确标记的审计事实，而非接受其业务结论。
-- **状态验证与远期投机**：AOSpec 的文件系统版本、DynBranch 的读版本和 TomasuLLM 的依赖新鲜度不能由现有隔离强弱声明自动推出。需要区分隔离、执行前状态标识、实际读依赖和消费时验证。AOSpec §4.3 明确允许候选跨过不改变受管环境的中间调用存活；如果每次 Branch Accept 都按 §4.5 无条件清理全部 sibling，则这些候选会提前丢失。远期动作的机会归属、到期和废弃须与真实依赖一致，不能只靠树的位置判定其失效，也不把整个未来轨迹都绑定为一个错误的祖先假设。先检查已有 Outcome/Reuse 是否可承载，不直接把树改成 DAG。
+- **状态验证与远期投机**：AOSpec 的文件系统版本、DynBranch 的读版本和 TomasuLLM 的依赖新鲜度不能由现有隔离强弱声明自动推出。需要区分隔离、执行前状态标识、实际读依赖和消费时验证。AOSpec §4.3 明确允许候选跨过不改变受管环境的中间调用存活；如果每次 Branch Accept 都按 §4.5 无条件清理全部 sibling，则这些候选会提前丢失。远期动作的机会归属、到期和废弃须与真实依赖一致，不能只靠树的位置判定其失效，也不把整个未来轨迹都绑定为一个错误的祖先假设。先检查已有 Outcome/Salvage 是否可承载，不直接把树改成 DAG。
 - **候选执行配置与透明接入**：`predict` 可用小模型，不等于后续 candidate Agent 已能使用不同于主 Agent 的模型、prompt 或执行器。SpecAgent/LEAP 的 weak–strong 路线、Skim 的快捷执行器需要可声明、可验证的执行差异。默认 Agent 不感知 Branch 可以保留，但“透明”不能误读为所有路径必须使用同一模型和完全同一执行步骤。
 - **模型服务能力及 Fidelity**：D-013 明确排除 engine plane，因而共享 KV、partial-token 接受、sequence residency、batch 调度不属于底座自动提供的能力。外部服务可提供这些能力，但其请求控制、取消、版本、上下文和可复现性要求尚不应冒充 VM 隔离声明。LEAP 证明 target authorship 不推出串行轨迹相同；精确工具参数匹配也不证明提前读取到的 observation 与稍后读取相同。建议先明确可观察能力与保证，不因论文标注 lossless 自动选择最高 Fidelity。
 - **用户交互边界**：ISP 的投机结果预览及用户直接纠正候选，与当前只向用户呈现权威主线的规则不完全相容；Speculative Interaction Agents 的持续新输入也受“前提改变则剪枝、不修复”限制。可选择只覆盖不预览候选的算法核心，或另行讨论受控预览，但不能声称完整 UI 已兼容。
@@ -210,77 +210,37 @@ PASTE 报告在 workload 中标记并阻止 602 个潜在副作用动作，且�
 
 | 算法／路线 | 当前模型可表达的部分 | 未闭合之处／范围边界 |
 |---|---|---|
-| Speculative Actions | API 结果预测、多候选、call specifier 匹配、连续嵌套、失败剪枝 | 缓存 future 的消费与主执行保留需统一 Reuse／accept 映射（§8.9 第 1 项）；不能只把参数相等当作所有状态下结果相等 |
-| PASTE | 模式生成具体调用，参数绑定完成后再形成不可变 Proposal；只读／dry-run 纪律、选择与抢占 | 提前工具结果／在飞调用复用同 §8.9 第 1 项；未绑定 preparation hint 不能直接冒充可执行 Proposal；co-scheduler 与部署级调度不完整覆盖 |
-| SPAgent Verified | 推理期间预测动作、精确匹配后复用工具结果 | Reuse 入口已有，需统一 accept 映射（§8.9 第 1 项）；推理引擎两级调度不在范围内 |
+| Speculative Actions | API 结果预测、多候选、call specifier 匹配、连续嵌套、失败剪枝 | 已完成结果可通过 `Salvage` 交付给主执行，在途调用的消费仍需明确归属；不能只把参数相等当作所有状态下结果相等 |
+| PASTE | 模式生成具体调用，参数绑定完成后再形成不可变 Proposal；只读／dry-run 纪律、选择与抢占 | 提前工具结果／在飞调用复用见 §8.7；未绑定 preparation hint 不能直接冒充可执行 Proposal；co-scheduler 与部署级调度不完整覆盖 |
+| SPAgent Verified | 推理期间预测动作、精确匹配后复用工具结果 | Salvage 入口已有，通过接受裁决移交；推理引擎两级调度不在范围内 |
 | SPAgent Aggressive | `launch=false`，依据明确接受规则跳过部分主推理，按弱 Fidelity 运行 | 不能将置信度阈值当作已证明等价；长期允许修改 Policy，当前首版同一 session 的 Policy 固定，后续修改规则见 [Policy 开发说明](policy-engine.md) |
 | Cost-Aware Speculative Execution | `admit/select/rebalance`、资源计量、`effect`、`match`、失败重执行足以承载局部成本决策 | 任意 DAG 的 fan-in/shared work 不是当前 Tree 自动保证；若拆成结构化 Proposal 仍须提供联合依赖和中间状态。概率更新反馈、跨任务容量与机会成本未闭合；不以论文公式改写机制 |
 | Speculative Interaction Agents | 未来用户输入／工具结果预测、持续事件、级联取消、写前缓冲 | 仅权威主线对用户输出；新输入使前提改变时现模型保守剪枝。不能声称覆盖论文的全部交互与重对齐行为 |
-| Speculative Tool Calls | client-side 提前调用、精确参数匹配、结果复用的局部流程 | 同 §8.9 第 1 项；engine-side KV 拼接、resident sequence 与提议中的 provider endpoint 明确不在现有范围内 |
+| Speculative Tool Calls | client-side 提前调用、精确参数匹配、结果复用的局部流程 | 见 §8.7；engine-side KV 拼接、resident sequence 与提议中的 provider endpoint 明确不在现有范围内 |
 | Skim accelerate | 快路径、`launch=false/lazy`、validator 接受、失败后 URL salvage 与 fallback | 不要求保留失败推理；URL handoff 必须是明确允许的输入，不把被拒答案移入权威 context。独立快路径执行配置尚未具体化 |
 | Skim aggregate | 多候选试验、validator 排序、至多一个最终输出 | 不等于自动支持多 loser 信息汇总；只选择一个经审核结果可映射，预算与快捷执行器能力仍需接入 |
-| SPORK D1/D2 | 流式推理中预测调用、置信度准入、只读提前执行、精确匹配 | 需要流式前缀/logprobs 等实际服务能力；“真实 operation 前 barrier”与中途观测点的关联需 Instrumentation 证明。KV fork 加速不由普通 API 保证，结果复用同 §8.9 第 1 项 |
+| SPORK D1/D2 | 流式推理中预测调用、置信度准入、只读提前执行、精确匹配 | 需要流式前缀/logprobs 等实际服务能力；“真实 operation 前 barrier”与中途观测点的关联需 Instrumentation 证明。KV fork 加速不由普通 API 保证，结果复用见 §8.7 |
 | SPORK D3 | dispose 可表达回收部分进展的意图 | 将 token draft 送入引擎验证器是明确排除的 engine plane，不能只因存在 Salvage 就声称完整覆盖 |
 | ISP | 近似步骤连续推进，各步 target 异步验证，前缀匹配后采用，错误后缀丢弃 | 同 §8.9 第 4 项；论文 UI 展示与用户裁决投机结果不符合当前权威主线唯一可见边界，算法核心与完整 UI 必须分列 |
 | DSP | ISP 路线加动态 extent、预算和收益权衡 | 同 §8.9 第 4 项；在线 trainer 与 inference predictor 的权重更新不是 `extent` 自己拥有的状态，需外部学习及版本边界 |
 | SpecHop | observation 预测、连续嵌套、异步真实工具、按顺序验证、失败级联清理 | 基本拓扑匹配；后续 target 调用也必须携带祖先假设。语义等价 verifier 的范围不能用“lossless”一词代替具体保证 |
 | SMC | 结构化宏 Proposal、锚点真实证据、模式与安全 predicate、批量采用动作结果 | 允许独立 validator/弱 Fidelity，因此无需强制逐步 actor 确认；但宏前缀状态、整段接受范围与后续 drafter 延续同 §8.9 第 4 项，不能仅确认锚点就清空所有未检查依赖 |
 | B-PASTE | 多候选子图预测、extent、资源调度、effect 边界、晚绑定后的具体调用 | 共享子图、前缀复用与未来调用消费未闭合；一条 Edge 的多个候选默认不协作，不能把 beam 子图共享当作已有能力。论文证据初步，不据此先扩全局模型 |
-| TomasuLLM（算法与运行时交叉） | 动作／observation 预测、私有写入、依赖检查、按正式轨迹验证与公开 | 乱序动作执行、实际读版本和效果 delta 的按序采用超出当前 Branch replacement 的明确语义；需统一 Reuse 映射（§8.9 第 1 项）并补状态验证契约（§8.9 第 3 项）。当前模型可用更保守的串行屏障退化，但不等于保留其核心乱序能力 |
-| NVIDIA / LangChain 已知图路由投机 | 路由结果为 Proposal，多互斥候选，路由确认后选择一个、取消其余 | 只读或受控效果下基本映射；若框架采用节点结果而不替换 Agent 世界，仍需 §8.9 第 1 项的 Reuse 映射；取消不提供外部回滚 |
+| TomasuLLM（算法与运行时交叉） | 动作／observation 预测、私有写入、依赖检查、按正式轨迹验证与公开 | 乱序动作执行、实际读版本和效果 delta 的按序采用超出当前 Branch replacement 的明确语义；需补状态验证契约（§8.9 第 3 项）。当前模型可用更保守的串行屏障退化，但不等于保留其核心乱序能力 |
+| NVIDIA / LangChain 已知图路由投机 | 路由结果为 Proposal，多互斥候选，路由确认后选择一个、取消其余 | 只读或受控效果下基本映射；若框架采用节点结果而不替换 Agent 世界，可用 `Salvage` 移交结果；取消不提供外部回滚 |
 
 ### 8.6 调整原则与后续顺序
 
-1. 不推翻已经有用的抽象：action/observation 不必拆成两套系统；精确与语义接受可继续由 match 和 Fidelity 区分；不可逆效果继续受 gate 约束。
-2. 先统一 Reuse／accept 映射（§8.9 第 1 项），再补批量验证拆分（第 4 项）；这两项主要是文字和规则澄清，收益最大、风险最小。
+1. action 与 observation 共用 Edge、Proposal 和验证机制。精确匹配与语义验证分别使用相应的 `match` 与 Fidelity 约束。
+2. 补足批量验证结果按 Edge 拆分的规则，明确证据依赖与前缀接受边界（§8.9 第 4 项）。
 3. independent offer 是唯一真正动模型的点（第 2 项），必须单独决定；选择保守方向时，把 AOSpec／DynBranch 的 independent offer 明确标为不覆盖。
 4. 状态版本、读集合和候选执行配置作为能力契约补（第 3、5 项），不放进九类 Decision。
 5. 跨 task 缓存、DAG fan-in、engine plane、用户预览先写清不覆盖（第 6–8 项），不以“通用”之名无限扩大系统。
-6. 当前没有批准任何上述模型调整；本次只形成证据、分类和待讨论建议。
+6. 上述仍未收敛的事项按各项能力缺口继续验证。
 
-### 8.7 续查：结果 Reuse 的最小调整草案（尚未批准）
+### 8.7 已完成工具结果的部分移交
 
-#### 原文要求与现有条款冲突
-
-[PASTE §4.2](https://arxiv.org/html/2603.18897#S4.SS2)、[SPAgent §III-C](https://arxiv.org/html/2511.20048#S3.SS3) 和 [Speculative Tool Calls §3.1](https://arxiv.org/html/2512.15834#S3.SS1) 都要求：主模型按自己的上下文生成正式调用，匹配后使用提前完成或仍在运行的工具工作，未命中则正常执行原调用。PASTE 所称的在飞工作 promote 是工具 job 转为正式调用的执行来源，不等于采用另一份 Agent 上下文。
-
-用一个最小过程即可区分两种行为：
-
-```text
-主 Agent：H ──真实推理 R──> 调用 A ──使用 O──> 从 H、R、A、O 继续
-候选工作：H ──预测 A────> 提前执行 A ──> O
-```
-
-原算法要求保留主 Agent 的 R；`branch-semantics.md` §4.5 的替换却保留 candidate identity，并不要求传递分叉后的 parent context。把两条路线一概映射为 accept，可能丢失 R，或错误地用预测器的轨迹替代它。即使最终答案碰巧相同，也不能声称复现了原算法。
-
-反方向的例子来自 [ObsSpec §2.2](https://arxiv.org/html/2610.15246#S2.SS2)：真实工具可能已经修改文件；候选只在预测 observation 上提前生成下一动作。预测匹配后要保留的是生成进展与真实工具完成后的环境，不能直接切换到工具执行前分叉、尚未包含真实修改的 VM。当前 Branch §4.5 虽要求 winner 继承必要的已生效效果，但环境隔离和 Proposal 匹配本身并未提供该衔接的能力证明。
-
-#### 建议在已有语义上明确的行为
-
-以下是对已有 Reuse、Promote、Outcome 和 Branch 的调整建议，不新增名称、Decision、实体或接口：
-
-1. Reuse 允许当前调用方保留自己的执行身份和上下文，仅经受控路径采用已验证的结果；整 Branch Accept 继续表示用 candidate 的执行延续替换 parent。是否采用整 Branch，由实际选择的处置意图和能力决定，不能从“采用了投机产物”自动推出。
-2. 必须明确采用范围：只采用返回值、还采用 artifact／受管状态变化，或直接采用完整执行延续。前两者不授权复制候选的任意内存、推理上下文或全部世界状态；“保留主 Agent”也不表示接受不同世界的任意 merge。
-3. 复用前核对结果对应的真实调用、实际输入、所依赖状态和有效性；调用名、参数相等只是其中一部分。只读不意味着新鲜，TTL 也不意味着外部数据没变。无法证明时重新执行或按声明降级。
-4. Reuse 的授权必须与原调用跳过相衔接，避免候选和主路径重复产生同一受管效果。未完成工作可以继续作为正式调用的结果来源，但须明确等待、失败、取消和资源归属；不能仅把已完成结果的 Reuse 定义照搬给在飞工作。
-5. 有状态工具的返回值、artifact 和效果必须一致采用。不能返回“修改成功”却丢掉修改，也不能提交效果后再执行一次原调用。需要保留进程、会话或流的工作，不能只用 stdout／exit code 替代；缺乏移交能力时回退。
-6. 采用成功后再关闭相应候选与效果责任、清理无用执行承载，并按真实依赖处理后代。采用失败或部分完成不能报告为成功。single-winner 继续防止同一互斥选择的多个结果或世界同时生效；它不应被解释为每次采用一个结果都必须替换主 Agent，或把所有其他 Edge 的工作一律清掉。
-
-这些条件是机制的强制责任。Policy 决定希望复用什么，不能自行删除假设、把状态视作已提交、跳过清理或直接修改 Runtime。
-
-[AOSpec §4.3](https://arxiv.org/html/2608.00881#S4.SS3) 用受管文件系统版本验证执行前状态；[TomasuLLM §3.6–3.7](https://arxiv.org/html/2609.38201#S3.SS6) 则分开验证工具结果的可复用性和预测 observation 对后续轨迹的有效性。这些事实说明，采用的结果必须有自己的有效性依据。它们不要求 AScout 为任意服务自动推导读集合，也不能把状态增量回放扩大成通用世界 merge。
-
-#### 上层模型和后续文档的影响
-
-若用户接受上述方向，根模型下一层可以先按以下内容调整；此处只是候选表述，不直接改写正式设计：
-
-> 基于 Proposal 提前完成的工作，通过验证后，可以由当前执行受控采用其结果和必要的受管状态，也可以由候选的执行延续替换当前执行。采用范围必须明确，相关未决依赖、状态、效果与资源责任必须先满足条件或完成合法移交。
-
-这要求检查 mental-model §2–3 与 design-model §2.1／§3.1 的一致性，再同步 Policy dispose、Branch resolution/accept、Outcome 返回路径、效果处理及 glossary 的层间映射。具体状态转换和所需后端能力留到相应下层讨论；不能只修改术语表就宣布问题解决。
-
-当前 runtime proxy 固定环境操作没有定义通用状态增量移交／回放。纯结果 Reuse 不一定需要新增环境操作；涉及受管效果时，应先明确 Instrumentation 与 External Effect Coordinator 的责任，再判断哪些环境能力确实要扩展。Firecracker 能分支和隔离，不自动说明它已能安全拼接任意两个环境的状态。
-
-本轮结论仍是待讨论草案，不是新增目标语义，也不是编码授权。
+`Salvage` 可交付已确认的工具结果及其声明的受管文件，保留主 Agent 的推理和会话。 [PASTE §4.2](https://arxiv.org/html/2603.18897#S4.SS2)、[SPAgent §III-C](https://arxiv.org/html/2511.20048#S3.SS3) 和 [Speculative Tool Calls §3.1](https://arxiv.org/html/2512.15834#S3.SS1) 还涉及让尚未完成的工具调用成为正式结果来源。后者仍需明确调用等待、失败、取消和资源归属。受管文件移交依赖路径与冲突检查。读集合的新鲜度和外部效果验收需要由相应 Runtime 能力或验证证据表达。
 
 ### 8.8 原文核对索引与范围边界
 
@@ -322,7 +282,6 @@ W&D、AsyncFC、Execution Edits 和 Tracking State Footprints 仍按 survey 作�
 
 | # | 具体场景 | 现在哪里对不上 | 性质 | 建议／状态 | 修正后的影响 |
 |---|---|---|---|---|---|
-| 1 | 主 Agent 保留自己的推理，只采用候选提前跑出的工具结果 | Reuse 是目标语义中的结果与受管状态移交，不等同于当前 Promote 实现；当前 speculative-first 接受时切换候选 session 并取消旧父调用，不向父调用填入候选结果 | 通用 Reuse 移交尚未完整实现 | 保持 Reuse／Promote 区分，结果与声明状态移交须满足 Effect Management，不把 session Promote 冒充 Reuse | 不新增实体、Decision 或接口；树、single-winner、效果屏障不变 |
 | 2 | `j` 时刻提前算 `j+3` 的动作；`j+1` 接受了另一个候选，而 `j+3` 的结果并不依赖被拒 Proposal | §4.5 规定 Accept 后旧 parent 和 candidate 的 sibling subtrees 失效；AOSpec／DynBranch 要让独立提前结果活到自己的 Edge | 正式条款与论文行为冲突，是真正的模型问题 | **暂按 A（不覆盖 independent offer）**：保守，只支持落在被接受路径上的前缀。备选 B：扩展，允许不依赖被拒 Proposal、执行前状态版本仍匹配的候选继续存活，并在自己的 Edge 上重新参与 `match`／`dispose` | A 只改范围和 survey 表述，不改模型。B 会动 Branch 生命周期、sibling 清理、single-winner、AssumptionSet、状态版本和资源所有权，必须单独设计、实现和测试 |
 | 3 | AOSpec 的动作加执行前环境版本；DynBranch 的读集合新鲜度；TomasuLLM 的实际读依赖 | runtime proxy 只声明隔离属性，不提供状态版本、读集合或新鲜度；现有 command 粒度语义只有 workspace revision，不是通用状态版本 | 能力契约缺口 | 把状态版本和读集合做成可选能力；Policy 需要时由 Contract 校验，后端没有就拒绝或明确降级；`match` 的 evidence 携带这些事实及其来源 | 改 runtime proxy Contract、Capability View 和 `match` 输入；Branch 语义不变。实现需要后端配合，不能只靠 control plane 推断 |
 | 4 | LEAP 一次验证 `k+1` 个上下文；SpecAgent 返回 `(j, reason, replacement)`；SMC 一次接受宏 | `MatchResult` 是开放的，但没有规定一次批量结果如何拆成每条 Edge 的确认／拒绝，也没有规定验证证据自身携带哪些未决 Proposal 依赖 | 规则缺口，不是结构不支持 | **方向：不新增批量原语**：`match`／`dispose` 保持逐 Edge，由 Policy 在一次审核后把结果分发；机制按前缀顺序逐条确认／拒绝，再采用对应状态。需补修正动作入口和证据依赖；确有必要时再给 evidence 增加结构化前缀字段 | 主要改 `policy-decisions.md` §2.6／§4.2 的说明；可能扩展 `MatchResult`／validator 契约。不改树，不新增 Decision |
@@ -333,7 +292,6 @@ W&D、AsyncFC、Execution Edits 和 Tracking State Footprints 仍按 survey 作�
 
 #### 对首轮判断的更正
 
-- 不能说“Reuse 没有入口”：`policy-decisions.md` §2.7、`agent-integration.md` §2.1／§2.3、`branch-semantics.md` §5.1 都已经给了入口；问题是 `accept` 的映射没有统一。
 - 不能说“树不支持前缀”：逐步 Edge 加嵌套 Branch，再配合 §4.7 的后代重挂，可以表达“接受前两步、丢掉第三步以后”；问题是批量证据拆分和每步状态保留，不是树结构本身。
 - 不能说“SpecAgent 需要任意写后回滚”：它的真实读是 PURE，首个写是 held；可以建模为共享环境中的 candidate 读，加 `effect=block` 的首个写。问题是 weak／strong 执行配置和 `(j, reason, replacement)` 的归属。
 - 不能说“LEAP 需要另一套轨迹树”：每步一个 Edge、target 作为 Authority、按前缀 Accept 就能表达；问题是并发 target 调用、每步环境状态和批量结果拆分。
@@ -342,9 +300,8 @@ W&D、AsyncFC、Execution Edits 和 Tracking State Footprints 仍按 survey 作�
 
 #### 建议顺序
 
-1. 先统一 Reuse／accept 的映射。这是文字级调整，收益最大、风险最小，能同时解锁新旧算法的结果复用。
 2. 批量审核不新增原语：保持逐 Edge `match`／`dispose`，由 Policy 在一次审核后把结果分发；补前缀顺序、修正动作入口和证据依赖。
 3. independent offer 暂按 A：保留 sibling 失效，AOSpec／DynBranch 的独立提前结果当前不覆盖；B 留作后续扩展。
 4. 状态版本、读集合和候选执行配置作为能力契约补，不放进九类 Decision。
 5. 跨 task 缓存、DAG fan-in、engine plane、用户预览先写清不覆盖，不因“通用底座”之名扩大范围。
-6. 第 1、3、5 项方向已确认，第 2 项暂按 A，第 4 项按逐 Edge 组合；第 1 项正式文档同步待嵌套产物、成功采用表示和在飞调用归属收敛后执行。
+6. 已完成结果的 `Salvage` 语义见 §8.7。第 2 项暂按 A，第 4 项按逐 Edge 组合。

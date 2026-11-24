@@ -330,8 +330,8 @@ fn delta_from_changes(
             if let Some(target) = node.redirect.clone() {
                 redirects.push((target, change.path.clone()));
             }
-            if change.old_path.is_some() && matches!(node.kind, NodeKind::Dir) {
-                // Send omits unchanged descendants; replay still needs the moved subtree.
+            if (change.old_path.is_some() || node.opaque) && matches!(node.kind, NodeKind::Dir) {
+                // Send can omit unchanged descendants needed when replaying a replacement.
                 for (path, child) in read_layer(&upper.join(&change.path))? {
                     view.insert(format!("{}/{path}", change.path), child);
                 }

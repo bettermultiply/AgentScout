@@ -15,10 +15,9 @@
 Overlay 是第一项实现工作，不是所有 Runtime 的必需结构。当前 Backend 的 branch
 为父 upper 做独立副本（优先 reflink，失败时复制）或 btrfs 快照，子 lower 追加该
 副本；父的 upper、lower 和运行中挂载不变。overlay 的 diff 扫描分支自己的 upper
-增量；accept 做三方冲突检测并把增量重放到目标：无 live mount 时直接写 upper，
-有 live mount 时用 bwrap `--json-status-fd` 得到的内层 sandbox pid，校验 mount
-namespace 后以 `/proc/<pid>/root` dirfd 为根、通过 `openat2(RESOLVE_IN_ROOT)`
-安全重放。btrfs 只有在当前权限下 `incremental_diff=true` 时才会被选为数据面，
+增量。Full `Promote` 将候选相对分叉基线的增量写到目标，Part `Salvage` 先检查所选路径的冲突。
+无 live mount 时直接写 upper。有 live mount 时用 bwrap `--json-status-fd` 得到的内层 sandbox pid，校验 mount
+namespace，再通过 `/proc/<pid>/root` 打开受管挂载。`openat2` 把重放限制在该挂载内并禁止通过符号链接解析祖先路径。btrfs 只有在当前权限下 `incremental_diff=true` 时才会被选为数据面，
 否则降级 overlay 并在能力/日志中说明。
 
 btrfs diff/accept 共用 send dump 增量视图：从 snapshot 声明取得根前缀，按

@@ -114,5 +114,5 @@ filesystem: state_directory_overlaps_mount=["/home"] startup=refused_by_default 
 - `overlapping_state_directory_is_rejected_by_default`
 - `default_config_starts_when_state_directory_is_outside_isolated_mounts`
 - `mixed_chain_and_flatten_layout_diff_and_accept_preserve_parent_view`
-- `mixed_layout_accept_reports_conflict_and_writes_nothing`
+- `mixed_layout_salvage_reports_conflict_and_writes_nothing`
 - `fork_refuses_chain_deeper_than_max_lower_depth_before_creating_anything`

@@ -214,7 +214,7 @@ impl SpeculativeTree {
                 parent_action_id,
                 arguments,
             ),
-            AgentMessage::SpeculativeAdmissionRequest { .. } => Err(invalid_input(
+            AgentMessage::ModelInferenceBoundary { .. } | AgentMessage::SpeculativeAdmissionRequest { .. } => Err(invalid_input(
                 "speculative admission must be handled by the coordinator",
             )),
             AgentMessage::BranchReleased { branch_id } => self.handle_branch_released(&branch_id),
@@ -577,6 +577,7 @@ impl SpeculativeTree {
                 let proposal_id = format!("proposal-{branch_id}");
                 self.chance_mut(&id)?.proposals.push(ProposalRecord {
                     provenance: None,
+                    model_options: Value::Null,
                     proposal_id: proposal_id.clone(),
                     payload: result.clone(),
                 });
@@ -631,6 +632,8 @@ impl SpeculativeTree {
             }
             return Ok(());
         }
+        // Completed tools update the facts projected into Rebalance even if no status changed.
+        self.rebalance_epoch = None;
         self.tool_finished_at_ms
             .entry(branch_id.to_string())
             .or_default()
@@ -976,8 +979,7 @@ impl SpeculativeTree {
                 })?;
                 let old = self.chance_parent(self.branch(branch_id)?)
                     .ok_or_else(|| invalid_input("missing acceptance parent"))?.to_owned();
-                let salvage = record["disposition"] == "Salvage";
-                let part = salvage || record["disposition"] == "Reuse";
+                let part = record["disposition"] == "Salvage";
                 let invalidated = self.authority_branch_id.as_deref() != Some(&old)
                     && self.acceptance_target(self.branch(branch_id)?).is_none();
                 if !part {
@@ -997,22 +999,22 @@ impl SpeculativeTree {
                     );
                 }
                 if part {
-                    let disposition = if salvage { "Salvage" } else { "Reuse" };
-                    if !salvage {
-                        self.record_accepted_chance(branch_id, "Reuse applied")?;
+                    let accepted = record["accepted"] == true;
+                    if accepted {
+                        self.record_accepted_chance(branch_id, "Salvage applied")?;
                     }
-                    self.queue_disposition_settlement(branch_id, !salvage, disposition)?;
+                    self.queue_disposition_settlement(branch_id, accepted, "Salvage")?;
                     let mut commands = self.discard_candidate_subtree(
                         branch_id,
-                        if salvage { DiscardedReason::MatchRejected } else { DiscardedReason::NotSelected },
-                        disposition,
+                        if accepted { DiscardedReason::NotSelected } else { DiscardedReason::MatchRejected },
+                        "Salvage",
                         true,
                     )?;
                     let siblings: Vec<_> = self
                         .pending_candidates()
                         .into_iter()
                         .filter(|id| {
-                            self.branches[id].chance_id == self.branches[branch_id].chance_id
+                            accepted && self.branches[id].chance_id == self.branches[branch_id].chance_id
                         })
                         .collect();
                     for sibling in siblings {

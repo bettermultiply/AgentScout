@@ -127,6 +127,7 @@ const activeActions = new Map(), reportedActions = new Set();
 const aborting = new Set();
 const modelActions = new Map();
 const modelForks = new Map();
+const yieldCandidates = new Map();
 const modelHolds = new Map();
 const modelResultHolds = new Map();
 const toolResultHolds = new Map<string, Map<string, PromiseWithResolvers<void>>>();
@@ -471,11 +472,13 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     await acceptanceBoundary(branch, signal);
     syncTranscript(branch);
     if(saving||closing||cancelled.has(branch)||signal?.aborted)throw Error('Model inference cancelled before execution');
-    const actionId=fork && fork.steps === 0 ? fork.operation_id : `model-${nextAction++}`;
+    const forkOperation = fork?.steps === 0 ? fork.operation_id : undefined;
+    const actionId = forkOperation ?? `model-${nextAction++}`;
     const candidateModelAction=Boolean(fork && fork.steps < fork.maxSteps);
     const modelArguments={model:`${modelValue.provider}/${modelValue.id}`,message_count:context.messages.length};
     const contractContext={...modelArguments,runtime_capabilities:runtimeTools};
-    const op={kind:'model_inference',name:'model',produces_result:true,result_pending:true,arguments:{model:modelArguments.model},branch_id:branch,predicting:Boolean(fork),authority:branch===authority};
+    const predictingModel = fork?.operation_id !== undefined;
+    const op={kind:'model_inference',name:'model',produces_result:true,result_pending:true,arguments:{model:modelArguments.model},branch_id:branch,predicting:predictingModel,authority:branch===authority};
     op.has_predictor=await access.hasPredictor(branch);
     const hold=Promise.withResolvers();modelHolds.set(key(branch,actionId),hold);
     const disposition=await access.beforeAction({
@@ -489,9 +492,9 @@ async function beforeModelInference(branch, modelValue, context, signal) {
         admit:()=>{
             // Extent can park this hook until the candidate becomes Authority.
             op.authority=branch===authority;
-            op.predicting=modelForks.has(branch);
+            op.predicting=modelForks.get(branch)?.operation_id !== undefined;
             if (op.authority) {
-                const current=sessions.get(branch).model;
+                const current=sessions.get(branch).model ?? modelValue;
                 contractContext.model=modelArguments.model=op.arguments.model=`${current.provider}/${current.id}`;
             }
             return !candidateBindings.has(branch) && !op.predicting;
@@ -502,10 +505,13 @@ async function beforeModelInference(branch, modelValue, context, signal) {
             checkpoints.set(key(branch,actionId),{saved,checkpoint,treeTail:tree.assertCheckpoint(branch,saved),manager,model:true});
             return {checkpoint};
         },
-        admitted:Boolean(fork && fork.steps === 0),
+        admitted:Boolean(forkOperation),
         signal,
     });
-    if(disposition.kind==='admit')await new Promise((resolve,reject)=>{
+    const settleYield = disposition.kind !== 'admit' && branch === authority && yieldCandidates.size > 0
+        && [...yieldCandidates.values()].includes(branch);
+    if (settleYield) await report({message:'model_inference_boundary',task_id:taskId,branch_id:branch,action_id:actionId});
+    if(disposition.kind==='admit' || settleYield)await new Promise((resolve,reject)=>{
         const abort=()=>reject(Error('Model admission cancelled'));
         signal?.addEventListener('abort',abort,{once:true});
         hold.promise.then(resolve,reject).finally(()=>signal?.removeEventListener('abort',abort));
@@ -802,6 +808,7 @@ async function handle(command) {
                     commandPrefix,commandAhead:[...commandAhead],
                     suspendedHooks:[...suspendedHooks],candidateSetups:[...candidateSetups],
                     candidateBindings:[...candidateBindings.keys()],
+                    yieldCandidates:[...yieldCandidates],
                     modelForks:[...modelForks].map(([branch,fork])=>[branch,{authorityModel:fork.authorityModel,authorityThinking:fork.authorityThinking,candidateModel:fork.candidateModel,candidateThinking:fork.candidateThinking,candidateGuidance:fork.candidateGuidance,maxSteps:fork.maxSteps,steps:fork.steps,operation_id:fork.operation_id}]),
                     interruptedBranches:[...interruptedBranches],
                     toolResultHolds:[...toolResultHolds].map(([branch, holds]) => [branch, [...holds.keys()]]),
@@ -870,6 +877,7 @@ async function handle(command) {
                 for(const id of record.candidateBindings??[]) {
                     if(!ascProxy.has(id))candidateBindings.set(id,Promise.withResolvers());
                 }
+                for(const [candidate,parent] of record.yieldCandidates??[])yieldCandidates.set(candidate,parent);
                 for(const [branch,fork] of record.modelForks??[])modelForks.set(branch,{...fork,maxSteps:fork.maxSteps??Infinity});
                 for(const [id,setup] of record.candidateSetups??[]){
                     const execution_access=command.execution_accesses?.[id];
@@ -987,20 +995,35 @@ async function handle(command) {
             candidateSetups.set(branch,structuredClone(command));
             const parent=sessions.get(command.parent_branch_id),checkpoint=checkpoints.get(key(command.parent_branch_id,command.operation_id));
             if(!parent||!checkpoint||checkpoint.checkpoint.adapter!==command.checkpoint?.adapter||checkpoint.checkpoint.kind!==command.checkpoint?.kind||checkpoint.checkpoint.opaqueId!==command.checkpoint?.opaqueId)throw Error('Candidate requires its registered checkpoint');
-            if(command.prediction?.predict==='branch_model'){
-                const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail,false);
-                const resolved=resolveCliModel({cliModel:command.prediction.model,cliThinking:parent.thinkingLevel,modelRuntime:parent.modelRuntime});
-                if(resolved.error||!resolved.model)throw Error(resolved.error??'Unknown predictor model');
-                const candidateThinking=command.prediction?.thinking??parent.thinkingLevel;
-                if(!['off','minimal','low','medium','high','xhigh'].includes(candidateThinking))throw Error('Invalid candidate thinking level');
+            const modelPrediction = command.prediction?.predict === 'branch_model';
+            const options = modelPrediction ? command.prediction : command.model_options;
+            const createCandidateSession = async manager => {
+                const candidateThinking = options?.thinking ?? parent.thinkingLevel;
+                if (options?.thinking !== undefined && !['off','minimal','low','medium','high','xhigh'].includes(candidateThinking)) throw Error('Invalid candidate thinking level');
+                let candidateModel = parent.model;
+                if (options?.model !== undefined) {
+                    const resolved = resolveCliModel({cliModel:options.model,cliThinking:candidateThinking,modelRuntime:parent.modelRuntime});
+                    if (resolved.error || !resolved.model) throw Error(resolved.error ?? 'Unknown predictor model');
+                    candidateModel = resolved.model;
+                }
                 await access.control(command);
-                const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:resolved.model,modelRuntime:parent.modelRuntime,thinkingLevel:candidateThinking,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
+                const {session} = await createAgentSession({...filesystemToolSelection,cwd:command.workspace,
+                    sessionManager:manager,model:candidateModel,modelRuntime:parent.modelRuntime,
+                    thinkingLevel:candidateThinking,customTools:tools(branch),
+                    beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
                 bindInteraction(session,branch);
-                if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
-                modelForks.set(branch,{authorityModel:parent.model,authorityThinking:parent.thinkingLevel,
-                    candidateModel:resolved.model,candidateThinking,maxSteps:command.prediction.max_candidate_model_steps ?? Infinity,
-                    candidateGuidance:command.prediction.candidate_guidance,
-                    steps:0,operation_id:command.operation_id,session});
+                if (options && !closing && !cancelled.has(branch)) {
+                    modelForks.set(branch,{authorityModel:parent.model,authorityThinking:parent.thinkingLevel,
+                        candidateModel,candidateThinking,candidateGuidance:options.candidate_guidance,
+                        maxSteps:options.max_candidate_model_steps ?? Infinity,
+                        steps:0,operation_id:modelPrediction ? command.operation_id : undefined,session});
+                }
+                return session;
+            };
+            if(modelPrediction){
+                const manager=tree.branches.get(branch)?.manager??tree.createBranch(branch,command.workspace,checkpoint.manager,checkpoint.treeTail,false);
+                const session = await createCandidateSession(manager);
+                if(closing||cancelled.has(branch)){await stopSession(branch);return}
                 candidateSetups.delete(branch);
                 await report({message:'branch_created',branch_id:branch});await report({message:'branch_started',branch_id:branch});await report({message:'branch_ready',branch_id:branch});
                 if(!saving&&!recoveryPaused)executeTurn(session,branch,()=>session.continue());else interruptedBranches.add(branch);return;
@@ -1014,12 +1037,7 @@ async function handle(command) {
                 }
                 const manager = tree.branches.get(branch)?.manager ??
                     tree.createBranch(branch, command.workspace, checkpoint.manager, checkpoint.treeTail, false);
-                await access.control(command);
-                const {session} = await createAgentSession({...filesystemToolSelection, cwd: command.workspace,
-                    sessionManager: manager, model: parent.model, modelRuntime: parent.modelRuntime,
-                    thinkingLevel: parent.thinkingLevel, customTools: tools(branch),
-                    beforeModelInference: (modelValue, context, signal) => beforeModelInference(branch, modelValue, context, signal)});
-                bindInteraction(session, branch);
+                const session = await createCandidateSession(manager);
                 if (closing || cancelled.has(branch)) { await stopSession(branch); return; }
                 const assistant = {role: 'assistant', api: parent.model.api, provider: parent.model.provider,
                     model: parent.model.id, stopReason: 'toolUse', timestamp: Date.now(),
@@ -1066,10 +1084,8 @@ async function handle(command) {
             }
             const pairedEntryIds=paired.map(entry=>tree.append(branch,entry));
             tree.inputs.set(branch,{parent:command.parent_branch_id,source:checkpoint.manager,operation:command.operation_id,checkpoint:checkpoint.treeTail,prediction:pairedEntryIds[paired.findIndex(e=>e.toolCallId===command.operation_id)],pairedTail:pairedEntryIds.at(-1),operations:paired.map(e=>e.toolCallId)});
-            await access.control(command);
-            const {session}=await createAgentSession({...filesystemToolSelection,cwd:command.workspace,sessionManager:manager,model:parent.model,modelRuntime:parent.modelRuntime,thinkingLevel:parent.thinkingLevel,customTools:tools(branch),beforeModelInference:(modelValue,context,signal)=>beforeModelInference(branch,modelValue,context,signal)});
-            bindInteraction(session,branch);
-            if(closing||cancelled.has(branch)){sessions.set(branch,session);await stopSession(branch);return}
+            const session = await createCandidateSession(manager);
+            if(closing||cancelled.has(branch)){await stopSession(branch);return}
             candidateSetups.delete(branch);
             await report({message:'branch_created',branch_id:branch});
             for(let i=0;i<paired.length;i++)await report({message:'transcript',branch_id:branch,entry:paired[i],session_entry_id:pairedEntryIds[i]});
@@ -1096,6 +1112,9 @@ async function handle(command) {
                 toolHolds.get(actionKey)?.resolve();modelHolds.get(actionKey)?.resolve();return;
             }
             if (command.outcome?.phase === 'continue') {
+                if (command.outcome.yield_candidate && !cancelled.has(command.outcome.yield_candidate)) {
+                    yieldCandidates.set(command.outcome.yield_candidate, branch);
+                }
                 if (command.outcome.notification) {
                     const notification = command.outcome.notification;
                     try {
@@ -1206,8 +1225,9 @@ async function handle(command) {
                 const fork = modelForks.get(branch);
                 if (fork) {
                     modelForks.delete(branch);
-                    await fork.session.setModel(fork.authorityModel);
-                    await fork.session.setThinkingLevel(fork.authorityThinking);
+                    const authoritySession = sessions.get(parent);
+                    await fork.session.setModel(authoritySession?.model ?? fork.authorityModel);
+                    await fork.session.setThinkingLevel(authoritySession?.thinkingLevel ?? fork.authorityThinking);
                 }
             }
             await access.control(command);
@@ -1244,6 +1264,7 @@ async function handle(command) {
             finally { aborting.delete(branch); }
             return;
         case 'discard': {
+            yieldCandidates.delete(branch);
             modelForks.delete(branch);
             candidateBindings.get(branch)?.resolve();candidateBindings.delete(branch);
             interaction.cancel(branch);cancelled.add(branch);reconnectControllers.get(branch)?.abort();candidateSetups.delete(branch);releaseCandidateWaiters(branch);
@@ -1251,6 +1272,7 @@ async function handle(command) {
             await sessions.get(branch)?.abort();await ascProxy.cancel(branch);await finishActions(branch,'cancelled');tree.settle();return;
         }
         case 'cleanup':
+            yieldCandidates.delete(branch);
             modelForks.delete(branch);
             candidateBindings.get(branch)?.resolve();candidateBindings.delete(branch);
             interaction.cancel(branch);

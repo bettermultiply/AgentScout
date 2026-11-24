@@ -34,6 +34,7 @@ pub(crate) fn apply_layer(
                 view.insert(path, node);
             }
             _ => {
+                remove_children(view, &path);
                 view.insert(path, node);
             }
         }

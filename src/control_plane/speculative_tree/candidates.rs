@@ -7,7 +7,7 @@ impl SpeculativeTree {
         chance_id: &str,
         prediction: Value,
     ) -> io::Result<AgentCommand> {
-        self.start_candidate_with_provenance(chance_id, prediction, None)
+        self.start_candidate_with_provenance(chance_id, prediction, None, Value::Null)
     }
 
     pub(super) fn start_candidate_with_provenance(
@@ -15,8 +15,9 @@ impl SpeculativeTree {
         chance_id: &str,
         prediction: Value,
         provenance: Option<Value>,
+        model_options: Value,
     ) -> io::Result<AgentCommand> {
-        self.create_candidate(chance_id, prediction, provenance, false)
+        self.create_candidate(chance_id, prediction, provenance, model_options, false)
     }
 
     pub fn start_model_candidate(
@@ -29,7 +30,7 @@ impl SpeculativeTree {
                 "branch_model requires a model inference boundary",
             ));
         }
-        self.create_candidate(chance_id, prediction, None, true)
+        self.create_candidate(chance_id, prediction, None, Value::Null, true)
     }
 
     fn create_candidate(
@@ -37,6 +38,7 @@ impl SpeculativeTree {
         chance_id: &str,
         prediction: Value,
         provenance: Option<Value>,
+        model_options: Value,
         deferred: bool,
     ) -> io::Result<AgentCommand> {
         let chance = self.chance(chance_id)?.clone();
@@ -73,6 +75,7 @@ impl SpeculativeTree {
                 proposal_id: proposal_id.clone(),
                 payload: prediction.clone(),
                 provenance,
+                model_options,
             });
         }
         chance_record.branch_ids.push(branch_id.clone());
@@ -133,6 +136,7 @@ impl SpeculativeTree {
             tool_name: chance.tool_name.clone(),
             workspace: self.workspace(),
             prediction,
+            model_options: self.branch_proposal(branch_id).map_or(Value::Null, |proposal| proposal.model_options.clone()),
             checkpoint: chance.checkpoint.clone(),
             command_id: format!("start-{branch_id}"),
             generation: branch.generation,
@@ -186,8 +190,19 @@ impl SpeculativeTree {
             return false;
         }
         if branch.yield_only {
-            return branch.status.is_decidable()
-                && self.deferred_validations.get(candidate) != Some(&self.yield_snapshot(candidate));
+            return (branch.status.is_decidable() || branch.status == BranchStatus::Blocked(BlockedReason::Rebalanced))
+                && (self.yield_candidate_stopped(branch)
+                    || self.chance_parent(branch).is_some_and(|parent| {
+                        self.model_inference_boundary.as_ref().is_some_and(|(owner, _, _)| owner == parent)
+                            || self.authority_branch_id.as_deref() == Some(parent)
+                                && self.chances.values().any(|chance| {
+                                    chance.parent_branch_id == parent
+                                        && chance.speculation_kind == Some(ActionKind::ModelInference)
+                                        && chance.authority == AuthorityState::NotRequested
+                                        && self.chance_waiting_live(chance)
+                                })
+                    }))
+                && self.yield_pending(candidate);
         }
         let chance = self
             .chances

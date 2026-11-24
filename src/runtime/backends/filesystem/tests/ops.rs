@@ -270,10 +270,46 @@ fn accept_replay_rolls_back_every_injected_failure() {
 }
 
 #[test]
+fn full_accept_overwrites_candidate_delta_and_preserves_target_only_paths() {
+    let root = temp();
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let mut config = overlapping_state_config(root.path().join("state"));
+    config.force_overlay = true;
+    config.isolated_paths = Some(vec![workspace.clone()]);
+    let backend = FilesystemBackend::new(config).unwrap();
+    backend.establish("root").unwrap();
+    write_upper(&backend, "root", &workspace.join("shared"), "base");
+    write_upper(&backend, "root", &workspace.join(".pytest-work/base"), "base");
+    backend.fork("root", "child", &[]).unwrap();
+    write_upper(&backend, "root", &workspace.join("shared"), "authority version");
+    write_upper(&backend, "root", &workspace.join(".pytest-work/old"), "old");
+    write_upper(&backend, "root", &workspace.join("authority-only"), "keep");
+    write_upper(&backend, "child", &workspace.join("shared"), "candidate");
+    write_upper(&backend, "child", &workspace.join(".pytest-work/new"), "new");
+    set_test_xattr(&upper_at(&backend, "child", &workspace.join(".pytest-work")), "user.overlay.opaque", b"y");
+    backend.suspend("root").unwrap();
+    let base = FilesystemBackend::base_snapshot_id_for_child("child");
+    let partial = backend.accept(&base, "child", "root", &[PathScope::Workspace], None, None).unwrap();
+    assert!(!partial.confirmation.published);
+    assert!(partial.conflicts.iter().any(|c| c.path.ends_with("/shared")));
+    assert!(partial.conflicts.iter().any(|c| c.kind == "opaque_replace" && c.path.ends_with("/.pytest-work")));
+    let full = backend.accept(&base, "child", "root", &[], None, None).unwrap();
+    assert!(full.confirmation.published);
+    let target = |path: &str| upper_at(&backend, "root", &workspace.join(path));
+    assert_eq!(fs::read(target("shared")).unwrap(), b"candidate");
+    assert_eq!(fs::read(target("authority-only")).unwrap(), b"keep");
+    assert_eq!(fs::read(target(".pytest-work/new")).unwrap(), b"new");
+    assert!(!target(".pytest-work/old").exists());
+    assert_eq!(get_xattr(&target(".pytest-work"), "user.overlay.opaque").as_deref(), Some(b"y".as_slice()));
+}
+
+#[test]
 fn replay_directory_replacement_rolls_back() {
     let root = temp();
     let upper = root.path().join("upper");
     fs::create_dir_all(upper.join("replace")).unwrap();
+    set_test_xattr(&upper.join("replace"), "user.overlay.opaque", b"y");
     fs::write(upper.join("replace/old.txt"), b"old").unwrap();
     let source = root.path().join("source.txt");
     fs::write(&source, b"new").unwrap();
@@ -327,7 +363,39 @@ fn replay_directory_replacement_rolls_back() {
     let (failures, _) = journal.rollback();
     assert!(failures.is_empty(), "rollback failed: {failures:?}");
     assert_eq!(fs::read(upper.join("replace/old.txt")).unwrap(), b"old");
+    assert_eq!(get_xattr(&upper.join("replace"), "user.overlay.opaque").as_deref(), Some(b"y".as_slice()));
     assert!(!upper.join("replace/new.txt").exists());
+}
+
+#[test]
+fn mounted_replay_replaces_types_and_rolls_back_opaque_directories() {
+    let scratch = temp();
+    let target = scratch.path().join("target");
+    let source = scratch.path().join("source");
+    write(&target, "cache/authority-only", "authority cache");
+    write(&target, "file-to-dir", "authority file");
+    write(&target, "dir-to-file/old", "authority directory");
+    write(&source, "cache/candidate", "candidate cache");
+    write(&source, "file-to-dir/new", "candidate directory");
+    write(&source, "dir-to-file", "candidate file");
+    set_test_xattr(&source.join("cache"), "user.overlay.opaque", b"y");
+    let delta = read_layer(&source).unwrap();
+    let mount = SafeRoot::open(std::process::id()).unwrap().mount(target.to_str().unwrap()).unwrap();
+    let mut journal = ReplayJournal::new(scratch.path().join("journal")).unwrap();
+    assert!(replay_delta(&ReplayRoot::Mount(&mount), &delta, &[], &[], &mut journal, &target, Some(4)).is_err());
+    let (failures, _) = journal.rollback();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(fs::read(target.join("cache/authority-only")).unwrap(), b"authority cache");
+    assert_eq!(fs::read(target.join("file-to-dir")).unwrap(), b"authority file");
+    assert_eq!(fs::read(target.join("dir-to-file/old")).unwrap(), b"authority directory");
+
+    let mut journal = ReplayJournal::new(scratch.path().join("journal")).unwrap();
+    replay_delta(&ReplayRoot::Mount(&mount), &delta, &[], &[], &mut journal, &target, None).unwrap();
+    journal.cleanup();
+    assert!(!target.join("cache/authority-only").exists());
+    assert_eq!(fs::read(target.join("cache/candidate")).unwrap(), b"candidate cache");
+    assert_eq!(fs::read(target.join("file-to-dir/new")).unwrap(), b"candidate directory");
+    assert_eq!(fs::read(target.join("dir-to-file")).unwrap(), b"candidate file");
 }
 
 #[test]
@@ -509,17 +577,14 @@ fn round_trip(root: ScratchDir, expect_btrfs: bool) {
         write_upper(&backend, "root", &conflicting_path, "authority wins");
         let target = BackendContext::new("root");
         let rejected = backend
-            .accept_environment_state(&target, "child", true, None)
+            .accept_environment_state(&target, "child", false, Some(&crate::protocol::contract::PartSelection::Results {
+                results: vec![crate::protocol::contract::PartResult {
+                    id: "selected".into(), files: vec![conflicting_path.display().to_string()],
+                }],
+            }))
             .unwrap();
         assert!(rejected.acceptance.is_none());
         assert!(!rejected.conflicts.is_empty());
-        let downgraded = backend
-            .accept_environment_state(&target, "child", true, Some(&crate::protocol::contract::PartSelection::Scopes(vec![])))
-            .unwrap();
-        assert_eq!(
-            downgraded.acceptance,
-            Some(crate::protocol::contract::Acceptance::Part { scopes: vec![] })
-        );
         assert_eq!(
             fs::read_to_string(upper_at(&backend, "root", &conflicting_path)).unwrap(),
             "authority wins"
@@ -723,7 +788,7 @@ fn live_target_accept_replays_through_inner_sandbox_pid() {
     backend
         .fork("root", "child", &[PathScope::Workspace])
         .unwrap();
-    assert!(run_in_environment(&backend, "child", &base, "rm -f x"));
+    assert!(run_in_environment(&backend, "child", &base, "rm -f x; printf candidate > zz"));
     let base_snapshot = FilesystemBackend::base_snapshot_id_for_child("child");
     let started = std::time::Instant::now();
     let (target, target_pid, target_ns) = spawn_in_environment(
@@ -731,7 +796,7 @@ fn live_target_accept_replays_through_inner_sandbox_pid() {
         "root",
         &base,
         "test -e x || exit 20; printf ready > .accept-ready; \
-             while [ -e x ]; do sleep 0.05; done; echo ASCOUT_ACCEPT_DELETION_OBSERVED; exit 0",
+             while [ ! -e zz ]; do sleep 0.05; done; test ! -e x; exit $?",
     );
     let spawned = started.elapsed();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -763,6 +828,13 @@ fn live_target_accept_replays_through_inner_sandbox_pid() {
         )
         .unwrap_err();
     assert!(error.message.contains("host mount namespace"));
+
+    backend.inject_replay_failure_after(Some(1));
+    let failed = backend.accept(&base_snapshot, "child", "root", &[], Some(target_pid), Some(target_ns)).unwrap_err();
+    assert!(!failed.is_partial(), "{failed}");
+    let visible_file = format!("/proc/{target_pid}/root{}/x", base.display());
+    assert_eq!(fs::read(&visible_file).unwrap(), b"base");
+    backend.inject_replay_failure_after(None);
 
     let accept = backend
         .accept(
@@ -1155,13 +1227,13 @@ fn mixed_chain_and_flatten_layout_diff_and_accept_preserve_parent_view() {
 }
 
 #[test]
-fn mixed_layout_accept_reports_conflict_and_writes_nothing() {
+fn mixed_layout_salvage_reports_conflict_and_writes_nothing() {
     let root = btrfs_temp();
     let base = root.path().join("base");
     fs::create_dir_all(&base).unwrap();
     let Some((_state, backend)) = layout_backend(&base, 32) else {
         eprintln!(
-            "SKIP mixed_layout_accept_reports_conflict_and_writes_nothing: no writable mount separate from workspace"
+            "SKIP mixed_layout_salvage_reports_conflict_and_writes_nothing: no writable mount separate from workspace"
         );
         return;
     };
@@ -1190,7 +1262,7 @@ fn mixed_layout_accept_reports_conflict_and_writes_nothing() {
     let grandchild_base = FilesystemBackend::base_snapshot_id_for_child("grandchild");
     backend.suspend("child1").unwrap();
     let accepted = backend
-        .accept(&grandchild_base, "grandchild", "child1", &[], None, None)
+        .accept(&grandchild_base, "grandchild", "child1", &[PathScope::Workspace], None, None)
         .unwrap();
     assert!(
         accepted

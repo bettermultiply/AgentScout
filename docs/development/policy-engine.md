@@ -199,7 +199,7 @@ def extent(data, *, policy_config, capabilities):
 | `launch` | `chance_context`、`authority_state`、`candidate_view` | `scheduling_context` | 布尔值 |
 | `effect` | `effect_descriptor`、`context` | 无 | `allow`、`deny`、`block`、`default`、`stage`、`simulate`，可附 `reason` |
 | `match` | `proposal`、`evidence`、`match_context` | `outcome` | 四类 `verdict`，可附数字 `score` 和对象 `details` |
-| `dispose` | `branch`、`resolution`、`context` | 无 | `Promote`、`Reuse`、`Salvage` 加 `Discard`，或 `Discard`。`indeterminate`／`error`／`extent_reached` 可返回空动作列表 |
+| `dispose` | `branch`、`resolution`、`context` | 无 | `Promote`、`Salvage`（未接受时须加 `Discard`）、`Yield` 或 `Discard`。`indeterminate`／`error`／`extent_reached` 可返回空动作列表 |
 
 `op` 包含 `kind`、`produces_result`、`result_pending`、`has_predictor`；后三者是布尔值。`process_state` 至少包含非负整数 `steps_completed` 和字符串 `phase`。`frontier_view` 每项有 `chance_id`；active／paused 视图每项有 `branch_id`，集合不得重叠。`assumption_set` 是无重复的 `(chance_id, proposal_id)` 引用数组。
 
@@ -236,7 +236,7 @@ def extent(data, *, policy_config, capabilities):
 
 `admit` 的 `op` 提供动作标识、参数、结果是否待定，以及预测和权威状态。`admit.feasibility_pass` 还接收 `is_candidate`、`assumption_depth`、`steps_completed`、按工具名统计的成功与失败次数 `tool_counts`、最近最多 16 条已完成动作 `recent_actions`。候选继承父分支的工具统计与最近动作，自己的步数从 0 开始。保存与恢复保留这些值。
 
-`predict` 只在声明 `history` 时接收最近最多 16 条有界历史摘要。`match` 只在声明 `outcome` 时接收顶层实际结果。`dispose` 的 `candidate_results` 保留已经报告的工具标识、参数和详情。`effect` 仅在候选工具边界求值，隔离能力与 Policy 同时允许时才执行工具。`block` 挂起至放行、丢弃或清理。`rebalance` 按 Policy 返回的分支标识执行 pause、resume、preempt。
+`predict` 只在声明 `history` 时接收有界历史摘要，条数由声明中的 `max_entries` 限制。`match` 只在声明 `outcome` 时接收顶层实际结果。`dispose` 的 `candidate_results` 保留已经报告的工具标识、参数和详情。`effect` 仅在候选工具边界求值，隔离能力与 Policy 同时允许时才执行工具。`block` 挂起至放行、丢弃或清理。`rebalance` 按 Policy 返回的分支标识执行 pause、resume、preempt。
 
 嵌套 Chance 使用它所属父 Branch 的真实执行和等待点来验证。内层 Full 可把候选状态合入仍处于投机的父环境，保留胜者 session 及其后代，并让胜者承接原父 Branch 的外层 Chance。Part 只把回执确认的结果交给原父 session，并抛弃内层候选及后代。两者都保留祖先未决 Proposal，且祖先否定仍会丢弃相应的投机延续。文件级结果依赖、暂停顺序和后端限制见 [Runtime 生命周期](runtime-lifecycle.md#full-与-part-接受)。
 
@@ -255,4 +255,10 @@ Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Pol
 
 调用方迁移：主入口、回放入口和五份本地 fixture 已切换到配置/session 路径，fixture 使用私有 HOME 配置、不写用户主目录。fixture 在启动 Runtime 前同步复制 workspace，消除 stderr 通知后的复制竞态。恢复中的 `launch evaluation: Broken pipe` 根因是缓存 worker 的 `--die-with-parent` 随创建线程退出杀死进程；由 Worker 的 Drop 负责清理后，新增线程退出回归测试通过（原实现先复现失败，日志 `/tmp/ascout-worker-before.log`）。最终 `cargo check --all-targets`、当时的 Rust 测试集 通过；`node --test tests/recovery-active.mjs tests/recovery-filesystem.mjs` 6/6 通过，日志 `/tmp/ascout-recovery-final.log`。回放新 session 必须选 `--policy NAME`，不加载源 session artifact；下游外部脚本仍需按新接口核查。
 
-`predict.chance_context` 携带工具参数，`process_context` 携带 `observation` 与 `steps_completed`。策略可用 `history: {mode: transcript_tail, max_entries: 30}` 声明历史投影，或用 `match.outcome: tool_output` 声明真实输出。`rebalance` 的每条分支视图提供 `branch_id`、`chance_id`、`steps_completed`、`tool_counts`、`tokens_used` 和 `age_ms`。
+`predict.chance_context` 携带工具参数，`process_context` 携带 `observation`、`steps_completed` 和 `authority_active_tools`。策略可用 `history: {mode: transcript_tail, max_entries: 30}` 声明历史投影，或用 `match.outcome: tool_output` 声明真实输出。`rebalance` 的分支视图另提供 `started_at_ms`（毫秒整数）与 `speculation_kind`（`model_inference` 或 `tool_execution`）。`scheduling_context.authority_recent_actions` 复用有界的最近已完成动作摘要，包含 `timestamp_ms`、`tool_name`、`arguments` 和 `status`。`authority_active_tools` 仅列出正在运行的工具及其 `tool_name` 和 `arguments`。阶段识别和是否抢占由 Policy 决定。工具完成会刷新调度事实，即使分支状态没有变化。
+
+### Coding 策略的三阶段循环
+
+读取探索默认用快模型定位代码。只交付扣除权威已请求部分后的只读成果，运行中用 `Yield`，停止或抢占时用 `Salvage` 回收剩余通知。权威完成修改、候选工具失败达到阈值或新机会需要容量时，策略按调度事实回收旧分支。
+
+权威修改后若还没有可用的工作区主验证命令，默认不启动候选。找到命令后，策略可直接启动工具并停在下一次模型推理之前。对验证边界的结果预测使用普通工具输出样式，候选可继续推理和修改，直到再次验证、触发退化止损或达到步数上限。命中的独立小模型失败分支只交付可用成果并保留权威会话。批量通知按完整文件或命令输出计入预算，重复验证命令按签名去重。

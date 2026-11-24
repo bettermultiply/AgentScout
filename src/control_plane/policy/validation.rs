@@ -446,7 +446,7 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                 && result.get("max_candidate_model_steps").is_none_or(|steps| {
                     steps.as_u64().is_some_and(|steps| steps >= 1)
                 })
-                && result.get("candidate_guidance").is_none_or(nonblank)
+                && valid_candidate_model(result)
                 && result.get("candidates").is_none_or(|count| {
                     count.as_u64().is_some_and(|count| (1..=4).contains(&count))
                 })
@@ -457,8 +457,8 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                             p.as_object().is_some_and(|m| {
                                 m.contains_key("payload")
                                     && m.keys()
-                                        .all(|k| ["payload", "provenance"].contains(&k.as_str()))
-                            })
+                                        .all(|k| ["payload", "provenance", "model", "thinking", "candidate_guidance"].contains(&k.as_str()))
+                            }) && valid_candidate_model(p)
                         })
                     }))
                 || (result["abstain"] == true && result.as_object().is_some_and(|m| {
@@ -504,10 +504,9 @@ pub(super) fn validate_result(decision: Decision, data: &Value, result: &Value) 
                         Some("Promote") => resolution == "accepted" && actions.len() == 1
                             && first.as_object().unwrap().keys().all(|key| ["intent", "notification"].contains(&key.as_str()))
                             && first.get("notification").is_none_or(nonblank),
-                        Some("Reuse") => resolution == "accepted" && valid_partial(first)
-                            && (actions.len() == 1 || actions[1..] == [discard]),
-                        Some("Salvage") => resolution != "accepted" && valid_partial(first)
-                            && actions[1..] == [discard],
+                        Some("Salvage") => valid_partial(first)
+                            && (actions[1..] == [discard]
+                                || resolution == "accepted" && actions.len() == 1),
                         Some("Yield") => resolution != "accepted" && actions.len() == 1
                             && first.as_object().is_some_and(|fields| fields.len() == 2)
                             && first["results"].as_array().is_some_and(|results| {
@@ -558,13 +557,21 @@ fn nonblank(value: &Value) -> bool {
     value.as_str().is_some_and(|text| !text.trim().is_empty())
 }
 
+fn valid_candidate_model(value: &Value) -> bool {
+    value.get("model").is_none_or(Value::is_string)
+        && value.get("thinking").is_none_or(|level| {
+            matches!(level.as_str(), Some("off" | "minimal" | "low" | "medium" | "high" | "xhigh"))
+        })
+        && value.get("candidate_guidance").is_none_or(nonblank)
+}
+
 fn valid_partial(action: &Value) -> bool {
     let fields = action.as_object().unwrap();
     let mut seen = BTreeSet::new();
     if let Some(results) = action["results"].as_array() {
         return fields.len() == 2 && !results.is_empty() && results.iter().all(|result| {
             result.as_object().is_some_and(|fields| fields.len() == 2
-                || (fields.len() == 3 && matches!(action["intent"].as_str(), Some("Salvage" | "Yield")) && result["files"] == serde_json::json!([])))
+                || (fields.len() == 3 && result["files"] == serde_json::json!([])))
                 && result["id"].as_str().is_some_and(|id| !id.trim().is_empty() && seen.insert(id))
                 && nonblank(&result["notification"])
         });
@@ -603,6 +610,35 @@ pub(super) fn ids(value: &Value, key: &str) -> io::Result<BTreeSet<String>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tool_proposals_validate_candidate_model_options() {
+        let mut prediction = json!({"generation":"batch", "proposals":[{
+            "payload": "predicted output", "model":"fixture/candidate", "thinking":"low", "candidate_guidance":"focus"
+        }]});
+        assert!(validate_result(Decision::Predict, &Value::Null, &prediction).is_ok());
+        for (field, invalid) in [("model", json!(3)), ("thinking", json!("maximum")), ("candidate_guidance", json!(" "))] {
+            let options = prediction["proposals"][0].as_object_mut().unwrap();
+            let original = options.insert(field.into(), invalid).unwrap();
+            assert!(validate_result(Decision::Predict, &Value::Null, &prediction).is_err());
+            prediction["proposals"][0][field] = original;
+        }
+    }
+
+    #[test]
+    fn salvage_acceptance_and_recovery_use_the_same_intent() {
+        let salvage = json!({"intent":"Salvage", "scopes":["workspace"]});
+        let valid = |resolution, actions| validate_result(Decision::Dispose, &json!({"resolution":resolution}), &json!({"actions":actions})).is_ok();
+        assert!(valid("accepted", json!([salvage])));
+        for resolution in ["rejected", "preempted", "extent_reached"] {
+            assert!(valid(resolution, json!([salvage, {"intent":"Discard"}])));
+            assert!(!valid(resolution, json!([salvage])));
+        }
+        let notification_only = json!({"intent":"Salvage", "results":[{"id":"test", "files":[], "notification":"test outcome"}]});
+        assert!(valid("accepted", json!([notification_only])));
+        assert!(valid("rejected", json!([notification_only, {"intent":"Discard"}])));
+        assert!(!valid("accepted", json!([{"intent":"Reuse", "scopes":["workspace"]}])));
+    }
 
     #[test]
     fn branch_model_step_limit_is_optional_and_positive() {

@@ -201,6 +201,14 @@ pub struct BranchRecord {
     pub(crate) execution_state: BranchExecutionState,
 }
 
+impl BranchRecord {
+    pub(crate) fn is_running_candidate(&self) -> bool {
+        self.role == BranchRole::Candidate
+            && (self.status == BranchStatus::Running
+                || self.status == BranchStatus::Finished && self.execution_state.turn_active)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExecutionPosition {
     pub sequence: u64,
@@ -222,6 +230,8 @@ pub struct ProposalRecord {
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Value>,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub model_options: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,6 +356,8 @@ pub struct SpeculativeTree {
     #[serde(skip)]
     policy_dependencies: BTreeMap<u64, Value>,
     pub(crate) deferred_validations: BTreeMap<String, Value>,
+    // The authority model hook remains parked until pending Yield work is settled.
+    model_inference_boundary: Option<(String, String, Option<String>)>,
     capability_revision: u64,
     policy_chance_revisions: BTreeMap<String, (u64, u64)>,
     policy_record_revisions: BTreeMap<String, u64>,
@@ -424,6 +436,7 @@ impl SpeculativeTree {
             retained_source_environments: BTreeSet::new(),
             policy_dependencies: BTreeMap::new(),
             deferred_validations: BTreeMap::new(),
+            model_inference_boundary: None,
             capability_revision: 0,
             policy_chance_revisions: BTreeMap::new(),
             policy_record_revisions: BTreeMap::new(),

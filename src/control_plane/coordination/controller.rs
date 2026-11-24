@@ -492,6 +492,7 @@ impl SpeculationCoordinator {
                 },
                 "process_context": {
                     "observation": observation,
+                    "authority_active_tools": active_tools(tree, tree.authority_branch_id.as_deref()),
                     "steps_completed": tree.action_facts.get(&tool.branch_id).map_or(0, |facts| facts.len()),
                 },
                 "assumption_set": assumptions,
@@ -571,12 +572,17 @@ impl SpeculationCoordinator {
             let facts = tree.action_facts.get(&branch.branch_id);
             let count = |status| facts.into_iter().flat_map(|facts| facts.values())
                 .filter(|fact| fact.action_kind == ActionKind::ToolExecution && fact.status == status).count();
+            let started_at_ms = tree.speculations.get(&branch.branch_id).map_or(0, |branch| branch.started_at_ms);
+            let speculation_kind = branch.chance_id.as_ref().and_then(|id| tree.chances.get(id))
+                .and_then(|chance| chance.speculation_kind);
             json!({"branch_id": branch.branch_id, "chance_id": branch.chance_id,
+                "started_at_ms": started_at_ms,
+                "speculation_kind": speculation_kind,
                 "steps_completed": facts.map_or(0, |facts| facts.len()),
                 "yield_only": branch.yield_only,
                 "tool_counts": {"succeeded": count(ActionStatus::Succeeded), "failed": count(ActionStatus::Failed)},
                 "tokens_used": tree.model_usage.get(&branch.branch_id).into_iter().flatten().map(|usage| usage.tokens_used).sum::<u64>(),
-                "age_ms": tree.speculations.get(&branch.branch_id).map_or(0, |branch| now.saturating_sub(branch.started_at_ms)),
+                "age_ms": now.saturating_sub(started_at_ms),
             })
         };
         let candidates = || {
@@ -585,19 +591,25 @@ impl SpeculationCoordinator {
                 .filter(|branch| branch.role == BranchRole::Candidate)
         };
         let active: Vec<_> = candidates()
-            .filter(|branch| branch.status == BranchStatus::Running)
+            .filter(|branch| branch.is_running_candidate())
             .map(view)
             .collect();
         let paused: Vec<_> = candidates()
             .filter(|branch| branch.status == BranchStatus::Blocked(BlockedReason::Rebalanced))
             .map(view)
             .collect();
+        let authority = tree.authority_branch_id.as_deref();
+        let recent_actions = authority.map_or_else(Vec::new, |id| recent_completed_actions(tree, id, "", 30));
         let actions = self.evaluate(
             engine,
             policy,
             Decision::Rebalance,
             &json!({"active_view": active, "paused_view": paused,
-                "scheduling_context": {"waiting_chance": !tree.selectable_chances().is_empty()}}),
+                "scheduling_context": {
+                    "waiting_chance": !tree.selectable_chances().is_empty(),
+                    "authority_recent_actions": recent_actions,
+                    "authority_active_tools": active_tools(tree, authority),
+                }}),
         )?;
         Ok(actions
             .as_array()
@@ -739,14 +751,22 @@ impl SpeculationCoordinator {
             .as_str()
             .unwrap_or("indeterminate")
             .to_string();
-        let compatible = !yield_only && verdict == "compatible";
+        let explicit_resolution = resolution.is_some();
+        let resolution = resolution.unwrap_or(match (yield_only, verdict.as_str()) {
+            (true, _) => "rejected",
+            (_, "compatible") => "accepted",
+            (_, "indeterminate") => "indeterminate",
+            (_, "error") => "error",
+            _ => "rejected",
+        });
+        let accepted = resolution == "accepted";
         let disposition = self.evaluate(
             engine,
             policy,
             Decision::Dispose,
             &json!({
                 "branch": {"operation_id": operation_id, "branch_id": candidate_id, "proposal": proposal_view},
-                "resolution": resolution.unwrap_or(if yield_only {"rejected"} else if compatible {"accepted"} else if verdict == "indeterminate" {"indeterminate"} else if verdict == "error" {"error"} else {"rejected"}),
+                "resolution": resolution,
                 "context": {
                     "match": result,
                     "authority_outcome": outcome,
@@ -760,10 +780,10 @@ impl SpeculationCoordinator {
         let action = &disposition["actions"][0];
         let notification = action["notification"].as_str().map(str::to_owned);
         let full = action["intent"] == "Promote";
-        let part = resolve_partial_acceptance(tree, candidate_id, action, notification.as_deref())?;
-        let verdict = if resolution.is_some() && action.is_null() {
+        let part = resolve_partial_acceptance(tree, candidate_id, action, notification.as_deref(), accepted)?;
+        let verdict = if explicit_resolution && action.is_null() {
             "wait".into()
-        } else if resolution.is_some() && part.is_none() {
+        } else if explicit_resolution && part.is_none() {
             "discard".into()
         } else {
             verdict
@@ -777,7 +797,7 @@ impl SpeculationCoordinator {
             })
         });
         Ok((
-            compatible && (full || part.is_some()),
+            accepted && (full || part.is_some()),
             verdict,
             notification,
             validated_at_ms,
@@ -831,10 +851,11 @@ fn resolve_partial_acceptance(
     candidate_id: &str,
     action: &Value,
     notification: Option<&str>,
+    accepted: bool,
 ) -> Result<Option<Value>, Box<dyn std::error::Error>> {
-    let Some(part_intent @ ("Reuse" | "Salvage" | "Yield")) = action["intent"].as_str() else {
+    if !matches!(action["intent"].as_str(), Some("Salvage" | "Yield")) {
         return Ok(None);
-    };
+    }
     let mut part = action.clone();
     if let Some(results) = part["results"].as_array_mut() {
         for result in results {
@@ -845,8 +866,7 @@ fn resolve_partial_acceptance(
                 .filter(|fact| {
                     fact.action_kind == ActionKind::ToolExecution
                         && (fact.status == ActionStatus::Succeeded
-                            || fact.status == ActionStatus::Failed
-                                && matches!(part_intent, "Salvage" | "Yield")
+                            || !accepted && fact.status == ActionStatus::Failed
                                 && result["files"] == json!([]))
                 })
                 .and_then(|fact| fact.result.as_ref())
@@ -898,57 +918,57 @@ fn declares_input(policy: &CompiledPolicy, decision: Decision, input: &str) -> b
 }
 
 fn branch_history(tree: &SpeculativeTree, branch: &str, operation: &str, max_entries: usize) -> Vec<Value> {
-    fn summary(text: &str) -> &str {
-        &text[..text.floor_char_boundary(1024)]
-    }
-    fn content(value: &Value) -> String {
-        if let Some(text) = value.as_str() {
-            return summary(text).to_owned();
-        }
-        value
-            .as_array()
-            .into_iter()
-            .flatten()
-            .take(4)
-            .filter_map(|part| part["text"].as_str())
-            .map(summary)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
     let transcript = tree.transcripts.get(branch).into_iter().flatten().rev().take(max_entries).map(|entry| (
         entry["timestamp"].as_u64().unwrap_or(0),
         json!({"role": entry["role"].as_str().map(summary), "content": content(&entry["content"])})
     ));
+    let actions = recent_completed_actions(tree, branch, operation, max_entries);
+    let mut history: Vec<_> = transcript.chain(actions.into_iter().rev().map(|entry| (entry["timestamp_ms"].as_u64().unwrap_or(0), entry))).collect();
+    history.sort_by_key(|(timestamp, _)| std::cmp::Reverse(*timestamp));
+    history.truncate(max_entries);
+    history.into_iter().rev().map(|(timestamp, mut entry)| {
+        entry["timestamp_ms"] = json!(timestamp);
+        entry
+    }).collect()
+}
+
+fn summary(text: &str) -> &str {
+    &text[..text.floor_char_boundary(1024)]
+}
+
+fn content(value: &Value) -> String {
+    if let Some(text) = value.as_str() {
+        return summary(text).to_owned();
+    }
+    value.as_array().into_iter().flatten().take(4)
+        .filter_map(|part| part["text"].as_str())
+        .map(summary).collect::<Vec<_>>().join("\n")
+}
+
+fn recent_completed_actions(tree: &SpeculativeTree, branch: &str, operation: &str, max_entries: usize) -> Vec<Value> {
     let mut facts: Vec<_> = tree
         .action_facts
         .get(branch)
         .into_iter()
         .flat_map(|facts| facts.values())
-        .filter(|fact| fact.action_id != operation)
+        .filter(|fact| fact.action_id != operation && matches!(fact.status, ActionStatus::Succeeded | ActionStatus::Failed))
         .collect();
-    facts.sort_by_key(|fact| std::cmp::Reverse(fact.timestamp_ms));
-    let actions = facts.into_iter().take(max_entries).map(|fact| {
+    facts.sort_by_key(|fact| std::cmp::Reverse((fact.timestamp_ms, &fact.action_id)));
+    facts.truncate(max_entries);
+    facts.into_iter().rev().map(|fact| {
         let result = fact.result.as_ref().unwrap_or(&Value::Null);
-        (
-            fact.timestamp_ms,
-            json!({"action_id": summary(&fact.action_id), "kind": fact.action_kind,
-            "status": fact.status, "tool_name": result["tool_name"].as_str().map(summary),
-            "arguments": result.get("arguments"),
-            "is_error": result.get("is_error"),
-            "content": content(result.get("content").unwrap_or(&result["payload"]))}),
-        )
-    });
-    let mut history: Vec<_> = transcript.chain(actions).collect();
-    history.sort_by_key(|(timestamp, _)| std::cmp::Reverse(*timestamp));
-    history.truncate(max_entries);
-    history
-        .into_iter()
-        .rev()
-        .map(|(timestamp, mut entry)| {
-            entry["timestamp_ms"] = json!(timestamp);
-            entry
-        })
-        .collect()
+        json!({"action_id": summary(&fact.action_id), "kind": fact.action_kind,
+            "timestamp_ms": fact.timestamp_ms, "status": fact.status,
+            "tool_name": result["tool_name"].as_str().map(summary),
+            "arguments": result.get("arguments"), "is_error": result.get("is_error"),
+            "content": content(result.get("content").unwrap_or(&result["payload"]))})
+    }).collect()
+}
+
+fn active_tools(tree: &SpeculativeTree, branch: Option<&str>) -> Vec<Value> {
+    branch.and_then(|id| tree.active_actions.get(id)).into_iter().flat_map(|actions| actions.values())
+        .filter(|action| action.action_kind == ActionKind::ToolExecution && action.arguments.is_some())
+        .map(|action| json!({"tool_name": action.name, "arguments": action.arguments})).collect()
 }
 
 fn match_facts(
@@ -992,9 +1012,7 @@ fn match_facts(
         "branch": branch,
         "yield_only": branch.is_some_and(|branch| branch.yield_only),
         "yielded_action_ids": branch.map(|branch| &branch.yielded_action_ids),
-        "active_tools": branch_id.and_then(|id| tree.active_actions.get(id)).into_iter().flat_map(|actions| actions.values())
-            .filter(|action| action.action_kind == ActionKind::ToolExecution && action.arguments.is_some())
-            .map(|action| json!({"tool_name": action.name, "arguments": action.arguments})).collect::<Vec<_>>(),
+        "active_tools": active_tools(tree, branch_id),
         "action_id": selected_action_id,
         "action_kind": fact.map(|item| item.action_kind),
         "status": fact.map(|item| item.status),

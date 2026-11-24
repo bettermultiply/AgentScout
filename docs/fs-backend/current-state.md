@@ -60,7 +60,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
   - 子挂载的 lower 只有在 Chain 布局下才追加 S；Flatten 不追加。父 upper、lower
     和运行中挂载不变。
   - `SnapshotRecord.lower`（快照的视图链）无论子挂载采用哪种布局，都显式记录
-    **父 lower + S**（该挂载有产出时）。diff/accept 的三方合并以它为基准视图；
+    **父 lower + S**（该挂载有产出时）。diff、Full 增量回放和 Part 冲突检测均以它为基准视图；
     若直接取子挂载 lower，Flatten 下会缺少 S 的内容。
   - S 由子（以及 mark/diff 基准）引用，按引用计数 GC。
   - 快照层/副本层先写入 staging 目录，完成后原子 rename 到最终路径并 sync 父目录；
@@ -157,7 +157,7 @@ saved_base 最后引用及 snapshot 下层链纳入回收；计划切换失败�
     （mknod c 0 0）翻译为 delete；opaque/redirect/metacopy 通过读取 upper 的
     overlay xattr 保留。只有 `incremental_diff=false` 时不被选中。
 - **accept（live mount 重放）**
-  - 三方冲突检测保留；ours 逐路径读取目标 lower+upper，不构建完整视图。
+  - Part `Salvage` 按路径执行三方冲突检查。Full `Promote` 只回放候选相对分叉基线的增量，同路径采用候选版本。两者均无需构建完整目标视图。
   - `target_mount_pid=None`：调用方确认无 live mount，直接写目标 upper，删除写
     whiteout。
   - `target_mount_pid=Some(inner_pid)`（由 FilesystemBackend 的进程句柄提供）：
@@ -372,7 +372,7 @@ EINVAL；读取成功但目标未齐时，轮询遗漏检查 child 退出。两�
 | fork | 选中（默认全部）挂载 | 每挂载按 upper 大小选 Chain（追加 lower）或 Flatten（复制进 upper）；含状态目录的挂载强制 Flatten（仅内部开关） | `extra_mount_...`、`backend_overlay_...`、`overlay_fork_isolates...`、`fork_layout_...`、`mixed_chain_and_flatten_...` |
 | mark | 选中挂载 | 每挂载独立快照副本，记录每挂载 lower | `extra_mount_...`（mark diff） |
 | diff | 选中挂载 | 每挂载 delta 或 upper 副本比较，路径加挂载前缀 | `extra_mount_...`、`real_overlay_whiteout...` |
-| accept | 选中挂载 | 每挂载三方合并 + 目标 upper/live root 重放 | `extra_mount_...`、`live_target_accept...` |
+| accept | 选中挂载 | 每挂载按候选增量重放，选择性移交先检查冲突 | `extra_mount_...`、`live_target_accept...` |
 | discard | 整个环境/标记 | rename 环境根或快照层到 trash，覆盖全部挂载 | `extra_mount_...`、`round_trip` |
 | 引用计数/GC | 每挂载 lower 链 + base + marks | `refresh_references` 遍历 mount.lower | `round_trip`（GC 清理）、`extra_mount_...`（discard 后 upper 消失） |
 | 持久化 | 每挂载 `MountUnit` | environment/snapshot metadata；旧 scope 元数据迁移 | 按旧 scope 元数据建立挂载单元 |
@@ -691,7 +691,7 @@ N=100k  fork snapshot_layer=464.139ms(1) create_child=1.834ms(1) prepare_dirs=1.
 | 连续 discard 信号合并后 trash 为空 | `repeated_discards_leave_trash_empty` |
 | btrfs 快照 fork | `btrfs_snapshot_copy_fork_is_end_to_end`（本机通过） |
 | 混合链/展平多代 diff、真实启动、accept | `mixed_chain_and_flatten_layout_diff_and_accept_preserve_parent_view` |
-| 混合布局冲突不写入 | `mixed_layout_accept_reports_conflict_and_writes_nothing` |
+| 混合布局冲突不写入 | `mixed_layout_salvage_reports_conflict_and_writes_nothing` |
 | 超过链深度上限时 fork 前失败、无半成品 | `fork_refuses_chain_deeper_than_max_lower_depth_before_creating_anything` |
 | bwrap lower 层数上限 | 本机实测 231 成功、232 `Invalid argument`；`MAX_LOWER_DEPTH=96` |
 

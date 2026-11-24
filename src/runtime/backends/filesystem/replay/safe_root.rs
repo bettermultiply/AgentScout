@@ -8,8 +8,10 @@ use std::path::Path;
 use super::super::util::*;
 use crate::runtime::backend::BackendError;
 
-const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+const RESOLVE_NO_XDEV: u64 = 0x01;
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_IN_ROOT: u64 = 0x10;
+const REPLAY_RESOLVE: u64 = RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV;
 
 #[repr(C)]
 pub(crate) struct OpenHow {
@@ -18,10 +20,8 @@ pub(crate) struct OpenHow {
     resolve: u64,
 }
 
-/// Directory-fd-rooted operations for replaying into a live target mount.
-/// All paths are resolved with `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS)`
-/// and final components use `O_NOFOLLOW`; absolute symlinks cannot escape to
-/// the caller's root.
+/// Replay opens each managed mount from the namespace root, then keeps all
+/// mutations inside that mount without following symlinks.
 pub(crate) struct SafeRoot {
     fd: OwnedFd,
 }
@@ -44,33 +44,12 @@ impl SafeRoot {
         })
     }
 
-    pub(crate) fn openat2(
-        &self,
-        path: &str,
-        flags: libc::c_int,
-        mode: u32,
-        resolve: u64,
-    ) -> Result<OwnedFd, BackendError> {
-        let path =
-            CString::new(path).map_err(|_| BackendError::new("invalid target-relative path"))?;
-        let how = OpenHow {
-            flags: flags as u64,
-            mode: mode as u64,
-            resolve,
-        };
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_openat2,
-                self.fd.as_raw_fd() as libc::c_long,
-                path.as_ptr() as libc::c_long,
-                &how as *const OpenHow as libc::c_long,
-                std::mem::size_of::<OpenHow>() as libc::c_long,
-            )
-        };
-        if result < 0 {
-            return Err(error(std::io::Error::last_os_error()));
-        }
-        Ok(unsafe { OwnedFd::from_raw_fd(result as libc::c_int) })
+    pub(crate) fn mount(&self, path: &str) -> Result<Self, BackendError> {
+        let path = normalize_relative_path(path)?;
+        let fd = openat2(&self.fd, if path.is_empty() { "." } else { &path },
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC, 0,
+            RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)?;
+        Ok(Self { fd })
     }
 
     pub(crate) fn open_dir(&self, path: &str, create: bool) -> Result<OwnedFd, BackendError> {
@@ -91,11 +70,11 @@ impl SafeRoot {
                 prefix.push('/');
             }
             prefix.push_str(component);
-            match self.openat2(
-                &prefix,
+            match openat2(
+                &self.fd, &prefix,
                 libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
                 0,
-                RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+                REPLAY_RESOLVE,
             ) {
                 Ok(fd) => current = Some(fd),
                 Err(value) if create && value.message.contains("No such file") => {
@@ -110,11 +89,11 @@ impl SafeRoot {
                     if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
                         return Err(error(std::io::Error::last_os_error()));
                     }
-                    current = Some(self.openat2(
-                        &prefix,
+                    current = Some(openat2(
+                        &self.fd, &prefix,
                         libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
                         0,
-                        RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+                        REPLAY_RESOLVE,
                     )?);
                 }
                 Err(value) => return Err(value),
@@ -144,7 +123,11 @@ impl SafeRoot {
         if path.is_empty() {
             return Err(BackendError::new("refusing to remove target root"));
         }
-        let (parent, name) = self.parent(&path, false)?;
+        let (parent, name) = match self.parent(&path, false) {
+            Ok(value) => value,
+            Err(value) if value.message.contains("No such file") => return Ok(()),
+            Err(value) => return Err(value),
+        };
         let c_name = CString::new(name.clone())
             .map_err(|_| BackendError::new("invalid target file name"))?;
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
@@ -164,14 +147,13 @@ impl SafeRoot {
             return Err(error(value));
         }
         if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
-            if let Ok(child) = self.openat2(
-                &path,
-                libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            let child = openat2(
+                &parent, &name,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                 0,
-                RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
-            ) {
-                remove_dir_fd(&child)?;
-            }
+                REPLAY_RESOLVE,
+            )?;
+            remove_dir_fd(&child)?;
             if unsafe { libc::unlinkat(parent.as_raw_fd(), c_name.as_ptr(), libc::AT_REMOVEDIR) }
                 != 0
             {
@@ -181,31 +163,6 @@ impl SafeRoot {
             return Err(error(std::io::Error::last_os_error()));
         }
         Ok(())
-    }
-
-    pub(crate) fn exists(&self, path: &str) -> Result<bool, BackendError> {
-        let path = normalize_relative_path(path)?;
-        let (parent, name) = match self.parent(&path, false) {
-            Ok(value) => value,
-            Err(_) => return Ok(false),
-        };
-        let c_name = CString::new(name).map_err(|_| BackendError::new("invalid target name"))?;
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        let result = unsafe {
-            libc::fstatat(
-                parent.as_raw_fd(),
-                c_name.as_ptr(),
-                &mut stat,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if result == 0 {
-            Ok(true)
-        } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
-            Ok(false)
-        } else {
-            Err(error(std::io::Error::last_os_error()))
-        }
     }
 
     pub(crate) fn mkdir(&self, path: &str, mode: u32) -> Result<(), BackendError> {
@@ -276,17 +233,16 @@ impl SafeRoot {
                 libc::AT_SYMLINK_NOFOLLOW,
             )
         } == 0;
-        if exists && (stat.st_mode & libc::S_IFMT) != libc::S_IFREG {
+        if exists && ((stat.st_mode & libc::S_IFMT) != libc::S_IFREG || stat.st_nlink > 1) {
             drop(parent);
             self.remove(&path)?;
             return self.write_file(&path, source, mode);
         }
-        drop(parent);
-        let output = self.openat2(
-            &path,
+        let output = openat2(
+            &parent, &name,
             libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             mode & 0o7777,
-            RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+            REPLAY_RESOLVE,
         )?;
         let mut input = File::open(source).map_err(error)?;
         let mut output = File::from(output);
@@ -306,6 +262,22 @@ impl SafeRoot {
         }
         Ok(())
     }
+}
+
+fn openat2(fd: &OwnedFd, path: &str, flags: libc::c_int, mode: u32, resolve: u64) -> Result<OwnedFd, BackendError> {
+    let path = CString::new(path).map_err(|_| BackendError::new("invalid target-relative path"))?;
+    openat2_name(fd, &path, flags, mode, resolve)
+}
+
+fn openat2_name(fd: &OwnedFd, path: &std::ffi::CStr, flags: libc::c_int, mode: u32, resolve: u64) -> Result<OwnedFd, BackendError> {
+    let how = OpenHow { flags: flags as u64, mode: mode as u64, resolve };
+    let result = unsafe {
+        libc::syscall(libc::SYS_openat2, fd.as_raw_fd(), path.as_ptr(), &how, std::mem::size_of::<OpenHow>())
+    };
+    if result < 0 {
+        return Err(error(std::io::Error::last_os_error()));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(result as libc::c_int) })
 }
 
 pub(crate) fn remove_dir_fd(fd: &OwnedFd) -> Result<(), BackendError> {
@@ -343,18 +315,14 @@ pub(crate) fn remove_dir_fd(fd: &OwnedFd) -> Result<(), BackendError> {
             return Err(error(std::io::Error::last_os_error()));
         }
         if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
-            let child = unsafe {
-                libc::openat(
-                    fd.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
+            let child = match openat2_name(fd, name,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0, REPLAY_RESOLVE) {
+                Ok(child) => child,
+                Err(error) => {
+                    unsafe { libc::closedir(directory) };
+                    return Err(error);
+                }
             };
-            if child < 0 {
-                unsafe { libc::closedir(directory) };
-                return Err(error(std::io::Error::last_os_error()));
-            }
-            let child = unsafe { OwnedFd::from_raw_fd(child) };
             if let Err(value) = remove_dir_fd(&child) {
                 unsafe { libc::closedir(directory) };
                 return Err(value);

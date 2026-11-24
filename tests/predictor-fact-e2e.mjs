@@ -32,7 +32,7 @@ for(const mode of ['single','advanced','full','part', ...(process.env.ASCOUT_TES
             source=source.replace('def launch(data, *, policy_config, capabilities):\n    return True', 'def launch(data, *, policy_config, capabilities):\n    return False');
             source=source.replace('if evidence is None:\n        return {"verdict": "indeterminate"}', 'if not evidence:\n        return {"verdict": "compatible" if data["match_context"]["operation_id"] == "first-tool" and data["proposal"]["payload"] == "moved" else "incompatible"}');
             if (mode==='part') {
-                source = source.replace('{"intent": "Promote"}', '{"intent": "Reuse", "scopes": ["workspace"], "notification": data["context"]["candidate_proposal"]["payload"]}');
+                source = source.replace('{"intent": "Promote"}', '{"intent": "Salvage", "scopes": ["workspace"], "notification": data["context"]["candidate_proposal"]["payload"]}');
             }
             if (nested) {
                 source = source.replace(/^def (predict|launch|match_proposal|dispose)\(/gm, 'def unused_$1(');
@@ -60,14 +60,14 @@ def dispose(data, *, policy_config, capabilities):
         return {'actions': [{'intent': 'Discard'}]}
     if data['branch']['operation_id'] != 'first-tool' and ${innerFull ? 'False' : 'True'}:
         directory = next(r['result']['payload'].strip() for r in data['context']['candidate_results'] if r.get('action_id') == 'inner-write')
-        return {'actions': [{'intent': 'Reuse', 'scopes': [directory + '/nested-report.txt'], 'notification': 'nested part delivered'}]}
+        return {'actions': [{'intent': 'Salvage', 'scopes': [directory + '/nested-report.txt'], 'notification': 'nested part delivered'}]}
     return {'actions': [{'intent': 'Promote'}]}
 `;
             }
             if(selective) {
                 source=source.replace('return {"mode": "block"}', 'return {"mode": "allow"}');
                 source=source.replace('    evidence = data["evidence"]', `    position = data["match_context"]["candidate"]["branch"]["execution_position"]\n    if position["transcript_index"] < 8:\n        return {"verdict": "indeterminate"}\n    evidence = data["evidence"]`);
-                source=source.replace('{"intent": "Promote"}', `{"intent": "Reuse", "scopes": [next(r["result"]["payload"].strip() for r in data["context"]["candidate_results"] if r["action_id"] == "candidate-files") + "/report.txt"], "notification": "selected report"}`);
+                source=source.replace('{"intent": "Promote"}', `{"intent": "Salvage", "scopes": [next(r["result"]["payload"].strip() for r in data["context"]["candidate_results"] if r["action_id"] == "candidate-files") + "/report.txt"], "notification": "selected report"}`);
             }
         }
         fs.mkdirSync(root+'/policy/'+path.split('/').slice(0,-1).join('/'),{recursive:true});
@@ -205,7 +205,7 @@ def dispose(data, *, policy_config, capabilities):
     if(speculativeFirst) {
         const accepted=rows.find(e=>e.message==='command_result'&&e.operation==='promote'&&e.status==='applied');
         assert.ok(accepted,'Policy acceptance must reach the Agent');
-        const receipt=rows.find(e=>e.disposition===(mode==='full'?'Promote':'Reuse'));
+        const receipt=rows.find(e=>e.disposition===(mode==='full'?'Promote':'Salvage'));
         assert.equal(receipt?.branch_id,accepted.branch_id);
         const transfer=rows.find(e=>e.event?.payload?.operation?.operation==='accept_environment')?.event;
         assert.ok(transfer,'acceptance uses the normal Runtime operation');

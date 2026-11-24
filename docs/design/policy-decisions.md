@@ -137,11 +137,16 @@ ProposalSet = {
 ```text
 Proposal = {
     payload,
-    provenance?
+    provenance?,
+    model?: string,
+    thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh",
+    candidate_guidance?: nonblank string
 }
 ```
 
 `payload` 可以是原子值或结构化值；`provenance` 可选，用于记录候选来自模型、规则、历史轨迹或外部系统等来源。结构化计划仍只是边界上的候选输入，实际展开由 candidate Branch 完成。输出可以是单候选、有限候选集、带 Policy 元数据的候选集，或增量生成的候选序列。
+
+`model`、`thinking`、`candidate_guidance` 配置该候选的推理，模型与思考档位缺省时继承父分支。`Promote` 后恢复权威模型和思考档位，后续推理移除候选指引。
 
 同一个 Chance 可以有多个 Proposal，每个 Proposal 可以派生出一个候选 Branch。Policy 可以根据自己的配置和已观察事实选择固定或动态的数量，但候选 Branch 仍必须遵守隔离、AssumptionSet 和 single-winner 约束。候选数量决定了投机的宽度 breadth；breadth 是 `predict` 的取值结果。每个已发出的 Proposal 必须不可变；如果 Policy 无法生成有效候选，应回退到普通/权威路径或结束本次投机入口。
 
@@ -149,7 +154,7 @@ Proposal = {
 
 ### 2.4 `launch` - 是否取得权威值
 
-Proposal 的不可变性不保证其运行内 id 跨运行稳定。外部回放可以按操作特征与候选输入匹配，但不得因此改变 Proposal、Promote／Reuse／Discard 或 single-winner 的语义；具体键与碰撞限制留在开发说明。
+Proposal 的不可变性不保证其运行内 id 跨运行稳定。外部回放可以按操作特征与候选输入匹配，但不得因此改变 Proposal、Promote／Salvage／Discard 或 single-winner 的语义；具体键与碰撞限制留在开发说明。
 
 ```text
 launch(input) -> bool
@@ -239,23 +244,21 @@ dispose(branch, resolution, context) -> DispositionPlan
 
 `context.match` 原样提供比较结果（包括 `details`），`context.authority_outcome` 提供对应 Chance／operation 的真实返回值。`match.proposal`、`branch.proposal` 与 `context.candidate_proposal` 提供同一份 `{id, payload, provenance}`。
 
-`Promote` 仅接受可选 `notification`。`Reuse` 和 `Salvage` 选择 `results: [{id, notification}, ...]` 或 `scopes: [path, ...]`，后者可附 `notification`。控制面验证结果身份及其已知文件依赖，Runtime 以父环境和候选环境的共同祖先为基准检查冲突。反馈只覆盖实际移交的成果。
+`Promote` 仅接受可选 `notification`。`Salvage` 选择 `results: [{id, notification}, ...]` 或 `scopes: [path, ...]`，后者可附 `notification`。结果项可显式使用 `files: []` 只交付通知。控制面验证结果身份及其已知文件依赖，Runtime 以父环境和候选环境的共同祖先为基准检查冲突。反馈只覆盖实际移交的成果。Full `Promote` 的同路径覆盖属于机制层，Runtime 只应用候选相对分叉基线的增量。
 
 `resolution` 表示为什么进入处置，而不是具体怎么处置：
 `resolution =[accepted, rejected, indeterminate, error, cancelled, preempted, extent_reached, failed]`
 
 `DispositionPlan` 可以包含一个或多个处置意图：
 
-- **Reuse**：仅适用于 `accepted`。采用部分已验证结果，保留原父分支会话并回收候选。可附 `Discard`。
 - **Promote**：仅适用于 `accepted`。全量合入环境并采用候选分支的会话延续。
-- **Salvage**：适用于整体未接受的处置。祖先假设须已确认，且须与 `Discard` 组合。独立成果移交后原父分支继续执行。
-- **Yield**：整体未接受时，可以单独返回 `{"intent": "Yield", "results": [...]}`。每项指定已完成工具的 `id`、空 `files` 和非空 `notification`。空 `results` 表示让仍在执行的候选继续，暂不交付通知。父分支继续执行，候选及其在途操作保持存活。父分支离开分叉点后，候选只能继续 `Yield`，不能 `Promote`。此动作不组合 `Discard`。
+- **Salvage**：移交所选部分成果，保留父会话并丢弃候选。`accepted` 要求成功工具结果（包括只交付通知的成功工具结果）或合法范围，完成后标记 Chance 为 `Accepted` 并清理同级候选，可附 `Discard`。其他裁决须与 `Discard` 组合，可用 `files: []` 附带失败验证通知，无赢家。祖先假设须已确认。
+- **Yield**：整体未接受时，可以单独返回 `{"intent": "Yield", "results": [...]}`。每项指定已完成工具的 `id`、空 `files` 和非空 `notification`。空 `results` 表示让仍在执行的候选继续，暂不交付通知。父分支继续执行，候选及其在途操作保持存活。父分支离开分叉点后，候选只能继续 `Yield`，不能 `Promote`。运行中的候选成果在 Authority 的下一轮模型推理开始前批量结算，即使该轮推理没有准入投机。停止的候选可立即结算并回收。此动作不组合 `Discard`。
 - **Re-execute**：使用权威结果重新执行必要工作；
 - **Discard**：丢弃候选工作及其未确认产物；
 - **Compensate**：对已发生且可补偿的效果执行反向处理；
-- **Overwrite**：在明确允许的状态语义下由后写覆盖先写。
 
-这些意图可以组合。例如，`Salvage + Discard` 表示先移交可保留的部分进展，再丢弃剩余候选工作；`Compensate + Discard` 表示先处理已发生效果，再清理分支。`Promote` 表示身份转换后继续执行，`Reuse` 表示采用候选结果并清理其他候选。`dispose` 不重新判断 `match`，也不决定过程是否还能继续推进；它只根据已有裁决选择后续处置。
+这些意图可以组合。例如，`Salvage + Discard` 表示先移交可保留的部分进展，再丢弃剩余候选工作；`Compensate + Discard` 表示先处理已发生效果，再清理分支。`Promote` 表示身份转换后继续执行，接受裁决下的 `Salvage` 也会清理同级候选。`dispose` 不重新判断 `match`，也不决定过程是否还能继续推进；它只根据已有裁决选择后续处置。
 
 这些是 Policy 的处置意图，不是对 Runtime 生命周期的直接调用。实际的 Branch 转换、状态回收、效果清理、资源释放和 commit/discard 由 Mechanism 编排，并由 Runtime 的实际操作结果确认。未命中的候选路径不能通过逐个修补绕过其携带的错误前提；依赖被否定时，相关子图应整体进入回收或丢弃流程。
 
@@ -298,7 +301,7 @@ rebalance(active_view, paused_view, scheduling_context)
 | 预测生成 | `predict` | 生成一个或多个 Proposal |
 | 过程执行 | `extent`、`effect`、`rebalance` | 限制单个过程推进、管理每个 step 的外部效果，并在多个已启动工作之间暂停、恢复或抢占 |
 | 验证 | `match` | 获得验证依据并判断 Proposal 是否兼容或可接受；权威值是否可取由 launch 决定 |
-| 处置与提交 | `dispose` | Reuse、继续、Promote、重执行、清理、回收或补偿 |
+| 处置与提交 | `dispose` | Salvage、继续、Promote、重执行、清理、回收或补偿 |
 
 一个 decision 可以跨越多个阶段。例如，`effect` 的处理会影响过程执行和最终处置，`launch` 同时影响启动和验证依据的可用时间，`rebalance` 的抢占结果会进入 `dispose`。阶段映射用于说明责任，不应被解释为把九类 decision 串成不可替换的固定流程。
 

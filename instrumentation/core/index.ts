@@ -173,7 +173,10 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
             const result = run('predict', {chance_context: {...chance, kind: 'toolexecution'}, process_context: {}}, ['chance_context']);
             const proposals = (result as {proposals?: {payload: unknown; provenance?: unknown}[]; abstain?: boolean} | undefined);
             if (proposals?.abstain === true) return {abstain: true} as const;
-            if (proposals?.proposals?.length === 1) return proposals.proposals[0];
+            if (proposals?.proposals?.length === 1) {
+                const proposal = proposals.proposals[0];
+                if (['model', 'thinking', 'candidate_guidance'].every(field => !(field in proposal))) return proposal;
+            }
         } catch {
         }
     }

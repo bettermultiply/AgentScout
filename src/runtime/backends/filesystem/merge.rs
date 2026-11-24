@@ -44,6 +44,17 @@ pub(crate) fn merge_delta_layers(
         let base = resolve_path_in_layers(base_layers, target_mount, path)?;
         let ours = resolve_path_in_environment(target_mount, path)?;
         let target_changed = !equivalent(ours.as_ref(), base.as_ref());
+        let replaces_directory = ours.as_ref().is_some_and(|ours| ours.kind == NodeKind::Dir)
+            && (node.kind != NodeKind::Dir || node.opaque);
+        if replaces_directory && (target_upper_path_has_changes(target_upper, path)
+            || target_mount.lower.iter().map(|layer| target_mount.layer_upper(layer))
+                .filter(|upper| !base_layers.contains(upper))
+                .any(|upper| target_upper_path_has_changes(&upper, path)))
+        {
+            let kind = if node.opaque { "opaque_replace" } else if node.is_whiteout() { "delete_modify" } else { "content" };
+            conflicts.push(conflict(path, kind, base.as_ref(), ours.as_ref(), (!node.is_whiteout()).then_some(node)));
+            continue;
+        }
         if node.is_whiteout() {
             if target_changed && ours.is_some() {
                 conflicts.push(conflict(
@@ -67,19 +78,6 @@ pub(crate) fn merge_delta_layers(
             conflicts.push(conflict(
                 path,
                 kind,
-                base.as_ref(),
-                ours.as_ref(),
-                Some(node),
-            ));
-        }
-        if matches!(node.kind, NodeKind::Dir)
-            && node.opaque
-            && target_upper_path_has_changes(target_upper, path)
-            && !conflicts.iter().any(|value| value.path == *path)
-        {
-            conflicts.push(conflict(
-                path,
-                "opaque_replace",
                 base.as_ref(),
                 ours.as_ref(),
                 Some(node),

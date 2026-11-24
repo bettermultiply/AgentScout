@@ -35,7 +35,7 @@
 | 25 | Resolution 与策略组合 | winner、旧 parent 和接受前提的关系；accept 选择后续有效执行，不等于宣布候选是客观真值；Policy、自定义操作与 Adapter 证明责任的组合边界。 | 待对照现有契约收敛剩余细节；[Branch 语义](docs/design/branch-semantics.md)、[Policy Decisions](docs/design/policy-decisions.md) |
 | 26 | Chance 模型边界 | 流式输入尚未产完时如何部分消费；L3／Bypass 无真实输入时的措辞；sibling command reuse 与 Chance 的关系。 | 已记录、尚未展开；[设计模型](docs/design-model.md) |
 | 27 | Agent 接入完整性 | 非标准上下文复制／恢复、Pi 原生消息字段之外的工具专有元数据、sub-agent 启动前 Hook。 | 实现／验证缺口；[Agent 接入](docs/development/agent-access.md)、[参考负载](docs/development/reference-workload.md) |
-| 28 | Policy 原型差距 | 草案字段、输出声明、能力授权、领域 schema、Contract／Fidelity、增量预测、score、Reuse／Salvage、执行隔离和取消等剩余能力的范围及落实；服务效果插件的实现范围见 Runtime 开发说明。rebalance 已按 epoch 调度并接通暂停／恢复／抢占，剩余扩展须明确具体缺口。 | 部分实现、剩余待审；以[Policy 实现](docs/development/policy-engine.md)为当前接口依据；[Runtime 接入](docs/development/runtime-adapter.md) |
+| 28 | Policy 原型差距 | 草案字段、输出声明、能力授权、领域 schema、Contract／Fidelity、增量预测、score、执行隔离和取消等剩余能力的范围及落实；服务效果插件的实现范围见 Runtime 开发说明。rebalance 已按 epoch 调度并接通暂停／恢复／抢占，剩余扩展须明确具体缺口。 | 部分实现、剩余待审；以[Policy 实现](docs/development/policy-engine.md)为当前接口依据；[Runtime 接入](docs/development/runtime-adapter.md) |
 | 30 | 退出、异常清理与接受竞态 | 启动握手阶段信号、Runtime 故障注入、独立环境端到端退出；异常退出后受管 Agent／工具进程的停止、残留资源归属确认与清理，不能误清理无关资源；Promote 在途时 Parent 开始下一操作、Agent 确认前候选取消。不要求异常退出后重新启动并继续原任务。 | 实现／验证缺口；已有 Shutdown／SIGINT／SIGTERM 验证不重复列为未实现；[参考负载](docs/development/reference-workload.md)、[Runtime 生命周期](docs/development/runtime-lifecycle.md) |
 | 33 | 嵌套端到端覆盖 | 活跃祖先 Candidate 被 Discard 后的嵌套 Chance 端到端执行、自然重复键与消费顺序；嵌套失效已有单元回归，不能替代端到端验证。 | 剩余端到端验证；[回放](docs/development/replay.md) |
 | 34 | `has_predictor` 的来源 | 不应由已编译 Policy 是否含 `predict` 决定。先记下，暂不展开。 | 用户要求只记录 |

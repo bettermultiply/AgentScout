@@ -401,6 +401,43 @@ fn yield_preserves_active_work_and_task_end_discards_candidate() {
 }
 
 #[test]
+fn running_yield_candidates_batch_two_tools_at_the_authority_model_boundary() {
+    let (mut tree, candidate, _) = nested_tree();
+    tree.branches.get_mut(&candidate).unwrap().yield_only = true;
+    for id in ["first", "second"] {
+        tree.handle_message(AgentMessage::ActionStarted {
+            task_id: "task-1".into(), branch_id: candidate.clone(), action_id: id.into(),
+            action_kind: ActionKind::ToolExecution, name: "bash".into(), arguments: json!({}),
+            parent_action_id: None, checkpoint: None, timestamp_ms: 10,
+        }).unwrap();
+        tree.handle_message(AgentMessage::ActionFinished {
+            task_id: "task-1".into(), branch_id: candidate.clone(), action_id: id.into(),
+            action_kind: ActionKind::ToolExecution, status: ActionStatus::Succeeded,
+            result: json!(id), evidence: None, timestamp_ms: 11,
+        }).unwrap();
+        assert!(!tree.candidate_due(&candidate));
+    }
+    tree.model_inference_boundary("task-1", "authority", "next-model").unwrap();
+    let capabilities = RuntimeCapabilities::default();
+    let actions = tree.progress(&capabilities).unwrap();
+    let validation = actions.operations.iter().find(|(_, op)| matches!(op, ControlOperation::Validate(id) if id == &candidate)).unwrap().0;
+    assert!(!actions.commands.iter().any(|op| matches!(op, AgentCommand::ResolvePending { operation_id, .. } if operation_id == "next-model")));
+    let delivery = tree.complete_work(validation, Ok(ControlResult::AcceptanceDisposition(
+        false, "incompatible".into(), None, None, false,
+        Some(json!({"intent":"Yield", "results":[
+            {"id":"first", "files":[], "notification":"first output"},
+            {"id":"second", "files":[], "notification":"second output"}
+        ]})), None,
+    ))).unwrap();
+    assert!(matches!(delivery.commands.as_slice(), [AgentCommand::ResolvePending { outcome: Some(outcome), .. }]
+        if outcome["notification"] == "first output\nsecond output"));
+    let actions = tree.progress(&capabilities).unwrap();
+    assert!(actions.commands.iter().any(|op| matches!(op, AgentCommand::ResolvePending { operation_id, outcome: Some(outcome), .. }
+        if operation_id == "next-model" && outcome["phase"] == "execute")));
+    assert!(!tree.candidate_due(&candidate));
+}
+
+#[test]
 fn nested_transfer_uses_its_parent_outcome_and_progress() {
     let (mut tree, parent, child) = nested_tree();
     tree.record_authority_outcome("chance-1", json!("A result"), None)

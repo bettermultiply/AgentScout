@@ -88,6 +88,11 @@ impl FilesystemBackend {
                 }
             }
         }
+        for (path, node) in current {
+            if ancestors(&path).iter().any(|parent| delta.get(parent).is_some_and(|node| node.opaque)) {
+                delta.insert(path, node);
+            }
+        }
         Ok((delta, redirects))
     }
 }

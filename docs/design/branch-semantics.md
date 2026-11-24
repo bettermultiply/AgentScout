@@ -103,11 +103,11 @@ Proposal 必须声明与真实 outcome 的 compatibility 条件，可以是 exac
 
 ### 4.5 Accept 与 winner continuation
 
-Accept 分为 full 和 part。两者都将获准的状态从 SpB 合入 AuB，保留 AuB 已有进展。Policy 通过 `Promote` 请求 full，通过 `Reuse` 或 `Salvage` 请求 part。
+Accept 分为 full 和 part。两者都将获准的状态从 SpB 合入 AuB，Policy 通过 `Promote` 请求 full，由机制层将候选相对分叉基线的增量覆盖到 AuB，保留增量以外的 AuB 改动。Policy 通过 `Salvage` 请求 part，按选中结果或范围移交并检查冲突。
 
 Full 合入 SpB 的全部变更，保留 SpB Branch、session 和独立 descendants。SpB 承接该 Chance 的胜者延续，后续调用使用 AuB 合入后的环境和 Backend。旧 AuB session 结束，原 SpB 环境和仍有依赖的资源在最后一个依赖释放后回收。旧 AuB 的进展若无法由该延续保留，则拒绝 full。Full 无需独立 descendants 完成，后代仍承担各自未决 Proposal。
 
-Part 只移交 Policy 选中的结果及其所需状态。允许尽力移交，并以 Runtime 实际提交的内容描述结果。AuB 保留原 Branch 与 session，SpB 和全部 descendants 丢弃。原调用是否继续由既有等待点与实际结果决定。
+Part 只移交 Policy 选中的结果及其所需状态。允许尽力移交，并以 Runtime 实际提交的内容描述结果。AuB 保留原 Branch 与 session，SpB 和全部 descendants 丢弃。接受裁决下的 Part 占用该 Chance 的唯一赢家名额并清理同级候选。其他裁决下的部分回收保留同级候选的验证资格。原调用是否继续由既有等待点与实际结果决定。
 
 接受的目标是该 Chance 的直接父级。直接父级是全局权威时，Full 让胜者承接权威执行。直接父级仍为投机时，Full 让胜者承接父级的外层 Chance 并保留祖先依赖，Part 则让原父级继续承担这些依赖。外层拒绝会抛弃依赖其 Proposal 的延续及后代。只有外层确认后才能向外层移交。在此之前，未决依赖不能进入权威上下文，也不能触发外部效果的释放。
 

@@ -167,7 +167,7 @@ Policy 的 `predict` 通过现有 proposal `payload` 交付预测值。Pi 在实
 
 - 2026-11-16：Pi `custom` 提示立即 reject 并说明不支持；终端组件、主题、状态与编辑器装饰接口仅最小空实现，`notify` 为文字观察事件。AScout TUI 提供 confirm/select/input/editor 回答与取消入口，多行 editor 可用，操作见 [TUI 使用说明](reference-workload.md)。无人回答保持等待，不补默认答案或超时；明确取消才按 Pi 的取消值结束。挂起提示不提供跨崩溃恢复，主动恢复暂停会取消提示。
 - 只有 Pi 一个 Product Integration；sub-agent 启动前仍无统一 Hook。
-- effect 只实现 `block` / `deny` 两种最小计划，没有 Reuse、Salvage 或更多效果模式。
+- effect 只实现 `block` / `deny` 两种最小计划，其他效果模式由独立的效果协调能力承载。
 - extent 计数的是工具执行点的 action 次数，不是模型语义上已完成步骤数；子 Chance 的计数独立于父 Chance。
 - hold 的 Promise 只存在于接入进程内；主动退出保存 hold 所属 Branch 与工具／候选配对描述，跨进程重新建立等待，用户继续后才推进。control plane 仍是 Tree、Chance 和提交资格的唯一权威。实际验收与 backend 边界见 [恢复](recovery.md)。
 - 通用层把 control plane 命令落实为 hold 的释放；Product Integration 负责放行或取消原调用，以及候选 session 的创建和接替。候选预测输入不用于替旧父调用完成。

@@ -53,10 +53,10 @@ impl ReplayJournal {
 
     fn record(&mut self, upper: &Path, relative: &str) -> Result<(), BackendError> {
         let key = (upper.to_path_buf(), relative.to_string());
-        if !self.seen.insert(key) {
+        if self.seen.contains(&key) || ancestors(relative).into_iter().any(|parent| self.seen.contains(&(upper.to_path_buf(), parent))) {
             return Ok(());
         }
-        let target = safe_join(upper, relative)?;
+        let target = replay_path(upper, relative)?;
         let backup = if path_exists(&target) {
             let backup = self
                 .root
@@ -67,6 +67,7 @@ impl ReplayJournal {
         } else {
             None
         };
+        self.seen.insert(key);
         self.entries.push(JournalEntry {
             upper: upper.to_path_buf(),
             relative: relative.to_string(),
@@ -84,8 +85,13 @@ impl ReplayJournal {
             return (failures, self.copy_warnings);
         }
         for entry in self.entries.drain(..).rev() {
-            let target = safe_join(&entry.upper, &entry.relative)
-                .unwrap_or_else(|_| entry.upper.join(entry.relative.trim_start_matches('/')));
+            let target = match replay_path(&entry.upper, &entry.relative) {
+                Ok(target) => target,
+                Err(error) => {
+                    failures.push(format!("{}: {error}", entry.relative));
+                    continue;
+                }
+            };
             if let Err(error) = remove_visible(&target) {
                 failures.push(format!("{}: {error}", entry.relative));
                 continue;
@@ -107,6 +113,19 @@ impl ReplayJournal {
     }
 }
 
+fn replay_path(upper: &Path, path: &str) -> Result<PathBuf, BackendError> {
+    let target = safe_join(upper, path)?;
+    for parent in ancestors(path).into_iter().rev() {
+        match fs::symlink_metadata(upper.join(&parent)) {
+            Ok(metadata) if !metadata.is_dir() => return Err(BackendError::new(format!("invalid replay ancestor {parent}"))),
+            Ok(_) => {},
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(value) => return Err(error(value)),
+        }
+    }
+    Ok(target)
+}
+
 fn backup_node(
     source: &Path,
     target: &Path,
@@ -118,7 +137,10 @@ fn backup_node(
     let metadata = fs::symlink_metadata(source).map_err(error)?;
     let file_type = metadata.file_type();
     if file_type.is_dir() {
-        clone_upper(source, target, true)
+        clone_upper(source, target, true)?;
+        fs::set_permissions(target, fs::Permissions::from_mode(metadata.mode() & 0o7777)).map_err(error)?;
+        copy_overlay_xattrs(source, target)?;
+        set_times(target, &metadata)
     } else if file_type.is_symlink() {
         let link = fs::read_link(source).map_err(error)?;
         symlink(link, target).map_err(error)?;
@@ -178,7 +200,7 @@ pub(crate) fn remove_visible(path: &Path) -> Result<(), BackendError> {
 }
 
 pub(crate) enum ReplayRoot<'a> {
-    Mount { root: &'a SafeRoot, prefix: String },
+    Mount(&'a SafeRoot),
     Upper(&'a Path),
 }
 
@@ -198,7 +220,18 @@ pub(crate) fn replay_delta(
                 "injected replay failure before operation {applied} at {path}"
             )));
         }
-        journal.record(target_upper, path)?;
+        for parent in ancestors(path).into_iter().rev() {
+            if !path_exists(&target_upper.join(&parent)) {
+                journal.record(target_upper, &parent)?;
+                break;
+            }
+        }
+        let target = replay_path(target_upper, path)?;
+        let unchanged_directory = node.kind == NodeKind::Dir && !node.opaque
+            && fs::symlink_metadata(target).is_ok_and(|metadata| metadata.is_dir());
+        if !unchanged_directory {
+            journal.record(target_upper, path)?;
+        }
         let result = replay_node(root, path, node, source_maps);
         applied += 1;
         match result {
@@ -265,38 +298,20 @@ pub(crate) fn replay_node(
 ) -> Result<(), BackendError> {
     match root {
         ReplayRoot::Upper(upper) => {
-            let target = safe_join(upper, path)?;
-            let existed = path_exists(&target);
-            if node.opaque {
-                remove_directory_force(&target)?;
-                return Ok(());
+            let target = replay_path(upper, path)?;
+            if node.opaque || node.kind != NodeKind::Dir {
+                remove_visible(&target)?;
             }
-            stage_node(upper, path, node, source_maps)?;
-            match &node.kind {
-                NodeKind::Whiteout | NodeKind::Other(_) => Ok(()),
-                NodeKind::Dir if !existed => Ok(()),
-                NodeKind::File if !existed => Ok(()),
-                NodeKind::Symlink(_) if !existed => Ok(()),
-                _ => Ok(()),
-            }
+            stage_node(upper, path, node, source_maps)
         }
-        ReplayRoot::Mount { root, prefix } => {
-            let target = format!("{prefix}/{path}");
-            let existed = root.exists(&target)?;
+        ReplayRoot::Mount(root) => {
             match &node.kind {
-                NodeKind::Whiteout => {
-                    root.remove(&target)?;
-                    Ok(())
-                }
+                NodeKind::Whiteout => root.remove(path),
                 NodeKind::Dir => {
                     if node.opaque {
-                        root.remove(&target)?;
-                        root.mkdir(&target, node.mode)?;
-                        Ok(())
-                    } else {
-                        root.mkdir(&target, node.mode)?;
-                        if existed { Ok(()) } else { Ok(()) }
+                        root.remove(path)?;
                     }
+                    root.mkdir(path, node.mode)
                 }
                 NodeKind::File => {
                     let source = if node.metacopy {
@@ -305,15 +320,11 @@ pub(crate) fn replay_node(
                         node.source.clone()
                     }
                     .ok_or_else(|| BackendError::new(format!("no content source for {path}")))?;
-                    root.write_file(&target, &source, node.mode)?;
-                    if existed { Ok(()) } else { Ok(()) }
+                    root.write_file(path, &source, node.mode)
                 }
                 NodeKind::Symlink(link) => {
-                    if existed {
-                        root.remove(&target)?;
-                    }
-                    root.symlink(&target, link)?;
-                    if existed { Ok(()) } else { Ok(()) }
+                    root.remove(path)?;
+                    root.symlink(path, link)
                 }
                 NodeKind::Other(kind) => Err(BackendError::new(format!(
                     "cannot replay special file {path} (mode 0o{kind:o})"

@@ -569,13 +569,12 @@ impl Session {
         if let Some(notice) = self.recovery.handle(tree, message)? {
             self.notice = notice;
         }
-        if matches!(message, AgentMessage::SpeculativeAdmissionRequest { .. }) {
-            tree.speculative_admission(message.clone())
-        } else {
-            Ok(ControlActions {
-                commands: tree.handle_message(message.clone())?,
-                ..Default::default()
-            })
+        match message {
+            AgentMessage::ModelInferenceBoundary { task_id, branch_id, action_id } => {
+                tree.model_inference_boundary(task_id, branch_id, action_id)
+            }
+            AgentMessage::SpeculativeAdmissionRequest { .. } => tree.speculative_admission(message.clone()),
+            _ => Ok(ControlActions { commands: tree.handle_message(message.clone())?, ..Default::default() }),
         }
     }
 

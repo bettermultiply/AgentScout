@@ -197,6 +197,8 @@ pub enum AgentCommand {
         tool_name: String,
         workspace: PathBuf,
         prediction: Value,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        model_options: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint: Option<Value>,
         #[serde(default)]
@@ -351,6 +353,11 @@ pub enum AgentMessage {
         checkpoint: Option<Value>,
         /// Instrumentation 测量的事件时刻（Unix 毫秒），不是 control plane 收到消息的时刻。
         timestamp_ms: u64,
+    },
+    ModelInferenceBoundary {
+        task_id: String,
+        branch_id: String,
+        action_id: String,
     },
     SpeculativeAdmissionRequest {
         task_id: String,
