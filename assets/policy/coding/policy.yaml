@@ -8,7 +8,7 @@ decisions:
       file: decisions.py
       function: opportunity_pass
       policy_config:
-        fast_model_speculation: false
+        fast_model_speculation: true
         tool_speculation: true
     feasibility_pass:
       file: decisions.py
@@ -23,25 +23,28 @@ decisions:
   launch:
     file: decisions.py
     function: launch
-    policy_config:
-      prior_readonly_exploration: false
   predict:
     file: decisions.py
     function: predict
     history: {mode: transcript_tail, max_entries: 30}
     policy_config:
+      readonly_reset_steps: 2
       candidate_model: deepseek/deepseek-flash
       candidate_thinking: "off"
-      active_post_edit_test: true
+      candidate_guidance: Use read-only tools to locate relevant files, symbols, and call chains. Do not edit files or write a long summary.
       candidate_count: 1
+      speculate_early_modify: false
+      active_post_edit_test: true
       adaptive_dual_tool_speculation: true
+      fail_candidate_model: deepseek/deepseek-flash
+      fail_candidate_thinking: "off"
+      fail_candidate_guidance: Start with high-confidence checks of the implicated code and input boundaries. Read the relevant code before proposing a fix.
   extent:
     file: decisions.py
     function: extent
-    inputs: [process_state.result_facts, process_state.semantic_facts, process_state.resource_counters]
+    inputs: [process_state.result_facts, process_state.semantic_facts]
     policy_config:
       max_steps: 12
-      stop_before_mutation: true
   effect:
     file: decisions.py
     function: effect
@@ -50,15 +53,18 @@ decisions:
     function: rebalance
     policy_config:
       max_active_candidates: 2
+      preempt_failed_tools: 2
   match:
     file: decisions.py
     function: match_proposal
     outcome: tool_output
     policy_config:
-      prior_readonly_exploration: false
-      readonly_salvage: true
-      yield_in_flight_verification: true
-      min_partial_coverage: 0.25
+      safe_result_chars: 16000
+      safe_result_count: 8
   dispose:
     file: decisions.py
     function: dispose
+    policy_config:
+      safe_result_chars: 16000
+      safe_result_count: 8
+      verification_output_chars: 20000

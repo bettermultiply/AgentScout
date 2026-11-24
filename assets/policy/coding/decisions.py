@@ -1,4 +1,227 @@
-"""Speculate on Authority tool calls or on pending local verification."""
+"""Coding policy for the explore → modify → verify cycle."""
+
+def _narrow_verification(command):
+    import re
+    from ascout_policy.info_match import _verification_words
+
+    name, *args = _verification_words(command)
+    if re.fullmatch(r'python(?:[23](?:\.\d+)?)?', name.rsplit('/', 1)[-1]):
+        if args[:1] == ['-m']:
+            args = args[1:]
+        if not args:
+            return False
+        name, *args = args
+    if name.rsplit('/', 1)[-1] not in ('pytest', 'py.test'):
+        return False
+
+    value_options = {'--basetemp', '-p', '-c', '-o', '--override-ini', '--tb', '--rootdir',
+                     '-m', '--maxfail', '--color', '--capture', '--import-mode', '--log-level'}
+    paths, options = [], iter(args)
+    keyword = ''
+    for arg in options:
+        if arg == '--':
+            paths.extend(options)
+            break
+        if arg == '-k':
+            keyword = next(options, '')
+        elif arg.startswith('-k'):
+            keyword = arg[2:].removeprefix('=')
+        elif arg in value_options:
+            next(options, None)
+        elif not arg.startswith('-'):
+            paths.append(arg)
+    # A leading exclusion does not identify a small set of tests.
+    return bool((keyword.strip() and not re.match(r'[\s(]*not(?=[\s(]|$)', keyword))
+                or paths and all(re.search(r'::(?:[^:]+::)*test_[^:]+$', path) for path in paths))
+
+
+def _verification_entry(entry):
+    from ascout_policy.info_match import is_verification_command
+
+    return entry.get('tool_name') == 'bash' and is_verification_command(
+        (entry.get('arguments') or {}).get('command'))
+
+
+def _workspace_verification(command):
+    from ascout_policy.info_match import _verification_words
+
+    directories = []
+    _verification_words(command, directories=directories)
+    for path in directories:
+        if path.startswith('/') or any(part == '..' or part.startswith('.') and part != '.'
+                                       for part in path.split('/')):
+            return False
+    return True
+
+
+def _succeeded(entry):
+    return (entry.get('status') == 'succeeded' and entry.get('is_error') is not True
+            and (entry.get('result') or {}).get('is_error') is not True)
+
+
+def _mutation(entry):
+    import re
+    from ascout_policy.info_match import is_readonly_action
+
+    tool, args = entry.get('tool_name'), entry.get('arguments') or {}
+    if not _succeeded(entry) or _verification_entry(entry):
+        return None
+    if tool in ('edit', 'write') and isinstance(args.get('path'), str):
+        *directories, name = args['path'].lower().split('/')
+        if ({'test', 'tests', 'spec', 'specs', '__tests__'}.intersection(directories)
+                or re.search(r'^test[_\.]|(?:_test|_spec|\.test|\.spec)\.', name)):
+            return 'test'
+        return 'source'
+    if tool == 'bash' and not is_readonly_action(tool, args):
+        return 'source'
+    return None
+
+
+def _detect_stage(history, current_op, readonly_reset_steps):
+    from ascout_policy.info_match import is_readonly_action, is_verification_command, match_verification_calls
+
+    args = current_op.get('arguments') or {}
+    command = args.get('command')
+    verifying = is_verification_command(command)
+    main_command = None
+    latest_workspace_command = None
+    edits = set()
+    tools = [entry for entry in history if entry.get('tool_name')]
+    covered = False
+    for entry in reversed(tools):
+        if _verification_entry(entry):
+            previous = entry['arguments']['command']
+            if _workspace_verification(previous):
+                latest_workspace_command = latest_workspace_command or previous
+                if main_command is None and not _narrow_verification(previous):
+                    main_command = previous
+                if _succeeded(entry):
+                    covered |= (not verifying or previous == command or match_verification_calls(
+                        [{'name': 'bash', 'arguments': {'command': previous}}],
+                        [{'name': 'bash', 'arguments': args}])['matched'])
+        elif not covered and (mutation := _mutation(entry)):
+            edits.add(mutation)
+
+    main_command = main_command or latest_workspace_command
+    if verifying:
+        return 'verify', main_command, edits
+    recent = tools[-readonly_reset_steps:] if readonly_reset_steps > 0 else []
+    if not edits or (recent and len(recent) == readonly_reset_steps and all(
+            _succeeded(entry) and is_readonly_action(entry['tool_name'], entry.get('arguments'))
+            for entry in recent)):
+        return 'explore', main_command, edits
+    return ('modify_ready' if main_command else 'modify_early'), main_command, edits
+
+
+def opportunity_pass(data, *, policy_config, capabilities):
+    op = data['op']
+    if op['kind'] == 'model_inference':
+        return policy_config.get('fast_model_speculation', True) and op['authority']
+    return (policy_config.get('tool_speculation', True) and op['kind'] == 'bash'
+            and op['produces_result'] and op['result_pending'])
+
+
+def feasibility_pass(data, *, policy_config, capabilities):
+    from ascout_policy.info_match import is_verification_command
+
+    if data['state']['assumption_depth'] >= policy_config.get('max_assumption_depth', 1):
+        return False
+    op = data['op']
+    return op['kind'] == 'model_inference' or is_verification_command(op.get('arguments', {}).get('command'))
+
+
+def select(data, *, policy_config, capabilities):
+    available = max(0, policy_config['max_active_candidates'] - data['scheduling_context']['active_candidate_count'])
+    frontier = sorted(data['frontier_view'], key=lambda chance: chance['assumption_depth'])
+    return [chance['chance_id'] for chance in frontier[:available]]
+
+
+def launch(data, *, policy_config, capabilities):
+    return True
+
+
+def _candidate_settings(config, prefix):
+    model = config.get(prefix + 'candidate_model', 'deepseek/deepseek-flash')
+    if not model:
+        return {}
+    thinking = config.get(prefix + 'candidate_thinking', 'off')
+    settings = {'model': model, 'thinking': 'off' if thinking is False else thinking}
+    guidance = config.get(prefix + 'candidate_guidance')
+    if guidance:
+        settings['candidate_guidance'] = guidance
+    return settings
+
+
+def predict(data, *, policy_config, capabilities):
+    chance = data['chance_context']
+    stage, main_command, edits = _detect_stage(
+        data.get('history', []), chance, policy_config.get('readonly_reset_steps', 2))
+    if stage == 'verify':
+        command = chance['arguments']['command']
+        phase, failures = 'baseline_check', [False]
+        if _workspace_verification(command) and not _narrow_verification(command):
+            if edits == {'test'}:
+                phase, failures = 'tdd_repro', [True]
+            elif 'source' in edits:
+                phase = 'post_source_edit'
+                if policy_config.get('adaptive_dual_tool_speculation', True):
+                    failures.append(True)
+        return {'generation': 'batch', 'proposals': [
+            _verification_proposal(failure, phase, policy_config) for failure in failures]}
+
+    if chance.get('kind') not in ('model_inference', 'modelinference'):
+        return {'abstain': True, 'reason': 'unrecognized_command'}
+    if stage == 'modify_ready':
+        active = data.get('process_context', {}).get('authority_active_tools', [])
+        if not policy_config.get('active_post_edit_test', True) or any(map(_verification_entry, active)):
+            return {'abstain': True, 'reason': 'verification_disabled_or_running'}
+        return {'generation': 'batch', 'proposals': [{
+            'payload': {'kind': 'predicted_tool_calls', 'tool_calls': [
+                {'name': 'bash', 'arguments': {'command': main_command}}]},
+            'provenance': {'kind': 'active_post_edit_test'},
+        }]}
+    if stage == 'modify_early' and not policy_config.get('speculate_early_modify', False):
+        return {'abstain': True, 'reason': stage}
+    settings = _candidate_settings(policy_config, '')
+    if not settings:
+        return {'abstain': True, 'reason': 'candidate_model_disabled'}
+    result = {'predict': 'branch_model', **settings}
+    if policy_config.get('candidate_count', 1) > 1:
+        result['candidates'] = policy_config['candidate_count']
+    return result
+
+
+def _verification_proposal(failure, phase, config):
+    kind, message = ('expected_test_failure', 'Command exited with non-zero status.') if failure else (
+        'verification_pass', 'All tests passed.')
+    settings = _candidate_settings(config, 'fail_') if failure else {}
+    return {
+        'payload': {'content': [{'type': 'text', 'text': message}], 'isError': failure},
+        'provenance': {'kind': kind, 'phase': phase, 'uses_candidate_model': bool(settings)},
+        **settings,
+    }
+
+
+def extent(data, *, policy_config, capabilities):
+    from ascout_policy.degradation import should_stop_degraded
+
+    state = data['process_state']
+    facts = state.get('semantic_facts', {})
+    if state['steps_completed'] >= policy_config.get('max_steps', 12):
+        return 'stop'
+    next_action = facts.get('next_action') or {}
+    kind = next_action.get('kind')
+    if facts.get('prediction_kind') == 'predicted_tool_calls':
+        if kind == 'model_inference' or state.get('phase') == 'model_inference':
+            return 'stop'
+    elif facts.get('speculation_kind') == 'tool_execution' and kind == 'tool_execution':
+        if _verification_entry({'tool_name': next_action.get('name'), 'arguments': next_action.get('arguments')}):
+            return 'stop'
+    completed = state.get('result_facts', {}).get('completed_tools', [])
+    if completed and should_stop_degraded(completed, next_action)[0]:
+        return 'stop'
+    return 'continue'
+
 
 def _words(command):
     import re
@@ -13,40 +236,6 @@ def _words(command):
     return words
 
 
-def _narrow_verification(command):
-    from ascout_policy.info_match import _verification_words
-
-    import re
-
-    name, *args = _verification_words(command)
-    if re.fullmatch(r'python(?:[23](?:\.\d+)?)?', name.rsplit('/', 1)[-1]):
-        if args[:1] == ['-m']:
-            args = args[1:]
-        if not args:
-            return False
-        name, *args = args
-    if name.rsplit('/', 1)[-1] not in ('pytest', 'py.test'):
-        return False
-
-    # Options with a separate value must not be confused with test paths.
-    value_options = {'--basetemp', '-p', '-c', '-o', '--override-ini', '--tb', '--rootdir',
-                     '-m', '--maxfail', '--color', '--capture', '--import-mode', '--log-level'}
-    paths, options = [], iter(args)
-    for arg in options:
-        if arg == '--':
-            paths.extend(options)
-            break
-        if arg == '-k':
-            return bool(next(options, ''))
-        if arg.startswith('-k') and len(arg) > 2:
-            return True
-        if arg in value_options:
-            next(options, None)
-        elif not arg.startswith('-'):
-            paths.append(arg)
-    return bool(paths and all(re.search(r'::(?:[^:]+::)*test_[^:]+$', path) for path in paths))
-
-
 def _bash_commands(command):
     from ascout_policy.info_match import _shell_tokens
 
@@ -58,145 +247,6 @@ def _bash_commands(command):
             yield _words(command[start:match.start()])
             start = match.end()
     yield _words(command[start:])
-
-
-def opportunity_pass(data, *, policy_config, capabilities):
-    op = data['op']
-    if op['kind'] == 'model_inference':
-        return policy_config.get('fast_model_speculation', False) and op['authority']
-    return (policy_config.get('tool_speculation', True) and op['kind'] == 'bash'
-            and op['produces_result'] and op['result_pending'])
-
-
-def feasibility_pass(data, *, policy_config, capabilities):
-    from ascout_policy.info_match import is_verification_command as _verification
-
-    if data['state']['assumption_depth'] >= policy_config.get('max_assumption_depth', 1):
-        return False
-    op = data['op']
-    return op['kind'] == 'model_inference' or _verification(op.get('arguments', {}).get('command'))
-
-
-def select(data, *, policy_config, capabilities):
-    available = max(0, policy_config['max_active_candidates'] - data['scheduling_context']['active_candidate_count'])
-    frontier = sorted(data['frontier_view'], key=lambda chance: chance['assumption_depth'])
-    return [chance['chance_id'] for chance in frontier[:available]]
-
-
-def launch(data, *, policy_config, capabilities):
-    return not (data['chance_context'].get('kind') == 'model_inference'
-                and policy_config.get('prior_readonly_exploration', False)
-                and data.get('authority_state', {}).get('steps_completed', 0) == 0)
-
-
-def _test_path(path):
-    import re
-
-    *directories, name = path.lower().split('/')
-    return bool({'test', 'tests', 'spec', 'specs', '__tests__'}.intersection(directories)
-                or re.search(r'^test[_\.]|(?:_test|_spec|\.test|\.spec)\.', name))
-
-
-def _history_state(history, command, _verification):
-    from ascout_policy.info_match import is_readonly_action, match_verification_calls
-
-    edited_source = edited_tests = covered = source_seen = False
-    last_command = None
-    for entry in reversed(history):
-        tool, args = entry.get('tool_name'), entry.get('arguments') or {}
-        succeeded = (entry.get('status') == 'succeeded' and entry.get('is_error') is not True
-                     and (entry.get('result') or {}).get('is_error') is not True)
-        previous = args.get('command') if tool == 'bash' else None
-        if _verification(previous):
-            last_command = last_command or previous
-            if not source_seen and succeeded and command and (previous == command or match_verification_calls(
-                    [{'name': 'bash', 'arguments': {'command': previous}}],
-                    [{'name': 'bash', 'arguments': {'command': command}}])['matched']):
-                covered = True
-            continue
-        if not succeeded:
-            continue
-        if tool in ('edit', 'write') and isinstance(args.get('path'), str):
-            if _test_path(args['path']):
-                edited_tests |= last_command is None
-                continue
-        elif tool != 'bash' or is_readonly_action(tool, args):
-            continue
-        if not source_seen:
-            edited_source = last_command is None
-            source_seen = True
-    return edited_source, edited_tests, last_command, source_seen and not covered
-
-
-def predict(data, *, policy_config, capabilities):
-    from ascout_policy.info_match import is_verification_command as _verification
-
-    chance = data['chance_context']
-    command = chance.get('arguments', {}).get('command')
-    history = data.get('history', [])
-    edited_source, edited_tests, last_command, source_uncovered = _history_state(history, command, _verification)
-    if chance.get('kind') in ('model_inference', 'modelinference'):
-        if (edited_source or edited_tests) and last_command and policy_config.get('active_post_edit_test', True):
-            return {'generation': 'batch', 'proposals': [{
-                'payload': {'kind': 'predicted_tool_calls', 'tool_calls': [
-                    {'name': 'bash', 'arguments': {'command': last_command}}]},
-                'provenance': {'kind': 'active_post_edit_test'},
-            }]}
-        raw = policy_config.get('candidate_thinking', 'off')
-        thinking = 'off' if raw is False else raw
-        result = {'predict': 'branch_model', 'model': policy_config['candidate_model'],
-                  'thinking': thinking}
-        if policy_config.get('candidate_count', 1) > 1:
-            result['candidates'] = policy_config['candidate_count']
-        return result
-    if not _verification(command):
-        return {'abstain': True, 'reason': 'unrecognized_command'}
-    phase = 'post_source_edit' if source_uncovered or edited_source else 'baseline_check'
-    failures = [False]
-    if edited_tests and not edited_source:
-        phase, failures = 'tdd_repro', [True]
-    elif source_uncovered and not _narrow_verification(command) and policy_config.get('adaptive_dual_tool_speculation', True):
-        failures.append(True)
-    return {'generation': 'batch', 'proposals': [_verification_proposal(failure, phase) for failure in failures]}
-
-
-def _verification_proposal(failure, phase):
-    kind, message = ('expected_test_failure', 'the test fails as expected.') if failure else (
-        'verification_pass', 'the command completes successfully.')
-    return {
-        'payload': {'content': [{'type': 'text', 'text': 'Predicted verification result: ' + message}], 'isError': failure},
-        'provenance': {'kind': kind, 'phase': phase},
-    }
-
-
-def extent(data, *, policy_config, capabilities):
-    from ascout_policy.degradation import should_stop_degraded
-    from ascout_policy.info_match import is_readonly_action, is_verification_command as _verification
-
-    state = data['process_state']
-    facts = state.get('semantic_facts', {})
-    results = state.get('result_facts', {})
-    counters = state.get('resource_counters', {})
-    if state['steps_completed'] >= policy_config.get('max_steps', 12):
-        return 'stop'
-    next_action = facts.get('next_action') or {}
-    kind = next_action.get('kind')
-    name, args = next_action.get('name'), next_action.get('arguments') or {}
-    if facts.get('prediction_kind') == 'predicted_tool_calls' and (
-            kind == 'model_inference' or state.get('phase') == 'model_inference'):
-        return 'stop'
-    if facts.get('speculation_kind') == 'model_inference':
-        verification = name == 'bash' and _verification(args.get('command'))
-        if (policy_config.get('stop_before_mutation', True) and kind == 'tool_execution'
-                and not verification and not is_readonly_action(name, args)):
-            return 'stop'
-        if should_stop_degraded(results.get('completed_tools', []), next_action)[0]:
-            return 'stop'
-    elif (results.get('last_action', {}).get('is_error') is True
-          or (kind == 'tool_execution' and not is_readonly_action(name, args))
-          or (kind == 'model_inference' and counters.get('model_inferences', 0) >= 1)):
-        return 'stop'
-    return 'continue'
 
 
 def effect(data, *, policy_config, capabilities):
@@ -223,19 +273,27 @@ def effect(data, *, policy_config, capabilities):
 
 
 def rebalance(data, *, policy_config, capabilities):
-    active = data['active_view']
-    actions = [{'branch_id': branch['branch_id'], 'action': 'preempt'}
-               for branch in active if branch['tool_counts']['failed'] >= 2]
+    active, paused = data['active_view'], data['paused_view']
+    context = data['scheduling_context']
+    last_edit = max((entry['timestamp_ms'] for entry in context.get('authority_recent_actions', [])
+                     if _mutation(entry)), default=0)
+    failed_limit = policy_config.get('preempt_failed_tools', 2)
+    preempt = [branch for branch in active + paused if branch['tool_counts']['failed'] >= failed_limit
+               or (branch.get('yield_only') and branch.get('speculation_kind') == 'model_inference'
+                   and last_edit > branch['started_at_ms'])]
+    removed = {branch['branch_id'] for branch in preempt}
+    waiting = context.get('waiting_chance')
     limit = policy_config['max_active_candidates']
-    paused = sorted(data['paused_view'], key=lambda branch: -branch['age_ms'])
-    waiting = bool(paused or data.get('scheduling_context', {}).get('waiting_chance'))
-    excess = max(0, len(active) - len(actions) - limit + int(waiting and limit > 0))
-    preempting = {action['branch_id'] for action in actions}
-    yielding = sorted((branch for branch in active if branch.get('yield_only')
-                       and branch['branch_id'] not in preempting), key=lambda branch: -branch['age_ms'])
-    actions.extend({'branch_id': branch['branch_id'], 'action': 'preempt'} for branch in yielding[:excess])
-    available = max(0, limit - len(active) + len(actions))
-    return actions + [{'branch_id': branch['branch_id'], 'action': 'resume'} for branch in paused[:available]]
+    running = [branch for branch in active if branch['branch_id'] not in removed]
+    excess = max(0, len(running) - limit + int(bool(waiting and limit > 0)))
+    yielding = sorted((branch for branch in running if branch.get('yield_only')),
+                      key=lambda branch: (branch['started_at_ms'], branch['branch_id']))
+    evicted = yielding[:excess]
+    available = max(0, limit - len(running) + len(evicted) - int(bool(waiting)))
+    resumable = sorted((branch for branch in paused if branch['branch_id'] not in removed),
+                      key=lambda branch: (branch['started_at_ms'], branch['branch_id']))
+    return ([{'branch_id': branch['branch_id'], 'action': 'preempt'} for branch in preempt + evicted]
+            + [{'branch_id': branch['branch_id'], 'action': 'resume'} for branch in resumable[:available]])
 
 
 def _output(outcome):
@@ -245,90 +303,92 @@ def _output(outcome):
     return str(content or '')
 
 
-def _verification_entry(entry):
-    from ascout_policy.info_match import is_verification_command as _verification
+def _result_key(entry):
+    from posixpath import join, normpath
+    from ascout_policy.info_match import normalize_verification_command
 
-    return entry.get('tool_name') == 'bash' and _verification((entry.get('arguments') or {}).get('command'))
+    name, args = entry['tool_name'], entry['arguments']
+    if _verification_entry(entry):
+        directories = []
+        command = args['command']
+        signature = normalize_verification_command(command, directories=directories)
+        return 'verification', normpath(join('.', *directories)), signature or command
+    return name, args.get('command') or args.get('path'), args.get('offset'), args.get('limit')
 
 
-def _safe_results(entries):
+def _safe_results(entries, config, yielded):
     from ascout_policy.info_match import _entry_output
 
-    latest = {}
+    latest, seen = {}, set()
     for entry in entries:
-        name, args = entry['tool_name'], entry['arguments']
-        target = args.get('command') if name == 'bash' else args.get('path')
-        if target:
-            key = name, target, args.get('offset'), args.get('limit')
-            latest.pop(key, None)
-            latest[key] = entry
-    results, remaining = [], 14_000
-    for (name, target, _, _), entry in latest.items():
-        output = entry.get('cropped_output', _entry_output(entry))
-        if not output.strip():
+        key = _result_key(entry)
+        if entry['action_id'] in yielded:
+            seen.add(key)
+        latest.pop(key, None)
+        latest[key] = entry
+
+    results, remaining = [], config.get('safe_result_chars', 16_000)
+    for key, entry in latest.items():
+        if len(results) >= config.get('safe_result_count', 8):
+            break
+        if entry['action_id'] in yielded or (key[0] == 'verification' and key in seen):
             continue
-        label = f'{name} {target[:240]}'
+        output = entry['cropped_output'] if 'cropped_output' in entry else _entry_output(entry)
+        name, args = entry['tool_name'], entry['arguments']
+        target = args.get('command') or args.get('path')
+        if not target or not output.strip():
+            continue
+        label = f'{name} {target}'
         if name == 'read':
-            bounds = [f'{key}={entry["arguments"][key]}' for key in ('offset', 'limit') if key in entry['arguments']]
+            bounds = [f'{key}={args[key]}' for key in ('offset', 'limit') if key in args]
             if bounds:
                 label += f" ({', '.join(bounds)})"
         label = entry.get('cropped_label', label)
-        kind = 'verification' if _verification_entry(entry) else 'workspace'
-        header = f'[Speculative {kind} output collected on current files]: {label}\n'
-        marker = '\n[truncated]'
-        budget = min(4_500, remaining) - len(header)
-        if budget <= len(marker):
-            break
-        if len(output) > budget:
-            output = output[:budget - len(marker)] + marker
-        notification = header + output
-        results.append({'id': entry['action_id'], 'files': [], 'notification': notification})
-        remaining -= len(notification)
-        if len(results) == 8:
-            break
+        kind = 'verification' if key[0] == 'verification' else 'workspace'
+        notification = f'[Speculative {kind} output collected on current files]: {label}\n{output}'
+        if len(notification) <= remaining:
+            results.append({'id': entry['action_id'], 'files': [], 'notification': notification})
+            remaining -= len(notification)
     return results
 
 
-def _match_model(proposal, outcome, context, config):
-    from ascout_policy.info_match import (_entry_output, directional_overlap, filter_novel_readonly,
-                                          is_readonly_action, match_verification_calls)
+def _readonly_results(actions, authority_calls):
+    from ascout_policy.info_match import filter_novel_readonly, is_readonly_action
 
-    if outcome is None:
-        candidate = context['candidate']
-        branch = candidate.get('branch') or {}
-        if (not config.get('prior_readonly_exploration', False) or
-                candidate.get('turn_active', branch.get('execution_state', {}).get('turn_active', False))
-                and not candidate.get('blocked', isinstance(branch.get('status'), dict))):
-            return {'verdict': 'indeterminate'}
+    readonly = []
+    for entry in actions:
+        # Results after a candidate-only write can describe files Authority has never seen.
+        if _mutation(entry):
+            break
+        if _succeeded(entry) and is_readonly_action(entry['tool_name'], entry.get('arguments')):
+            readonly.append(entry)
+    return filter_novel_readonly(readonly, authority_calls)
+
+
+def _match_model(proposal, outcome, context, config):
+    from ascout_policy.info_match import match_verification_calls
 
     candidate = context['candidate']
-    yielded = set(candidate.get('yielded_action_ids') or [])
+    calls = outcome.get('tool_calls') if isinstance(outcome, dict) else None
     actions = [entry for entry in context.get('candidate_results', []) if entry.get('tool_name')]
-    readonly = [entry for entry in actions if entry.get('status') == 'succeeded'
-                and not (entry.get('result') or {}).get('is_error')
-                and is_readonly_action(entry['tool_name'], entry.get('arguments'))]
-    verification = [entry for entry in actions if _verification_entry(entry) and _entry_output(entry)]
-    mutations = [entry for entry in actions if not _verification_entry(entry)
-                 and not is_readonly_action(entry['tool_name'], entry.get('arguments'))]
-    authority = outcome.get('tool_calls') if isinstance(outcome, dict) else None
-    calls = (proposal.get('payload') or {}).get('tool_calls') or []
-    completed = [{'name': entry['tool_name'], 'arguments': entry['arguments']} for entry in readonly]
-    executed = [{'name': entry['tool_name'], 'arguments': entry['arguments']} for entry in verification]
-    if not candidate.get('yield_only') and not mutations and (match_verification_calls(calls, authority)['matched']
-                          or match_verification_calls(completed + executed, authority)['matched']):
-        return {'verdict': 'compatible', 'score': 1.0, 'details': {
-            'matched_tool_calls': True, 'match_kind': 'verification', 'coverage': 1.0}}
-    novel = filter_novel_readonly(readonly, authority) if config.get('readonly_salvage', True) else []
-    overlap = directional_overlap(completed, authority)
-    anchored = overlap > 0 and overlap >= config.get('min_partial_coverage', 0.25)
-    safe = [] if mutations else _safe_results(
-        [entry for entry in verification + novel if entry['action_id'] not in yielded]
-        if verification or anchored or outcome is None else [])
-    if safe:
-        return {'verdict': 'incompatible', 'score': overlap, 'details': {
-            'match_kind': 'prior_readonly' if outcome is None else 'partial_info',
-            'coverage': overlap, 'safe_results': safe}}
-    return {'verdict': 'incompatible', 'score': 0.0}
+    predicted = (proposal.get('payload') or {}).get('tool_calls') or []
+    proactive = (proposal.get('provenance') or {}).get('kind') == 'active_post_edit_test'
+    if proactive and not candidate.get('yield_only'):
+        if outcome is None:
+            return {'verdict': 'indeterminate'}
+        if match_verification_calls(predicted, calls)['matched']:
+            return {'verdict': 'compatible', 'score': 1.0, 'details': {'matched_tool_calls': True}}
+
+    verification = []
+    if proactive:
+        for entry in actions:
+            if _mutation(entry):
+                break
+            if _verification_entry(entry):
+                verification.append(entry)
+    safe = _safe_results(verification + _readonly_results(actions, calls), config,
+                         set(candidate.get('yielded_action_ids') or []))
+    return {'verdict': 'incompatible', 'score': 0.0, 'details': {'safe_results': safe}}
 
 
 def match_proposal(data, *, policy_config, capabilities):
@@ -358,23 +418,53 @@ def match_proposal(data, *, policy_config, capabilities):
     return {'verdict': 'incompatible', 'score': 0.0}
 
 
+def _verification_notification(outcome, limit):
+    output = _output(outcome)
+    if len(output) > limit:
+        marker = '\n…\n'
+        budget = max(0, limit - len(marker))
+        head, tail = budget // 2, budget - budget // 2
+        output = output[:head] + marker + (output[-tail:] if tail else '')
+    return 'Real verification output:\n' + output
+
+
 def dispose(data, *, policy_config, capabilities):
     resolution, context = data['resolution'], data['context']
     outcome = context.get('authority_outcome')
+    candidate = context.get('candidate') or {}
+    proposal = context.get('candidate_proposal') or {}
+    provenance = proposal.get('provenance') or {}
+    details = (context.get('match') or {}).get('details') or {}
+    discard = {'intent': 'Discard'}
     if resolution == 'accepted':
+        explore = (candidate.get('speculation_kind') == 'model_inference'
+                   and provenance.get('kind') != 'active_post_edit_test')
+        if explore or provenance.get('uses_candidate_model'):
+            actions = [entry for entry in context.get('candidate_results', []) if entry.get('tool_name')]
+            safe = _safe_results(_readonly_results(actions, None), policy_config, ())
+            return {'actions': [{'intent': 'Salvage', 'results': safe}] if safe else [discard]}
         action = {'intent': 'Promote'}
-        if isinstance(outcome, dict) and not ((context.get('match') or {}).get('details') or {}).get('matched_tool_calls'):
-            action['notification'] = 'Real verification matched the prediction.\n' + _output(outcome).strip()[-600:]
+        if isinstance(outcome, dict) and not details.get('matched_tool_calls'):
+            action['notification'] = _verification_notification(
+                outcome, policy_config.get('verification_output_chars', 20_000))
         return {'actions': [action]}
+
     if resolution in ('extent_reached', 'indeterminate') and outcome is None:
         return {'actions': []}
-    safe = ((context.get('match') or {}).get('details') or {}).get('safe_results')
-    discard = {'intent': 'Discard'}
-    candidate = context.get('candidate') or {}
-    if policy_config.get('yield_in_flight_verification', True) and resolution == 'rejected':
-        if (candidate.get('yield_only') and safe
-                or any(_verification_entry(tool) for tool in candidate.get('active_tools') or [])):
-            return {'actions': [{'intent': 'Yield', 'results': safe or []}]}
-    if resolution == 'rejected' and safe:
-        return {'actions': [{'intent': 'Salvage', 'results': safe}, discard]}
+
+    if candidate.get('speculation_kind') == 'model_inference':
+        safe = details.get('safe_results')
+        if safe is None:
+            safe = _match_model(proposal, outcome, context, policy_config).get('details', {}).get('safe_results', [])
+        branch = candidate.get('branch') or {}
+        status = branch.get('status')
+        stopped = (resolution in ('preempted', 'extent_reached')
+                   or status == {'blocked': 'extent_reached'}
+                   or (branch.get('execution_state') or {}).get('turn_active') is False)
+        explore = provenance.get('kind') != 'active_post_edit_test'
+        active_test = any(map(_verification_entry, candidate.get('active_tools') or []))
+        if not stopped and (explore or candidate.get('yield_only') or active_test):
+            return {'actions': [{'intent': 'Yield', 'results': safe}]}
+        if safe:
+            return {'actions': [{'intent': 'Salvage', 'results': safe}, discard]}
     return {'actions': [discard]}

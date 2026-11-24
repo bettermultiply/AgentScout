@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -196,18 +197,16 @@ function assertSharedCacheKey(root, requests, branchIds) {
     assert.equal(files.size, branchIds.length + 1);
 }
 
-function modelPolicy(root, write, {prior = false, active = true} = {}) {
+function modelPolicy(root, write, {fast = true, tools = false} = {}) {
     write('value.txt', 'one\ntwo\nthree\nfour\n');
     write('other.txt', 'different\n');
     const dir = join(root, 'policy');
     fs.cpSync(coding, dir, {recursive: true});
     const manifest = join(dir, 'policy.yaml');
     const config = fs.readFileSync(manifest, 'utf8')
-        .replace('fast_model_speculation: false', 'fast_model_speculation: true')
-        .replace('tool_speculation: true', 'tool_speculation: false')
-        .replace('candidate_model: deepseek/deepseek-flash', 'candidate_model: fixture/candidate')
-        .replace('active_post_edit_test: true', `active_post_edit_test: ${active}`)
-        .replaceAll('prior_readonly_exploration: false', `prior_readonly_exploration: ${prior}`);
+        .replace('fast_model_speculation: true', `fast_model_speculation: ${fast}`)
+        .replace('tool_speculation: true', `tool_speculation: ${tools}`)
+        .replaceAll('candidate_model: deepseek/deepseek-flash', 'candidate_model: fixture/candidate');
     fs.writeFileSync(manifest, config);
     return manifest;
 }
@@ -220,138 +219,178 @@ async function waitFor(predicate, label) {
     assert.fail(label);
 }
 
-test('coding Policy promotes observed verification outcomes and discards mismatches', {timeout: 45000}, async t => {
-    const {done, rows, root, requests, shutdown} = await fixture(t, messages => {
+for (const failure of [false, true]) test(`Verify ${failure ? 'Fail salvages diagnostics' : 'Pass promotes with complete output'}`, {timeout: 45000}, async t => {
+    const realOutput = `START_OF_TEST\n${'test output line\n'.repeat(420)}END_OF_TEST`;
+    const expected = failure ? 'Command exited with non-zero status.' : 'All tests passed.';
+    const {done, rows, root, shutdown} = await fixture(t, (messages, model, root) => {
         const last = lastTool(messages);
-        const edit = (id, path, oldText, newText) => tool(id, 'edit', {path, edits: [{oldText, newText}]});
-        const bash = (id, command) => tool(id, 'bash', {command});
         const id = last?.tool_call_id?.split('|')[0];
-        const predicted = last?.content?.includes('Predicted verification result:');
-        switch (id) {
-            case undefined: return tool('initial-read', 'read', {path: 'test_sample.py'});
-            case 'initial-read': return edit('test-edit', 'test_sample.py', '# todo', 'assert value == 1');
-            case 'test-edit': return bash('reproduce', './pytest');
-            case 'reproduce':
-                assert.ok(predicted);
-                assert.match(last.content, /fails as expected/);
-                return edit('source-fix', 'sample.py', 'value = 0', 'value = 1');
-            case 'source-fix': return bash('broken-check', './pytest --broken');
-            case 'broken-check': return predicted
-                ? (last.content.includes('fails as expected')
-                    ? edit('second-fix', 'sample.py', 'value = 1', 'value = 2')
-                    : tool('bad-write', 'write', {path: 'unwanted.txt', content: 'discard me'}))
-                : edit('second-fix', 'sample.py', 'value = 1', 'value = 2');
-            case 'bad-write': return {content: 'incorrect candidate'};
-            case 'second-fix': return bash('final-check', './runtests.py');
-            case 'final-check':
-                assert.ok(predicted);
-                return tool('final-write', 'write', {path: 'verified.txt', content: 'verified'});
-            case 'final-write': return {content: 'Verified and finished.'};
-            default: assert.fail(`unexpected tool result ${id}`);
+        const input = JSON.stringify(messages);
+        assert.doesNotMatch(input, /Predicted verification result:/);
+        if (!id) return failure ? tool('test-edit', 'write', {path: 'test_app.py', content: 'assert value == 1'})
+            : tool('verify', 'bash', {command: './pytest'});
+        if (id === 'test-edit') return tool('verify', 'bash', {command: './pytest'});
+        if (id === 'verify' && last.content === expected) {
+            assert.equal(model, failure ? 'candidate' : 'agent');
+            if (failure) assert.match(input, /Start with high-confidence checks/);
+            return tool('inspect', 'read', {path: 'app.py'});
         }
-    }, (_, write) => {
-        write('sample.py', 'value = 0\n');
-        write('test_sample.py', '# todo\n');
-        write('pytest', '#!/bin/bash\nsleep 1.2\nif [[ "$1" == --broken ]]; then echo SyntaxError: invalid syntax; else echo AssertionError: expected 1; fi\nexit 1\n', true);
-        write('runtests.py', '#!/bin/bash\nsleep 1.2\nprintf "OK (skipped=2, expected failures=1)\\n"\n', true);
-        return join(coding, 'policy.yaml');
-    }, {checkUiNotice: true, responses: true, cliModel: false});
-    const events = rows();
-    const decisions = events.filter(e => e.disposition);
-    const settlements = events.filter(e => e.observation?.event === 'settlement').map(e => e.observation);
-    // The broken invocation discards both predictions. The assertion failure and clean pass each promote one.
-    assert.deepEqual(settlements.map(e => e.disposition).sort(), ['Discard', 'Discard', 'Discard', 'Promote', 'Promote']);
-    assert.equal(done.branch_id, decisions.filter(e => e.disposition === 'Promote').at(-1).branch_id);
-    assert.ok(!events.some(e => e.message === 'policy_error' || e.policy_error));
-    assert.equal(events.filter(e => e.message === 'speculative_admission_request').length, 3);
-    for (const action of ['initial-read', 'test-edit']) {
-        assert.ok(events.some(e => e.message === 'action_finished' && e.action_id.startsWith(action) && e.status === 'succeeded'));
-    }
-    assert.equal(fs.readFileSync(runPath(root, 'workspace/sample.py'), 'utf8'), 'value = 2\n');
-    assert.equal(fs.readFileSync(runPath(root, 'workspace/verified.txt'), 'utf8'), 'verified');
-    assert.ok(!fs.existsSync(runPath(root, 'workspace/unwanted.txt')));
-    assert.ok(requests.some(r => r.toolId === 'reproduce'));
-    assertSharedCacheKey(root, requests, ['authority', ...decisions.filter(e => e.disposition === 'Promote').map(e => e.branch_id)]);
-    const session = rows('session.jsonl');
-    assert.equal(session.filter(e => e.customType === 'notification' && e.content.includes('OK (skipped=2, expected failures=1)')).length, 1);
-    assert.ok(session.some(e => e.message?.role === 'assistant' && e.message.content.some(part => part.text === 'Verified and finished.')));
-    await shutdown();
-});
-
-test('Salvage settles during a delayed second inference and delivers only novel results', {timeout: 45000}, async t => {
-    let candidatePending = false;
-    let authorityReturned;
-    let notificationReceived;
-    let candidateAborted;
-    const {rows, shutdown} = await fixture(t, async (messages, model, _root, _thinking, onAbort) => {
-        const id = lastTool(messages)?.tool_call_id?.split('|')[0];
-        if (model === 'candidate' && !id) return {tool_calls: [
-            ...tool('shared-read', 'read', {path: 'value.txt', limit: 2}).tool_calls,
-            {...tool('novel-read', 'read', {path: 'other.txt'}).tool_calls[0], index: 1},
-        ]};
-        if (model === 'candidate' && id !== 'authority-read') {
-            candidatePending = true;
-            onAbort(() => { candidateAborted = performance.now(); });
-            await delay(4_000, undefined, {ref: false});
-            return {content: 'Delayed candidate response'};
+        if (id === 'inspect') return tool('candidate-edit', 'write', {path: 'app.py', content: 'value = 1\n'});
+        if (id === 'candidate-edit') {
+            fs.writeFileSync(join(root, 'candidate-ready'), '');
+            return tool('candidate-retest', 'bash', {command: './pytest second'});
         }
-        if (model === 'agent' && !id) {
-            await waitFor(() => candidatePending, 'second candidate inference should be pending');
-            authorityReturned = performance.now();
-            return tool('authority-read', 'read', {path: 'value.txt', limit: 4});
-        }
-        if (model === 'agent') {
-            notificationReceived ??= performance.now();
-            const input = JSON.stringify(messages);
-            assert.match(input, /Accepted result: \[Speculative workspace output collected on current files\]: read other\.txt/);
-            assert.doesNotMatch(input, /Accepted result: \[Speculative workspace output collected on current files\]: read value\.txt/);
+        if (failure) {
+            assert.equal(id, 'verify');
+            assert.equal(model, 'agent');
+            assert.match(input, /read app\.py/);
+            assert.match(input, /END_OF_TEST/);
+            assert.doesNotMatch(input, /Start with high-confidence checks|candidate-edit/);
+        } else if (id === 'candidate-retest') {
+            // The previously blocked verification is allowed after Promote.
+            assert.match(last.content, /END_OF_TEST/);
+        } else {
+            assert.fail(`unexpected continuation after ${id}`);
         }
         return {content: 'Done'};
-    }, (root, write) => modelPolicy(root, write, {}), {modelIds: ['agent', 'candidate']});
-    const elapsed = notificationReceived - authorityReturned;
-    t.diagnostic(`Salvage notification reached Authority in ${Math.round(elapsed)} ms`);
-    assert.ok(elapsed < 1_500, `Salvage took ${elapsed} ms`);
-    await waitFor(() => candidateAborted !== undefined, 'candidate HTTP request should abort');
-    assert.ok(candidateAborted - authorityReturned < 1_500);
-    assert.ok(rows().some(e => e.disposition === 'Salvage'));
+    }, (root, write) => {
+        write('app.py', 'value = 0\n');
+        write('pytest', `#!/bin/sh\nfor i in $(seq 1 100); do [ -f '${join(root, 'candidate-ready')}' ] && break; sleep .05; done\nsleep .4\nprintf '%s\\n' '${realOutput}'\nexit ${Number(failure)}\n`, true);
+        const manifest = modelPolicy(root, write, {fast: false, tools: true});
+        fs.appendFileSync(join(root, 'policy', 'decisions.py'), `
+
+def initial_verification_only(data, *, policy_config, capabilities):
+    return data['op'].get('arguments', {}).get('command') == './pytest'
+`);
+        fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8')
+            .replace('function: feasibility_pass', 'function: initial_verification_only'));
+        return manifest;
+    }, {modelIds: ['agent', 'candidate']});
+    const events = rows();
+    assert.ok(!events.some(e => e.policy_error || e.message === 'policy_error'));
+    const settlement = events.find(e => e.observation?.event === 'settlement')?.observation;
+    assert.equal(settlement.disposition, failure ? 'Salvage' : 'Promote');
+    assert.equal(settlement.hit, true);
+    assert.equal(done.branch_id, failure ? 'authority' : settlement.branch_id);
+    const stopped = events.findIndex(e => e.branch_id === settlement.branch_id && e.message === 'branch_suspended'
+        && e.reason === 'extent_reached');
+    const edited = events.findIndex(e => e.action_id?.startsWith('candidate-edit') && e.message === 'action_finished');
+    const retest = events.findIndex(e => e.action_id?.startsWith('candidate-retest') && e.message === 'action_started');
+    assert.ok(edited >= 0 && stopped > edited);
+    assert.ok(failure ? retest === -1 : retest > stopped);
+    assert.equal(fs.readFileSync(runPath(root, 'workspace/app.py'), 'utf8'), `value = ${Number(!failure)}\n`);
+    if (!failure) {
+        const notices = rows('session.jsonl').filter(e => e.customType === 'notification');
+        assert.ok(notices.some(e => e.content.includes(realOutput)));
+    }
     await shutdown();
 });
 
-test('Yield delivers workspace and verification results while the candidate keeps running', {timeout: 45000}, async t => {
-    let verificationRequested = false;
+test('Explore yields novel reads before inference and retires after an Authority edit', {timeout: 45000}, async t => {
+    let candidateWaiting = false;
+    let aborted = false;
+    const {rows, done, root, shutdown} = await fixture(t, async (messages, model, _root, _thinking, onAbort) => {
+        const id = lastTool(messages)?.tool_call_id?.split('|')[0];
+        if (model === 'candidate') {
+            if (!id) {
+                assert.match(JSON.stringify(messages), /Use read-only tools/);
+                return tool('candidate-read', 'read', {path: 'other.txt'});
+            }
+            if (id === 'candidate-read') return tool('candidate-write', 'write', {path: 'value.txt', content: 'candidate only'});
+            assert.equal(id, 'candidate-write');
+            candidateWaiting = true;
+            onAbort(() => { aborted = true; });
+            await delay(7000, undefined, {ref: false});
+            return {content: 'Private reasoning'};
+        }
+        if (!id) {
+            await waitFor(() => candidateWaiting, 'candidate write should run before Authority responds');
+            return tool('authority-read', 'read', {path: 'value.txt'});
+        }
+        const input = JSON.stringify(messages);
+        assert.match(input, /read other\.txt/);
+        assert.doesNotMatch(input, /candidate only|Private reasoning/);
+        if (id === 'authority-read') return tool('authority-edit', 'write', {path: 'value.txt', content: 'authority only'});
+        await waitFor(() => aborted, 'Authority edit should preempt the running explorer');
+        return {content: 'Done'};
+    }, (root, write) => {
+        const manifest = modelPolicy(root, write);
+        fs.appendFileSync(join(root, 'policy', 'decisions.py'), `\n\ndef initial_only(data, *, policy_config, capabilities):\n    return data['state']['steps_completed'] == 0\n`);
+        fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8')
+            .replace('function: feasibility_pass', 'function: initial_only'));
+        return manifest;
+    }, {modelIds: ['agent', 'candidate']});
+    assert.equal(done.branch_id, 'authority');
+    const events = rows();
+    const yielded = events.find(e => e.disposition === 'Yield');
+    assert.ok(yielded);
+    assert.equal(yielded.part.results.length, 1);
+    assert.ok(!events.some(e => e.disposition === 'Promote' || e.policy_error));
+    assert.equal(fs.readFileSync(runPath(root, 'workspace/value.txt'), 'utf8'), 'authority only');
+    await shutdown();
+});
+
+test('Yield batches newly completed read-only results before inference while the candidate keeps running', {timeout: 45000}, async t => {
+    let candidateWaiting = false;
     let authorityAdvanced = false;
     const workspace = '[Speculative workspace output collected on current files]: read other.txt';
-    const verification = 'YIELD_VERIFICATION_COMPLETED';
+    const first = 'YIELD_FIRST_COMPLETED';
+    const second = 'YIELD_SECOND_COMPLETED';
+    const log = root => fs.readFileSync(runPath(root, 'events.jsonl'), 'utf8').split('\n').slice(0, -1).map(JSON.parse);
     const {rows, done, shutdown} = await fixture(t, async (messages, model, root) => {
         const id = lastTool(messages)?.tool_call_id?.split('|')[0];
         if (model === 'candidate' && !id) return {tool_calls: [
             ...tool('yield-shared', 'read', {path: 'value.txt', limit: 2}).tool_calls,
             {...tool('yield-novel', 'read', {path: 'other.txt'}).tool_calls[0], index: 1},
         ]};
-        if (model === 'candidate' && id !== 'yield-test') {
-            verificationRequested = true;
-            return tool('yield-test', 'bash', {command: './pytest'});
+        if (model === 'candidate' && !id.startsWith('yield-late')) {
+            candidateWaiting = true;
+            await waitFor(() => authorityAdvanced, 'Authority should continue after the initial Yield');
+            return {tool_calls: [
+                ...tool('yield-late-first', 'read', {path: 'late-first.txt'}).tool_calls,
+                {...tool('yield-late-second', 'read', {path: 'late-second.txt'}).tool_calls[0], index: 1},
+            ]};
         }
-        if (model === 'candidate') return {content: 'Candidate finished.'};
+        if (model === 'candidate') {
+            // Stay running so only the authority boundary can trigger the second Yield.
+            await delay(6000, undefined, {ref: false});
+            return {content: 'Candidate finished.'};
+        }
         if (!id) {
-            await waitFor(() => verificationRequested && fs.readFileSync(runPath(root, 'events.jsonl'), 'utf8')
-                .split('\n').some(line => line.includes('"message":"action_started"') && line.includes('yield-test')),
-            'candidate verification did not start');
+            await waitFor(() => candidateWaiting, 'candidate should be waiting in its second inference');
             return tool('yield-authority-read', 'read', {path: 'value.txt', limit: 4});
         }
         const input = JSON.stringify(messages);
         if (id === 'yield-authority-read') {
             assert.ok(input.includes(workspace), input);
-            assert.ok(!input.includes(verification), input);
+            assert.ok(!input.includes(first), input);
             authorityAdvanced = true;
-            return tool('yield-authority-work', 'bash', {command: 'sleep 2.5'});
+            void waitFor(() => log(root).some(e => e.message === 'action_finished' && e.action_id === 'yield-late-second'),
+                'both late reads should finish').then(() => fs.promises.writeFile(join(root, 'authority-read-fifo'), 'ready'));
+            return tool('yield-authority-work', 'bash', {command: `cat '${join(root, 'authority-read-fifo')}'`});
         }
         assert.equal(input.split(workspace).length - 1, 1, input);
-        assert.equal(input.split(verification).length - 1, 1, input);
+        assert.equal(input.split(first).length - 1, 1, input);
+        assert.equal(input.split(second).length - 1, 1, input);
         return {content: 'Authority finished.'};
     }, (root, write) => {
-        write('pytest', `#!/bin/bash\nsleep 2\necho ${verification}\n`, true);
-        return modelPolicy(root, write);
+        execFileSync('mkfifo', [join(root, 'authority-read-fifo')]);
+        write('late-first.txt', first);
+        write('late-second.txt', second);
+        const manifest = modelPolicy(root, write);
+        const dir = join(root, 'policy');
+        fs.appendFileSync(join(dir, 'decisions.py'), `
+
+def feasibility_initial_only(data, *, policy_config, capabilities):
+    return data['state']['steps_completed'] == 0
+
+def extent_keep_running(data, *, policy_config, capabilities):
+    return 'continue'
+`);
+        fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8')
+            .replace('function: feasibility_pass', 'function: feasibility_initial_only')
+            .replace('function: extent', 'function: extent_keep_running'));
+        return manifest;
     }, {modelIds: ['agent', 'candidate']});
     assert.ok(authorityAdvanced);
     assert.equal(done.status, 'succeeded');
@@ -360,10 +399,15 @@ test('Yield delivers workspace and verification results while the candidate keep
     assert.equal(yields.length, 2);
     const candidate = yields[0].branch_id;
     assert.equal(yields[1].branch_id, candidate);
-    const finished = events.find(event => event.message === 'action_finished' && event.action_id.startsWith('yield-test'));
-    assert.equal(finished?.status, 'succeeded');
-    assert.ok(events.indexOf(yields[0]) < events.indexOf(finished));
-    assert.ok(events.indexOf(finished) < events.indexOf(yields[1]));
+    const completed = events.filter(event => event.message === 'action_finished' && event.action_id.startsWith('yield-late'));
+    assert.deepEqual(completed.map(event => event.status), ['succeeded', 'succeeded']);
+    const boundary = events.slice(events.indexOf(completed[1]) + 1)
+        .find(event => event.message === 'model_inference_boundary' && event.branch_id === 'authority');
+    assert.ok(boundary, 'locally denied speculation must still settle Yield before inference');
+    assert.ok(events.indexOf(yields[0]) < events.indexOf(completed[0]));
+    assert.ok(events.indexOf(completed[1]) < events.indexOf(boundary));
+    assert.ok(events.indexOf(boundary) < events.indexOf(yields[1]));
+    assert.equal(yields[1].part.results.length, 2);
     const cleaned = events.findIndex(event => event.message === 'command_result' && event.branch_id === candidate
         && event.operation === 'cleanup' && event.status === 'applied');
     assert.ok(cleaned > events.indexOf(yields[1]) && cleaned < events.findIndex(event => event.message === 'materialization_started'));
@@ -371,110 +415,60 @@ test('Yield delivers workspace and verification results while the candidate keep
     await shutdown();
 });
 
-for (const prior of [false, true]) test(`Mode ${prior ? 1 : 2} salvages only read-only facts before edit`, {timeout: 45000}, async t => {
-    const started = [];
-    const marker = 'PRIVATE_CANDIDATE_TEXT', thinking = 'PRIVATE_CANDIDATE_THINKING';
-    const candidateReply = delta => ({content: marker, reasoning_content: thinking, ...delta});
-    const {rows, done, root, shutdown} = await fixture(t, async (messages, model, root) => {
-        const id = lastTool(messages)?.tool_call_id?.split('|')[0];
-        started.push({model, id});
-        const seen = (model, id) => started.some(call => call.model === model && call.id === id);
-        if (model === 'candidate') {
-            if (id === 'authority-read') {
-                await waitFor(() => seen('agent', id), 'Authority must run concurrently on the subsequent turn');
-                return candidateReply({});
-            }
-            if (!id) {
-                if (prior && started.filter(call => call.model === 'candidate' && !call.id).length === 1) {
-                    assert.equal(seen('agent', undefined), false);
-                } else if (!prior) await waitFor(() => seen('agent', undefined), 'Authority must start concurrently');
-                return candidateReply(tool('candidate-first', 'read', {path: 'other.txt'}));
-            }
-            if (id === 'candidate-first') return candidateReply(tool('candidate-second', 'read', {path: 'value.txt', limit: 2}));
-            assert.equal(id, 'candidate-second');
-            return candidateReply(tool('braked-edit', 'edit', {path: 'value.txt', edits: [{oldText: 'one', newText: 'bad'}]}));
-        }
-        const input = JSON.stringify(messages);
-        assert.ok(!input.includes(marker) && !input.includes(thinking));
-        if (prior || id) {
-            assert.ok(input.includes('read other.txt') && input.includes('different'), input);
-            if (prior) assert.ok(input.includes('read value.txt') && input.includes('one\\ntwo'), input);
-            else assert.ok(!input.includes('[Speculative workspace output collected on current files]: read value.txt'), input);
-        }
-        if (!id) {
-            if (!prior) await waitFor(() => {
-                const path = runPath(root, 'events.jsonl');
-                return fs.existsSync(path) && fs.readFileSync(path, 'utf8').includes('extent_reached');
-            }, 'candidate should park before Authority returns');
-            return tool('authority-read', 'read', {path: 'value.txt', limit: 4});
-        }
-        assert.equal(id, 'authority-read');
-        await waitFor(() => seen('candidate', id), 'subsequent step should admit a candidate');
-        return {content: 'done'};
-    }, (root, write) => modelPolicy(root, write, {prior}), {modelIds: ['agent', 'candidate'], reasoning: true});
-    const events = rows();
-    assert.equal(done.branch_id, 'authority');
-    assert.ok(!events.some(e => e.policy_error || e.message === 'policy_error'));
-    const first = events.find(e => e.message === 'candidate_created').branch_id;
-    assert.equal(events.find(e => e.branch_id === first && e.disposition)?.disposition, 'Salvage');
-    assert.ok(events.some(e => e.message === 'observation' && e.observation.event === 'settlement'
-        && e.observation.branch_id === first && e.observation.disposition === 'Salvage' && !e.observation.hit));
-    assert.ok(!events.some(e => e.message === 'action_started' && e.action_id.startsWith('braked-edit')));
-    for (const id of ['candidate-first', 'candidate-second']) {
-        assert.ok(events.some(e => e.message === 'action_finished' && e.action_id.startsWith(id)
-            && e.branch_id === first && e.status === 'succeeded'));
-    }
-    assert.equal(fs.readFileSync(runPath(root, 'workspace/value.txt'), 'utf8'), 'one\ntwo\nthree\nfour\n');
-    await shutdown();
-    const tree = JSON.parse(fs.readFileSync(runPath(root, 'final-tree.json'), 'utf8'));
-    assert.ok(tree.transcripts[first].some(message => message.role === 'assistant'
-        && message.content.some(part => part.type === 'thinking' && part.thinking === thinking)
-        && message.content.some(part => part.type === 'text' && part.text === marker)));
-});
-
-test('adaptive tool speculation promotes the failure branch after a source edit', {timeout: 45000}, async t => {
-    let predictedCalls = 0;
-    const {rows, done, shutdown} = await fixture(t, messages => {
+test('tool Proposal selects candidate inference settings and restores Authority on Promote', {timeout: 45000}, async t => {
+    let sawCandidate = false;
+    let sawRestored = false;
+    const guide = 'Only the speculative model should receive this guidance.';
+    const {done, rows, root, requests, shutdown} = await fixture(t, (messages, model, _, thinking) => {
         const last = lastTool(messages);
-        switch (last?.tool_call_id?.split('|')[0]) {
-            case undefined: return tool('source-write', 'write', {path: 'app.py', content: 'value = 1\n'});
-            case 'source-write': return tool('verify', 'bash', {command: './pytest'});
-            case 'verify':
-                if (last.content.includes('Predicted verification result:')) predictedCalls++;
-                return {content: last.content.includes('fails as expected') ? 'failure branch' : 'pass branch'};
-            default: assert.fail(`unexpected tool ${last.tool_call_id}`);
+        if (!last) return tool('verify', 'bash', {command: './pytest'});
+        if (model === 'candidate') {
+            assert.equal(thinking, 'low');
+            assert.ok(JSON.stringify(messages).includes(guide));
+            sawCandidate = true;
+            return tool('after-promotion', 'read', {path: 'result.txt'});
         }
-    }, (_, write) => {
-        write('pytest', '#!/bin/bash\nsleep 1.2\necho "AssertionError: expected 2"\nexit 1\n', true);
-        return join(coding, 'policy.yaml');
-    });
-    const events = rows();
-    assert.ok(!events.some(e => e.policy_error || e.message === 'policy_error'));
-    const branches = events.filter(e => e.message === 'candidate_created');
-    assert.equal(branches.length, 2);
-    assert.equal(branches[0].chance_id, branches[1].chance_id);
-    assert.equal(predictedCalls, 2);
-    const decisions = events.filter(e => e.disposition);
-    assert.equal(decisions.length, 2);
-    assert.equal(decisions.find(e => e.hypothesis?.isError === false)?.disposition, 'Discard');
-    const winner = decisions.find(e => e.hypothesis?.isError === true);
-    assert.equal(winner?.disposition, 'Promote');
-    assert.equal(done.branch_id, winner.branch_id);
+        assert.equal(thinking, 'medium');
+        assert.ok(!JSON.stringify(messages).includes(guide));
+        assert.match(last.tool_call_id, /after-promotion/);
+        sawRestored = true;
+        return {content: 'done'};
+    }, (root, write) => {
+        write('result.txt', 'restored model');
+        write('pytest', '#!/bin/sh\nsleep 1.5\necho "1 passed"\n', true);
+        const manifest = modelPolicy(root, write, {fast: false, tools: true});
+        const dir = join(root, 'policy');
+        fs.appendFileSync(join(dir, 'decisions.py'), `
+
+def predict_with_settings(data, *, policy_config, capabilities):
+    prediction = predict(data, policy_config=policy_config, capabilities=capabilities)
+    for proposal in prediction.get('proposals', []):
+        proposal.update(model='fixture/candidate', thinking='low', candidate_guidance=${JSON.stringify(guide)})
+    return prediction
+`);
+        const config = fs.readFileSync(manifest, 'utf8').replace(/function: predict\b/, 'function: predict_with_settings')
+            .replace('max_steps: 12', 'max_steps: 2');
+        fs.writeFileSync(manifest, config);
+        return manifest;
+    }, {modelIds: ['agent', 'candidate'], reasoning: true, responses: true});
+    assert.ok(sawCandidate && sawRestored);
+    assert.ok(rows().some(event => event.disposition === 'Promote' && event.branch_id === done.branch_id));
+    assertSharedCacheKey(root, requests, ['authority', done.branch_id]);
     await shutdown();
 });
 
-for (const intent of ['Reuse', 'Salvage']) test(`${intent} transfers a file and preserves the authority session`, {timeout: 45000}, async t => {
+for (const accepted of [true, false]) test(`Salvage (${accepted ? 'accepted' : 'rejected'}) transfers a file and preserves the authority session`, {timeout: 45000}, async t => {
     const {done, rows, root, shutdown} = await fixture(t, messages => {
         const last = lastTool(messages);
         if (!last) return tool('verify', 'bash', {command: './pytest'});
-        if (last.content.includes('Predicted verification result:')) {
+        if (last.content === 'All tests passed.') {
             return tool('candidate-write', 'write', {path: 'selected.txt', content: 'candidate result'});
         }
         return {content: 'done'};
     }, (root, write) => {
-        write('pytest', `#!/bin/bash\nsleep 1.2\n${intent === 'Reuse' ? "echo '1 passed'" : "echo 'SyntaxError'; exit 1"}\n`, true);
+        write('pytest', `#!/bin/bash\nsleep 1.2\n${accepted ? "echo '1 passed'" : "echo 'SyntaxError'; exit 1"}\n`, true);
+        const manifest = modelPolicy(root, write, {fast: false, tools: true});
         const dir = join(root, 'policy');
-        fs.cpSync(coding, dir, {recursive: true});
         fs.appendFileSync(join(dir, 'decisions.py'), `
 
 def extent_partial(data, *, policy_config, capabilities):
@@ -490,8 +484,8 @@ def dispose_partial(data, *, policy_config, capabilities):
     assert data['context']['match']['details']['partial'] is True
     assert data['branch']['proposal']['provenance']['phase'] == 'baseline_check'
     result = next(item for item in data['context']['candidate_results'] if item.get('tool_name') == 'write')
-    action = {'intent': '${intent}', 'results': [{'id': result['action_id'], 'notification': 'Selected artifact transferred.'}]}
-    return {'actions': [action${intent === 'Salvage' ? ", {'intent': 'Discard'}" : ''}]}
+    action = {'intent': 'Salvage', 'results': [{'id': result['action_id'], 'notification': 'Selected artifact transferred.'}]}
+    return {'actions': [action${!accepted ? ", {'intent': 'Discard'}" : ''}]}
 `);
         const config = fs.readFileSync(join(dir, 'policy.yaml'), 'utf8')
             .replace('function: extent', 'function: extent_partial')
@@ -501,25 +495,24 @@ def dispose_partial(data, *, policy_config, capabilities):
     });
     assert.equal(done.branch_id, 'authority');
     const events = rows();
-    const disposition = events.find(e => e.disposition === intent);
+    const disposition = events.find(e => e.disposition === 'Salvage');
     assert.ok(disposition, JSON.stringify(events.filter(e => e.disposition || e.policy_error)));
     const settlements = events.filter(e => e.message === 'observation').map(e => e.observation)
         .filter(e => e.event === 'settlement' && e.branch_id === disposition.branch_id);
-    assert.deepEqual(settlements.map(({disposition, hit}) => ({disposition, hit})), [{disposition: intent, hit: intent === 'Reuse'}]);
+    assert.deepEqual(settlements.map(({disposition, hit}) => ({disposition, hit})), [{disposition: 'Salvage', hit: accepted}]);
     assert.equal(fs.readFileSync(runPath(root, 'workspace/selected.txt'), 'utf8'), 'candidate result');
     assert.equal(rows('session.jsonl').filter(e => e.customType === 'notification' && e.content.includes('Selected artifact transferred.')).length, 1);
     await shutdown();
 });
 
-for (const scenario of ['running', 'finished', 'yield', 'salvage', 'fast-model', 'recovery']) {
+for (const scenario of ['running', 'finished', 'yield', 'salvage', 'recovery']) {
     test('post-edit verification ' + scenario, {timeout: 45000}, async t => {
-        const active = scenario !== 'fast-model';
-        const salvage = scenario === 'salvage' || !active;
+        const salvage = scenario === 'salvage';
         const yielding = scenario === 'yield';
         const diverges = salvage || yielding;
         const running = scenario === 'running' || scenario === 'recovery';
         const command = './pytest';
-        const authorityModel = active ? 'gpt-6.2-sol' : 'agent';
+        const authorityModel = 'gpt-6.2-sol';
         const toolStarted = event => event.message === 'action_started' && event.action_id.startsWith('pred-candidate');
         const parked = event => event.message === 'branch_suspended' && event.reason === 'extent_reached';
         async function waitEvent(root, predicate, label) {
@@ -536,30 +529,21 @@ for (const scenario of ['running', 'finished', 'yield', 'salvage', 'fast-model',
                 assert.match(JSON.stringify(messages), /POST_EDIT_RESULT/);
                 return {content: 'Recovered verification confirmed'};
             }
-            const predicted = id?.startsWith('pred-') || id === 'fast-test';
-            if (predicted && active && model === 'candidate') return {content: 'No speculative work'};
-            if (predicted) {
-                assert.equal(model, active ? authorityModel : 'candidate');
+            if (model === 'candidate') return {content: 'No speculative work'};
+            if (id?.startsWith('pred-')) {
+                assert.equal(model, authorityModel);
                 assert.match(lastTool(messages).content, /POST_EDIT_RESULT/);
                 continuation = true;
-                if (!active || scenario === 'recovery') {
+                if (scenario === 'recovery') {
                     onAbort(() => { aborted = true; release(); });
                     await pending;
                 }
                 return {content: 'Candidate verification finished'};
             }
-            if (model === 'candidate') {
-                if (id === 'source-write') {
-                    assert.equal(active, false);
-                    assert.equal(thinking, undefined);
-                    return tool('fast-test', 'bash', {command});
-                }
-                return {content: 'No speculative work'};
-            }
             if (!id) return tool('baseline', 'bash', {command});
             if (id === 'baseline') return tool('source-write', 'write', {path: 'value.txt', content: 'edited'});
             if (id === 'source-write') {
-                if (active) {
+                {
                     predictedExecution = await waitEvent(root, toolStarted, 'predicted test should start while Authority is waiting');
                     if (running) {
                         // Runtime can finish transferring only after the in-flight tool returns.
@@ -573,8 +557,6 @@ for (const scenario of ['running', 'finished', 'yield', 'salvage', 'fast-model',
                             'candidate should park before inference while Authority is waiting');
                     }
                     assert.equal(continuation, undefined);
-                } else {
-                    await waitFor(() => continuation, 'fast-model candidate should reach its next inference');
                 }
                 return diverges ? tool('authority-read', 'read', {path: 'other.txt'})
                     : tool('authority-test', 'bash', {command});
@@ -584,16 +566,22 @@ for (const scenario of ['running', 'finished', 'yield', 'salvage', 'fast-model',
                     && event.disposition === 'Yield' && event.part.results.length === 0, 'initial empty Yield');
                 assert.doesNotMatch(JSON.stringify(messages), /POST_EDIT_RESULT/);
                 fs.writeFileSync(join(root, 'release-test'), '');
-                await waitEvent(root, event => event.branch_id === predictedExecution.branch_id
-                    && event.operation === 'cleanup' && event.status === 'applied', 'cleanup after final Yield');
+                await waitEvent(root, event => event.branch_id === predictedExecution.branch_id && parked(event), 'park after verification');
                 return tool('authority-confirm', 'read', {path: 'value.txt'});
             }
             assert.equal(id, yielding ? 'authority-confirm' : 'authority-read');
-            assert.match(JSON.stringify(messages), /Accepted result: \[Speculative verification output.*POST_EDIT_RESULT/);
+            assert.match(JSON.stringify(messages), /\[Speculative verification output.*POST_EDIT_RESULT/);
             assert.doesNotMatch(JSON.stringify(messages), /Candidate verification finished/);
             return {content: 'Authority finished'};
         }, (root, write) => {
-            const policy = modelPolicy(root, write, {active});
+            const policy = modelPolicy(root, write);
+            fs.appendFileSync(join(root, 'policy', 'decisions.py'), `
+
+def after_source_edit_only(data, *, policy_config, capabilities):
+    return data['state']['steps_completed'] == 4
+`);
+            fs.writeFileSync(policy, fs.readFileSync(policy, 'utf8')
+                .replace('function: feasibility_pass', 'function: after_source_edit_only'));
             write('pytest', '#!/bin/sh\nif [ "$(cat value.txt)" != edited ]; then echo BASELINE; exit; fi\n'
                 + (running || yielding ? `while [ ! -f '${join(root, 'release-test')}' ]; do sleep 0.05; done\n` : '')
                 + 'echo POST_EDIT_RESULT\n' + (diverges ? 'exit 1\n' : ''), true);
@@ -604,7 +592,7 @@ for (const scenario of ['running', 'finished', 'yield', 'salvage', 'fast-model',
         } : undefined});
         await releaseRunning;
         const events = rows();
-        const execution = events.find(e => toolStarted(e) || (e.message === 'action_started' && e.action_id.startsWith('fast-test')));
+        const execution = events.find(toolStarted);
         assert.ok(execution);
         const finished = events.find(e => e.message === 'action_finished' && e.action_id === execution.action_id);
         assert.ok(finished);
@@ -634,24 +622,23 @@ for (const scenario of ['running', 'finished', 'yield', 'salvage', 'fast-model',
         } else if (yielding) {
             assert.equal(done.branch_id, 'authority');
             const yields = events.filter(e => e.branch_id === candidate && e.disposition === 'Yield');
-            assert.equal(yields.length, 2);
-            assert.deepEqual(yields[0].part.results, []);
-            assert.match(yields[1].part.results[0].notification, /POST_EDIT_RESULT/);
+            assert.deepEqual(yields.map(e => e.part.results), [[]]);
+            const salvage = events.find(e => e.branch_id === candidate && e.disposition === 'Salvage');
+            assert.match(salvage.part.results[0].notification, /POST_EDIT_RESULT/);
             const cleanup = events.findIndex(e => e.branch_id === candidate && e.message === 'command_result'
                 && e.operation === 'cleanup' && e.status === 'applied');
             assert.ok(extent);
             assert.ok(events.indexOf(yields[0]) < events.indexOf(finished));
             assert.ok(events.indexOf(finished) < events.indexOf(extent));
-            assert.ok(events.indexOf(extent) < events.indexOf(yields[1]));
-            assert.ok(events.indexOf(yields[1]) < cleanup);
+            assert.ok(events.indexOf(extent) < events.indexOf(salvage));
+            assert.ok(events.indexOf(salvage) < cleanup);
             assert.ok(cleanup < events.findIndex(e => e.message === 'materialization_started'));
         } else {
-            if (!active) await waitFor(() => aborted, 'pending fast-model reasoning should abort');
             assert.equal(done.branch_id, 'authority');
             assert.ok(events.some(e => e.observation?.branch_id === candidate && e.observation.status === 'discarded'));
             assert.ok(disposition.part.results.every(result => result.files.length === 0));
         }
-        if (active) {
+        {
             const postTestRequests = requests.filter(request => request.toolId === execution.action_id
                 && request.model === authorityModel);
             if (scenario !== 'recovery') assert.equal(postTestRequests.length, diverges ? 0 : 1);

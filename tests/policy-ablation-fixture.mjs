@@ -15,238 +15,232 @@ print(json.dumps(getattr(m, sys.argv[2])(json.loads(sys.argv[3]), policy_config=
         env: {...process.env, PYTHONPATH: resolve('policy_lib'), PYTHONDONTWRITEBYTECODE: '1'}}));
 }
 
+const model = {kind: 'model_inference', authority: true};
+const bash = command => ({kind: 'bash', produces_result: true, result_pending: true, arguments: {command}});
+const entry = (tool_name, arguments_, extra = {}) => ({tool_name, arguments: arguments_, status: 'succeeded', ...extra});
+const read = (path, extra) => entry('read', {path}, extra);
+const edit = entry('edit', {path: 'src/sample.py'}, {timestamp_ms: 50});
+const verified = (command, extra) => entry('bash', {command}, extra);
+const predict = (history, chance_context = model, config = {}, process_context = {}) =>
+    call('predict', {chance_context, history, process_context}, config);
+
 test('shared information matcher', () => {
     execFileSync('python3', ['-B', 'tests/policy-info-match.py'], {
         env: {...process.env, PYTHONPATH: resolve('policy_lib')}, stdio: 'inherit',
     });
 });
 
-const model = {kind: 'model_inference', authority: true};
-const bash = {kind: 'bash', produces_result: true, result_pending: true, arguments: {command: 'cargo test'}};
-
-test('Authority model opportunities are admitted at every step and launch concurrently', () => {
-    const config = {fast_model_speculation: true, tool_speculation: false};
-    assert.equal(call('opportunity_pass', {op: model}), false);
-    assert.equal(call('opportunity_pass', {op: model}, config), true);
-    assert.equal(call('opportunity_pass', {op: {...model, authority: false, predicting: true}}, config), false);
-    for (const steps_completed of [0, 1, 12]) {
-        assert.equal(call('feasibility_pass', {op: model, state: {steps_completed, assumption_depth: 0}}), true);
-    }
-    assert.equal(call('feasibility_pass', {op: model, state: {assumption_depth: 1}}), false);
-    assert.equal(call('launch', {chance_context: model}), true);
-    const prior = {prior_readonly_exploration: true};
-    assert.equal(call('launch', {chance_context: model, authority_state: {steps_completed: 0}}, prior), false);
-    assert.equal(call('launch', {chance_context: model, authority_state: {steps_completed: 1}}, prior), true);
-    assert.equal(call('launch', {chance_context: {kind: 'tool_execution'}}, prior), true);
-});
-
-test('model prediction starts known post-edit verification or falls back to branch_model', () => {
-    const data = {chance_context: {kind: 'model_inference'}};
-    const config = {candidate_model: 'fixture/fast'};
-    const prediction = {predict: 'branch_model', model: 'fixture/fast', thinking: 'off'};
-    const edited = {status: 'succeeded', tool_name: 'write', arguments: {path: 'src/a.py'}};
-    const verified = {status: 'failed', tool_name: 'bash', arguments: {command: 'pytest tests'}};
-    assert.deepEqual(call('predict', {...data, history: [edited]}, config), prediction);
-    assert.deepEqual(call('predict', {...data, history: [verified, edited]}, config), {
-        generation: 'batch', proposals: [{payload: {kind: 'predicted_tool_calls', tool_calls: [
-            {name: 'bash', arguments: {command: 'pytest tests'}},
-        ]}, provenance: {kind: 'active_post_edit_test'}}],
+test('Explore → Modify-Early → Modify-Ready → Verify → Explore', () => {
+    const main = verified('cd ./src && pytest tests');
+    const failure = {...main, status: 'failed'};
+    const guide = {candidate_model: 'fixture/fast', candidate_guidance: 'Find relevant code.'};
+    assert.deepEqual(predict([], model, guide), {predict: 'branch_model', model: 'fixture/fast', thinking: 'off', candidate_guidance: 'Find relevant code.'});
+    assert.deepEqual(predict([edit]), {abstain: true, reason: 'modify_early'});
+    assert.equal(predict([edit], model, {speculate_early_modify: true}).predict, 'branch_model');
+    const ready = predict([failure, edit]);
+    assert.deepEqual(ready.proposals[0], {
+        payload: {kind: 'predicted_tool_calls', tool_calls: [{name: 'bash', arguments: main.arguments}]},
+        provenance: {kind: 'active_post_edit_test'},
     });
-    assert.deepEqual(call('predict', {...data, history: [verified, edited]}, {...config, active_post_edit_test: false}), prediction);
-    assert.deepEqual(call('predict', {...data, history: [edited, verified]}, config), prediction);
+    assert.ok(predict([failure, edit], model, {}, {authority_active_tools: [main]}).abstain);
+    assert.ok(predict([failure, edit], model, {active_post_edit_test: false}).abstain);
+    for (const command of ['cd .baseline && pytest', 'cd /tmp/work && pytest', 'cd ../baseline && pytest',
+        'cd src && cd ".test copies/baseline" && pytest']) {
+        assert.equal(predict([main, edit, verified(command, {status: 'failed'})]).proposals[0]
+            .payload.tool_calls[0].arguments.command, main.arguments.command, command);
+        assert.ok(predict([verified(command, {status: 'failed'}), edit]).abstain, command);
+    }
+    assert.equal(predict([failure, edit], bash(main.arguments.command)).proposals.length, 2);
+    assert.equal(predict([failure, edit, main]).predict, 'branch_model');
+    assert.equal(predict([edit, failure, read('a'), {kind: 'model_inference'}, read('b')]).predict, 'branch_model');
 });
 
-const read = path => ({name: 'read', arguments: {path}});
-const tool = (name, args) => ({name, arguments: args});
-const match = (calls, outcome, context = {}, config = {}) => call('match_proposal', {
-    proposal: {payload: {tool_calls: calls}}, outcome,
-    match_context: {candidate: {speculation_kind: 'model_inference', ...context.candidate},
-        authority: context.authority, candidate_results: context.results},
-}, config);
-test('model match promotes only verification batches that cover Authority', () => {
-    const verify = tool('bash', {command: 'pytest tests/a.py'});
-    const wrapped = tool('bash', {command: 'TMPDIR=/tmp python3 -m pytest -q tests/a.py'});
-    const extra = tool('bash', {command: 'git diff --check'});
-    const outcome = {tool_calls: [verify]};
-    assert.deepEqual(match([verify], null), {verdict: 'indeterminate'});
-    assert.equal(match([read('a')], {tool_calls: [read('a')]}).verdict, 'incompatible');
-    const hit = match([wrapped], outcome);
-    assert.equal(hit.verdict, 'compatible');
-    assert.deepEqual(call('dispose', {resolution: 'accepted', context: {authority_outcome: outcome, match: hit}}),
-        {actions: [{intent: 'Promote'}]});
-    assert.equal(match([wrapped], {tool_calls: [verify, extra]}).verdict, 'incompatible');
-    const executed = {tool_name: 'bash', arguments: wrapped.arguments, status: 'failed', action_id: 'verify',
-        result: {content: '1 failed', is_error: true}};
-    assert.equal(match([read('a')], outcome, {results: [executed]}).verdict, 'compatible');
-    const miss = match([wrapped], {tool_calls: [verify, extra]}, {results: [executed]});
-    assert.equal(miss.verdict, 'incompatible');
-    assert.deepEqual(miss.details.safe_results.map(result => result.files), [[]]);
-    assert.match(miss.details.safe_results[0].notification, /1 failed/);
-    const mutated = {tool_name: 'edit', arguments: {path: 'a'}, status: 'succeeded'};
-    assert.equal(match([wrapped], outcome, {results: [executed, mutated]}).verdict, 'incompatible');
+test('workspace verification accepts absolute interpreters and hidden paths in pytest arguments', () => {
+    for (const command of ['TMPDIR="$PWD/.test-tmp" python -m pytest --basetemp "$PWD/.pytest-work" tests/test_a.py',
+        'pytest -o cache_dir=.test-tmp/cache tests/test_a.py', '/usr/bin/python3 -m pytest tests/test_a.py',
+        'pytest .baseline/tests']) {
+        const proposals = predict([edit], bash(command)).proposals;
+        assert.deepEqual(proposals.map(p => p.payload.isError), [false, true], command);
+        assert.deepEqual(predict([verified(command), edit]).proposals?.[0], {
+            payload: {kind: 'predicted_tool_calls', tool_calls: [{name: 'bash', arguments: {command}}]},
+            provenance: {kind: 'active_post_edit_test'},
+        }, command);
+    }
 });
 
-test('multi-step weak-model matches salvage only novel results', () => {
-    const result = {action_id: 'r1', tool_name: 'read', arguments: {path: 'a'}, status: 'succeeded',
-        result: {content: [{type: 'text', text: 'authority-visible facts'}]}};
-    const outcome = {tool_calls: [read('a')]};
-    const context = {
-        authority: {model: 'authority-model'},
-        candidate: {usage: [{model: 'deepseek-flash'}, {model: 'deepseek-flash'}]},
-        results: [result],
-    };
-    const novel = {...result, action_id: 'r2', arguments: {path: 'b'}};
-    const proposal = match([read('a')], outcome, {...context, results: [result, novel]});
-    assert.equal(proposal.verdict, 'incompatible');
-    assert.equal(proposal.details.match_kind, 'partial_info');
-    assert.deepEqual(proposal.details.safe_results, [{id: 'r2', files: [],
-        notification: '[Speculative workspace output collected on current files]: read b\nauthority-visible facts'}]);
-    const redundant = match([read('a')], outcome, context);
-    assert.deepEqual(call('dispose', {resolution: 'rejected', context: {
-        authority_outcome: outcome, match: redundant,
-    }}), {actions: [{intent: 'Discard'}]});
-    assert.deepEqual(call('dispose', {resolution: 'rejected', context: {
-        authority_outcome: outcome, match: proposal,
-    }}), {actions: [
-        {intent: 'Salvage', results: proposal.details.safe_results},
-        {intent: 'Discard'},
-    ]});
+test('Modify-Ready selects the latest wide verification or falls back to the latest narrow verification', () => {
+    const olderNarrow = verified('pytest tests/test_a.py::test_two');
+    const narrow = verified('pytest tests/test_a.py::test_one');
+    const olderWide = verified('pytest tests');
+    const wide = verified('pytest tests/test_a.py');
+    for (const [history, expected] of [[[olderNarrow, narrow], narrow], [[olderWide, wide, narrow], wide]]) {
+        assert.deepEqual(predict([...history, edit]).proposals?.[0], {
+            payload: {kind: 'predicted_tool_calls', tool_calls: [{name: 'bash', arguments: expected.arguments}]},
+            provenance: {kind: 'active_post_edit_test'},
+        });
+    }
 });
 
-test('extent permits isolated verification and stops observable degradation', () => {
-    const extent = (next_action, completed_tools = [], steps_completed = 2, speculation_kind = 'model_inference') =>
-        call('extent', {process_state: {steps_completed, semantic_facts: {speculation_kind, next_action},
-            result_facts: {completed_tools}}});
-    const action = (name, args) => ({kind: 'tool_execution', ...tool(name, args)});
-    const verification = action('bash', bash.arguments);
-    const mutation = action('edit', {path: 'a'});
-    const prior = {...read('a'), status: 'succeeded'};
-    assert.equal(extent(verification, [prior]), 'continue');
-    assert.equal(extent(mutation), 'stop');
-    assert.equal(extent(action('read', {path: './a'}), [prior]), 'stop');
-    assert.equal(extent(action('read', {path: 'b'}), [prior]), 'continue');
-    assert.equal(extent(verification, [], 12), 'stop');
-    assert.equal(extent(verification, [], 2, 'tool_execution'), 'stop');
-});
-
-test('read-only Salvage requires novelty and an Authority anchor', () => {
-    const good = {action_id: 'r', tool_name: 'read', status: 'succeeded', arguments: {path: 'b'},
-        result: {content: 'useful facts'}};
-    const overlap = {...good, action_id: 'a', arguments: {path: 'a'}};
-    const failed = {...good, action_id: 'failed', status: 'failed'};
-    const context = {results: [good, overlap, failed, {result: {content: 'assistant prose'}}]};
-    const outcome = {tool_calls: [read('a')]};
-    assert.deepEqual(match([read('a')], outcome, context).details.safe_results.map(r => r.id), ['r']);
-    assert.deepEqual(match([], {tool_calls: [read('c')]}, context), {verdict: 'incompatible', score: 0});
-    assert.deepEqual(match([], null, context, {prior_readonly_exploration: true})
-        .details.safe_results.map(r => r.id), ['r', 'a']);
-});
-
-test('cross-tool search overlap can anchor Salvage but cannot Promote', () => {
-    const search = tool('bash', {command: 'grep -rn "delete_cookie" src'});
-    const repeated = read('src/response.py');
-    const novel = read('tests/test_cookie.py');
-    const outcome = {tool_calls: [tool('bash', {command: "rg -n 'delete_cookie\\(' ."}), repeated]};
-    const results = [search, repeated, novel].map((fn, i) => ({action_id: `r${i}`,
-        tool_name: fn.name, arguments: fn.arguments, status: 'succeeded', result: {content: 'output'}}));
-    const result = match([search, repeated, novel], outcome, {results}, {min_partial_coverage: 0.75});
-    assert.equal(result.verdict, 'incompatible');
-    assert.equal(result.details.coverage, 1);
-    assert.deepEqual(result.details.safe_results.map(r => r.id), ['r0', 'r2']);
-    assert.deepEqual(call('dispose', {resolution: 'rejected', context: {authority_outcome: outcome, match: result}})
-        .actions.map(a => a.intent), ['Salvage', 'Discard']);
-});
-
-test('read-only salvage keeps the latest result per target within both budgets', () => {
-    const entry = (id, path, content) => ({action_id: id, tool_name: 'read', arguments: {path},
-        status: 'succeeded', result: {content}});
-    const latest = entry('latest', 'a', [{type: 'text', text: 'latest output'},
-        {type: 'thinking', thinking: 'private'}]);
-    latest.arguments = {path: 'a', offset: 140, limit: 100};
-    const salvage = results => match([], null, {results}, {prior_readonly_exploration: true}).details.safe_results;
-    const duplicate = salvage([{...entry('old', 'a', 'old output'), arguments: latest.arguments}, latest]);
-    const header = '[Speculative workspace output collected on current files]: ';
-    assert.deepEqual(duplicate, [{id: 'latest', files: [], notification: `${header}read a (offset=140, limit=100)\nlatest output`}]);
-
-    const many = size => Array.from({length: 10}, (_, i) => entry(`r${i}`, `p${i}`, 'x'.repeat(size)));
-    assert.equal(salvage(many(10)).length, 8);
-    const long = salvage(many(5_000));
-    assert.deepEqual(long.map(result => result.notification.length), [4_500, 4_500, 4_500, 500]);
-    assert.ok(long.every(result => result.notification.endsWith('\n[truncated]')));
-    const exact = 'x'.repeat(4_500 - `${header}read a\n`.length);
-    assert.equal(salvage([entry('exact', 'a', exact)])[0].notification, `${header}read a\n${exact}`);
-});
-
-test('verification predictions adapt to test edits, source edits, and passing verification', () => {
-    const entry = (tool_name, arguments_, status = 'succeeded', is_error = false) =>
-        ({tool_name, arguments: arguments_, status, is_error});
-    const source = entry('edit', {path: 'src/sample.py'});
-    const tests = entry('write', {path: 'tests/test_sample.py'});
-    const failed = entry('bash', bash.arguments, 'failed', true);
-    const passed = entry('bash', bash.arguments);
-    const predict = (history, config) => call('predict', {chance_context: bash, history}, config)
-        .proposals.map(p => p.provenance.kind);
-    const pass = 'verification_pass', fail = 'expected_test_failure';
-    assert.deepEqual(predict([]), [pass]);
-    assert.deepEqual(predict([tests]), [fail]);
-    assert.deepEqual(predict([source]), [pass, fail]);
-    assert.deepEqual(predict([tests, source, failed]), [pass, fail]);
-    assert.deepEqual(predict([source, {...passed, is_error: true}]), [pass, fail]);
-    assert.deepEqual(predict([source], {adaptive_dual_tool_speculation: false}), [pass]);
-    assert.deepEqual(predict([source, passed]), [pass]);
-
-    const branches = (command, history) => call('predict', {chance_context: {...bash, arguments: {command}}, history})
-        .proposals.map(p => p.provenance.kind);
-    assert.deepEqual(branches('pytest tests', [source, entry('bash', {command: 'pytest tests -k smoke'})]), [pass, fail]);
-    const shellEdit = entry('bash', {command: "python - <<'PY'\nfrom pathlib import Path\nPath('src/sample.py').write_text('updated')\nPY"});
-    assert.deepEqual(branches('pytest tests', [shellEdit]), [pass, fail]);
-    assert.deepEqual(branches('pytest tests', [shellEdit, passed]), [pass, fail]);
-    assert.deepEqual(branches('pytest tests', [shellEdit, entry('bash', {command: 'python3 -m pytest tests'})]), [pass]);
-    assert.deepEqual(branches('pytest tests', [{...shellEdit, status: 'failed'}]), [pass]);
-    assert.deepEqual(branches('pytest tests', [entry('bash', {command: 'git status'})]), [pass]);
-    for (const command of ['pytest -k "first or second" tests',
-        'cd src && TMPDIR="$PWD/tmp" python -m pytest --basetemp "$PWD/tmp" tests/test_sample.py::TestClass::test_one']) {
-        assert.deepEqual(branches(command, [source]), [pass]);
-        assert.deepEqual(branches(command, [failed, source]), [pass]);
-        assert.deepEqual(branches(command, [{...passed, result: {is_error: true}}, source]), [pass]);
-        assert.deepEqual(branches(command, [passed, source]), [pass]);
+test('verification bets use native output and independent model settings', () => {
+    const testEdit = entry('write', {path: 'tests/test_sample.py'});
+    const proposals = (history, command = 'pytest tests', config = {}) => predict(history, bash(command), config).proposals;
+    const bets = (...args) => proposals(...args).map(p => p.payload.isError);
+    assert.deepEqual(bets([]), [false]);
+    assert.deepEqual(bets([testEdit]), [true]);
+    assert.deepEqual(bets([edit]), [false, true]);
+    assert.deepEqual(bets([edit, verified('pytest tests', {is_error: true})]), [false, true]);
+    assert.deepEqual(bets([edit, verified('python3 -m pytest tests')]), [false]);
+    assert.deepEqual(bets([edit], 'pytest tests', {adaptive_dual_tool_speculation: false}), [false]);
+    assert.deepEqual(bets([edit], 'cd .baseline && pytest tests'), [false]);
+    for (const command of ['pytest -k test_foo', 'pytest -ktest_foo', 'pytest -k "test_one and not slow"',
+        'pytest -k "not slow" tests/test_sample.py::test_one',
+        'cd src && TMPDIR="$PWD/tmp" python -m pytest --basetemp="$PWD/tmp" tests/test_sample.py::TestClass::test_one']) {
+        assert.deepEqual(bets([edit], command), [false], command);
     }
     for (const command of ['pytest tests/test_sample.py', 'pytest tests/test_sample.py::test_one tests/other',
-        'pytest -- tests/test_sample.py::test_one tests']) {
-        assert.deepEqual(branches(command, [source]), [pass, fail]);
+        'pytest -- tests/test_sample.py::test_one tests', 'pytest -k "not test_cython"', 'pytest -k "not (a or b)"',
+        'pytest -k "not foo and not bar"', 'pytest -k"(not foo) and (not bar)"', 'pytest -k="not slow"']) {
+        assert.deepEqual(bets([edit], command), [false, true], command);
+    }
+    assert.deepEqual(bets([verified('pytest tests -k smoke'), edit], 'pytest tests'), [false, true]);
+    assert.deepEqual(bets([edit, verified('pytest tests -k smoke')]), [false, true]);
+    const [pass, fail] = proposals([edit], 'pytest tests', {fail_candidate_model: 'fixture/fast', fail_candidate_guidance: 'Inspect code.'});
+    assert.deepEqual(pass.payload, {content: [{type: 'text', text: 'All tests passed.'}], isError: false});
+    assert.equal(pass.model, undefined);
+    assert.deepEqual(fail.payload, {content: [{type: 'text', text: 'Command exited with non-zero status.'}], isError: true});
+    assert.equal(fail.model, 'fixture/fast');
+    assert.equal(fail.thinking, 'off');
+    assert.equal(fail.candidate_guidance, 'Inspect code.');
+    assert.equal(fail.provenance.uses_candidate_model, true);
+    const [mainFail] = proposals([testEdit], 'pytest tests', {fail_candidate_model: ''});
+    assert.equal(mainFail.provenance.uses_candidate_model, false);
+    assert.equal(mainFail.model, undefined);
+});
+
+const candidate = {speculation_kind: 'model_inference'};
+const proactive = {provenance: {kind: 'active_post_edit_test'}, payload: {tool_calls: [{name: 'bash', arguments: {command: 'pytest tests'}}]}};
+const match = (proposal, outcome, results, branch = candidate, config = {}) => call('match_proposal', {
+    proposal, outcome, match_context: {candidate: branch, candidate_results: results},
+}, config);
+const dispose = (resolution, context, config = {}) => call('dispose', {resolution, context}, config).actions;
+const result = (id, path, content) => read(path, {action_id: id, result: {content}});
+
+test('Explore yields only novel read-only results, including an empty Yield while running', () => {
+    const outcome = {tool_calls: [{name: 'read', arguments: {path: 'a', offset: 2, limit: 2}}]};
+    const entries = [{...result('shared', 'a', 'one\ntwo\nthree\nfour'), arguments: {path: 'a', limit: 4}}, result('novel', 'b', 'fresh'),
+        {...edit, action_id: 'write'}, result('unsafe', 'c', 'after candidate mutation')];
+    const proposal = {payload: outcome};
+    const hit = match(proposal, outcome, entries);
+    assert.equal(hit.verdict, 'incompatible');
+    const safe = hit.details.safe_results;
+    assert.deepEqual(safe.map(r => r.id), ['shared', 'novel']);
+    assert.match(safe[0].notification, /one/);
+    assert.match(safe[0].notification, /four/);
+    assert.doesNotMatch(safe[0].notification, /two|three/);
+    const context = {candidate, candidate_proposal: proposal, authority_outcome: outcome, candidate_results: entries};
+    assert.deepEqual(dispose('rejected', {...context, match: hit}), [{intent: 'Yield', results: safe}]);
+    assert.deepEqual(dispose('rejected', {...context, candidate: {...candidate, yielded_action_ids: ['shared', 'novel']}}),
+        [{intent: 'Yield', results: []}]);
+    for (const resolution of ['extent_reached', 'preempted']) {
+        assert.deepEqual(dispose(resolution, context), [{intent: 'Salvage', results: safe}, {intent: 'Discard'}]);
     }
 });
 
-test('Yield with no completed result keeps an in-flight verification alive', () => {
-    const candidate = {active_tools: [{tool_name: 'bash', arguments: {command: 'pytest 2>&1 | tail -15'}}]};
-    const data = {resolution: 'rejected', context: {candidate, authority_outcome: {}}};
-    assert.deepEqual(call('dispose', data), {actions: [{intent: 'Yield', results: []}]});
-    assert.deepEqual(call('dispose', data, {yield_in_flight_verification: false}), {actions: [{intent: 'Discard'}]});
-    assert.deepEqual(call('rebalance', {active_view: [{branch_id: 'candidate', yield_only: true, age_ms: 100,
-        tool_counts: {failed: 0}}], paused_view: [], scheduling_context: {waiting_chance: true}},
-    {max_active_candidates: 1}), [{branch_id: 'candidate', action: 'preempt'}]);
+test('Modify-Ready promotes matching verification and yields or salvages unmatched output', () => {
+    const matching = {tool_calls: [{name: 'bash', arguments: {command: 'TMPDIR=/tmp python3 -m pytest -q tests'}}]};
+    const hit = match(proactive, matching, []);
+    assert.equal(hit.verdict, 'compatible');
+    assert.deepEqual(dispose('accepted', {candidate, candidate_proposal: proactive, authority_outcome: matching, match: hit}),
+        [{intent: 'Promote'}]);
+    const context = {candidate: {...candidate, active_tools: [verified('pytest tests')]}, candidate_proposal: proactive,
+        authority_outcome: {tool_calls: []}};
+    assert.deepEqual(dispose('rejected', context), [{intent: 'Yield', results: []}]);
+    const report = verified('pytest tests', {status: 'failed', action_id: 'test', result: {content: '1 failed'}});
+    assert.match(dispose('rejected', {...context, candidate, candidate_results: [report]})[0].results[0].notification, /1 failed$/);
 });
 
-test('tool speculation is independently toggleable and recognizes standalone verification', () => {
-    assert.equal(call('opportunity_pass', {op: bash}, {fast_model_speculation: false}), true);
-    assert.equal(call('opportunity_pass', {op: bash}, {fast_model_speculation: true, tool_speculation: false}), false);
-    assert.equal(call('opportunity_pass', {op: {...bash, result_pending: false}}), false);
-    const feasible = command => call('feasibility_pass', {op: {...bash, arguments: {command}}, state: {assumption_depth: 0}});
+test('verification runs multiple inferences and allows edits until the next verification', () => {
+    const extent = (next_action, options = {}) => call('extent', {process_state: {steps_completed: options.steps ?? 4,
+        semantic_facts: {speculation_kind: options.kind ?? 'tool_execution', prediction_kind: options.prediction, next_action},
+        result_facts: {completed_tools: options.completed ?? []}, resource_counters: {model_inferences: 3}}});
+    const action = (name, args) => ({kind: 'tool_execution', name, arguments: args});
+    assert.equal(extent({kind: 'model_inference'}), 'continue');
+    assert.equal(extent(action('edit', {path: 'a'})), 'continue');
+    assert.equal(extent(action('write', {path: 'a'}), {kind: 'model_inference'}), 'continue');
+    assert.equal(extent(action('bash', {command: 'cargo test'})), 'stop');
+    assert.equal(extent({kind: 'model_inference'}, {prediction: 'predicted_tool_calls'}), 'stop');
+    assert.equal(extent({kind: 'model_inference'}, {steps: 12}), 'stop');
+    assert.equal(extent(action('read', {path: './a'}), {completed: [{name: 'read', arguments: {path: 'a'}, status: 'succeeded'}]}), 'stop');
+});
+
+test('verification settlement preserves full output or salvages weak-model read-only facts', () => {
+    const [pass, fail] = predict([edit], bash('pytest')).proposals;
+    const output = 'FIRST\n' + 'x'.repeat(10_000) + '\nLAST';
+    const authority_outcome = {status: 'succeeded', is_error: false, content: output};
+    assert.equal(match(pass, authority_outcome, [], {}).verdict, 'compatible');
+    const promote = dispose('accepted', {candidate_proposal: pass, authority_outcome})[0];
+    assert.equal(promote.intent, 'Promote');
+    assert.ok(promote.notification.endsWith(output));
+    const huge = {...authority_outcome, content: 'FIRST' + 'x'.repeat(21_000) + 'LAST'};
+    const bounded = dispose('accepted', {candidate_proposal: pass, authority_outcome: huge})[0].notification.split('\n').slice(1).join('\n');
+    assert.equal(bounded.length, 20_000);
+    assert.match(bounded, /^FIRST[\s\S]*LAST$/);
+    const failure = {...authority_outcome, status: 'failed', is_error: true, content: 'AssertionError'};
+    assert.equal(match(fail, failure, [], {}).verdict, 'compatible');
+    const candidate_results = [result('r', 'src/a.py', 'useful'), {...edit, action_id: 'edit'}];
+    const salvage = dispose('accepted', {candidate_proposal: fail, authority_outcome: failure, candidate_results});
+    assert.deepEqual(salvage.map(a => a.intent), ['Salvage']);
+    assert.deepEqual(salvage[0].results.map(r => r.id), ['r']);
+    assert.deepEqual(dispose('accepted', {candidate_proposal: fail, authority_outcome: failure}), [{intent: 'Discard'}]);
+    const mainFail = predict([edit], bash('pytest'), {fail_candidate_model: ''}).proposals[1];
+    assert.equal(dispose('accepted', {candidate_proposal: mainFail, authority_outcome: failure})[0].intent, 'Promote');
+});
+
+test('safe results fit whole file or command output and deduplicate verification by signature', () => {
+    const report = (id, command, content) => verified(command, {action_id: id, result: {content}});
+    const large = 'x'.repeat(6_000) + '\nend of test';
+    const entries = [report('old', 'pytest tests', 'old output'), report('full', 'python3 -m pytest -q tests', large),
+        report('too-large', 'cargo test', 'z'.repeat(16_000)), result('small', 'a', 'small output')];
+    const safe = match(proactive, {}, entries).details.safe_results;
+    assert.deepEqual(safe.map(r => r.id), ['full', 'small']);
+    assert.ok(safe[0].notification.endsWith(large));
+    const files = Array.from({length: 10}, (_, i) => result(`r${i}`, `p${i}`, 'data'));
+    assert.equal(match({}, null, files).details.safe_results.length, 8);
+    assert.deepEqual(match(proactive, {}, entries, {...candidate, yielded_action_ids: ['old']}).details.safe_results.map(r => r.id), ['small']);
+});
+
+test('rebalance retires stale explorers, failed branches, and oldest yield-only branch under pressure', () => {
+    const branch = (branch_id, started_at_ms, kind = 'model_inference', yield_only = true, failed = 0) =>
+        ({branch_id, started_at_ms, speculation_kind: kind, yield_only, tool_counts: {failed}});
+    const rebalance = (active_view, scheduling_context, paused_view = []) => call('rebalance',
+        {active_view, paused_view, scheduling_context}, {max_active_candidates: 2});
+    const old = branch('old', 40), recent = branch('recent', 55);
+    const preempt = branch_id => ({branch_id, action: 'preempt'});
+    assert.deepEqual(rebalance([old, recent], {authority_recent_actions: [edit]}), [preempt('old')]);
+    assert.deepEqual(rebalance([old, recent], {authority_recent_actions: [{...edit, status: 'failed'}]}), []);
+    assert.deepEqual(rebalance([recent, old], {waiting_chance: true}), [preempt('old')]);
+    assert.deepEqual(rebalance([branch('failed', 60, 'tool_execution', false, 2)], {}), [preempt('failed')]);
+    assert.deepEqual(rebalance([recent], {authority_recent_actions: [edit]}, [old]), [preempt('old')]);
+});
+
+test('model/tool toggles are independent and feasibility still restricts verification commands', () => {
+    assert.equal(call('opportunity_pass', {op: model}), true);
+    assert.equal(call('opportunity_pass', {op: model}, {fast_model_speculation: false}), false);
+    assert.equal(call('opportunity_pass', {op: {...model, authority: false}}), false);
+    assert.equal(call('opportunity_pass', {op: bash('cargo test')}), true);
+    assert.equal(call('opportunity_pass', {op: bash('cargo test')}, {tool_speculation: false}), false);
+    assert.equal(call('feasibility_pass', {op: model, state: {assumption_depth: 1}}), false);
+    const feasible = command => call('feasibility_pass', {op: bash(command), state: {assumption_depth: 0}});
     for (const command of ['cargo test', 'python3 -m pytest', './runtests.py', 'npm run build',
-        'cd /tmp/work && mkdir -p "$PWD/.tmp" && TMPDIR="$PWD/.tmp" PYTHONPATH="${PWD}" PYTHONDONTWRITEBYTECODE=1 python -m pytest --basetemp="$PWD/.pytest-tmp" tests/test_*.py',
-        'mkdir -p .tmp\nTMPDIR="$PWD/.tmp" python tests/runtests.py testsuite', 'LD_PRELOAD=lib.so pytest',
+        'cd /tmp/work && mkdir -p "$PWD/.tmp" && TMPDIR="$PWD/.tmp" python -m pytest tests',
         'pytest | head', 'cd /tmp/work/tests && python runtests.py testsuite 2>&1 | tail -15']) {
         assert.equal(feasible(command), true, command);
     }
-    for (const command of ['pytest && curl example.com', 'pytest > out', 'pytest >> out', 'git push',
-        'pytest; rm -r tests', 'jest --updateSnapshot', 'pytest | head out', 'pytest "$(pwd)"', 'pytest "`pwd`"',
-        'pytest --basetemp="$OTHER/tmp"', 'pytest --basetemp="$PWD_OTHER/tmp"', 'pytest "$?"',
-        'rm -rf .tmp && pytest', 'apply_patch && pytest', "python - <<'PY'\nprint(1)\nPY\npytest",
-        'git push && pytest', 'curl example.com && pytest', 'mkdir .tmp && pytest', 'mkdir -p .tmp extra && pytest',
-        'cd /tmp || pytest', 'cd /tmp &&', 'pytest\npytest']) {
+    for (const command of ['git diff', 'pytest && curl example.com', 'pytest > out', 'pytest; rm -r tests',
+        'jest --updateSnapshot', 'pytest | head out', 'pytest "$(pwd)"', 'git push && pytest',
+        'pytest --basetemp="$OTHER/tmp"', 'rm -rf .tmp && pytest', 'cd /tmp || pytest', 'pytest\npytest']) {
         assert.equal(feasible(command), false, command);
     }
-    assert.equal(call('launch', {chance_context: bash}), true);
     for (const [tool, args, mode] of [['bash', {command: 'git push'}, 'block'], ['bash', {command: 'find /'}, 'deny'],
         ['read', {path: '../file'}, 'deny'], ['bash', {command: 'cargo test'}, 'allow']]) {
         assert.equal(call('effect', {effect_descriptor: {tool, arguments: args}}).mode, mode);

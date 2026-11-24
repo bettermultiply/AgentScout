@@ -233,13 +233,15 @@ class InfoMatchTests(unittest.TestCase):
                         status='failed', result={'content': 'verification report'})]
         candidate = {'speculation_kind': 'model_inference', 'yield_only': True,
                      'active_tools': [entries[1]], 'yielded_action_ids': []}
-        data = {'proposal': {}, 'outcome': outcome, 'match_context': {
+        proposal = {'provenance': {'kind': 'active_post_edit_test'}}
+        data = {'proposal': proposal, 'outcome': outcome, 'match_context': {
             'candidate': candidate, 'candidate_results': entries}}
-        for intent in ('Salvage', 'Yield'):
+        for intent, resolution in (('Salvage', 'preempted'), ('Yield', 'rejected')):
             result = policy['match_proposal'](data, policy_config={}, capabilities={})
-            context = {'match': result, 'authority_outcome': outcome, 'candidate': candidate}
-            plan = policy['dispose']({'resolution': 'rejected', 'context': context},
-                                     policy_config={'yield_in_flight_verification': intent == 'Yield'}, capabilities={})
+            context = {'match': result, 'authority_outcome': outcome, 'candidate': candidate,
+                       'candidate_results': entries}
+            plan = policy['dispose']({'resolution': resolution, 'context': context},
+                                     policy_config={}, capabilities={})
             self.assertEqual(plan['actions'][0]['intent'], intent)
             self.assertEqual({entry['id'] for entry in plan['actions'][0]['results']}, {'read', 'test'})
             for entry in plan['actions'][0]['results']:
@@ -327,12 +329,11 @@ class CodingPolicyTests(unittest.TestCase):
         }
         return self.decisions['extent']({'process_state': state}, policy_config={}, capabilities={})
 
-    def test_tool_execution_extent_stops_before_writes_or_second_inference(self):
+    def test_tool_execution_extent_stops_at_the_next_recognized_verification(self):
         for name, args, expected in (
-            ('bash', {'command': 'rm -rf .pytest-work && pytest tests'}, 'stop'),
-            ('bash', {'command': 'mkdir -p .pytest-work'}, 'stop'),
+            ('bash', {'command': 'mkdir -p .pytest-work'}, 'continue'),
             ('bash', {'command': 'pytest tests'}, 'stop'),
-            ('write', {'path': 'result.txt', 'content': 'result'}, 'stop'),
+            ('write', {'path': 'result.txt', 'content': 'result'}, 'continue'),
             ('bash', {'command': 'git diff'}, 'continue'),
             ('read', {'path': 'result.txt'}, 'continue'),
         ):
@@ -341,8 +342,7 @@ class CodingPolicyTests(unittest.TestCase):
                 self.assertEqual(self.extent('tool_execution', action, model_inferences=1), expected)
         inference = {'kind': 'model_inference'}
         self.assertEqual(self.extent('tool_execution', inference), 'continue')
-        self.assertEqual(self.extent('tool_execution', inference, model_inferences=1), 'stop')
-        self.assertEqual(self.extent('tool_execution', inference, is_error=True), 'stop')
+        self.assertEqual(self.extent('tool_execution', inference, model_inferences=1), 'continue')
 
     def test_predicted_tool_calls_extent_runs_verification_then_parks(self):
         verification = {'kind': 'tool_execution', 'name': 'bash', 'arguments': {'command': 'pytest tests'}}
