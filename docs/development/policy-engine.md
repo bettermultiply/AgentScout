@@ -259,6 +259,8 @@ Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Pol
 
 `match` 和 `dispose` 的 `candidate_results` 为已完成动作提供 `action_id`、`action_kind`、`status`、`timestamp_ms` 和 `result`，已知时也包含 `started_at_ms`。工具项另提供工具名称、参数和相关详情，模型推理项的 `result.content` 可包含文本和思考内容。Policy 可用 `Salvage` 或 `Yield` 选择交付工具结果和成功的模型推理输出。模型项必须显式传入 `files: []`，`Yield` 的所有项均使用空文件列表。文件级 `Salvage` 仅交付 Runtime 回执确认的结果，即使原 Chance 已结束也可向原 Authority 结算停止的 `yield_only` 候选，且无需改变 Chance 的赢家。
 
+未被 `Select` 选中的 Chance 在 Authority 取值期间保持 `Pending`，`Fetching` 时仍计入可选前沿。`rebalance` 因此能看到等待的 Chance，并按策略抢占占用容量的 `yield_only` 候选。容量释放后，`Select` 会重新评估等待的 Chance。调度状态未变化时只运行一次 `Select`，已经开始的 Authority 操作也只执行一次。如果 Authority 模型先完成且 Chance 没有候选，Chance 以 `Discarded(NotSelected)` 结算并释放等待。
+
 ### Coding 策略的三阶段循环
 
 `explore` 默认启动快模型候选，直接沿用 Authority 的 session 历史进行推理，不注入任务引导。活跃的探索候选会使同类预测弃权。进入 `yield_only` 后，候选继续执行本轮剩余工具，在下一次模型推理前由 `extent` 停下。Authority 的下一轮可同时启动新的探索候选。停止候选在下一次 Authority 模型边界或任务收尾时用 `Salvage + Discard` 结算。工具失败阈值、工作区进展和容量仍由 `rebalance` 处理。
@@ -273,6 +275,10 @@ Policy 不新增 backend 列表。`PolicyEngine::confirm_backends` 读取该 Pol
 
 任何 `model_inference` 候选在自身首次修改工作区之前取得的有效工作区验证输出，无论通过还是失败，都可通过 `Yield` 或 `Salvage` 交付。验证须在 Authority 最近一次修改之后开始。Authority 已有覆盖该命令的结果、该结果已交付，或同批中有更新的相同命令结果时，策略去重。候选修改后的验证仅作为终止时移交已验证文件的依据。
 
-`verify` 识别带有 `TMPDIR`、`SPHINX_TEST_TEMPDIR` 等环境变量前缀的验证命令，临时目录赋值也可使用加双引号的 `$TMPDIR` 路径。只读工具识别沿用原有规则。策略对隐藏目录基线快照等非工作区比较验证弃权，原命令继续由 Authority 执行。工作区验证的候选可继续推理和修改。`fail_candidate_guidance` 仅用于 `Fail` 预测占位，告知候选验证已失败、真实输出尚未到达，并要求候选将失败视为真实，在检查或编辑代码之前不重跑验证命令。若从未修改文件，或最后一次修改之后已有成功的工作区验证，`extent` 会在新的验证命令前停止。修改后尚未通过验证的候选可以运行工作区测试。范围上限默认是 12 个完整轮次。
+`verify` 识别带有 `TMPDIR`、`SPHINX_TEST_TEMPDIR` 等环境变量前缀的验证命令，临时目录赋值也可使用加双引号的 `$TMPDIR` 路径。`timeout` 包装以及将输出重定向到日志后用 `tail`、`head` 或 `cat` 显示同一文件的命令，会按底层测试命令识别和匹配。管道接 `tail` 或 `head` 也使用同一签名。分号或管道末尾的显示命令可能掩盖测试退出码。策略检查输出中的失败标记，有明确失败的报告仍可交付为已完成的失败验证。显示命令掩盖退出码时，策略要求输出末尾有可识别的成功摘要，才允许依据结果晋升候选或移交文件。
+
+Policy 逐步解析验证命令的 `cd`，识别工作区绝对根路径及其可见子目录。策略对进入隐藏目录或离开工作区的比较验证弃权，原命令继续由 Authority 执行。`extent` 从 `process_state.semantic_facts.workspace` 读取工作区路径。只读结果去重将工作区内的绝对 `cd` 和文件参数转换为工作区相对路径，例如 `cd <workspace> && sed ...` 的文件范围可以与 Authority 的相对路径读取合并。
+
+工作区验证的候选可继续推理和修改。`fail_candidate_guidance` 仅用于 `Fail` 预测占位，告知候选验证已失败、真实输出尚未到达，并要求候选将失败视为真实，在检查或编辑代码之前不重跑验证命令。若从未修改文件，或最后一次修改之后已有成功的工作区验证，`extent` 会在新的验证命令前停止。修改后尚未通过验证的候选可以运行工作区测试。范围上限默认是 12 个完整轮次。
 
 使用 Authority 模型的候选在 `accepted` 裁决下仍可 `Promote`。快模型候选的 `Yield` 仅交付通知。终止的快模型候选只有在至少一次 `edit` 或 `write` 成功、没有失败的 `edit` 或 `write`，且最后一次修改后有成功并无调用错误的工作区验证时，才可通过 `Salvage` 移交文件。Policy 按路径选择最新的成功修改，附上改动摘要，以及通过的验证命令和输出，提醒 Authority 在定稿前审查逻辑与边界情况。Runtime 逐结果检查文件冲突并保留 Authority 的冲突改动。未满足验收标准时，只回收适用的只读或诊断通知。适用的修改前只读结果扣除 Authority 已请求部分后按完整输出交付。Coding 策略每批最多 4 项，不设字符上限；其他配置可显式指定正整数 `safe_result_chars` 或 `safe_result_count`。

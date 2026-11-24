@@ -535,6 +535,14 @@ impl SpeculativeTree {
             .collect();
         for id in ids {
             self.record_authority_outcome(&id, result.clone(), evidence.cloned())?;
+            if self.chance(&id)?.branch_ids.is_empty() {
+                self.change_chance_stage(
+                    &id,
+                    ChanceStage::Discarded(DiscardedReason::NotSelected),
+                    "Authority value arrived without a candidate",
+                )?;
+                continue;
+            }
             self.change_chance_stage(&id, ChanceStage::Resolving, "Model authority arrived")?;
             // Authority arrival closes the model Proposal window before later completions.
             let unfinished: Vec<_> = self
@@ -638,7 +646,8 @@ impl SpeculativeTree {
             }
             return Ok(());
         }
-        // Completed tools update the facts projected into Rebalance even if no status changed.
+        // Completed tools update the projected scheduling facts even if no status changed.
+        self.select_epoch = None;
         self.rebalance_epoch = None;
         self.tool_finished_at_ms
             .entry(branch_id.to_string())

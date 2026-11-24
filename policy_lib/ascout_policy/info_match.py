@@ -178,16 +178,21 @@ def _options(args, flags=(), values=(), *, numeric=False, intermixed=False):
     return options, operands
 
 
-def _scope(path, cwd):
+def _scope(path, cwd, workspace=None):
     if not path or path == '-' or any(ord(c) < 32 for c in path):
         raise ValueError('invalid or streaming path')
     for prefix in ('$PWD/', '${PWD}/'):
         if path.startswith(prefix):
             path = './' + path[len(prefix):]
             break
-    if path.startswith(('/', '~/')) or path == '~':
+    if path.startswith('~/') or path == '~':
         return _path(path)
-    return _path(posixpath.join(cwd, path))
+    scoped = _path(posixpath.join(cwd, path))
+    if workspace and posixpath.isabs(scoped):
+        relative = posixpath.relpath(scoped, workspace)
+        if relative != '..' and not relative.startswith('../'):
+            return relative
+    return scoped
 
 
 def _path_operands(operands):
@@ -200,7 +205,7 @@ def _path_operands(operands):
             yield operand
 
 
-def _line_ranges(name, args, cwd, *, stream=False):
+def _line_ranges(name, args, cwd, *, stream=False, workspace=None):
     if name in ('head', 'tail'):
         options, paths = _options(args, values=('-n', '--lines'), numeric=name == 'head' or stream, intermixed=True)
         count = options[-1][1] if options else '10'
@@ -215,7 +220,7 @@ def _line_ranges(name, args, cwd, *, stream=False):
             if not paths:
                 raise ValueError('missing file operands')
             # EOF-relative intervals cannot be compared to absolute line numbers.
-            return [(_scope(path, cwd), -number, -1) for path in paths]
+            return [(_scope(path, cwd, workspace), -number, -1) for path in paths]
         if name == 'head' and count.startswith('+'):
             raise ValueError('unsupported relative line count')
         ranges = [(1, number)] if name == 'head' else [(number, None)]
@@ -245,7 +250,7 @@ def _line_ranges(name, args, cwd, *, stream=False):
         ranges = [(1, None)]
     if not paths:
         raise ValueError('missing file operands')
-    return [(_scope(path, cwd), start, end) for path in paths for start, end in ranges]
+    return [(_scope(path, cwd, workspace), start, end) for path in paths for start, end in ranges]
 
 
 def _terms(pattern, dialect):
@@ -277,7 +282,7 @@ def _terms(pattern, dialect):
     return terms | {pattern[start:]} if not (bracket or escaped or depth) else {pattern}
 
 
-def _search(name, args, cwd, locale):
+def _search(name, args, cwd, locale, workspace):
     flags = ('-n', '-i', '-E', '-F', '-G', '-H', '-h', '--line-number', '--ignore-case',
              '--extended-regexp', '--fixed-strings', '--basic-regexp', '--with-filename', '--no-filename',
              '-l', '--files-with-matches', '-w', '--word-regexp')
@@ -324,7 +329,7 @@ def _search(name, args, cwd, locale):
     for flag, _ in options:
         dialect = modes.get(flag, dialect)
     terms = frozenset(term for pattern in patterns for term in _terms(pattern, dialect))
-    scopes = frozenset(_scope(path, cwd) for path in _path_operands(operands or ['.']))
+    scopes = frozenset(_scope(path, cwd, workspace) for path in _path_operands(operands or ['.']))
     dereference = any(flag in ('-R', '--dereference-recursive') for flag, _ in options)
     recursive = name in ('rg', 'git grep') or dereference or any(flag in ('-r', '--recursive') for flag, _ in options)
     filters = tuple((aliases.get(flag, flag), value) for flag, value in options
@@ -346,7 +351,7 @@ _GIT_FLAGS = {
 }
 
 
-def _observation(name, args, cwd, locale):
+def _observation(name, args, cwd, locale, workspace):
     if name in ('type', 'which', 'command'):
         operands = args[1:] if name == 'command' and args[:1] == ['-v'] else args if name != 'command' else []
         if len(operands) == 1 and re.fullmatch(r'[A-Za-z0-9_./][A-Za-z0-9_./+-]*', operands[0]):
@@ -385,19 +390,19 @@ def _observation(name, args, cwd, locale):
             # Without -- Git can interpret operands as either revisions or paths.
             return [('git_diff', cwd, locale, flags, tuple(before[split:]), ())]
         return [('git_' + subcommand, cwd, locale, flags, tuple(before[split:]),
-                 tuple(_scope(path, cwd) for path in after))]
+                 tuple(_scope(path, cwd, workspace) for path in after))]
     if name == 'ls':
         options, paths = _options(args, ('-a', '-A', '-l', '-h', '-1', '-d', '-F', '-t', '-r', '-R',
                                           '--all', '--almost-all', '--recursive'), intermixed=True)
         aliases = {'--all': '-a', '--almost-all': '-A', '--recursive': '-R'}
         flags = tuple(sorted({aliases.get(flag, flag) for flag, _ in options}))
-        return [('ls', _scope(path, cwd), locale, flags) for path in _path_operands(paths or ['.'])]
+        return [('ls', _scope(path, cwd, workspace), locale, flags) for path in _path_operands(paths or ['.'])]
     if name == 'rg' and args[:1] == ['--files']:
         options, paths = _options(args[1:], ('--hidden',), ('-g', '--glob'), intermixed=True)
         if any(isinstance(value, _Glob) for _, value in options):
             raise ValueError('unsupported shell expansion in rg filter')
         flags = tuple(('-g' if flag == '--glob' else flag, value) for flag, value in options)
-        return [('rg_files', _scope(path, cwd), locale, flags) for path in _path_operands(paths or ['.'])]
+        return [('rg_files', _scope(path, cwd, workspace), locale, flags) for path in _path_operands(paths or ['.'])]
     if name == 'find':
         index = next((i for i, value in enumerate(args) if value.startswith('-') or value in ('!', '(', ')')), len(args))
         paths, predicates = args[:index], args[index:]
@@ -411,7 +416,7 @@ def _observation(name, args, cwd, locale):
                 break
             else:
                 raise ValueError('unsupported find predicate: ' + flag)
-        return [('find', _scope(path, cwd), locale, tuple(normalized)) for path in paths or ['.']]
+        return [('find', _scope(path, cwd, workspace), locale, tuple(normalized)) for path in paths or ['.']]
     raise ValueError('unsupported command: ' + name)
 
 
@@ -422,7 +427,7 @@ def _partition(args, delimiter):
     return args[:index], True, args[index + 1:]
 
 
-def _shell_info(command):
+def _shell_info(command, workspace):
     cwd = '.'
     facts, pipeline = [], None
     for words, separator in _shell_commands(command):
@@ -452,7 +457,7 @@ def _shell_info(command):
         if name == 'cd':
             if len(args) != 1 or args[0].startswith('-') or separator != '&&':
                 raise ValueError('unsupported directory change')
-            cwd = _scope(args[0], cwd)
+            cwd = _scope(args[0], cwd, workspace)
             if cwd.startswith('/'):
                 facts.append(('absolute_cd', cwd))
             continue
@@ -461,13 +466,14 @@ def _shell_info(command):
                 raise ValueError('unsupported variable assignment')
             continue
         if name in _LINE_TOOLS:
-            current = [('tail' if item[1] < 0 else 'file', item) for item in _line_ranges(name, args, cwd)]
+            current = [('tail' if item[1] < 0 else 'file', item)
+                       for item in _line_ranges(name, args, cwd, workspace=workspace)]
         elif (name == 'rg' and args[:1] != ['--files'] or name in ('grep', 'egrep', 'fgrep')
               or name == 'git' and args[:1] == ['grep']):
             current = [('search', _search('git grep' if name == 'git' else name,
-                                          args[1:] if name == 'git' else args, cwd, locale))]
+                                          args[1:] if name == 'git' else args, cwd, locale, workspace))]
         else:
-            current = [('observation', item) for item in _observation(name, args, cwd, locale)]
+            current = [('observation', item) for item in _observation(name, args, cwd, locale, workspace)]
         if separator == '|':
             supported = (name in ('ls', 'rg', 'grep', 'egrep', 'fgrep')
                          or name == 'git' and args[:1] in (['log'], ['tag'], ['branch']))
@@ -490,7 +496,7 @@ def _merge(ranges):
     return tuple(merged)
 
 
-def extract_info_set(calls):
+def extract_info_set(calls, *, workspace: str | None = None):
     """Return merged file ranges, search intents and observations for a batch.
 
     A rejected call invalidates the entire information set. Empty batches have
@@ -509,9 +515,9 @@ def extract_info_set(calls):
                                                     for value in (offset, limit)):
                     raise ValueError('invalid read arguments')
                 start = offset or 1
-                facts = [('file', (_scope(path, '.'), start, start + limit - 1 if limit else None))]
+                facts = [('file', (_scope(path, '.', workspace), start, start + limit - 1 if limit else None))]
             elif name == 'bash' and args.keys() <= {'command', 'timeout'} and isinstance(args.get('command'), str):
-                facts = _shell_info(args['command'].strip())
+                facts = _shell_info(args['command'].strip(), workspace)
             else:
                 raise ValueError('unsupported tool or arguments: ' + name)
             for kind, item in facts:
@@ -560,32 +566,41 @@ def _entry_output(entry):
     return '\n'.join(part.get('text', '') for part in (content or []) if part.get('type') == 'text')
 
 
-def _readonly_subset(calls):
-    return extract_info_set([call for call in (calls or []) if extract_info_set([call]).pure_readonly])
+def _readonly_subset(calls, workspace):
+    return extract_info_set([call for call in (calls or []) if extract_info_set([call], workspace=workspace).pure_readonly],
+                            workspace=workspace)
 
 
-def _search_hit(line):
+def _search_hit(line, workspace=None):
     match = re.fullmatch(r'(.+?):([1-9]\d*):.*', line)
-    return (_path(match[1]), int(match[2])) if match else None
+    if not match:
+        return None
+    try:
+        return (_scope(match[1], '.', workspace), int(match[2]))
+    except ValueError:
+        return None
 
 
-def filter_novel_readonly(candidate_entries, authority_calls, *, authority_entries=()):
+def filter_novel_readonly(candidate_entries, authority_calls, *, authority_entries=(), workspace: str | None = None):
     """Subtract requested reads and known search hits from completed output."""
-    authority_info = _readonly_subset(authority_calls)
+    authority_info = _readonly_subset(authority_calls, workspace)
     authority_hits = {hit for entry in authority_entries for line in _entry_output(entry).splitlines()
-                      if (hit := _search_hit(line))}
+                      if (hit := _search_hit(line, workspace))}
     novel = []
     for entry in candidate_entries:
         name, args = entry.get('tool_name'), entry.get('arguments') or {}
-        info, authority = _aligned_info(extract_info_set([{'name': name, 'arguments': args}]), authority_info)
+        info = extract_info_set([{'name': name, 'arguments': args}], workspace=workspace)
+        authority = authority_info
+        if not workspace:
+            info, authority = _aligned_info(info, authority)
         searches = info.searches | {item for kind, item, _ in info.limited if kind == 'search'}
         new_search = any(not _search_covered(authority, search) for search in searches)
         output = _entry_output(entry)
         lines = output.splitlines()
-        if new_search and not info.file_ranges and lines and all(map(_search_hit, lines)):
+        hits = [_search_hit(line, workspace) for line in lines] if new_search and not info.file_ranges else []
+        if hits and all(hits):
             kept = []
-            for line in lines:
-                path, number = _search_hit(line)
+            for line, (path, number) in zip(lines, hits):
                 if (path, number) not in authority_hits and not any(
                         start <= number and (end is None or number <= end)
                         for start, end in authority.file_ranges.get(path, ())):
@@ -871,6 +886,66 @@ def _shell_tokens(command):
     return re.compile(r'''\\.|'[^']*'|"(?:\\.|[^"\\])*"|(?<!\S)#.*|(?P<operator>(?<!\S)2>&1|[;&|<>()\n`$])''').finditer(command)
 
 
+def _unwrap_timeout(words):
+    if not words or words[0].rsplit('/', 1)[-1] != 'timeout':
+        return words
+    duration = r'(?:\d+(?:\.\d*)?|\.\d+)[smhd]?'
+    args = iter(words[1:])
+    for option in args:
+        if option == '--':
+            break
+        if not option.startswith('-'):
+            return list(args) if re.fullmatch(duration, option) else []
+        if option in ('-v', '--verbose', '--foreground', '--preserve-status'):
+            continue
+        match = re.fullmatch(r'(--kill-after|--signal)(?:=(.*))?|(-[ks])(.*)', option)
+        if not match:
+            return []
+        long, long_value, short, short_value = match.groups()
+        value = long_value if long else short_value or None
+        if value is None:
+            value = next(args, '')
+        pattern = duration if (long or short) in ('-k', '--kill-after') else r'[A-Za-z0-9]+'
+        if not re.fullmatch(pattern, value):
+            return []
+    return list(args) if re.fullmatch(duration, next(args, '')) else []
+
+
+def _log_display(suffix):
+    """Recognize a log redirect followed by one display of the same file."""
+    operators = [token for token in _shell_tokens(suffix) if token['operator']]
+    try:
+        if operators and operators[0]['operator'] == '2>&1':
+            stderr = operators.pop(0)
+        else:
+            stderr = None
+        separator, *rest = operators
+        start = separator.end()
+        if separator['operator'] == '&' and suffix[separator.start():start + 1] == '&&':
+            if len(rest) != 1 or rest[0].start() != start:
+                return False
+            start += 1
+        elif separator['operator'] != ';' or rest:
+            return False
+        if stderr and suffix[stderr.end():separator.start()].strip():
+            return False
+        [log] = shlex.split(suffix[:stderr.start() if stderr else separator.start()], comments=True)
+        if (not re.fullmatch(r'[\w./-]+\.log', log) or '..' in log.split('/')
+                or log.startswith('-') or log.startswith('/') and not log.startswith('/tmp/')):
+            return False
+        [(words, separator)] = _shell_commands(suffix[start:].strip())
+        name, *args = words
+        if separator or name not in ('tail', 'head', 'cat'):
+            return False
+        if name == 'tail':
+            # Legacy -N has the same meaning as -n N for this display.
+            args = [part for arg in args for part in (('-n', arg[1:]) if re.fullmatch(r'-\d+', arg) else (arg,))]
+        ranges = _line_ranges(name, args, '.')
+        return {path for path, _, _ in ranges} == {_path(log)}
+    except (ValueError, IndexError):
+        return False
+
+
 def _verification_words(command, *, allow_setup=True, directories=None):
     if not isinstance(command, str):
         return []
@@ -888,6 +963,12 @@ def _verification_words(command, *, allow_setup=True, directories=None):
                 return []
             redirect = match.start()
             continue
+        if operator == '>':
+            if (match.start() > start and command[match.start() - 1].isdigit()
+                    or not _log_display(command[match.end():])):
+                return []
+            redirect = match.start()
+            break
         if operator == '|':
             try:
                 [(limiter, separator)] = _shell_commands(command[match.end():].strip())
@@ -943,13 +1024,20 @@ def _verification_words(command, *, allow_setup=True, directories=None):
         if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', words[0]):
             break
         words.pop(0)
-    return words
+    return _unwrap_timeout(words)
 
 
 def is_verification_command(command):
-    import re
+    return _is_verification_runner(_verification_words(command))
 
-    words = _verification_words(command)
+
+def verification_masks_exit(command):
+    """Whether a recognized verification ends in a status-masking display."""
+    return is_verification_command(command) and any(
+        token['operator'] in (';', '|') for token in _shell_tokens(command))
+
+
+def _is_verification_runner(words):
     if not words or {'--help', '-h', '--version', '--collect-only', '--fix', '--write', '-U',
                      '--update-snapshots', '--updateSnapshot', '--snapshot-update'}.intersection(words):
         return False
@@ -978,7 +1066,7 @@ def is_verification_command(command):
 def normalize_verification_command(command, *, directories=None):
     """Return a conservative runner and argument signature, or None."""
     words = _verification_words(command, allow_setup=False, directories=directories)
-    if not words or not is_verification_command(command):
+    if not _is_verification_runner(words):
         return None
     name, *args = words
     if name in ('python', 'python3') and args[:2] == ['-m', 'pytest']:

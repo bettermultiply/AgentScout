@@ -120,8 +120,10 @@ class PureCompiler:
         seen = set()
         for node in body(tree):
             if isinstance(node, ast.FunctionDef):
-                if (node.decorator_list or node.returns or node.args.defaults
-                        or any(node.args.kw_defaults) or getattr(node, 'type_params', [])
+                defaults = node.args.defaults + node.args.kw_defaults
+                if (node.decorator_list or node.returns
+                        or any(value is not None and not isinstance(value, ast.Constant) for value in defaults)
+                        or getattr(node, 'type_params', [])
                         or any(x.annotation for x in ast.walk(node.args) if isinstance(x, ast.arg))):
                     raise Unsupported()
                 name = node.name

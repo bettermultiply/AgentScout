@@ -380,6 +380,7 @@ pub struct SpeculativeTree {
     #[serde(default)]
     epoch: u64,
     #[serde(default)]
+    select_epoch: Option<u64>,
     rebalance_epoch: Option<u64>,
     extent_disposals: BTreeSet<String>,
     #[serde(default)]
@@ -452,6 +453,7 @@ impl SpeculativeTree {
             next_work: 1,
             next_chance: 1,
             epoch: 0,
+            select_epoch: None,
             rebalance_epoch: None,
             extent_disposals: BTreeSet::new(),
             stopping: false,

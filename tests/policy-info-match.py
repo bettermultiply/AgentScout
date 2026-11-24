@@ -192,6 +192,43 @@ class InfoMatchTests(unittest.TestCase):
         self.assertEqual(result['cropped_output'], 'src/f:5:needle')
         self.assertEqual(filter_novel_readonly([entry], [command]), [])
 
+    def test_absolute_workspace_read_deduplication(self):
+        workspace = '/var/tmp/scout/workspace'
+        authority = [bash('cat src/f.py')]
+        for command in (f"cd {workspace} && sed -n '1,2p' src/f.py",
+                        f"sed -n '1,2p' {workspace}/src/f.py",
+                        f"cd {workspace}/src && sed -n '1,2p' f.py"):
+            with self.subTest(command=command):
+                entry = dict(tool_name='bash', arguments={'command': command}, result={'content': 'a\nb'})
+                self.assertEqual(filter_novel_readonly([entry], authority, workspace=workspace), [])
+        outside = dict(tool_name='bash', arguments={'command': 'cat /other/workspace/src/f.py'},
+                       result={'content': 'outside workspace'})
+        self.assertEqual(filter_novel_readonly([outside], authority, workspace=workspace), [outside])
+
+    def test_timeout_and_log_display_verification_signatures(self):
+        from ascout_policy.info_match import is_verification_command, normalize_verification_command
+
+        plain = 'pytest tests/test_example.py'
+        signature = normalize_verification_command(plain)
+        for command in (f'TMPDIR="$PWD/.pytest-tmp" timeout 300 python -m {plain}',
+                        f'timeout -k 5 100s {plain}', f'timeout --signal=TERM 60 {plain}',
+                        f'timeout -v --foreground --preserve-status -s TERM --kill-after=5 -- 1m {plain}',
+                        f'{plain} > .pytest.log 2>&1; tail -100 .pytest.log',
+                        f'{plain} > /tmp/pytest.log 2>&1; head -20 /tmp/pytest.log',
+                        f'{plain} > .pytest.log 2>&1 && cat .pytest.log', f'{plain} 2>&1 | tail -20'):
+            with self.subTest(command=command):
+                self.assertTrue(is_verification_command(command))
+                self.assertEqual(normalize_verification_command(command), signature)
+        for command in (f'timeout --unknown 60 {plain}', f'timeout {plain}',
+                        f'{plain} > src/f.py 2>&1; cat src/f.py',
+                        f'{plain} > ../outside.log 2>&1; cat ../outside.log',
+                        f'{plain} > .pytest.log 2>&1; cat other.log',
+                        f'{plain} > .pytest.log 2>&1; cat .pytest.log; touch src/f.py',
+                        f'{plain} | tail -20 && touch src/f.py',
+                        f'{plain} > .pytest.log; cat .pytest.log > src/f.py'):
+            with self.subTest(command=command):
+                self.assertFalse(is_verification_command(command))
+
     def test_verification_equivalence(self):
         from ascout_policy.info_match import match_verification_calls, normalize_verification_command
 

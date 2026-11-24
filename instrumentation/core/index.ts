@@ -23,6 +23,7 @@ export type EvaluatePolicy = (
 
 export type ExecutionPoint = {
     branch: string;
+    workspace?: string;
     /** Product action identity, used to pair repeated hooks of one action. */
     actionId: string;
     actionKind: string;
@@ -247,6 +248,7 @@ export function createInterposer({ taskId, report, evaluate: sandbox, now = Date
                     break;
                 case 'process_state.semantic_facts':
                     process_state.semantic_facts = {
+                        workspace: point.workspace,
                         speculation_kind: branch.speculationKind,
                         yield_only: branch.yieldOnly === true,
                         prediction_kind: branch.predictionKind,

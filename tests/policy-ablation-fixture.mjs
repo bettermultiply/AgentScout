@@ -180,6 +180,49 @@ const match = (proposal, outcome, results, branch = candidate, config = {}) => c
 const dispose = (resolution, context, config = {}) => call('dispose', {resolution, context}, config).actions;
 const result = (id, path, content) => read(path, {action_id: id, result: {content}});
 
+test('absolute workspace verification salvages edits and validates sequential directory changes', () => {
+    const workspace = '/var/tmp/scout/workspace';
+    const command = `cd ${workspace} && python -m pytest tests/test_ext_autodoc_autoproperty.py -q`;
+    const process = {workspace};
+    assert.ok(predict([edit], bash(command), {}, process).proposals.length);
+    assert.ok(predict([edit], bash(`cd ${workspace}/src && cd .. && pytest`), {}, process).proposals.length);
+    assert.ok(predict([edit], bash('cd "$PWD/src" && cd .. && pytest'), {}, process).proposals.length);
+    for (const path of [`${workspace}/.baseline`, `${workspace}/.baseline/../src`,
+        `${workspace}/../workspace`, `${workspace}-other`, '/other', '..', '"$PWD/.."', '"$PWD" && cd ..', '~other']) {
+        assert.equal(predict([edit], bash(`cd ${path} && pytest`), {}, process).reason, 'non_workspace_verification');
+    }
+    const writes = Array.from({length: 4}, (_, i) => entry('write', {path: `src/file${i}.py`, content: 'fix'},
+        {action_id: `write${i}`}));
+    const report = verified(command, {action_id: 'verified', result: {content: '3 passed'}});
+    const context = {workspace, candidate, candidate_proposal: {model_options: {model: 'fixture/fast'}},
+        candidate_results: [...writes, report]};
+    assert.deepEqual(dispose('preempted', context)[0].results.map(r => r.id), [...writes.map(r => r.action_id), 'verified']);
+    const process_state = {steps_completed: 2, phase: 'tool_execution',
+        semantic_facts: {workspace, speculation_kind: 'tool_execution', next_action: {kind: 'tool_execution',
+            name: 'bash', arguments: {command}}}, result_facts: {completed_tools: [...writes, report]}};
+    assert.equal(call('extent', {process_state}), 'stop');
+});
+
+test('successful display exit still delivers the failed verification and prevents promotion and file salvage', () => {
+    const command = 'python -m pytest tests > .pytest.log 2>&1; tail -100 .pytest.log';
+    const outcome = {is_error: false, status: 'succeeded', content: '===== FAILURES =====\nFAILED tests/test_f.py\n1 failed'};
+    const matchTool = (kind, content, wrapped = command) => call('match_proposal', {
+        proposal: {provenance: {kind}}, outcome: {...outcome, content},
+        match_context: {authority: {arguments: {command: wrapped}}},
+    }).verdict;
+    for (const wrapped of [command, 'python -m pytest tests 2>&1 | tail -20']) {
+        assert.equal(matchTool('verification_pass', outcome.content, wrapped), 'incompatible');
+        assert.equal(matchTool('expected_test_failure', outcome.content, wrapped), 'compatible');
+    }
+    assert.equal(matchTool('verification_pass', 'truncated output'), 'incompatible');
+    assert.equal(matchTool('verification_pass', '===== 3 passed, 1 warning in 0.24s ====='), 'compatible');
+    const report = verified(command, {action_id: 'failed', result: outcome});
+    const proposal = {provenance: {kind: 'active_post_edit_test'}, model_options: {model: 'fixture/fast'}};
+    assert.deepEqual(match(proposal, {}, [report, edit]).details.safe_results.map(r => r.id), ['failed']);
+    assert.deepEqual(dispose('preempted', {candidate, candidate_proposal: proposal,
+        candidate_results: [{...edit, action_id: 'write'}, report]}), [{intent: 'Discard'}]);
+});
+
 test('Explore yields only novel read-only results, including an empty Yield while running', () => {
     const outcome = {tool_calls: [{name: 'read', arguments: {path: 'a', offset: 2, limit: 2}}]};
     const entries = [{...result('shared', 'a', 'one\ntwo\nthree\nfour'), arguments: {path: 'a', limit: 4}}, result('novel', 'b', 'fresh'),

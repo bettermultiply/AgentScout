@@ -486,6 +486,7 @@ async function beforeModelInference(branch, modelValue, context, signal) {
     const hold=Promise.withResolvers();modelHolds.set(key(branch,actionId),hold);
     const disposition=await access.beforeAction({
         branch,
+        workspace:tree.branches.get(branch)?.manager.getHeader().cwd,
         actionId,
         actionKind:'model_inference',
         name:'model',
@@ -607,6 +608,7 @@ function install(session,branch) {
             && pendingHooks.size===1 && context.assistantMessage?.content?.filter(part=>part.type==='toolCall').length===1;
         const disposition=await access.beforeAction({
             branch,
+            workspace:tree.branches.get(branch)?.manager.getHeader().cwd,
             actionId:context.toolCall.id,
             actionKind:'tool_execution',
             name:context.toolCall.name,

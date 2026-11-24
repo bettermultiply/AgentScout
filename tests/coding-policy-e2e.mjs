@@ -220,7 +220,8 @@ async function waitFor(predicate, label) {
 }
 
 for (const failure of [false, true]) test(`Verify ${failure ? 'Fail salvages verified edits' : 'Pass promotes with complete output'}`, {timeout: 45000}, async t => {
-    const realOutput = `START_OF_TEST\n${'test output line\n'.repeat(420)}END_OF_TEST`;
+    const command = failure ? './pytest > .pytest.log 2>&1; tail -500 .pytest.log' : './pytest';
+    const realOutput = `START_OF_TEST\n${'test output line\n'.repeat(420)}END_OF_TEST${failure ? '\n1 failed' : ''}`;
     const expected = failure ? 'Command exited with non-zero status.' : 'All tests passed.';
     const {done, rows, root, shutdown} = await fixture(t, (messages, model, root) => {
         const last = lastTool(messages);
@@ -228,8 +229,8 @@ for (const failure of [false, true]) test(`Verify ${failure ? 'Fail salvages ver
         const input = JSON.stringify(messages);
         assert.doesNotMatch(input, /Predicted verification result:/);
         if (!id) return failure ? tool('test-edit', 'write', {path: 'test_app.py', content: 'assert value == 1'})
-            : tool('verify', 'bash', {command: './pytest'});
-        if (id === 'test-edit') return tool('verify', 'bash', {command: './pytest'});
+            : tool('verify', 'bash', {command});
+        if (id === 'test-edit') return tool('verify', 'bash', {command});
         if (id === 'verify' && last.content === expected) {
             assert.equal(model, failure ? 'candidate' : 'agent');
             if (failure) assert.deepEqual(messages.at(-1), {role: 'user', content:
@@ -264,7 +265,7 @@ for (const failure of [false, true]) test(`Verify ${failure ? 'Fail salvages ver
         fs.appendFileSync(join(root, 'policy', 'decisions.py'), `
 
 def initial_verification_only(data, *, policy_config, capabilities):
-    return data['op'].get('arguments', {}).get('command') == './pytest'
+    return data['op'].get('arguments', {}).get('command') == ${JSON.stringify(command)}
 `);
         fs.writeFileSync(manifest, fs.readFileSync(manifest, 'utf8')
             .replace('function: feasibility_pass', 'function: initial_verification_only'));
@@ -272,6 +273,10 @@ def initial_verification_only(data, *, policy_config, capabilities):
     }, {modelIds: ['agent', 'candidate']});
     const events = rows();
     assert.ok(!events.some(e => e.policy_error || e.message === 'policy_error'));
+    if (failure) {
+        assert.equal(events.find(e => e.message === 'action_finished' && e.branch_id === 'authority'
+            && e.action_id.startsWith('verify'))?.status, 'succeeded');
+    }
     const settlement = events.find(e => e.observation?.event === 'settlement')?.observation;
     assert.equal(settlement.disposition, failure ? 'Salvage' : 'Promote');
     assert.equal(settlement.hit, true);
@@ -440,7 +445,7 @@ def extent_keep_running(data, *, policy_config, capabilities):
 });
 
 for (const conflict of [false, true]) test(`draining Yield salvages verified files (${conflict ? 'conflict' : 'clean transfer'})`, {timeout: 45000}, async t => {
-    const command = './pytest drain';
+    const command = root => `cd ${join(root, 'workspace')} && timeout 15 ./pytest drain > .pytest.log 2>&1 && cat .pytest.log`;
     const waitForEvent = (root, predicate, label) => waitFor(() => fs.readFileSync(runPath(root, 'events.jsonl'), 'utf8')
         .split('\n').slice(0, -1).map(JSON.parse).some(predicate), label);
     let fresh = false, parked;
@@ -451,7 +456,7 @@ for (const conflict of [false, true]) test(`draining Yield salvages verified fil
             if (!id) return tool('drain-read', 'read', {path: 'other.txt'});
             if (id === 'drain-read') return tool('drain-edit', 'write', {path: 'value.txt', content: 'candidate fix'});
             if (id === 'drain-edit') return {tool_calls: [
-                ...tool('drain-verify', 'bash', {command}).tool_calls,
+                ...tool('drain-verify', 'bash', {command: command(root)}).tool_calls,
                 {...tool('drain-last-tool', 'read', {path: 'last.txt'}).tool_calls[0], index: 1},
             ]};
             assert.equal(id, 'drain-authority-read', 'draining candidate must park before another inference');

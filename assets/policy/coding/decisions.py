@@ -42,15 +42,36 @@ def _verification_entry(entry):
         (entry.get('arguments') or {}).get('command'))
 
 
-def _workspace_verification(command):
+def _workspace_verification(command, workspace=None):
+    from posixpath import normpath
     from ascout_policy.info_match import _verification_words
 
     directories = []
-    _verification_words(command, directories=directories)
+    if not _verification_words(command, directories=directories):
+        return False
+    root = normpath(workspace).rstrip('/') if workspace else None
+    cwd = []
     for path in directories:
-        if path.startswith('/') or any(part == '..' or part.startswith('.') and part != '.'
-                                       for part in path.split('/')):
+        for variable in ('$PWD', '${PWD}'):
+            if path == variable or path.startswith(variable + '/'):
+                path = '.' + path[len(variable):]
+                break
+        if path.startswith('~') or any(char in path for char in '$*?[]{}'):
             return False
+        if path.startswith('/'):
+            if root is None or not (path == root or path.startswith(root + '/')):
+                return False
+            cwd = []
+            path = path[len(root):].lstrip('/')
+        for component in path.split('/'):
+            if component == '..':
+                if not cwd:
+                    return False
+                cwd.pop()
+            elif component and component != '.':
+                if component.startswith('.'):
+                    return False
+                cwd.append(component)
     return True
 
 
@@ -205,23 +226,23 @@ def _mutation(entry, workspace):
 _VERIFICATION_HEADER = '[Speculative verification output collected on current files]: bash '
 
 
-def _completed_verification(entry):
+def _completed_verification(entry, workspace=None):
     return (entry.get('status') in ('succeeded', 'failed') and _verification_entry(entry)
-            and _workspace_verification(entry['arguments']['command'])
+            and _workspace_verification(entry['arguments']['command'], workspace)
             and not _invocation_error(entry.get('result') or entry))
 
 
-def _history_verifications(entry):
+def _history_verifications(entry, workspace):
     import re
     from ascout_policy.info_match import is_verification_command
 
-    if _completed_verification(entry):
+    if _completed_verification(entry, workspace):
         yield entry
     if entry.get('role') == 'custom' and entry.get('custom_type') == 'notification':
         for match in re.finditer(r'(?m)^(?:Accepted result: )?' + re.escape(_VERIFICATION_HEADER) + r'([^\n]+)',
                                  _output(entry)):
             command = match[1]
-            if is_verification_command(command) and _workspace_verification(command):
+            if is_verification_command(command) and _workspace_verification(command, workspace):
                 yield {'tool_name': 'bash', 'arguments': {'command': command}}
 
 
@@ -244,7 +265,7 @@ def _detect_stage(history, current_op, readonly_reset_steps, workspace):
 
     command = (current_op.get('arguments') or {}).get('command')
     verifying = is_verification_command(command)
-    verifications = [list(_history_verifications(entry)) for entry in history]
+    verifications = [list(_history_verifications(entry, workspace)) for entry in history]
     commands = [entry['arguments']['command'] for group in reversed(verifications) for entry in group]
     main_command = next((previous for previous in commands if not _narrow_verification(previous)),
                         next(iter(commands), None))
@@ -329,7 +350,7 @@ def predict(data, *, policy_config, capabilities):
         data.get('history', []), chance, policy_config.get('readonly_reset_steps', 2), process.get('workspace'))
     if stage == 'verify':
         command = chance['arguments']['command']
-        if not _workspace_verification(command):
+        if not _workspace_verification(command, process.get('workspace')):
             return {'abstain': True, 'reason': 'non_workspace_verification'}
         phase, failures = 'baseline_check', [False]
         if not _narrow_verification(command):
@@ -409,10 +430,11 @@ def extent(data, *, policy_config, capabilities):
         return 'stop'
     if facts.get('speculation_kind') == 'tool_execution' and kind == 'tool_execution':
         if _verification_entry({'tool_name': next_action.get('name'), 'arguments': next_action.get('arguments')}):
+            workspace = facts.get('workspace')
             for index in range(len(completed) - 1, -1, -1):
                 mutation = completed[index]
-                if _mutation(mutation, None):
-                    verified = any(_passing_verification(entry, mutation) for entry in completed[index + 1:])
+                if _mutation(mutation, workspace):
+                    verified = any(_passing_verification(entry, mutation, workspace) for entry in completed[index + 1:])
                     return 'stop' if verified else 'continue'
             return 'stop'
     if completed and should_stop_degraded(completed, next_action)[0]:
@@ -564,7 +586,7 @@ def _readonly_results(actions, authority_calls, workspace):
             break
         if _succeeded(entry) and is_readonly_action(entry['tool_name'], entry.get('arguments')):
             readonly.append(entry)
-    return filter_novel_readonly(readonly, authority_calls)
+    return filter_novel_readonly(readonly, authority_calls, workspace=workspace)
 
 
 def _match_model(proposal, outcome, context, config):
@@ -588,11 +610,11 @@ def _match_model(proposal, outcome, context, config):
         if _mutation(entry, workspace):
             last_edit = entry.get('timestamp_ms')
             break
-        current_checks.extend(_history_verifications(entry))
+        current_checks.extend(_history_verifications(entry, workspace))
     for entry in actions:
         if _mutation(entry, workspace):
             break
-        if _completed_verification(entry):
+        if _completed_verification(entry, workspace):
             command = entry['arguments']['command']
             if (_started_after(entry, last_edit)
                     and not any(_started_after(check, last_edit) and _covers_verification(check, command)
@@ -617,10 +639,14 @@ def match_proposal(data, *, policy_config, capabilities):
         if kind in ('verification_pass', 'expected_test_failure'):
             if _invocation_error(outcome):
                 return {'verdict': 'incompatible', 'score': 0.0}
-        if kind == 'verification_pass' and status == 'succeeded' and outcome.get('is_error') is False:
-            return {'verdict': 'compatible', 'score': 1.0}
-        if kind == 'expected_test_failure' and outcome.get('is_error') is True:
-            return {'verdict': 'compatible', 'score': 0.9}
+            output = _output(outcome)
+            if kind == 'verification_pass' and status == 'succeeded' and outcome.get('is_error') is False:
+                command = ((context.get('authority') or {}).get('arguments') or {}).get('command')
+                if _verification_pass_reported(command, output):
+                    return {'verdict': 'compatible', 'score': 1.0}
+            if kind == 'expected_test_failure' and (outcome.get('is_error') is True
+                    or status == 'succeeded' and _reported_test_failure(output)):
+                return {'verdict': 'compatible', 'score': 0.9}
     return {'verdict': 'incompatible', 'score': 0.0}
 
 
@@ -632,8 +658,35 @@ def _invocation_error(result):
     ))
 
 
-def _passing_verification(entry, mutation):
-    return _started_after(entry, mutation.get('timestamp_ms')) and _completed_verification(entry) and _succeeded(entry)
+def _reported_test_failure(output):
+    import re
+
+    output = re.sub(r'\x1b\[[0-9;]*m', '', output)
+    return bool(re.search(
+        r'^\s*=+\s+(?:FAILURES|ERRORS)\s+=+\s*$|^FAILED(?:\s|\s*\()|'
+        r'\b[1-9]\d* (?:failed|errors?)\b|^Traceback \(most recent call last\):|'
+        r'\bCommand exited with code [1-9]\d*\b', output, re.MULTILINE))
+
+
+def _verification_pass_reported(command, output):
+    import re
+    from ascout_policy.info_match import verification_masks_exit
+
+    if _reported_test_failure(output):
+        return False
+    if not verification_masks_exit(command):
+        return True
+    # A display can omit the runner's diagnostics. Require its final success summary.
+    lines = re.sub(r'\x1b\[[0-9;]*m', '', output).strip().splitlines()
+    return bool(lines and re.fullmatch(
+        r'=*\s*(?:[1-9]\d* passed(?:, \d+ [a-z ]+)*(?: in [\d.]+s)?|OK(?: \(skipped=\d+\))?)\s*=*',
+        lines[-1]))
+
+
+def _passing_verification(entry, mutation, workspace=None):
+    return (_started_after(entry, mutation.get('timestamp_ms')) and _completed_verification(entry, workspace)
+            and _succeeded(entry) and _verification_pass_reported(
+                entry['arguments']['command'], _output(entry.get('result') or entry)))
 
 
 def _verified_files(actions, workspace, config):
@@ -655,7 +708,7 @@ def _verified_files(actions, workspace, config):
                     path = relpath(path, workspace)
                 if path != '..' and not path.startswith('../'):
                     latest[path] = entry
-        elif mutation and _passing_verification(entry, mutation):
+        elif mutation and _passing_verification(entry, mutation, workspace):
             verification = entry
     if not latest or verification is None:
         return []

@@ -603,10 +603,17 @@ impl SpeculativeTree {
                 self.schedule(ControlOperation::Predict(tool), actions);
             }
         }
+        let same_epoch = self.select_epoch == Some(self.epoch);
         for id in ids.iter().filter(|id| !selected.contains(id)) {
-            if self.chance_is(id, &ChanceStage::Pending) {
+            if self.chance_is(id, &ChanceStage::Pending)
+                && self.chance(id)?.authority == AuthorityState::NotRequested
+            {
                 self.authorize_authority(id, actions)?;
             }
+        }
+        // Starting Authority leaves the same selectable frontier and candidate count.
+        if same_epoch && selected.is_empty() {
+            self.select_epoch = Some(self.epoch);
         }
         Ok(())
     }
@@ -706,6 +713,11 @@ impl SpeculativeTree {
 
     fn authorize_authority(&mut self, id: &str, actions: &mut ControlActions) -> io::Result<()> {
         let chance = self.chance(id)?.clone();
+        if chance.authority != AuthorityState::NotRequested
+            || self.model_inference_boundary.as_ref().is_some_and(|(_, _, parked)| parked.as_deref() == Some(id))
+        {
+            return Ok(());
+        }
         if chance.speculation_kind == Some(ActionKind::ModelInference)
             && self.authority_branch_id.as_deref() == Some(&chance.parent_branch_id)
             && self.has_pending_yield(&chance.parent_branch_id)
@@ -1422,11 +1434,13 @@ impl SpeculativeTree {
     fn progress_chances(&mut self, actions: &mut ControlActions) -> io::Result<()> {
         let selectable = self.selectable_chances();
         if !selectable.is_empty()
+            && self.select_epoch != Some(self.epoch)
             && !self
                 .pending_work
                 .values()
                 .any(|work| matches!(work, ControlOperation::Select(_)))
         {
+            self.select_epoch = Some(self.epoch);
             self.schedule(ControlOperation::Select(selectable), actions);
         }
         let ids: Vec<String> = self.chances.keys().cloned().collect();

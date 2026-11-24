@@ -686,6 +686,9 @@ impl SpeculationCoordinator {
                     "candidate": match_facts(tree, Some(candidate_id), operation_id, Some(&proposal.payload)),
                 }
         });
+        if let Some(chance) = branch.chance_id.as_ref().and_then(|id| tree.chances.get(id)) {
+            data["match_context"]["authority"]["arguments"] = chance.arguments.clone();
+        }
         if declares_input(policy, Decision::Match, "outcome") {
             data["outcome"] = outcome.clone();
         }

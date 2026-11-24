@@ -151,7 +151,8 @@ impl SpeculativeTree {
             .values()
             .filter(|chance| {
                 chance.stage == ChanceStage::Pending
-                    && chance.authority == AuthorityState::NotRequested
+                    && matches!(chance.authority, AuthorityState::NotRequested | AuthorityState::Fetching)
+                    && self.chance_waiting_live(chance)
             })
             .map(|chance| chance.chance_id.clone())
             .collect()
